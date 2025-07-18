@@ -20,6 +20,9 @@ pub struct AppState {
     pub total_tasks: usize,
     pub is_admin: bool,
     pub diagnostics_started: bool,
+    pub selected_tasks: Vec<bool>, // Track which tasks are selected
+    pub task_outputs: Vec<String>, // Real-time output for each task
+    pub current_output: String, // Current task output
 }
 
 #[tokio::main]
@@ -49,16 +52,21 @@ async fn main() {
     let _ = std::fs::create_dir_all(output_dir.join("Minidump"));
 
     // Initialize app state
+    let task_count = diagnostics::DIAGNOSTIC_TASKS.len();
     let app_state = Arc::new(Mutex::new(AppState {
         is_admin,
+        selected_tasks: vec![true; task_count], // All tasks selected by default
+        task_outputs: vec![String::new(); task_count],
         ..Default::default()
     }));
 
     // Run GUI
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([500.0, 200.0])
-            .with_resizable(false),
+            .with_inner_size([1200.0, 750.0])
+            .with_resizable(true)
+            .with_min_inner_size([1100.0, 700.0])
+            .with_transparent(true),
         ..Default::default()
     };
 

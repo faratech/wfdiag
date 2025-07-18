@@ -8,6 +8,7 @@ use sysinfo::System;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+#[derive(Clone, Copy)]
 pub struct DiagnosticTask {
     pub name: &'static str,
     pub admin_required: bool,
@@ -53,19 +54,28 @@ pub const DIAGNOSTIC_TASKS: &[DiagnosticTask] = &[
     DiagnosticTask { name: "BSOD Minidump", admin_required: true },
 ];
 
-pub async fn run_all_diagnostics(
+pub fn get_filtered_tasks(is_admin: bool) -> Vec<&'static DiagnosticTask> {
+    DIAGNOSTIC_TASKS.iter()
+        .filter(|task| !task.admin_required || is_admin)
+        .collect()
+}
+
+pub async fn run_selected_diagnostics(
     state: Arc<Mutex<AppState>>,
     output_dir: PathBuf,
     zip_path: PathBuf,
 ) -> Result<()> {
-    let is_admin = {
+    let (is_admin, selected_tasks) = {
         let app_state = state.lock().unwrap();
-        app_state.is_admin
+        (app_state.is_admin, app_state.selected_tasks.clone())
     };
 
-    // Filter tasks based on admin privileges
-    let tasks: Vec<_> = DIAGNOSTIC_TASKS.iter()
-        .filter(|task| !task.admin_required || is_admin)
+    // Filter tasks based on admin privileges and selection
+    let all_tasks = get_filtered_tasks(is_admin);
+    let tasks: Vec<_> = all_tasks.into_iter()
+        .enumerate()
+        .filter(|(i, _)| selected_tasks.get(*i).copied().unwrap_or(false))
+        .map(|(_, task)| *task)
         .collect();
 
     let total_tasks = tasks.len();
@@ -77,6 +87,52 @@ pub async fn run_all_diagnostics(
         app_state.tasks_completed = 0;
     }
 
+    run_diagnostic_tasks(state.clone(), &tasks, &output_dir).await?;
+    
+    // Create zip file
+    {
+        let mut app_state = state.lock().unwrap();
+        app_state.status_text = "Creating zip file...".to_string();
+        app_state.current_task = "Compression".to_string();
+    }
+
+    file_ops::create_zip(&output_dir, &zip_path)?;
+
+    // Final status
+    {
+        let mut app_state = state.lock().unwrap();
+        app_state.status_text = format!("Complete! Results saved to {}", zip_path.display());
+        app_state.current_task = "Finished".to_string();
+        app_state.progress = 1.0;
+        app_state.is_running = false;
+    }
+
+    // Open the zip file
+    #[cfg(windows)]
+    {
+        Command::new("explorer")
+            .arg(&zip_path)
+            .spawn()
+            .context("Failed to open zip file")?;
+    }
+
+    Ok(())
+}
+
+async fn run_diagnostic_tasks(
+    state: Arc<Mutex<AppState>>,
+    tasks: &[DiagnosticTask],
+    output_dir: &PathBuf,
+) -> Result<()> {
+    let total_tasks = tasks.len();
+    
+    // Update state with total tasks
+    {
+        let mut app_state = state.lock().unwrap();
+        app_state.total_tasks = total_tasks;
+        app_state.tasks_completed = 0;
+    }
+    
     // Run each diagnostic task
     for (i, task) in tasks.iter().enumerate() {
         // Update current task
@@ -84,9 +140,10 @@ pub async fn run_all_diagnostics(
             let mut app_state = state.lock().unwrap();
             app_state.current_task = task.name.to_string();
             app_state.status_text = format!("Running {}...", task.name);
+            app_state.current_output = format!("Starting {}...\n", task.name);
         }
 
-        // Execute the task
+        // Execute the task with real-time output capture
         let result = match task.name {
             "Computer System" => run_wmi_query("Win32_ComputerSystem", &output_dir, "CompSystem").await,
             "Operating System" => run_wmi_query("Win32_OperatingSystem", &output_dir, "OS").await,
@@ -127,9 +184,23 @@ pub async fn run_all_diagnostics(
             _ => Ok(()),
         };
 
-        // Log any errors but continue
-        if let Err(e) = result {
-            eprintln!("Error in task {}: {}", task.name, e);
+        // Handle task completion
+        match result {
+            Ok(_) => {
+                let mut app_state = state.lock().unwrap();
+                app_state.current_output = format!("✅ {} completed successfully\n", task.name);
+                if let Some(output) = app_state.task_outputs.get_mut(i) {
+                    *output = format!("✅ {} - Completed successfully", task.name);
+                }
+            },
+            Err(e) => {
+                eprintln!("Error in task {}: {}", task.name, e);
+                let mut app_state = state.lock().unwrap();
+                app_state.current_output = format!("❌ {} failed: {}\n", task.name, e);
+                if let Some(output) = app_state.task_outputs.get_mut(i) {
+                    *output = format!("❌ {} - Error: {}", task.name, e);
+                }
+            }
         }
 
         // Update progress
@@ -140,34 +211,7 @@ pub async fn run_all_diagnostics(
         }
 
         // Small delay to allow GUI updates
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    }
-
-    // Create zip file
-    {
-        let mut app_state = state.lock().unwrap();
-        app_state.status_text = "Creating zip file...".to_string();
-        app_state.current_task = "Compression".to_string();
-    }
-
-    file_ops::create_zip(&output_dir, &zip_path)?;
-
-    // Final status
-    {
-        let mut app_state = state.lock().unwrap();
-        app_state.status_text = format!("Complete! Results saved to {}", zip_path.display());
-        app_state.current_task = "Finished".to_string();
-        app_state.progress = 1.0;
-        app_state.is_running = false;
-    }
-
-    // Open the zip file
-    #[cfg(windows)]
-    {
-        Command::new("explorer")
-            .arg(&zip_path)
-            .spawn()
-            .context("Failed to open zip file")?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     }
 
     Ok(())
