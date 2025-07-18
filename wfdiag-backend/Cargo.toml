@@ -1,0 +1,52 @@
+[package]
+name = "wfdiag-backend"
+version = "3.0.0"
+edition = "2021"
+
+[dependencies]
+# Web framework
+actix-web = "4"
+actix-ws = "0.2"
+actix-cors = "0.7"
+actix-files = "0.6"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Windows diagnostics
+wmi = "0.13"
+sysinfo = "0.30"
+windows = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_Registry",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# Utilities
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+zip = "0.6"
+dirs = "5.0"
+walkdir = "2.5"
+clap = { version = "4.4", features = ["derive"] }
+env_logger = "0.11"
+log = "0.4"
+whoami = "1.4"
+
+# For real-time updates
+futures-util = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

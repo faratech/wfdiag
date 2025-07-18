@@ -1,5 +1,6 @@
 # Rust build artifacts
-/target/
+target/
+**/target/
 **/*.rs.bk
 *.pdb
 
@@ -57,3 +58,7 @@ c#/*.cache
 
 # Modern app folder (if not needed)
 modern-app/
+
+# Backend build artifacts
+wfdiag-backend/target/
+wfdiag-backend.exe
