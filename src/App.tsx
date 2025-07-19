@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/tauri'
 import { save } from '@tauri-apps/api/dialog'
 import { writeText } from '@tauri-apps/api/clipboard'
 import { writeTextFile } from '@tauri-apps/api/fs'
+import { SystemMonitoring } from './SystemMonitoring'
 import { 
   Switch,
   Button,
@@ -71,7 +72,7 @@ interface TaskResult {
   duration_ms: number
 }
 
-type ViewMode = 'home' | 'systemCheck' | 'progress' | 'results'
+type ViewMode = 'home' | 'systemCheck' | 'progress' | 'results' | 'monitoring'
 type CheckType = 'basic' | 'standard' | 'complete'
 
 function App() {
@@ -101,6 +102,7 @@ function App() {
   })
   const [windowsVersion, setWindowsVersion] = useState<string>('')
   const [systemUptime, setSystemUptime] = useState<string>('')
+  const [isMonitoringActive, setIsMonitoringActive] = useState(false)
 
   useEffect(() => {
     loadSystemInfo()
@@ -397,6 +399,18 @@ ${content}
           <CheckmarkIcon className="action-card-icon" />
           <h4>System Check</h4>
           <p>Analyze your system for potential issues</p>
+        </Card>
+        
+        <Card 
+          className="action-card"
+          onClick={() => {
+            setCurrentView('monitoring')
+            setIsMonitoringActive(true)
+          }}
+        >
+          <WindowIcon className="action-card-icon" />
+          <h4>Real-time Monitor</h4>
+          <p>View live system performance metrics</p>
         </Card>
 
         <Card 
@@ -1670,6 +1684,12 @@ ${content}
               {currentView === 'systemCheck' && renderSystemCheck()}
               {currentView === 'progress' && renderProgress()}
               {currentView === 'results' && renderResults()}
+              {currentView === 'monitoring' && (
+                <SystemMonitoring 
+                  isActive={isMonitoringActive} 
+                  onToggle={setIsMonitoringActive} 
+                />
+              )}
             </div>
           )}
         </main>

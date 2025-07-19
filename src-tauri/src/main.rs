@@ -3,13 +3,15 @@
 mod diagnostics;
 mod native_diagnostics;
 mod windows_native;
+mod monitoring;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{State, Manager};
 use tokio::sync::Mutex;
 use diagnostics::{DiagnosticTask, TaskResult};
+use monitoring::{SystemMonitor, NetworkConnection};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SystemInfo {
@@ -27,6 +29,7 @@ struct DiagnosticSession {
 
 struct AppState {
     current_session: Arc<Mutex<Option<DiagnosticSession>>>,
+    system_monitor: Arc<Mutex<Option<SystemMonitor>>>,
 }
 
 #[tauri::command]
@@ -260,9 +263,59 @@ async fn restart_as_admin() -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+async fn start_monitoring(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut monitor_opt = state.system_monitor.lock().await;
+    
+    // Create a new monitor if none exists
+    if monitor_opt.is_none() {
+        *monitor_opt = Some(SystemMonitor::new(app_handle));
+    }
+    
+    // Start monitoring
+    if let Some(monitor) = monitor_opt.as_ref() {
+        monitor.start_monitoring().await;
+        Ok(())
+    } else {
+        Err("Failed to create system monitor".to_string())
+    }
+}
+
+#[tauri::command]
+async fn stop_monitoring(state: State<'_, AppState>) -> Result<(), String> {
+    let monitor_opt = state.system_monitor.lock().await;
+    
+    if let Some(monitor) = monitor_opt.as_ref() {
+        monitor.stop_monitoring().await;
+        Ok(())
+    } else {
+        Err("No active monitoring session".to_string())
+    }
+}
+
+#[tauri::command]
+async fn get_current_stats(state: State<'_, AppState>) -> Result<monitoring::SystemStats, String> {
+    let monitor_opt = state.system_monitor.lock().await;
+    
+    if let Some(monitor) = monitor_opt.as_ref() {
+        Ok(monitor.get_current_stats().await)
+    } else {
+        Err("No active monitoring session".to_string())
+    }
+}
+
+#[tauri::command]
+async fn get_network_connections() -> Result<Vec<NetworkConnection>, String> {
+    Ok(monitoring::get_network_connections().await)
+}
+
 fn main() {
     let app_state = AppState {
         current_session: Arc::new(Mutex::new(None)),
+        system_monitor: Arc::new(Mutex::new(None)),
     };
     
     tauri::Builder::default()
@@ -277,6 +330,10 @@ fn main() {
             save_results_to_file,
             get_uptime,
             restart_as_admin,
+            start_monitoring,
+            stop_monitoring,
+            get_current_stats,
+            get_network_connections,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
