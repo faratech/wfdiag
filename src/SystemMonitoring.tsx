@@ -9,6 +9,7 @@ import {
   Badge,
   Divider,
   Text,
+  Button,
 } from '@fluentui/react-components';
 import {
   DesktopRegular,
@@ -18,6 +19,7 @@ import {
   AppsListDetailRegular,
   ArrowDownloadRegular,
   ArrowUploadRegular,
+  ArrowLeftRegular,
 } from '@fluentui/react-icons';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/tauri';
@@ -105,6 +107,17 @@ const useStyles = makeStyles({
   },
 });
 
+interface DiskInfo {
+  name: string;
+  mount_point: string;
+  total_gb: number;
+  used_gb: number;
+  available_gb: number;
+  utilization: number;
+  file_system: string;
+  disk_type: string;
+}
+
 interface SystemStats {
   cpu_utilization: number;
   per_cpu_utilization: number[];
@@ -119,6 +132,7 @@ interface SystemStats {
   disk_utilization: number;
   disk_read_bytes: number;
   disk_write_bytes: number;
+  disks: DiskInfo[];
   network_upload_kb: number;
   network_download_kb: number;
   top_processes: ProcessInfo[];
@@ -130,16 +144,40 @@ interface ProcessInfo {
   name: string;
   cpu_percent: number;
   memory_percent: number;
+  memory_mb: number;
+  virtual_memory_mb: number;
+  disk_read_bytes: number;
+  disk_write_bytes: number;
+  status: string;
+  start_time: number;
+  command: string;
+}
+
+interface NetworkConnection {
+  protocol: string;
+  local_addr: string;
+  remote_addr: string;
+  status: string;
 }
 
 interface SystemMonitoringProps {
   isActive: boolean;
   onToggle: (active: boolean) => void;
+  onBack?: () => void;
 }
 
-const MAX_DATA_POINTS = 30; // 60 seconds of history (2 second intervals)
+const MAX_DATA_POINTS = 60; // 60 seconds of history (1 second intervals)
 
-export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, onToggle }) => {
+// Helper function to format bytes
+const formatBytes = (bytes: number): string => {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+};
+
+export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, onToggle, onBack }) => {
   const styles = useStyles();
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [cpuHistory, setCpuHistory] = useState<number[]>([]);
@@ -147,6 +185,8 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
   const [networkUploadHistory, setNetworkUploadHistory] = useState<number[]>([]);
   const [networkDownloadHistory, setNetworkDownloadHistory] = useState<number[]>([]);
   const [timeLabels, setTimeLabels] = useState<string[]>([]);
+  const [networkConnections, setNetworkConnections] = useState<NetworkConnection[]>([]);
+  const [showNetworkConnections, setShowNetworkConnections] = useState(false);
   const unlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -315,7 +355,35 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
   }
 
   return (
-    <div className={styles.container}>
+    <div>
+      {/* Header with back button */}
+      <div style={{ 
+        padding: tokens.spacingVerticalM, 
+        display: 'flex', 
+        alignItems: 'center', 
+        gap: tokens.spacingHorizontalM,
+        borderBottom: `1px solid ${tokens.colorNeutralStroke1}`
+      }}>
+        {onBack && (
+          <Button 
+            appearance="secondary" 
+            icon={<ArrowLeftRegular />} 
+            onClick={() => {
+              onToggle(false); // Stop monitoring
+              onBack(); // Navigate back
+            }}
+          >
+            Back to Home
+          </Button>
+        )}
+        <Title3 style={{ flex: 1 }}>Real-time System Monitor</Title3>
+        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS }}>
+          <Text>Auto-refresh: </Text>
+          <Badge appearance="filled" color="success">Active</Badge>
+        </div>
+      </div>
+      
+      <div className={styles.container}>
       {/* CPU Card */}
       <Card className={styles.card}>
         <div className={styles.header}>
@@ -354,20 +422,31 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
         <Text size={200}>Swap: {stats.swap_utilization.toFixed(1)}%</Text>
       </Card>
 
-      {/* Disk Card */}
-      <Card className={styles.card}>
-        <div className={styles.header}>
-          <HardDriveRegular fontSize={24} />
-          <Title3>Disk</Title3>
-        </div>
-        <div className={styles.metric}>
-          <Text>Usage</Text>
-          <Badge appearance="filled" color={stats.disk_utilization > 80 ? 'danger' : stats.disk_utilization > 50 ? 'warning' : 'success'}>
-            {stats.disk_utilization.toFixed(1)}%
-          </Badge>
-        </div>
-        <ProgressBar value={stats.disk_utilization / 100} />
-      </Card>
+      {/* Disk Cards - Show all physical disks */}
+      {stats.disks && stats.disks.map((disk, index) => (
+        <Card key={index} className={styles.card}>
+          <div className={styles.header}>
+            <HardDriveRegular fontSize={24} />
+            <div style={{ flex: 1 }}>
+              <Title3>{disk.mount_point}</Title3>
+              <Caption1>{disk.name || 'Local Disk'} • {disk.disk_type} • {disk.file_system}</Caption1>
+            </div>
+          </div>
+          <div className={styles.metric}>
+            <Text>Usage</Text>
+            <Badge appearance="filled" color={disk.utilization > 80 ? 'danger' : disk.utilization > 50 ? 'warning' : 'success'}>
+              {disk.utilization.toFixed(1)}%
+            </Badge>
+          </div>
+          <ProgressBar value={disk.utilization / 100} />
+          <Caption1 style={{ marginTop: tokens.spacingVerticalXS }}>
+            {disk.used_gb.toFixed(1)} GB / {disk.total_gb.toFixed(1)} GB
+            <span style={{ opacity: 0.7, marginLeft: 8 }}>
+              ({disk.available_gb.toFixed(1)} GB free)
+            </span>
+          </Caption1>
+        </Card>
+      ))}
 
       {/* Network Card */}
       <Card className={styles.card}>
@@ -419,47 +498,160 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
         </div>
       </Card>
 
+      {/* Network Connections */}
+      <Card className={styles.fullWidthCard}>
+        <div className={styles.header}>
+          <NetworkCheckRegular fontSize={24} />
+          <Title3>Network Connections</Title3>
+          <Button 
+            appearance="secondary" 
+            size="small"
+            onClick={async () => {
+              try {
+                const connections = await invoke<NetworkConnection[]>('get_network_connections');
+                setNetworkConnections(connections);
+                setShowNetworkConnections(true);
+              } catch (error) {
+                console.error('Failed to get network connections:', error);
+              }
+            }}
+          >
+            Refresh Connections
+          </Button>
+        </div>
+        {showNetworkConnections && networkConnections.length > 0 && (
+          <div style={{ overflowX: 'auto', marginTop: tokens.spacingVerticalM }}>
+            <table className={styles.processTable}>
+              <thead>
+                <tr>
+                  <th className={styles.processHeader}>Protocol</th>
+                  <th className={styles.processHeader}>Local Address</th>
+                  <th className={styles.processHeader}>Remote Address</th>
+                  <th className={styles.processHeader}>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {networkConnections.slice(0, 20).map((conn, index) => (
+                  <tr key={index}>
+                    <td className={styles.processCell}>
+                      <Badge appearance="tint" size="small">
+                        {conn.protocol}
+                      </Badge>
+                    </td>
+                    <td className={styles.processCell}>
+                      <Text size={200}>{conn.local_addr}</Text>
+                    </td>
+                    <td className={styles.processCell}>
+                      <Text size={200}>{conn.remote_addr}</Text>
+                    </td>
+                    <td className={styles.processCell}>
+                      <Badge 
+                        appearance="tint" 
+                        color={
+                          conn.status === 'ESTABLISHED' ? 'success' :
+                          conn.status === 'LISTENING' ? 'brand' :
+                          conn.status === 'TIME_WAIT' ? 'warning' :
+                          'subtle'
+                        }
+                        size="small"
+                      >
+                        {conn.status}
+                      </Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {networkConnections.length > 20 && (
+              <Text size={200} style={{ marginTop: tokens.spacingVerticalS }}>
+                Showing first 20 of {networkConnections.length} connections
+              </Text>
+            )}
+          </div>
+        )}
+        {showNetworkConnections && networkConnections.length === 0 && (
+          <Text>No active network connections found</Text>
+        )}
+      </Card>
+
       {/* Top Processes */}
       <Card className={styles.fullWidthCard}>
         <div className={styles.header}>
           <AppsListDetailRegular fontSize={24} />
-          <Title3>Top Processes</Title3>
+          <Title3>Top Processes (by CPU Usage)</Title3>
         </div>
-        <table className={styles.processTable}>
-          <thead>
-            <tr>
-              <th className={styles.processHeader}>PID</th>
-              <th className={styles.processHeader}>Name</th>
-              <th className={styles.processHeader}>CPU %</th>
-              <th className={styles.processHeader}>Memory %</th>
-            </tr>
-          </thead>
-          <tbody>
-            {stats.top_processes.map((process) => (
-              <tr key={process.pid}>
-                <td className={styles.processCell}>{process.pid}</td>
-                <td className={styles.processCell}>{process.name}</td>
-                <td className={styles.processCell}>
-                  <Badge 
-                    appearance="tint" 
-                    color={process.cpu_percent > 50 ? 'danger' : process.cpu_percent > 20 ? 'warning' : 'success'}
-                  >
-                    {process.cpu_percent.toFixed(1)}%
-                  </Badge>
-                </td>
-                <td className={styles.processCell}>
-                  <Badge 
-                    appearance="tint" 
-                    color={process.memory_percent > 50 ? 'danger' : process.memory_percent > 20 ? 'warning' : 'brand'}
-                  >
-                    {process.memory_percent.toFixed(1)}%
-                  </Badge>
-                </td>
+        <div style={{ overflowX: 'auto' }}>
+          <table className={styles.processTable}>
+            <thead>
+              <tr>
+                <th className={styles.processHeader}>PID</th>
+                <th className={styles.processHeader}>Name</th>
+                <th className={styles.processHeader}>Status</th>
+                <th className={styles.processHeader}>CPU %</th>
+                <th className={styles.processHeader}>Memory</th>
+                <th className={styles.processHeader}>Disk I/O</th>
+                <th className={styles.processHeader} style={{ maxWidth: '300px' }}>Command</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {stats.top_processes.map((process) => (
+                <tr key={process.pid}>
+                  <td className={styles.processCell}>{process.pid}</td>
+                  <td className={styles.processCell} title={process.name}>
+                    {process.name.length > 20 ? process.name.substring(0, 20) + '...' : process.name}
+                  </td>
+                  <td className={styles.processCell}>
+                    <Badge 
+                      appearance="tint" 
+                      color={process.status === 'Running' ? 'success' : 'subtle'}
+                      size="small"
+                    >
+                      {process.status}
+                    </Badge>
+                  </td>
+                  <td className={styles.processCell}>
+                    <Badge 
+                      appearance="filled" 
+                      color={process.cpu_percent > 50 ? 'danger' : process.cpu_percent > 20 ? 'warning' : 'success'}
+                    >
+                      {process.cpu_percent.toFixed(1)}%
+                    </Badge>
+                  </td>
+                  <td className={styles.processCell}>
+                    <div>
+                      <Text size={200}>{process.memory_mb.toFixed(1)} MB</Text>
+                      <Badge 
+                        appearance="tint" 
+                        color={process.memory_percent > 50 ? 'danger' : process.memory_percent > 20 ? 'warning' : 'brand'}
+                        size="small"
+                        style={{ marginLeft: '8px' }}
+                      >
+                        {process.memory_percent.toFixed(1)}%
+                      </Badge>
+                    </div>
+                  </td>
+                  <td className={styles.processCell}>
+                    <div style={{ fontSize: '11px' }}>
+                      {process.disk_read_bytes > 0 || process.disk_write_bytes > 0 ? (
+                        <>
+                          <div>R: {formatBytes(process.disk_read_bytes)}</div>
+                          <div>W: {formatBytes(process.disk_write_bytes)}</div>
+                        </>
+                      ) : (
+                        <Text size={100}>-</Text>
+                      )}
+                    </div>
+                  </td>
+                  <td className={styles.processCell} style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={process.command}>
+                    <Text size={100}>{process.command}</Text>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </Card>
+    </div>
     </div>
   );
 };

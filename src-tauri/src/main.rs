@@ -4,6 +4,7 @@ mod diagnostics;
 mod native_diagnostics;
 mod windows_native;
 mod monitoring;
+mod openai_integration;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -334,6 +335,8 @@ fn main() {
             stop_monitoring,
             get_current_stats,
             get_network_connections,
+            openai_integration::analyze_with_openai,
+            openai_integration::analyze_system_with_ai,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

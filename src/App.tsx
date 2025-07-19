@@ -4,6 +4,7 @@ import { save } from '@tauri-apps/api/dialog'
 import { writeText } from '@tauri-apps/api/clipboard'
 import { writeTextFile } from '@tauri-apps/api/fs'
 import { SystemMonitoring } from './SystemMonitoring'
+import { OpenAIIntegration } from './OpenAIIntegration'
 import { 
   Switch,
   Button,
@@ -43,6 +44,7 @@ import {
   ArrowUploadRegular,
   CopyFilled,
   CopyRegular,
+  BrainCircuitRegular,
 } from '@fluentui/react-icons'
 
 const WindowIcon = bundleIcon(WindowFilled, WindowRegular)
@@ -72,7 +74,7 @@ interface TaskResult {
   duration_ms: number
 }
 
-type ViewMode = 'home' | 'systemCheck' | 'progress' | 'results' | 'monitoring'
+type ViewMode = 'home' | 'systemCheck' | 'progress' | 'results' | 'monitoring' | 'ai'
 type CheckType = 'basic' | 'standard' | 'complete'
 
 function App() {
@@ -96,7 +98,7 @@ function App() {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null)
   const [highlightedTask, setHighlightedTask] = useState<string | null>(null)
-  const [outputMode, setOutputMode] = useState<'rich' | 'raw' | 'json'>('rich')
+  const [outputMode, setOutputMode] = useState<'rich' | 'json'>('rich')
   const [isDarkMode, setIsDarkMode] = useState(() => {
     return window.matchMedia?.('(prefers-color-scheme: dark)').matches || false
   })
@@ -411,6 +413,15 @@ ${content}
           <WindowIcon className="action-card-icon" />
           <h4>Real-time Monitor</h4>
           <p>View live system performance metrics</p>
+        </Card>
+
+        <Card 
+          className="action-card"
+          onClick={() => setCurrentView('ai')}
+        >
+          <BrainCircuitRegular className="action-card-icon" />
+          <h4>AI Analysis</h4>
+          <p>Use OpenAI to analyze system issues</p>
         </Card>
 
         <Card 
@@ -881,25 +892,8 @@ ${content}
           </div>
         )
       
-      case 'raw':
       default:
-        return (
-          <div className="result-data">
-            <pre style={{ 
-              fontSize: 12, 
-              fontFamily: 'Consolas, monospace',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-              maxHeight: 400,
-              overflow: 'auto',
-              margin: 0,
-              padding: 0,
-              background: 'transparent'
-            }}>
-              {result.output}
-            </pre>
-          </div>
-        )
+        return null
     }
   }
 
@@ -1225,18 +1219,11 @@ ${content}
             </Dropdown>
             
             {/* Output Mode Toggle */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 14, opacity: 0.8 }}>View:</span>
-              <RadioGroup
-                value={outputMode}
-                onChange={(_, data) => setOutputMode(data.value as 'rich' | 'raw' | 'json')}
-                layout="horizontal"
-              >
-                <Radio value="rich" label="Rich" />
-                <Radio value="raw" label="Raw" />
-                <Radio value="json" label="JSON" />
-              </RadioGroup>
-            </div>
+            <Checkbox
+              checked={outputMode === 'json'}
+              onChange={(_, data) => setOutputMode(data.checked ? 'json' : 'rich')}
+              label="JSON"
+            />
             
             <Button 
               onClick={() => {
@@ -1687,7 +1674,18 @@ ${content}
               {currentView === 'monitoring' && (
                 <SystemMonitoring 
                   isActive={isMonitoringActive} 
-                  onToggle={setIsMonitoringActive} 
+                  onToggle={setIsMonitoringActive}
+                  onBack={() => setCurrentView('home')}
+                />
+              )}
+              {currentView === 'ai' && (
+                <OpenAIIntegration 
+                  sessionId={sessionId || ''}
+                  onRunDiagnostics={(taskIds) => {
+                    // Could optionally run diagnostics here
+                    console.log('AI requested diagnostics:', taskIds)
+                  }}
+                  onBack={() => setCurrentView('home')}
                 />
               )}
             </div>
@@ -1704,7 +1702,7 @@ ${content}
             <a href="https://www.windowsforum.com" target="_blank" style={{ marginRight: 16 }}>
               WindowsForum.com
             </a>
-            <span style={{ opacity: 0.5 }}>v1.0.0</span>
+            <span style={{ opacity: 0.5 }}>v2.0.7-{__BUILD_TIME__}</span>
           </div>
         </footer>
 

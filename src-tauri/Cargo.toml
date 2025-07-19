@@ -1,6 +1,6 @@
 [package]
 name = "wfdiag-tauri"
-version = "1.0.0"
+version = "2.0.7"
 description = "WindowsForum Diagnostic Tool"
 authors = ["WindowsForum"]
 edition = "2021"
@@ -20,6 +20,9 @@ sysinfo = "0.30"
 winreg = "0.52"
 scraper = "0.20"
 regex = "1.0"
+reqwest = { version = "0.11", features = ["json"] }
+async-openai = "0.19"
+uuid = { version = "1.6", features = ["v4"] }
 
 # Windows-specific dependencies
 [target.'cfg(windows)'.dependencies]
