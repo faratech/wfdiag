@@ -22,6 +22,7 @@ import {
   DialogBody,
   DialogActions,
   DialogContent,
+  Checkbox,
 } from '@fluentui/react-components';
 import {
   BrainCircuitRegular,
@@ -33,6 +34,7 @@ import {
   InfoRegular,
   DismissCircleRegular,
   ArrowLeftRegular,
+  CodeRegular,
 } from '@fluentui/react-icons';
 import { invoke } from '@tauri-apps/api/tauri';
 
@@ -104,6 +106,8 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ onBack }) 
   const [response, setResponse] = useState<OpenAIResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showApiKeyDialog, setShowApiKeyDialog] = useState(false);
+  const [showJsonView, setShowJsonView] = useState(false);
+  const [apiCallData, setApiCallData] = useState<any>(null);
   const apiKeyInputRef = useRef<HTMLInputElement>(null);
 
   const handleAnalyze = async () => {
@@ -140,6 +144,13 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ onBack }) 
       if (result.diagnostic_results) {
         console.log('Diagnostic results:', result.diagnostic_results);
       }
+
+      // Store API call/response data for JSON view
+      setApiCallData({
+        api_calls: result.api_calls || [],
+        api_responses: result.api_responses || [],
+        diagnostic_results: result.diagnostic_results || {}
+      });
 
       setResponse(response);
     } catch (err) {
@@ -208,10 +219,20 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ onBack }) 
       
       <div className={styles.header}>
         <BrainCircuitRegular fontSize={32} />
-        <div>
+        <div style={{ flex: 1 }}>
           <Title3>AI-Powered System Analysis</Title3>
           <Caption1>Use OpenAI to analyze your system and identify issues</Caption1>
         </div>
+        <Checkbox 
+          label={
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <CodeRegular />
+              <span>Show JSON</span>
+            </div>
+          }
+          checked={showJsonView}
+          onChange={(_, data) => setShowJsonView(data.checked as boolean)}
+        />
       </div>
 
       {/* API Key Section */}
@@ -372,8 +393,51 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ onBack }) 
 
           {/* Full Analysis */}
           <Card style={{ marginTop: tokens.spacingVerticalL }}>
-            <Title3 style={{ marginBottom: tokens.spacingVerticalM }}>Full Analysis</Title3>
-            <Text style={{ whiteSpace: 'pre-wrap' }}>{response.analysis}</Text>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: tokens.spacingVerticalM }}>
+              <Title3>Full Analysis</Title3>
+              <Checkbox 
+                label={
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <CodeRegular />
+                    <span>Show JSON</span>
+                  </div>
+                }
+                checked={showJsonView}
+                onChange={(_, data) => setShowJsonView(data.checked as boolean)}
+              />
+            </div>
+            {!showJsonView ? (
+              <Text style={{ whiteSpace: 'pre-wrap' }}>{response.analysis}</Text>
+            ) : (
+              <div style={{ 
+                backgroundColor: tokens.colorNeutralBackground2, 
+                padding: tokens.spacingVerticalM,
+                borderRadius: tokens.borderRadiusMedium,
+                fontFamily: 'monospace',
+                fontSize: '12px',
+                overflow: 'auto',
+                maxHeight: '600px'
+              }}>
+                <div style={{ marginBottom: tokens.spacingVerticalL }}>
+                  <Text weight="semibold" style={{ display: 'block', marginBottom: tokens.spacingVerticalS }}>API Calls:</Text>
+                  <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
+                    {JSON.stringify(apiCallData?.api_calls || [], null, 2)}
+                  </pre>
+                </div>
+                <div style={{ marginBottom: tokens.spacingVerticalL }}>
+                  <Text weight="semibold" style={{ display: 'block', marginBottom: tokens.spacingVerticalS }}>API Responses:</Text>
+                  <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
+                    {JSON.stringify(apiCallData?.api_responses || [], null, 2)}
+                  </pre>
+                </div>
+                <div>
+                  <Text weight="semibold" style={{ display: 'block', marginBottom: tokens.spacingVerticalS }}>Diagnostic Results:</Text>
+                  <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
+                    {JSON.stringify(apiCallData?.diagnostic_results || {}, null, 2)}
+                  </pre>
+                </div>
+              </div>
+            )}
           </Card>
         </div>
       )}
