@@ -137,7 +137,7 @@ interface SystemMonitoringProps {
   onToggle: (active: boolean) => void;
 }
 
-const MAX_DATA_POINTS = 60; // 60 seconds of history
+const MAX_DATA_POINTS = 30; // 60 seconds of history (2 second intervals)
 
 export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, onToggle }) => {
   const styles = useStyles();

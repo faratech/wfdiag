@@ -92,23 +92,8 @@ impl SystemMonitor {
         let previous_network = Arc::clone(&self.previous_network);
         
         tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(1));
-            
-            // Initialize network counters
-            #[cfg(windows)]
-            {
-                match get_network_stats() {
-                    Ok((sent, recv)) => {
-                        let mut prev = previous_network.lock().await;
-                        *prev = (sent, recv);
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to initialize network stats: {}", e);
-                        let mut prev = previous_network.lock().await;
-                        *prev = (0, 0);
-                    }
-                }
-            }
+            // Update every 2 seconds to reduce CPU usage
+            let mut interval = interval(Duration::from_secs(2));
             
             loop {
                 interval.tick().await;
@@ -184,34 +169,8 @@ async fn collect_stats(
     };
     drop(disks_guard);
     
-    // Network stats - Windows specific
-    #[cfg(windows)]
-    let (network_upload_kb, network_download_kb) = {
-        match get_network_stats() {
-            Ok((sent, recv)) => {
-                let mut prev = previous_network.lock().await;
-                let (prev_sent, prev_recv) = *prev;
-                
-                // Only calculate if we have previous data
-                if prev_sent > 0 || prev_recv > 0 {
-                    let upload = ((sent.saturating_sub(prev_sent)) as f64) / 1024.0;
-                    let download = ((recv.saturating_sub(prev_recv)) as f64) / 1024.0;
-                    *prev = (sent, recv);
-                    (upload, download)
-                } else {
-                    // First run, just store the values
-                    *prev = (sent, recv);
-                    (0.0, 0.0)
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to get network stats: {}", e);
-                (0.0, 0.0)
-            }
-        }
-    };
-    
-    #[cfg(not(windows))]
+    // Network stats - simplified placeholder for now
+    // TODO: Implement proper network monitoring without Windows API issues
     let (network_upload_kb, network_download_kb) = (0.0, 0.0);
     
     // Top processes by CPU usage
@@ -295,44 +254,3 @@ pub async fn get_network_connections() -> Vec<NetworkConnection> {
     vec![]
 }
 
-// Get network statistics using Windows API
-#[cfg(windows)]
-fn get_network_stats() -> Result<(u64, u64), String> {
-    use windows::Win32::NetworkManagement::IpHelper::{GetIfTable2, FreeMibTable, MIB_IF_TABLE2};
-    use std::ptr;
-    
-    unsafe {
-        let mut table_ptr: *mut MIB_IF_TABLE2 = ptr::null_mut();
-        
-        match GetIfTable2(&mut table_ptr) {
-            Ok(()) => {
-                if table_ptr.is_null() {
-                    return Err("Failed to get network interface table".to_string());
-                }
-                
-                let table = &*table_ptr;
-                let mut total_sent: u64 = 0;
-                let mut total_recv: u64 = 0;
-                
-                // Sum up bytes from all network interfaces
-                let num_entries = table.NumEntries as usize;
-                if num_entries > 0 && num_entries < 1000 { // Sanity check
-                    for i in 0..num_entries.min(table.Table.len()) {
-                        let entry = &table.Table[i];
-                        total_sent = total_sent.saturating_add(entry.OutOctets);
-                        total_recv = total_recv.saturating_add(entry.InOctets);
-                    }
-                }
-                
-                let _ = FreeMibTable(table_ptr as *const _);
-                Ok((total_sent, total_recv))
-            }
-            Err(_) => Err("Failed to get network interface table".to_string()),
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn get_network_stats() -> Result<(u64, u64), String> {
-    Ok((0, 0))
-}
