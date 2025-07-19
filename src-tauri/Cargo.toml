@@ -5,27 +5,37 @@ description = "WindowsForum Diagnostic Tool"
 authors = ["WindowsForum"]
 edition = "2021"
 
+[lib]
+name = "wfdiag_tauri"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [build-dependencies]
-tauri-build = { version = "1.5", features = [] }
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "1.5", features = ["shell-open", "dialog-all", "clipboard-all", "fs-all", "path-all", "process-all", "window-all", "devtools"] }
+tauri = { version = "2", features = ["devtools"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Tauri plugins for v2
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-process = "2"
+tauri-plugin-shell = "2"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 chrono = "0.4"
-wmi = "0.13"
-sysinfo = "0.30"
-winreg = "0.52"
+wmi = "0.17"
+sysinfo = "0.36"
+winreg = "0.55"
 scraper = "0.20"
-regex = "1.0"
-reqwest = { version = "0.11", features = ["json"] }
-uuid = { version = "1.6", features = ["v4"] }
+regex = "1.11"
+reqwest = { version = "0.12", features = ["json"] }
+uuid = { version = "1.17", features = ["v4"] }
 
 # Windows-specific dependencies
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.52", features = [
+windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security", 
     "Win32_System_Threading",

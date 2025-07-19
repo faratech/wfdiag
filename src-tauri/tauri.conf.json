@@ -2,53 +2,30 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
-    "devPath": "http://localhost:3000",
-    "distDir": "../dist",
-    "withGlobalTauri": false
+    "devUrl": "http://localhost:3000",
+    "frontendDist": "../dist"
   },
-  "package": {
-    "productName": "WF Diagnostics",
-    "version": "2.0.7"
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.ico"],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    }
   },
-  "tauri": {
-    "allowlist": {
-      "all": false,
-      "shell": {
-        "open": true
-      },
-      "dialog": {
-        "all": true
-      },
-      "clipboard": {
-        "all": true
-      },
-      "fs": {
-        "all": true,
-        "scope": ["$TEMP", "$APPDATA", "$DESKTOP", "$DOCUMENT"]
-      },
-      "path": {
-        "all": true
-      },
-      "process": {
-        "all": true
-      },
-      "window": {
-        "all": true
-      }
-    },
-    "bundle": {
-      "active": true,
-      "targets": "all",
-      "identifier": "com.windowsforum.diagnostics",
-      "icon": ["icons/icon.ico"],
-      "windows": {
-        "certificateThumbprint": null,
-        "digestAlgorithm": "sha256",
-        "timestampUrl": ""
-      }
-    },
+  "productName": "WF Diagnostics",
+  "version": "2.0.7",
+  "identifier": "com.windowsforum.diagnostics",
+  "plugins": {},
+  "app": {
     "security": {
-      "csp": null
+      "csp": null,
+      "dangerousDisableAssetCspModification": false,
+      "assetProtocol": {
+        "enable": false
+      }
     },
     "windows": [
       {

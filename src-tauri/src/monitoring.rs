@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use sysinfo::{System, Disks, Networks};
-use tauri::{AppHandle, Manager};
+use sysinfo::{System, Disks, Networks, ProcessesToUpdate};
+use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use tokio::time::interval;
 use std::collections::HashMap;
@@ -136,7 +136,7 @@ impl SystemMonitor {
                 let stats = collect_stats(&system, &disks, &networks, &previous_network).await;
                 
                 // Emit the stats through Tauri's event system
-                let _ = app_handle.emit_all("system-stats", &stats);
+                let _ = app_handle.emit("system-stats", &stats);
             }
         });
     }
@@ -166,11 +166,11 @@ async fn collect_stats(
     
     // Refresh all system data
     sys.refresh_all();
-    sys.refresh_processes();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
     sys.refresh_cpu_usage();
     
-    // CPU stats - sysinfo 0.30 API changes
-    let cpu_utilization = sys.global_cpu_info().cpu_usage();
+    // CPU stats - sysinfo 0.36 API changes
+    let cpu_utilization = sys.global_cpu_usage();
     let per_cpu_utilization: Vec<f32> = sys.cpus().iter().map(|cpu| cpu.cpu_usage()).collect();
     let cpu_frequency = sys.cpus().first().map(|cpu| cpu.frequency()).unwrap_or(0);
     
@@ -191,7 +191,7 @@ async fn collect_stats(
     
     // Disk stats - using Disks API
     let mut disks_guard = disks.lock().await;
-    disks_guard.refresh();
+    disks_guard.refresh(true);
     let disk_list = disks_guard.list();
     
     // Collect individual disk information
@@ -239,7 +239,7 @@ async fn collect_stats(
     
     // Network stats with proper monitoring
     let mut networks_guard = networks.lock().await;
-    networks_guard.refresh();
+    networks_guard.refresh(false);
     
     let mut _total_upload_bytes = 0u64;
     let mut _total_download_bytes = 0u64;
@@ -276,7 +276,12 @@ async fn collect_stats(
     // Enhanced process information
     let memory_total_kb = memory_total as f64 / 1024.0;
     let mut processes: Vec<_> = sys.processes().iter().map(|(pid, proc)| {
-        let cmd_line = proc.cmd().join(" ");
+        // Convert Vec<OsString> to String by joining with space
+        let cmd_line = proc.cmd()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect::<Vec<String>>()
+            .join(" ");
         let status = match proc.status() {
             sysinfo::ProcessStatus::Idle => "Idle",
             sysinfo::ProcessStatus::Run => "Running",
@@ -286,9 +291,12 @@ async fn collect_stats(
             _ => "Unknown",
         }.to_string();
         
+        // Convert &OsStr to String for name
+        let process_name = proc.name().to_string_lossy().into_owned();
+        
         ProcessInfo {
             pid: pid.as_u32(),
-            name: proc.name().to_string(),
+            name: process_name.clone(),
             cpu_percent: proc.cpu_usage(),
             memory_percent: ((proc.memory() as f64 / memory_total_kb / 1024.0) * 100.0) as f32,
             memory_mb: proc.memory() as f64 / 1024.0 / 1024.0,
@@ -297,7 +305,7 @@ async fn collect_stats(
             disk_write_bytes: proc.disk_usage().written_bytes,
             status,
             start_time: proc.start_time() as i64,
-            command: if cmd_line.is_empty() { proc.name().to_string() } else { cmd_line },
+            command: if cmd_line.is_empty() { process_name } else { cmd_line },
         }
     }).collect();
     

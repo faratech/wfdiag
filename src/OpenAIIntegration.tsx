@@ -36,7 +36,7 @@ import {
   ArrowLeftRegular,
   CodeRegular,
 } from '@fluentui/react-icons';
-import { invoke } from '@tauri-apps/api/tauri';
+import { invoke } from '@tauri-apps/api/core';
 
 const useStyles = makeStyles({
   container: {

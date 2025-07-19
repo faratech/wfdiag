@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react'
-import { invoke } from '@tauri-apps/api/tauri'
-import { save } from '@tauri-apps/api/dialog'
-import { writeText } from '@tauri-apps/api/clipboard'
-import { writeTextFile } from '@tauri-apps/api/fs'
+import { invoke } from '@tauri-apps/api/core'
+import { save } from '@tauri-apps/plugin-dialog'
+import { writeText } from '@tauri-apps/plugin-clipboard-manager'
+import { writeTextFile } from '@tauri-apps/plugin-fs'
 import { SystemMonitoring } from './SystemMonitoring'
 import { OpenAIIntegration } from './OpenAIIntegration'
 import { 

@@ -22,7 +22,7 @@ import {
   ArrowLeftRegular,
 } from '@fluentui/react-icons';
 import { listen } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/tauri';
+import { invoke } from '@tauri-apps/api/core';
 import {
   Chart as ChartJS,
   CategoryScale,
