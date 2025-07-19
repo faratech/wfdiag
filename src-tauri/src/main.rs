@@ -8,7 +8,7 @@ mod monitoring;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::{State, Manager};
+use tauri::State;
 use tokio::sync::Mutex;
 use diagnostics::{DiagnosticTask, TaskResult};
 use monitoring::{SystemMonitor, NetworkConnection};
