@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use sysinfo::System;
+use sysinfo::{System, Disks};
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 use tokio::time::interval;
@@ -58,6 +58,7 @@ pub struct NetworkConnection {
 
 pub struct SystemMonitor {
     system: Arc<Mutex<System>>,
+    disks: Arc<Mutex<Disks>>,
     app_handle: AppHandle,
     monitoring: Arc<Mutex<bool>>,
     previous_network: Arc<Mutex<(u64, u64)>>, // (bytes_sent, bytes_recv)
@@ -68,8 +69,11 @@ impl SystemMonitor {
         let mut system = System::new_all();
         system.refresh_all();
         
+        let disks = Disks::new_with_refreshed_list();
+        
         Self {
             system: Arc::new(Mutex::new(system)),
+            disks: Arc::new(Mutex::new(disks)),
             app_handle,
             monitoring: Arc::new(Mutex::new(false)),
             previous_network: Arc::new(Mutex::new((0, 0))),
@@ -82,6 +86,7 @@ impl SystemMonitor {
         drop(monitoring);
         
         let system = Arc::clone(&self.system);
+        let disks = Arc::clone(&self.disks);
         let app_handle = self.app_handle.clone();
         let monitoring_flag = Arc::clone(&self.monitoring);
         let previous_network = Arc::clone(&self.previous_network);
@@ -89,10 +94,20 @@ impl SystemMonitor {
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(1));
             
-            // Initialize network counters to zero for now (sysinfo 0.30 doesn't have network stats)
+            // Initialize network counters
+            #[cfg(windows)]
             {
-                let mut prev = previous_network.lock().await;
-                *prev = (0, 0);
+                match get_network_stats() {
+                    Ok((sent, recv)) => {
+                        let mut prev = previous_network.lock().await;
+                        *prev = (sent, recv);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to initialize network stats: {}", e);
+                        let mut prev = previous_network.lock().await;
+                        *prev = (0, 0);
+                    }
+                }
             }
             
             loop {
@@ -104,7 +119,7 @@ impl SystemMonitor {
                 }
                 drop(monitoring);
                 
-                let stats = collect_stats(&system, &previous_network).await;
+                let stats = collect_stats(&system, &disks, &previous_network).await;
                 
                 // Emit the stats through Tauri's event system
                 let _ = app_handle.emit_all("system-stats", &stats);
@@ -118,13 +133,14 @@ impl SystemMonitor {
     }
     
     pub async fn get_current_stats(&self) -> SystemStats {
-        collect_stats(&self.system, &self.previous_network).await
+        collect_stats(&self.system, &self.disks, &self.previous_network).await
     }
 }
 
 async fn collect_stats(
     system: &Arc<Mutex<System>>,
-    _previous_network: &Arc<Mutex<(u64, u64)>>,
+    disks: &Arc<Mutex<Disks>>,
+    previous_network: &Arc<Mutex<(u64, u64)>>,
 ) -> SystemStats {
     let mut sys = system.lock().await;
     
@@ -152,12 +168,51 @@ async fn collect_stats(
         0.0
     };
     
-    // Disk stats - simplified for sysinfo 0.30
-    let disk_utilization = 0.0; // Placeholder
+    // Disk stats - using Disks API
+    let mut disks_guard = disks.lock().await;
+    disks_guard.refresh();
+    let disk_list = disks_guard.list();
     
-    // Network stats - not available in sysinfo 0.30, using placeholders
-    let network_upload_kb = 0.0;
-    let network_download_kb = 0.0;
+    let total_disk_space: u64 = disk_list.iter().map(|d| d.total_space()).sum();
+    let available_disk_space: u64 = disk_list.iter().map(|d| d.available_space()).sum();
+    let used_disk_space = total_disk_space.saturating_sub(available_disk_space);
+    
+    let disk_utilization = if total_disk_space > 0 {
+        (used_disk_space as f32 / total_disk_space as f32) * 100.0
+    } else {
+        0.0
+    };
+    drop(disks_guard);
+    
+    // Network stats - Windows specific
+    #[cfg(windows)]
+    let (network_upload_kb, network_download_kb) = {
+        match get_network_stats() {
+            Ok((sent, recv)) => {
+                let mut prev = previous_network.lock().await;
+                let (prev_sent, prev_recv) = *prev;
+                
+                // Only calculate if we have previous data
+                if prev_sent > 0 || prev_recv > 0 {
+                    let upload = ((sent.saturating_sub(prev_sent)) as f64) / 1024.0;
+                    let download = ((recv.saturating_sub(prev_recv)) as f64) / 1024.0;
+                    *prev = (sent, recv);
+                    (upload, download)
+                } else {
+                    // First run, just store the values
+                    *prev = (sent, recv);
+                    (0.0, 0.0)
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to get network stats: {}", e);
+                (0.0, 0.0)
+            }
+        }
+    };
+    
+    #[cfg(not(windows))]
+    let (network_upload_kb, network_download_kb) = (0.0, 0.0);
     
     // Top processes by CPU usage
     let memory_total_kb = memory_total as f32;
@@ -238,4 +293,46 @@ pub async fn get_network_connections() -> Vec<NetworkConnection> {
 #[cfg(not(windows))]
 pub async fn get_network_connections() -> Vec<NetworkConnection> {
     vec![]
+}
+
+// Get network statistics using Windows API
+#[cfg(windows)]
+fn get_network_stats() -> Result<(u64, u64), String> {
+    use windows::Win32::NetworkManagement::IpHelper::{GetIfTable2, FreeMibTable, MIB_IF_TABLE2};
+    use std::ptr;
+    
+    unsafe {
+        let mut table_ptr: *mut MIB_IF_TABLE2 = ptr::null_mut();
+        
+        match GetIfTable2(&mut table_ptr) {
+            Ok(()) => {
+                if table_ptr.is_null() {
+                    return Err("Failed to get network interface table".to_string());
+                }
+                
+                let table = &*table_ptr;
+                let mut total_sent: u64 = 0;
+                let mut total_recv: u64 = 0;
+                
+                // Sum up bytes from all network interfaces
+                let num_entries = table.NumEntries as usize;
+                if num_entries > 0 && num_entries < 1000 { // Sanity check
+                    for i in 0..num_entries.min(table.Table.len()) {
+                        let entry = &table.Table[i];
+                        total_sent = total_sent.saturating_add(entry.OutOctets);
+                        total_recv = total_recv.saturating_add(entry.InOctets);
+                    }
+                }
+                
+                let _ = FreeMibTable(table_ptr as *const _);
+                Ok((total_sent, total_recv))
+            }
+            Err(_) => Err("Failed to get network interface table".to_string()),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn get_network_stats() -> Result<(u64, u64), String> {
+    Ok((0, 0))
 }
