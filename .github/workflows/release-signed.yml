@@ -135,7 +135,7 @@ jobs:
         echo "" >> RELEASE_INFO.md
         echo "## Signing Status" >> RELEASE_INFO.md
         echo "✅ **Windows Certificate Signing**: Applied (embedded digital signatures)" >> RELEASE_INFO.md
-        echo "✅ **Sigstore Keyless Signing**: Applied (separate .sig/.crt files)" >> RELEASE_INFO.md
+        echo "✅ **Sigstore Keyless Signing**: Applied (verification files stored in workflow artifacts)" >> RELEASE_INFO.md
         echo "" >> RELEASE_INFO.md
         echo "## Files in this Release" >> RELEASE_INFO.md
         
@@ -213,17 +213,15 @@ jobs:
           - Supports supply chain security best practices  
           
           ## 📥 Download
-          - **For most users**: Download `wfdiag-${{ steps.version.outputs.version }}.exe`
-          - **For verification**: Also download corresponding `.sig` and `.crt` files
+          Download `wfdiag-${{ steps.version.outputs.version }}.exe` - this file contains both signature types embedded.
           
           ## 🔍 Signature Verification
-          ```bash
-          # Verify Sigstore signature
-          cosign verify-blob --signature wfdiag-*.exe.sig --certificate wfdiag-*.exe.crt --certificate-identity-regexp "https://github.com/faratech/wfdiag" --certificate-oidc-issuer "https://token.actions.githubusercontent.com" wfdiag-*.exe
-          
-          # Check Windows signature (Windows)
+          ```powershell
+          # Check Windows digital signature (shows certificate info)
           Get-AuthenticodeSignature wfdiag-*.exe
           ```
+          
+          Advanced users can verify the Sigstore signature using workflow artifacts containing the .sig/.crt files.
           
           Generated from commit: ${{ github.sha }}
         draft: false
@@ -236,8 +234,8 @@ jobs:
           "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ steps.version.outputs.version }}" | \
           jq -r '.id')
         
-        # Upload all binary files and their signatures
-        find . \( -name "*.exe" -o -name "*.msi" -o -name "*.msix" -o -name "*.sig" -o -name "*.crt" \) -type f | while read -r file; do
+        # Upload only binary files (exclude .sig and .crt files from release downloads)
+        find . \( -name "*.exe" -o -name "*.msi" -o -name "*.msix" \) -type f | while read -r file; do
           filename=$(basename "$file")
           echo "📤 Uploading: $filename"
           
@@ -248,12 +246,7 @@ jobs:
             "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=${filename}"
         done
         
-        # Upload release info
-        curl -s \
-          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-          -H "Content-Type: text/markdown" \
-          --data-binary @RELEASE_INFO.md \
-          "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=RELEASE_INFO.md"
+        # Note: RELEASE_INFO.md stays in workflow artifacts, not in release downloads
 
     - name: Release Summary
       run: |
