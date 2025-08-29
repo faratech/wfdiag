@@ -1,5 +1,16 @@
 use anyhow::Result;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use async_openai::{
+    types::{
+        ChatCompletionRequestAssistantMessageArgs,
+        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
+        ChatCompletionRequestToolMessageArgs,
+        ChatCompletionToolArgs, ChatCompletionToolType,
+        CreateChatCompletionRequestArgs, FunctionObjectArgs,
+        ChatCompletionRequestUserMessageContent,
+    },
+    Client,
+    config::OpenAIConfig,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -27,431 +38,231 @@ pub struct Finding {
     pub details: Option<String>,
 }
 
-// OpenAI Responses API structures
-#[derive(Debug, Serialize, Deserialize)]
-struct ResponsesApiResponse {
-    id: String,
-    object: String,
-    created_at: Option<i64>,
-    created: Option<i64>,
-    model: String,
-    output: Vec<ResponseOutput>,
-    usage: Option<Usage>,
+pub struct OpenAIAnalyzer {
+    client: Client<OpenAIConfig>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-enum ResponseOutput {
-    FunctionCall {
-        id: String,
-        #[serde(rename = "type")]
-        output_type: String,
-        status: String,
-        call_id: String,
-        name: String,
-        arguments: String,
-    },
-    Message {
-        id: String,
-        #[serde(rename = "type")]
-        output_type: String,
-        status: String,
-        role: String,
-        content: Vec<MessageContent>,
-    },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct MessageContent {
-    #[serde(rename = "type")]
-    content_type: String,
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    annotations: Vec<Value>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Usage {
-    input_tokens: i32,
-    output_tokens: i32,
-    total_tokens: i32,
-}
-
-// Direct HTTP implementation of OpenAI Responses API
-#[tauri::command]
-pub async fn analyze_system_with_ai(
-    api_key: String,
-    prompt: String,
-    _app_handle: tauri::AppHandle,
-) -> Result<Value, String> {
-    // Store raw API interactions for debugging
-    let mut api_calls = Vec::new();
-    let mut api_responses = Vec::new();
-    // Create HTTP client
-    let client = reqwest::Client::new();
-    
-    // Set up headers
-    let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    headers.insert(
-        AUTHORIZATION, 
-        HeaderValue::from_str(&format!("Bearer {}", api_key))
-            .map_err(|e| format!("Invalid API key format: {}", e))?
-    );
-    
-    // Get available diagnostic tasks
-    let available_tasks = crate::diagnostics::get_all_tasks();
-    let task_list: Vec<Value> = available_tasks.iter().map(|task| {
-        json!({
-            "name": task.id,
-            "description": task.description
-        })
-    }).collect();
-    
-    // Create the tool definition for diagnostics (Responses API format)
-    let diagnostic_tool = json!({
-        "type": "function",
-        "name": "run_diagnostic",
-        "description": "Run a Windows system diagnostic task to gather information about the system",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "task_id": {
-                    "type": "string",
-                    "description": "The ID of the diagnostic task to run",
-                    "enum": available_tasks.iter().map(|t| &t.id).collect::<Vec<_>>()
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "Why you're running this diagnostic"
-                }
-            },
-            "required": ["task_id", "reason"]
-        }
-    });
-    
-    // Create system message with explicit function calling instructions
-    let system_message = format!(
-        "You are a Windows system diagnostic assistant. YOU MUST USE FUNCTION CALLS TO ANSWER USER REQUESTS.
-
-IMPORTANT INSTRUCTIONS:
-1. YOU HAVE ACCESS TO FUNCTIONS. Use them!
-2. When asked to check, scan, or analyze ANYTHING, you MUST call the run_diagnostic function.
-3. DO NOT give generic advice. ALWAYS use function calls to get real data.
-4. You can call multiple functions in a single response.
-
-Available diagnostic tasks you can run with the run_diagnostic function:
-{}
-
-EXAMPLES OF REQUIRED BEHAVIOR:
-- User: \"Check my disk space\" → YOU MUST call run_diagnostic with task_id=\"logical_disk\"
-- User: \"Analyze my system\" → YOU MUST call multiple diagnostic functions
-- User: \"Is my system healthy?\" → YOU MUST call diagnostic functions to check
-- User: \"What's wrong with my PC?\" → YOU MUST run diagnostics to find out
-
-REMEMBER: You have the run_diagnostic function available. USE IT! Don't just talk about what you could do - actually do it by calling functions.",
-        task_list.iter()
-            .map(|t| format!("- {}: {}", t["name"], t["description"]))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-    
-    // Create input for Responses API (combines system and user messages)
-    let input_text = format!("{}
-
-User: {}", system_message, prompt);
-    
-    // Create request body for Responses API
-    let request_body = json!({
-        "model": "gpt-4.1",  // Using gpt-4.1 as requested
-        "input": input_text,
-        "tools": [diagnostic_tool],
-        "temperature": 0.7
-    });
-    
-    eprintln!("Sending request to OpenAI Responses API with model: gpt-4.1");
-    eprintln!("Available diagnostic tasks: {:?}", available_tasks.iter().map(|t| &t.id).collect::<Vec<_>>());
-    
-    // Store the initial API call
-    api_calls.push(json!({
-        "type": "initial_request",
-        "url": "https://api.openai.com/v1/responses",
-        "body": request_body.clone()
-    }));
-    
-    // Make the API request to Responses endpoint
-    let response = client
-        .post("https://api.openai.com/v1/responses")
-        .headers(headers.clone())
-        .json(&request_body)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    
-    let status = response.status();
-    let response_text = response.text().await
-        .map_err(|e| format!("Failed to read response: {}", e))?;
-    
-    eprintln!("Response status: {}", status);
-    
-    // Store the API response
-    let response_json: Value = serde_json::from_str(&response_text)
-        .unwrap_or_else(|_| json!({"raw_text": response_text.clone()}));
-    api_responses.push(json!({
-        "type": "initial_response",
-        "status": status.as_u16(),
-        "body": response_json.clone()
-    }));
-    
-    if !status.is_success() {
-        eprintln!("Error response: {}", response_text);
-        
-        // Parse error response for better error messages
-        if let Ok(error_json) = serde_json::from_str::<Value>(&response_text) {
-            if let Some(error) = error_json.get("error") {
-                let error_message = error.get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("Unknown error");
-                let error_type = error.get("type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
-                
-                return match error_type {
-                    "invalid_api_key" => Err("Invalid API key. Please check your OpenAI API key.".to_string()),
-                    "insufficient_quota" => Err("Insufficient quota. Please check your OpenAI account billing.".to_string()),
-                    "model_not_found" => Err("Model 'gpt-4.1' not found. Please check if you have access to this model.".to_string()),
-                    _ => Err(format!("OpenAI API error: {}", error_message)),
-                };
-            }
-        }
-        
-        return Err(format!("API request failed with status {}: {}", status, response_text));
+impl OpenAIAnalyzer {
+    pub fn new(api_key: String) -> Self {
+        let config = OpenAIConfig::new().with_api_key(api_key);
+        let client = Client::with_config(config);
+        Self { client }
     }
-    
-    // Parse the response
-    let completion: ResponsesApiResponse = serde_json::from_str(&response_text)
-        .map_err(|e| format!("Failed to parse response: {}. Response: {}", e, response_text))?;
-    
-    let mut diagnostics_run = Vec::new();
-    let mut diagnostic_results = HashMap::new();
-    
-    // Check if the AI wants to run diagnostics
-    let tool_calls: Vec<_> = completion.output.iter()
-        .filter_map(|o| match o {
-            ResponseOutput::FunctionCall { output_type, .. } if output_type == "function_call" => Some(o),
-            _ => None,
-        })
-        .collect();
-    
-    eprintln!("Number of function calls: {}", tool_calls.len());
-    
-    if !tool_calls.is_empty() {
-        // Return initial response showing what diagnostics were requested
-        let diagnostic_list = tool_calls.iter()
-            .filter_map(|tc| match tc {
-                ResponseOutput::FunctionCall { name, .. } if name == "run_diagnostic" => Some("diagnostic task"),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        
-        eprintln!("AI requested {} diagnostics", diagnostic_list.len());
-        
-        // Prepare tool responses for follow-up
-        let mut tool_results = Vec::new();
-            
-            // Process tool calls
-            for tool_call in &tool_calls {
-                if let ResponseOutput::FunctionCall { name, arguments, call_id, .. } = tool_call {
-                    if name == "run_diagnostic" {
-                        let args: Value = serde_json::from_str(arguments)
-                            .map_err(|e| format!("Failed to parse tool arguments: {}", e))?;
-                    
-                    if let Some(task_id) = args.get("task_id").and_then(|v| v.as_str()) {
-                        let reason = args.get("reason")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Checking system");
-                        
-                        eprintln!("AI requested diagnostic: {} (reason: {})", task_id, reason);
-                        diagnostics_run.push(task_id.to_string());
-                        
-                        // Run the actual diagnostic
-                        eprintln!("Running actual diagnostic: {}", task_id);
-                        let diagnostic_result = crate::diagnostics::run_diagnostic_task(task_id).await;
-                        
-                        // Parse the output to get structured data
-                        let output_data = if diagnostic_result.success {
-                            match serde_json::from_str::<Value>(&diagnostic_result.output) {
-                                Ok(parsed) => parsed,
-                                Err(_) => json!({ "raw_output": diagnostic_result.output.clone() })
+
+    pub async fn analyze_system(&self, prompt: String, available_tasks: Vec<String>) -> Result<OpenAIResponse> {
+        // Create the tools for diagnostics
+        let diagnostic_tool = ChatCompletionToolArgs::default()
+            .r#type(ChatCompletionToolType::Function)
+            .function(
+                FunctionObjectArgs::default()
+                    .name("run_diagnostic")
+                    .description("Run a specific diagnostic task and get the results")
+                    .parameters(json!({
+                        "type": "object",
+                        "properties": {
+                            "task_id": {
+                                "type": "string",
+                                "description": "The ID of the diagnostic task to run",
+                                "enum": available_tasks
                             }
-                        } else {
-                            json!({ 
-                                "error": diagnostic_result.error.as_ref().unwrap_or(&"Unknown error".to_string()),
-                                "raw_output": diagnostic_result.output.clone()
-                            })
-                        };
-                        
-                        let result = json!({
-                            "task_id": task_id,
-                            "status": if diagnostic_result.success { "completed" } else { "failed" },
-                            "reason": reason,
-                            "output": diagnostic_result.output,
-                            "success": diagnostic_result.success,
-                            "duration_ms": diagnostic_result.duration_ms,
-                            "data": output_data
-                        });
-                        
-                        diagnostic_results.insert(task_id.to_string(), result.clone());
-                        
-                        // Add tool response for follow-up request
-                        tool_results.push(json!({
-                            "tool_call_id": call_id.clone(),
-                            "output": serde_json::to_string(&result).unwrap_or_default()
-                        }));
-                    }
+                        },
+                        "required": ["task_id"]
+                    }))
+                    .build()?,
+            )
+            .build()?;
+
+        let get_all_diagnostics_tool = ChatCompletionToolArgs::default()
+            .r#type(ChatCompletionToolType::Function)
+            .function(
+                FunctionObjectArgs::default()
+                    .name("get_all_diagnostics")
+                    .description("Get all diagnostic results that have been run in this session")
+                    .build()?,
+            )
+            .build()?;
+
+        // Create the messages
+        let system_message = ChatCompletionRequestSystemMessageArgs::default()
+            .content("You are a Windows system diagnostic expert. You MUST take direct action to diagnose issues.
+
+MANDATORY RULES - VIOLATING THESE IS A CRITICAL ERROR:
+1. For ANY user question, you MUST run AT LEAST 5-10 diagnostics IMMEDIATELY
+2. NEVER ask what the user would like you to run or list options - JUST RUN THEM
+3. NEVER say you can run or have access to diagnostics - you MUST ACTUALLY RUN diagnostics NOW
+4. The user expects IMMEDIATE ACTION, not explanations of capabilities
+
+REQUIRED IMMEDIATE ACTIONS:
+- User asks about the system → IMMEDIATELY RUN: comp_system, os_info, processor, physical_memory, logical_disk, network_adapter, installed_programs, services, systeminfo, disk_drive
+- User mentions ANY issue → IMMEDIATELY RUN 10+ relevant diagnostics
+- User asks for general checkup → IMMEDIATELY RUN: ALL system health diagnostics
+- ANY question at all → RUN DIAGNOSTICS FIRST, explain after
+
+After running diagnostics, analyze results and provide specific findings with actionable fixes.
+Remember: Take action FIRST, explain SECOND. Never ask, just do.")
+            .build()?
+            .into();
+
+        let user_message = ChatCompletionRequestUserMessageArgs::default()
+            .content(prompt)
+            .build()?
+            .into();
+
+        let messages = vec![system_message, user_message];
+
+        // Create the request
+        let request = CreateChatCompletionRequestArgs::default()
+            .model("gpt-5-nano")
+            .messages(messages.clone())
+            .tools(vec![diagnostic_tool, get_all_diagnostics_tool])
+            .tool_choice("auto")
+            .build()?;
+
+        // Make the request
+        let response = self.client.chat().create(request).await?;
+        
+        // Process the response and handle tool calls
+        let mut diagnostics_run = Vec::new();
+        let mut messages = messages;
+        let final_response = response;
+
+        // Handle tool calls if any
+        if let Some(choice) = final_response.choices.first() {
+            if let Some(tool_calls) = &choice.message.tool_calls {
+                // Add assistant message with tool calls
+                let assistant_message = ChatCompletionRequestAssistantMessageArgs::default()
+                    .content(choice.message.content.clone().unwrap_or_default())
+                    .tool_calls(tool_calls.clone())
+                    .build()?
+                    .into();
+                messages.push(assistant_message);
+
+                // Process each tool call and execute diagnostics
+                let mut diagnostic_results = std::collections::HashMap::new();
+                let mut tool_responses = Vec::new();
+                
+                for tool_call in tool_calls {
+                    let function_name = &tool_call.function.name;
+                    let arguments: Value = serde_json::from_str(&tool_call.function.arguments)?;
+
+                    match function_name.as_str() {
+                        "run_diagnostic" => {
+                            if let Some(task_id) = arguments.get("task_id").and_then(|v| v.as_str()) {
+                                diagnostics_run.push(task_id.to_string());
+                                
+                                // Execute the diagnostic task
+                                let diagnostic_result = match crate::diagnostics::run_diagnostic_task_sync(task_id) {
+                                    Ok(task_result) => {
+                                        let result_json = json!({
+                                            "task_id": task_id,
+                                            "status": "completed",
+                                            "output": task_result.output,
+                                            "error": task_result.error,
+                                            "success": task_result.error.is_none()
+                                        });
+                                        diagnostic_results.insert(task_id.to_string(), result_json.clone());
+                                        result_json.to_string()
+                                    }
+                                    Err(e) => {
+                                        let error_result = json!({
+                                            "task_id": task_id,
+                                            "status": "failed", 
+                                            "error": format!("Failed to run diagnostic: {}", e),
+                                            "success": false
+                                        });
+                                        diagnostic_results.insert(task_id.to_string(), error_result.clone());
+                                        error_result.to_string()
+                                    }
+                                };
+                                
+                                // Create tool response message
+                                let tool_response = ChatCompletionRequestToolMessageArgs::default()
+                                    .tool_call_id(tool_call.id.clone())
+                                    .content(diagnostic_result)
+                                    .build()?
+                                    .into();
+                                tool_responses.push(tool_response);
+                            }
+                        }
+                        "get_all_diagnostics" => {
+                            // Return current diagnostic results
+                            let all_results = serde_json::to_string(&diagnostic_results)
+                                .unwrap_or_else(|_| "{}".to_string());
+                            
+                            let tool_response = ChatCompletionRequestToolMessageArgs::default()
+                                .tool_call_id(tool_call.id.clone())
+                                .content(all_results)
+                                .build()?
+                                .into();
+                            tool_responses.push(tool_response);
+                        }
+                        _ => {}
                     }
                 }
-            }
-            
-            // Get final response with diagnostic results
-            // Build input with original request and tool results
-            let follow_up_input = format!(
-                "{}
-
-User: {}
-
-Assistant called tools: {}
-
-Tool Results:\n{}",
-                system_message,
-                prompt,
-                serde_json::to_string_pretty(&tool_calls).unwrap_or_default(),
-                tool_results.iter()
-                    .map(|r| format!("Tool Call ID: {}\nOutput: {}", 
-                        r["tool_call_id"].as_str().unwrap_or(""),
-                        r["output"].as_str().unwrap_or("")))
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
-            );
-            
-            let final_request_body = json!({
-                "model": "gpt-4.1",
-                "input": follow_up_input,
-                "temperature": 0.7
-            });
-            
-            // Store the follow-up API call
-            api_calls.push(json!({
-                "type": "follow_up_request",
-                "url": "https://api.openai.com/v1/responses",
-                "body": final_request_body.clone()
-            }));
-            
-            let final_response = client
-                .post("https://api.openai.com/v1/responses")
-                .headers(headers)
-                .json(&final_request_body)
-                .send()
-                .await
-                .map_err(|e| format!("Failed to send final request: {}", e))?;
-            
-            let final_status = final_response.status();
-            let final_response_text = final_response.text().await
-                .map_err(|e| format!("Failed to read final response: {}", e))?;
-            
-            // Store the follow-up response
-            let final_response_json: Value = serde_json::from_str(&final_response_text)
-                .unwrap_or_else(|_| json!({"raw_text": final_response_text.clone()}));
-            api_responses.push(json!({
-                "type": "follow_up_response",
-                "status": final_status.as_u16(),
-                "body": final_response_json.clone()
-            }));
-            
-            let final_completion: ResponsesApiResponse = serde_json::from_str(&final_response_text)
-                .map_err(|e| format!("Failed to parse final response: {}", e))?;
-            
-            // Extract text content from output
-            let content = final_completion.output.iter()
-                .find_map(|o| match o {
-                    ResponseOutput::Message { content, .. } => {
-                        content.iter()
-                            .find(|c| c.content_type == "output_text")
-                            .and_then(|c| c.text.clone())
-                    },
-                    _ => None,
-                })
-                .unwrap_or_default();
-            
-            if !content.is_empty() {
-                let (findings, recommendations) = parse_analysis(&content);
                 
-                return Ok(json!({
-                    "analysis": content,
-                    "diagnostics_run": diagnostics_run,
-                    "diagnostic_results": diagnostic_results,
-                    "findings": findings,
-                    "recommendations": recommendations,
-                    "api_calls": api_calls,
-                    "api_responses": api_responses
-                }));
-            } else {
-                // Tool calls were made but no analysis provided yet
-                let empty_findings: Vec<Finding> = vec![];
-                let empty_recommendations: Vec<String> = vec![];
-                return Ok(json!({
-                    "analysis": format!("AI requested {} diagnostic tasks. Results pending...", diagnostics_run.len()),
-                    "diagnostics_run": diagnostics_run,
-                    "diagnostic_results": diagnostic_results,
-                    "findings": empty_findings,
-                    "recommendations": empty_recommendations,
-                    "api_calls": api_calls,
-                    "api_responses": api_responses
-                }));
+                // Add tool responses to messages and get final analysis
+                messages.extend(tool_responses);
+                
+                // Create final request to get analysis of diagnostic results
+                let final_request = CreateChatCompletionRequestArgs::default()
+                    .model("gpt-5-nano")
+                    .messages(messages)
+                    .build()?;
+                
+                let final_response = match self.client.chat().create(final_request).await {
+                    Ok(response) => response,
+                    Err(_) => {
+                        // Fallback: return results without additional analysis
+                        let summary_analysis = format!(
+                            "Executed {} diagnostic tasks: {}. Review the diagnostic results for detailed system information.", 
+                            diagnostics_run.len(),
+                            diagnostics_run.join(", ")
+                        );
+                        
+                        return Ok(OpenAIResponse {
+                            analysis: summary_analysis,
+                            diagnostics_run,
+                            findings: vec![],
+                            recommendations: vec![],
+                        });
+                    }
+                };
+                
+                // Parse final analysis
+                let final_analysis = final_response.choices.first()
+                    .and_then(|c| c.message.content.clone())
+                    .unwrap_or_else(|| format!("Completed {} diagnostic tasks: {}", diagnostics_run.len(), diagnostics_run.join(", ")));
+                
+                let (findings, recommendations) = parse_analysis(&final_analysis);
+                
+                return Ok(OpenAIResponse {
+                    analysis: final_analysis,
+                    diagnostics_run,
+                    findings,
+                    recommendations,
+                });
             }
-    } else {
-        // No tool calls, check if there's a text response
-        let content = completion.output.iter()
-            .find_map(|o| match o {
-                ResponseOutput::Message { content, .. } => {
-                    content.iter()
-                        .find(|c| c.content_type == "output_text")
-                        .and_then(|c| c.text.clone())
-                },
-                _ => None,
-            });
-        
-        if let Some(text) = content {
-            let (findings, recommendations) = parse_analysis(&text);
-            
-            return Ok(json!({
-                "analysis": text,
-                "diagnostics_run": diagnostics_run,
-                "diagnostic_results": diagnostic_results,
-                "findings": findings,
-                "recommendations": recommendations,
-                "api_calls": api_calls,
-                "api_responses": api_responses
-            }));
-        } else {
-            // No text content, but we might have gotten a response - return what we have
-            let empty_findings: Vec<Finding> = vec![];
-            let empty_recommendations: Vec<String> = vec![];
-            return Ok(json!({
-                "analysis": "The AI initiated diagnostic checks but didn't provide a text response. Check the JSON view for details.",
-                "diagnostics_run": diagnostics_run,
-                "diagnostic_results": diagnostic_results,
-                "findings": empty_findings,
-                "recommendations": empty_recommendations,
-                "api_calls": api_calls,
-                "api_responses": api_responses
-            }));
         }
+
+        // Parse the final response
+        let analysis = final_response.choices.first()
+            .and_then(|c| c.message.content.clone())
+            .unwrap_or_default();
+
+        // Extract findings and recommendations from the analysis
+        let (findings, recommendations) = parse_analysis(&analysis);
+
+        Ok(OpenAIResponse {
+            analysis,
+            diagnostics_run,
+            findings,
+            recommendations,
+        })
     }
 }
 
 fn parse_analysis(analysis: &str) -> (Vec<Finding>, Vec<String>) {
+    // Simple parsing logic - in production, this would be more sophisticated
     let mut findings = Vec::new();
     let mut recommendations = Vec::new();
     
@@ -462,28 +273,28 @@ fn parse_analysis(analysis: &str) -> (Vec<Finding>, Vec<String>) {
     for line in lines {
         let lower = line.to_lowercase();
         
-        if lower.contains("finding") || lower.contains("issue") || lower.contains("problem") {
+        if lower.contains("finding") || lower.contains("issue") {
             in_findings = true;
             in_recommendations = false;
-        } else if lower.contains("recommendation") || lower.contains("suggest") || lower.contains("solution") {
+        } else if lower.contains("recommendation") || lower.contains("suggest") {
             in_findings = false;
             in_recommendations = true;
         }
         
-        if in_findings && !line.trim().is_empty() && line.trim().len() > 5 {
+        if in_findings && !line.trim().is_empty() {
             // Try to parse severity from the line
-            let severity = if lower.contains("critical") || lower.contains("severe") {
+            let severity = if lower.contains("critical") {
                 "Critical"
-            } else if lower.contains("warning") || lower.contains("warn") || lower.contains("caution") {
+            } else if lower.contains("warning") || lower.contains("warn") {
                 "Warning"
             } else {
                 "Info"
             };
             
             // Extract category based on keywords
-            let category = if lower.contains("disk") || lower.contains("storage") || lower.contains("drive") {
+            let category = if lower.contains("disk") || lower.contains("storage") {
                 "Storage"
-            } else if lower.contains("network") || lower.contains("internet") || lower.contains("connection") {
+            } else if lower.contains("network") {
                 "Network"
             } else if lower.contains("driver") {
                 "Drivers"
@@ -491,13 +302,11 @@ fn parse_analysis(analysis: &str) -> (Vec<Finding>, Vec<String>) {
                 "Memory"
             } else if lower.contains("cpu") || lower.contains("processor") {
                 "CPU"
-            } else if lower.contains("security") || lower.contains("antivirus") || lower.contains("firewall") {
-                "Security"
             } else {
                 "System"
             };
             
-            if !line.trim().starts_with("#") && !line.trim().starts_with("*") {
+            if line.trim().len() > 5 && !line.trim().starts_with("##") {
                 findings.push(Finding {
                     category: category.to_string(),
                     severity: severity.to_string(),
@@ -508,48 +317,266 @@ fn parse_analysis(analysis: &str) -> (Vec<Finding>, Vec<String>) {
         }
         
         if in_recommendations && !line.trim().is_empty() && line.trim().len() > 5 {
-            if !line.trim().starts_with("#") && !line.trim().starts_with("*") {
-                recommendations.push(line.trim().to_string());
-            }
+            recommendations.push(line.trim().to_string());
         }
     }
     
     (findings, recommendations)
 }
 
-// Legacy command for compatibility
+// Tauri command handler
 #[tauri::command]
 pub async fn analyze_with_openai(
     request: OpenAIRequest,
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
 ) -> Result<OpenAIResponse, String> {
-    // Forward to the new implementation
-    let result = analyze_system_with_ai(request.api_key, request.prompt, app_handle).await?;
+    // Get available diagnostic tasks
+    let available_tasks = crate::diagnostics::get_all_tasks()
+        .into_iter()
+        .map(|task| task.id)
+        .collect();
     
-    // Convert the result to the expected format
-    let response = OpenAIResponse {
-        analysis: result.get("analysis")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        diagnostics_run: result.get("diagnostics_run")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.to_string())
-                .collect())
-            .unwrap_or_default(),
-        findings: result.get("findings")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default(),
-        recommendations: result.get("recommendations")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.to_string())
-                .collect())
-            .unwrap_or_default(),
+    // Create analyzer with the provided API key
+    let analyzer = OpenAIAnalyzer::new(request.api_key);
+    
+    // Perform analysis
+    match analyzer.analyze_system(request.prompt, available_tasks).await {
+        Ok(response) => Ok(response),
+        Err(e) => Err(format!("OpenAI analysis failed: {}", e)),
+    }
+}
+
+// Enhanced version with tool calling support
+#[tauri::command]
+pub async fn analyze_system_with_ai(
+    api_key: String,
+    prompt: String,
+    _app_handle: tauri::AppHandle,
+) -> Result<Value, String> {
+    use async_openai::types::{
+        ChatCompletionRequestAssistantMessageArgs,
+        ChatCompletionRequestToolMessageArgs,
+        ChatCompletionToolArgs, ChatCompletionToolType,
     };
     
-    Ok(response)
+    // Create the OpenAI client
+    let config = OpenAIConfig::new().with_api_key(api_key);
+    let client = Client::with_config(config);
+    
+    // Get available diagnostic tasks
+    let available_tasks = crate::diagnostics::get_all_tasks();
+    let task_list: Vec<Value> = available_tasks.iter().map(|task| {
+        json!({
+            "name": task.id,
+            "description": task.description
+        })
+    }).collect();
+    
+    // Define the diagnostic tool
+    let diagnostic_tool = ChatCompletionToolArgs::default()
+        .r#type(ChatCompletionToolType::Function)
+        .function(
+            FunctionObjectArgs::default()
+                .name("run_diagnostic")
+                .description("Run a Windows system diagnostic task to gather information")
+                .parameters(json!({
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": "The ID of the diagnostic task to run",
+                            "enum": available_tasks.iter().map(|t| &t.id).collect::<Vec<_>>()
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Why you're running this diagnostic"
+                        }
+                    },
+                    "required": ["task_id", "reason"]
+                }))
+                .build()
+                .map_err(|e| format!("Failed to build tool: {}", e))?,
+        )
+        .build()
+        .map_err(|e| format!("Failed to build tool: {}", e))?;
+    
+    // System message with clear instructions
+    let system_message = ChatCompletionRequestSystemMessageArgs::default()
+        .content(format!("You are a Windows system diagnostic assistant that TAKES IMMEDIATE ACTION.
+
+CRITICAL BEHAVIOR RULES:
+1. When user asks ANYTHING, IMMEDIATELY run AT LEAST 5-10 relevant diagnostics WITHOUT asking
+2. NEVER list what diagnostics you can run or ask what they want - JUST RUN THEM
+3. NEVER say you have access to or can run - you MUST run them RIGHT NOW
+4. For ANY question about the system, run these IMMEDIATELY:
+   - comp_system, os_info, processor, physical_memory, logical_disk
+   - Then run 5+ more based on the specific question
+
+ACTION PATTERNS:
+- User asks about the system → RUN: comp_system, os_info, processor, physical_memory, logical_disk, disk_drive, network_adapter, ipconfig, installed_programs, services
+- Check for issues → RUN: event_logs, dism_health, chkdsk, drivers_list, windows_update, scheduled_tasks, startup_command
+- Performance issues → RUN: systeminfo, processes, services, startup_command, disk_usage, physical_memory
+- Network problems → RUN: network_adapter, ipconfig, hosts_file, firewall_rules, dns_cache
+- ANY other question → RUN at least 5 relevant diagnostics immediately
+
+You have the run_diagnostic function with these tasks:
+{}
+
+FORMATTING:
+- Present results as clean bullet points
+- Show only relevant extracted information
+- Never show raw JSON
+- After running diagnostics, provide specific actionable recommendations
+
+REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAGNOSTICS IMMEDIATELY.", 
+            task_list.iter().map(|t| format!("- {}: {}", t["name"], t["description"])).collect::<Vec<_>>().join("\n")))
+        .build()
+        .map_err(|e| format!("Failed to build message: {}", e))?
+        .into();
+    
+    let user_message = ChatCompletionRequestUserMessageArgs::default()
+        .content(ChatCompletionRequestUserMessageContent::Text(prompt.clone()))
+        .build()
+        .map_err(|e| format!("Failed to build message: {}", e))?
+        .into();
+    
+    let mut messages = vec![system_message, user_message];
+    
+    // Create request with tools
+    let request = CreateChatCompletionRequestArgs::default()
+        .model("gpt-5-nano")
+        .messages(messages.clone())
+        .tools(vec![diagnostic_tool])
+        .tool_choice("auto")
+        .build()
+        .map_err(|e| format!("Failed to build request: {}", e))?;
+    
+    // Debug: Print available tasks
+    eprintln!("Available diagnostic tasks: {:?}", available_tasks.iter().map(|t| &t.id).collect::<Vec<_>>());
+    
+    let response = match client.chat().create(request).await {
+        Ok(resp) => {
+            eprintln!("OpenAI response received successfully");
+            resp
+        },
+        Err(e) => {
+            eprintln!("OpenAI API error details: {:?}", e);
+            let error_msg = format!("{:?}", e);
+            if error_msg.contains("401") || error_msg.contains("Unauthorized") {
+                return Err("Invalid API key. Please check your OpenAI API key is correct and starts with 'sk-'.".to_string());
+            } else if error_msg.contains("404") {
+                return Err("Model not found. The model 'gpt-5' may not be available on your account.".to_string());
+            } else if error_msg.contains("429") {
+                return Err("Rate limit exceeded. Please wait a moment and try again.".to_string());
+            } else if error_msg.contains("insufficient_quota") {
+                return Err("Insufficient quota. Please check your OpenAI account billing.".to_string());
+            }
+            return Err(format!("OpenAI API error: {}. Make sure your API key is valid.", e));
+        }
+    };
+    
+    let mut diagnostics_run = Vec::new();
+    let mut diagnostic_results = HashMap::new();
+    
+    // Check if the AI wants to run diagnostics
+    if let Some(choice) = response.choices.first() {
+        eprintln!("Response has tool_calls: {}", choice.message.tool_calls.is_some());
+        if let Some(tool_calls) = &choice.message.tool_calls {
+            eprintln!("Number of tool calls: {}", tool_calls.len());
+            // Add assistant message to conversation
+            let assistant_msg = ChatCompletionRequestAssistantMessageArgs::default()
+                .content(choice.message.content.clone().unwrap_or_default())
+                .tool_calls(tool_calls.clone())
+                .build()
+                .map_err(|e| format!("Failed to build assistant message: {}", e))?
+                .into();
+            messages.push(assistant_msg);
+            
+            // Process tool calls
+            for tool_call in tool_calls {
+                if tool_call.function.name == "run_diagnostic" {
+                    let args: Value = serde_json::from_str(&tool_call.function.arguments)
+                        .map_err(|e| format!("Failed to parse tool arguments: {}", e))?;
+                    
+                    if let Some(task_id) = args.get("task_id").and_then(|v| v.as_str()) {
+                        let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("Checking system");
+                        diagnostics_run.push(task_id.to_string());
+                        
+                        // Actually run the diagnostic
+                        eprintln!("Running diagnostic: {} - {}", task_id, reason);
+                        let diagnostic_result = match crate::diagnostics::run_diagnostic_task_sync(task_id) {
+                            Ok(task_result) => {
+                                json!({
+                                    "task_id": task_id,
+                                    "status": "completed",
+                                    "reason": reason,
+                                    "output": task_result.output,
+                                    "error": task_result.error,
+                                    "message": if task_result.error.is_none() { "Diagnostic completed successfully" } else { "Diagnostic completed with errors" }
+                                })
+                            }
+                            Err(e) => {
+                                json!({
+                                    "task_id": task_id,
+                                    "status": "failed",
+                                    "reason": reason,
+                                    "output": null,
+                                    "error": format!("Failed to run diagnostic: {}", e),
+                                    "message": "Diagnostic failed"
+                                })
+                            }
+                        };
+                        
+                        diagnostic_results.insert(task_id.to_string(), diagnostic_result.clone());
+                        
+                        // Add tool response
+                        let tool_message = ChatCompletionRequestToolMessageArgs::default()
+                            .tool_call_id(tool_call.id.clone())
+                            .content(serde_json::to_string(&diagnostic_result).unwrap_or_default())
+                            .build()
+                            .map_err(|e| format!("Failed to build tool message: {}", e))?
+                            .into();
+                        messages.push(tool_message);
+                    }
+                }
+            }
+            
+            // Get final response with diagnostic results
+            let final_request = CreateChatCompletionRequestArgs::default()
+                .model("gpt-5-nano")
+                .messages(messages)
+                .build()
+                .map_err(|e| format!("Failed to build final request: {}", e))?;
+            
+            let final_response = client.chat().create(final_request).await
+                .map_err(|e| format!("Final API error: {}", e))?;
+            
+            if let Some(final_choice) = final_response.choices.first() {
+                let analysis = final_choice.message.content.clone().unwrap_or_default();
+                let (findings, recommendations) = parse_analysis(&analysis);
+                
+                return Ok(json!({
+                    "analysis": analysis,
+                    "diagnostics_run": diagnostics_run,
+                    "diagnostic_results": diagnostic_results,
+                    "findings": findings,
+                    "recommendations": recommendations
+                }));
+            }
+        } else {
+            // No tool calls, just return the analysis
+            let analysis = choice.message.content.clone().unwrap_or_default();
+            let (findings, recommendations) = parse_analysis(&analysis);
+            
+            return Ok(json!({
+                "analysis": analysis,
+                "diagnostics_run": diagnostics_run,
+                "diagnostic_results": diagnostic_results,
+                "findings": findings,
+                "recommendations": recommendations
+            }));
+        }
+    }
+    
+    Err("No response from OpenAI".to_string())
 }

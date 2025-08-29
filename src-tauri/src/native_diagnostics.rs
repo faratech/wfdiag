@@ -1,190 +1,360 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use wmi::{COMLibrary, WMIConnection, Variant};
-use sysinfo::System;
-use std::process::Command;
-use std::fs;
 use std::path::Path;
-use crate::windows_native::WindowsNativeAPI;
+use std::fs;
+use wmi::{COMLibrary, WMIConnection};
+use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+// Performance counter imports removed - not used in current implementation
+use winreg::enums::*;
+use winreg::RegKey;
 use scraper::{Html, Selector};
-use regex::Regex;
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
 
 pub struct NativeDiagnostics {
-    wmi_con: Option<WMIConnection>,
-    windows_api: WindowsNativeAPI,
+    com_lib: COMLibrary,
 }
 
 impl NativeDiagnostics {
-    pub fn new() -> Self {
-        // Try to initialize WMI, but don't fail if it doesn't work
-        let wmi_con = match COMLibrary::new() {
-            Ok(com_con) => WMIConnection::new(com_con.into()).ok(),
-            Err(_) => None,
-        };
+    pub fn new() -> Result<Self> {
+        let com_lib = COMLibrary::new()?;
+        Ok(Self { com_lib })
+    }
+
+    pub fn run_wmi_query(&self, class_name: &str) -> Result<Value> {
+        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(&format!("SELECT * FROM {}", class_name))?;
         
-        Self { 
-            wmi_con,
-            windows_api: WindowsNativeAPI::new(),
+        let mut json_results = Vec::new();
+        for result in results {
+            let mut json_obj = serde_json::Map::new();
+            for (key, value) in result {
+                json_obj.insert(key, self.variant_to_json(value));
+            }
+            json_results.push(Value::Object(json_obj));
         }
+        
+        Ok(Value::Array(json_results))
     }
 
-    // Helper to create commands without console window
-    fn create_command(program: &str) -> Command {
-        let mut cmd = Command::new(program);
-        #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        cmd
-    }
-
-    // Convert WMI variants to JSON values
-    fn convert_variant_to_json(variant: &Variant) -> Value {
+    fn variant_to_json(&self, variant: wmi::Variant) -> Value {
         match variant {
-            Variant::String(s) => json!(s),
-            Variant::I1(v) => json!(v),
-            Variant::I2(v) => json!(v),
-            Variant::I4(v) => json!(v),
-            Variant::I8(v) => json!(v),
-            Variant::UI1(v) => json!(v),
-            Variant::UI2(v) => json!(v),
-            Variant::UI4(v) => json!(v),
-            Variant::UI8(v) => json!(v),
-            Variant::Bool(v) => json!(v),
-            Variant::R4(v) => json!(v),
-            Variant::R8(v) => json!(v),
-            Variant::Array(arr) => {
-                let values: Vec<Value> = arr.iter()
-                    .map(|v| Self::convert_variant_to_json(v))
-                    .collect();
-                json!(values)
+            wmi::Variant::String(s) => json!(s),
+            wmi::Variant::I4(i) => json!(i),
+            wmi::Variant::I8(i) => json!(i),
+            wmi::Variant::UI4(u) => json!(u),
+            wmi::Variant::UI8(u) => json!(u),
+            wmi::Variant::Bool(b) => json!(b),
+            wmi::Variant::Array(arr) => {
+                let json_arr: Vec<Value> = arr.into_iter().map(|v| self.variant_to_json(v)).collect();
+                json!(json_arr)
             }
             _ => json!(null),
         }
     }
 
-    fn convert_wmi_results(&self, results: Vec<HashMap<String, Variant>>) -> Vec<Value> {
-        results.into_iter()
-            .map(|row| {
-                let mut obj = serde_json::Map::new();
-                for (key, value) in row {
-                    obj.insert(key, Self::convert_variant_to_json(&value));
-                }
-                json!(obj)
-            })
-            .collect()
-    }
-
-    pub fn run_wmi_query(&self, class: &str) -> Result<Value> {
-        if let Some(ref wmi) = self.wmi_con {
-            let query = format!("SELECT * FROM {}", class);
-            let results: Vec<HashMap<String, Variant>> = wmi.raw_query(&query)?;
-            Ok(json!(self.convert_wmi_results(results)))
-        } else {
-            // Fallback to wmic command
-            self.run_wmic_command(class)
-        }
-    }
-
-    fn run_wmic_command(&self, class: &str) -> Result<Value> {
-        let output = Command::new("wmic")
-            .args(&["path", class, "get", "/format:list"])
-            .output()?;
+    pub fn get_native_disk_space(&self) -> Result<Value> {
+        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_LogicalDisk WHERE DriveType=3")?;
         
-        let text = String::from_utf8_lossy(&output.stdout);
-        Ok(json!({ "raw_output": text.to_string() }))
+        let mut drives = Vec::new();
+        for result in results {
+            let mut drive_info = serde_json::Map::new();
+            
+            // Include all WMI data
+            for (key, value) in result {
+                drive_info.insert(key.clone(), self.variant_to_json(value));
+            }
+            
+            drives.push(Value::Object(drive_info));
+        }
+        
+        Ok(Value::Array(drives))
+    }
+
+    pub fn get_native_network_adapters(&self) -> Result<Value> {
+        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let config_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled=TRUE")?;
+        let adapter_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_NetworkAdapter")?;
+        
+        let mut adapters = Vec::new();
+        
+        for config in config_results {
+            let mut adapter_info = serde_json::Map::new();
+            
+            // Get the index to match with adapter
+            let index = config.get("Index").and_then(|v| {
+                if let wmi::Variant::UI4(i) = v {
+                    Some(*i)
+                } else {
+                    None
+                }
+            });
+            
+            // Add all configuration data
+            for (key, value) in &config {
+                adapter_info.insert(key.clone(), self.variant_to_json(value.clone()));
+            }
+            
+            // Find matching adapter info
+            if let Some(idx) = index {
+                for adapter in &adapter_results {
+                    if let Some(wmi::Variant::UI4(adapter_idx)) = adapter.get("DeviceID") {
+                        if *adapter_idx == idx {
+                            // Add adapter-specific info
+                            for (key, value) in adapter {
+                                if !adapter_info.contains_key(key) {
+                                    adapter_info.insert(key.clone(), self.variant_to_json(value.clone()));
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            adapters.push(Value::Object(adapter_info));
+        }
+        
+        Ok(Value::Array(adapters))
     }
 
     pub fn get_system_info(&self) -> Result<Value> {
-        let mut sys = System::new_all();
-        sys.refresh_all();
+        let mut system_info = SYSTEM_INFO::default();
+        unsafe {
+            GetSystemInfo(&mut system_info);
+        }
         
-        let load = System::load_average();
         Ok(json!({
-            "hostname": System::host_name(),
-            "os_name": System::name(),
-            "os_version": System::os_version(),
-            "kernel_version": System::kernel_version(),
-            "total_memory": sys.total_memory(),
-            "used_memory": sys.used_memory(),
-            "total_swap": sys.total_swap(),
-            "used_swap": sys.used_swap(),
-            "cpu_count": sys.cpus().len(),
-            "cpu_brand": sys.cpus().first().map(|c| c.brand().to_string()),
-            "cpu_frequency": sys.cpus().first().map(|c| c.frequency()),
-            "boot_time": System::boot_time(),
-            "uptime": System::uptime(),
-            "load_average": {
-                "one": load.one,
-                "five": load.five,
-                "fifteen": load.fifteen
-            }
+            "processor_architecture": unsafe { system_info.Anonymous.Anonymous.wProcessorArchitecture.0 },
+            "number_of_processors": system_info.dwNumberOfProcessors,
+            "page_size": system_info.dwPageSize,
+            "minimum_application_address": format!("{:p}", system_info.lpMinimumApplicationAddress),
+            "maximum_application_address": format!("{:p}", system_info.lpMaximumApplicationAddress),
+            "active_processor_mask": system_info.dwActiveProcessorMask,
+            "processor_type": system_info.dwProcessorType,
+            "allocation_granularity": system_info.dwAllocationGranularity,
+            "processor_level": system_info.wProcessorLevel,
+            "processor_revision": system_info.wProcessorRevision,
         }))
     }
 
-    pub fn get_drivers(&self) -> Result<Value> {
-        if let Some(ref wmi) = self.wmi_con {
-            let results: Vec<HashMap<String, Variant>> = wmi.raw_query(
-                "SELECT DeviceName, DriverVersion, Manufacturer FROM Win32_PnPSignedDriver"
-            )?;
-            Ok(json!(self.convert_wmi_results(results)))
-        } else {
-            self.run_wmic_command("Win32_PnPSignedDriver")
+    pub fn get_native_system_info(&self) -> Result<Value> {
+        // Get OS info from WMI
+        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let os_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_OperatingSystem")?;
+        let comp_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_ComputerSystem")?;
+        
+        let mut info = json!({});
+        
+        // Add OS information
+        if let Some(os) = os_results.first() {
+            let mut os_info = json!({});
+            for (key, value) in os {
+                os_info[key] = self.variant_to_json(value.clone());
+            }
+            
+            // Parse Windows version details
+            if let Some(wmi::Variant::String(caption)) = os.get("Caption") {
+                let windows_version = if caption.contains("Windows 11") {
+                    "Windows 11"
+                } else if caption.contains("Windows 10") {
+                    "Windows 10"
+                } else if caption.contains("Windows 8.1") {
+                    "Windows 8.1"
+                } else if caption.contains("Windows 8") {
+                    "Windows 8"
+                } else if caption.contains("Windows 7") {
+                    "Windows 7"
+                } else if caption.contains("Server 2022") {
+                    "Windows Server 2022"
+                } else if caption.contains("Server 2019") {
+                    "Windows Server 2019"
+                } else if caption.contains("Server 2016") {
+                    "Windows Server 2016"
+                } else {
+                    "Windows"
+                };
+                os_info["windows_version"] = json!(windows_version);
+            }
+            
+            info["os_version"] = os_info;
         }
+        
+        // Add Computer System information
+        if let Some(comp) = comp_results.first() {
+            let mut comp_info = json!({});
+            for (key, value) in comp {
+                comp_info[key] = self.variant_to_json(value.clone());
+            }
+            info["computer_system"] = comp_info;
+        }
+        
+        // Add native system info
+        let mut native_info = SYSTEM_INFO::default();
+        unsafe {
+            GetSystemInfo(&mut native_info);
+        }
+        
+        info["processor_info"] = json!({
+            "architecture": unsafe { native_info.Anonymous.Anonymous.wProcessorArchitecture.0 },
+            "processor_count": native_info.dwNumberOfProcessors,
+            "processor_type": native_info.dwProcessorType,
+            "processor_level": native_info.wProcessorLevel,
+            "processor_revision": native_info.wProcessorRevision,
+        });
+        
+        // Get additional system info
+        {
+            let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+            if let Ok(cv_key) = hklm.open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion") {
+                let mut version_info = json!({});
+                
+                // Read various version fields
+                for field in &["ProductName", "DisplayVersion", "CurrentBuild", "UBR", "EditionID", "CompositionEditionID"] {
+                    if let Ok(value) = cv_key.get_value::<String, _>(field) {
+                        version_info[field] = json!(value);
+                    }
+                }
+                
+                info["windows_version_details"] = version_info;
+            }
+            
+            // Get hardware info
+            if let Ok(hw_key) = hklm.open_subkey("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0") {
+                if let Ok(cpu_name) = hw_key.get_value::<String, _>("ProcessorNameString") {
+                    info["cpu_name"] = json!(cpu_name.trim());
+                }
+            }
+        }
+        
+        Ok(info)
+    }
+
+    pub fn get_drivers(&self) -> Result<Value> {
+        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let mut drivers = Vec::new();
+        
+        // Get PnP signed drivers (main source on modern Windows)
+        match wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+            "SELECT Name, DeviceName, DriverVersion, DriverDate, DriverProviderName, DeviceClass, IsSigned FROM Win32_PnPSignedDriver"
+        ) {
+            Ok(pnp_results) => {
+                for result in pnp_results {
+                    let mut driver_info = serde_json::Map::new();
+                    for (key, value) in result {
+                        driver_info.insert(key, self.variant_to_json(value));
+                    }
+                    drivers.push(Value::Object(driver_info));
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to query Win32_PnPSignedDriver: {}", e);
+            }
+        }
+        
+        // Try to get legacy VxD drivers (might not exist on modern systems)
+        match wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+            "SELECT Name, DriverVersion, DriverDate, DeviceName FROM Win32_DriverVXD"
+        ) {
+            Ok(vxd_results) => {
+                for result in vxd_results {
+                    let mut driver_info = serde_json::Map::new();
+                    driver_info.insert("Type".to_string(), json!("VxD"));
+                    for (key, value) in result {
+                        driver_info.insert(key, self.variant_to_json(value));
+                    }
+                    drivers.push(Value::Object(driver_info));
+                }
+            }
+            Err(_) => {
+                // VxD drivers not available on this system - this is normal for modern Windows
+            }
+        }
+        
+        // If no drivers found, return error
+        if drivers.is_empty() {
+            return Err(anyhow::anyhow!("No drivers found or WMI query failed"));
+        }
+        
+        Ok(Value::Array(drivers))
+    }
+
+    pub fn get_event_logs(&self) -> Result<Value> {
+        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        
+        let mut all_events = Vec::new();
+        
+        // Query System events
+        match wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+            "SELECT TimeGenerated, Type, SourceName, EventCode, Message FROM Win32_NTLogEvent WHERE Logfile='System' AND Type='Error'"
+        ) {
+            Ok(results) => {
+                for result in results.into_iter().take(50) {
+                    let mut event_info = serde_json::Map::new();
+                    event_info.insert("LogFile".to_string(), json!("System"));
+                    for (key, value) in result {
+                        event_info.insert(key, self.variant_to_json(value));
+                    }
+                    all_events.push(Value::Object(event_info));
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to query System events: {}", e);
+            }
+        }
+        
+        // Query Application events
+        match wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+            "SELECT TimeGenerated, Type, SourceName, EventCode, Message FROM Win32_NTLogEvent WHERE Logfile='Application' AND Type='Error'"
+        ) {
+            Ok(results) => {
+                for result in results.into_iter().take(50) {
+                    let mut event_info = serde_json::Map::new();
+                    event_info.insert("LogFile".to_string(), json!("Application"));
+                    for (key, value) in result {
+                        event_info.insert(key, self.variant_to_json(value));
+                    }
+                    all_events.push(Value::Object(event_info));
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to query Application events: {}", e);
+            }
+        }
+        
+        Ok(Value::Array(all_events))
     }
 
     pub fn get_installed_programs(&self) -> Result<Value> {
         let mut programs = Vec::new();
         
-        // Try to read from registry using winreg crate
-        #[cfg(windows)]
-        {
-            use winreg::enums::*;
-            use winreg::RegKey;
-            
-            let paths = [
-                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-                r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
-            ];
-            
-            for path in &paths {
-                let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-                    if let Ok(uninstall_key) = hklm.open_subkey(path) {
-                        for subkey_name in uninstall_key.enum_keys().filter_map(Result::ok) {
-                            if let Ok(app_key) = uninstall_key.open_subkey(&subkey_name) {
-                                let display_name: Option<String> = app_key.get_value("DisplayName").ok();
-                                let version: Option<String> = app_key.get_value("DisplayVersion").ok();
-                                let publisher: Option<String> = app_key.get_value("Publisher").ok();
-                                
-                                if let Some(name) = display_name {
-                                    programs.push(json!({
-                                        "name": name,
-                                        "version": version.unwrap_or_default(),
-                                        "publisher": publisher.unwrap_or_default(),
-                                    }));
+        // Check both 32-bit and 64-bit registry locations
+        let paths = vec![
+            (HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
+            (HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
+            (HKEY_CURRENT_USER, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
+        ];
+        
+        for (hkey, path) in paths {
+            if let Ok(key) = RegKey::predef(hkey).open_subkey(path) {
+                for subkey_name in key.enum_keys().filter_map(Result::ok) {
+                    if let Ok(subkey) = key.open_subkey(&subkey_name) {
+                        let mut program_info = serde_json::Map::new();
+                        
+                        // Read common fields
+                        for field in &["DisplayName", "DisplayVersion", "Publisher", "InstallDate", "UninstallString", "InstallLocation"] {
+                            if let Ok(value) = subkey.get_value::<String, _>(field) {
+                                if !value.is_empty() {
+                                    program_info.insert(field.to_string(), json!(value));
                                 }
                             }
                         }
+                        
+                        // Only add if it has a display name
+                        if program_info.contains_key("DisplayName") {
+                            programs.push(Value::Object(program_info));
+                        }
                     }
-            }
-        }
-        
-        // If registry reading failed or not on Windows, try PowerShell
-        if programs.is_empty() {
-            let output = Self::create_command("powershell")
-                .args(&["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", "Get-Package | Select-Object Name, Version | ConvertTo-Json"])
-                .output()?;
-            
-            if output.status.success() {
-                let json_str = String::from_utf8_lossy(&output.stdout);
-                if let Ok(parsed) = serde_json::from_str::<Value>(&json_str) {
-                    return Ok(parsed);
                 }
             }
         }
@@ -193,303 +363,301 @@ impl NativeDiagnostics {
     }
 
     pub fn run_dxdiag(&self) -> Result<Value> {
-        let temp_file = std::env::temp_dir().join("wfdiag_dxdiag.txt");
-        let temp_path = temp_file.to_string_lossy();
+        eprintln!("[DXDIAG] Starting DirectX diagnostic");
         
-        // Clean up any existing file
-        let _ = fs::remove_file(&temp_file);
+        // Always use WMI as primary method - it's more reliable
+        eprintln!("[DXDIAG] Getting DirectX info via WMI");
+        self.get_directx_info_via_wmi()
+    }
+    
+    fn get_directx_info_via_wmi(&self) -> Result<Value> {
+        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let mut info = json!({
+            "source": "WMI",
+            "description": "DirectX information gathered from Windows Management Instrumentation"
+        });
         
-        // Start dxdiag
-        let mut child = Self::create_command("dxdiag")
-            .args(&["/t", &temp_path, "/whql:off"])
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("Failed to start dxdiag: {}", e))?;
-        
-        // Wait up to 15 seconds for dxdiag to complete
-        let mut completed = false;
-        for i in 0..30 {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if temp_file.exists() {
-                if let Ok(metadata) = fs::metadata(&temp_file) {
-                    if metadata.len() > 1000 {  // Ensure file has some content
-                        // Wait a bit more to ensure it's finished writing
-                        std::thread::sleep(std::time::Duration::from_secs(if i > 10 { 2 } else { 1 }));
-                        completed = true;
-                        break;
-                    }
+        // Try to determine DirectX version from registry
+        {
+            let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+            if let Ok(dx_key) = hklm.open_subkey("SOFTWARE\\Microsoft\\DirectX") {
+                if let Ok(version) = dx_key.get_value::<String, _>("Version") {
+                    info["directx_version"] = json!(version);
+                }
+                if let Ok(install_version) = dx_key.get_value::<u32, _>("InstalledVersion") {
+                    info["directx_installed_version"] = json!(install_version);
                 }
             }
         }
         
-        // Kill the process if still running
-        let _ = child.kill();
-        let _ = child.wait();
-        
-        // Read the output
-        if completed && temp_file.exists() {
-            match fs::read_to_string(&temp_file) {
-                Ok(content) => {
-                    let _ = fs::remove_file(&temp_file);
-                    if content.len() > 100 {
-                        Ok(json!({ "raw_output": content }))
-                    } else {
-                        Err(anyhow::anyhow!("DXDiag output file too small or corrupted"))
-                    }
+        // Get video controller info
+        if let Ok(video_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+            "SELECT * FROM Win32_VideoController"
+        ) {
+            let mut video_info = Vec::new();
+            for result in video_results {
+                let mut controller = json!({});
+                for (key, value) in result {
+                    controller[key] = self.variant_to_json(value);
                 }
-                Err(e) => {
-                    let _ = fs::remove_file(&temp_file);
-                    Err(anyhow::anyhow!("Failed to read DXDiag output: {}", e))
+                video_info.push(controller);
+            }
+            info["video_controllers"] = json!(video_info);
+        }
+        
+        // Get sound device info
+        if let Ok(sound_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+            "SELECT * FROM Win32_SoundDevice"
+        ) {
+            let mut sound_info = Vec::new();
+            for result in sound_results {
+                let mut device = json!({});
+                for (key, value) in result {
+                    device[key] = self.variant_to_json(value);
+                }
+                sound_info.push(device);
+            }
+            info["sound_devices"] = json!(sound_info);
+        }
+        
+        // Try to get DirectX version from registry
+        {
+            let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+            if let Ok(dx_key) = hklm.open_subkey("SOFTWARE\\Microsoft\\DirectX") {
+                if let Ok(version) = dx_key.get_value::<String, _>("Version") {
+                    info["directx_version"] = json!(version);
                 }
             }
-        } else {
-            let _ = fs::remove_file(&temp_file);
-            Err(anyhow::anyhow!("DXDiag failed to complete or output file not created"))
         }
+        
+        Ok(info)
     }
 
     pub fn run_chkdsk(&self) -> Result<Value> {
-        // Use chkdsk in read-only mode for safety
-        let output = Self::create_command("chkdsk")
-            .args(&["C:", "/f", "/v"])  // /f = fix errors in read-only mode, /v = verbose
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to run chkdsk: {}", e))?;
+        // First try to run chkdsk in read-only mode using secure execution
+        let output = Self::execute_secure_command("chkdsk", &["C:"])?;
         
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        
-        let mut result = json!({
-            "command": "chkdsk C: /f /v",
-            "exit_code": output.status.code().unwrap_or(-1),
-            "stdout": stdout.to_string(),
-            "stderr": stderr.to_string()
-        });
-
-        // If chkdsk fails, try alternative disk check methods
-        if !output.status.success() {
-            // Try PowerShell Get-Volume as fallback
-            match Self::create_command("powershell")
-                .args(&["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", "Get-Volume C | Select-Object DriveLetter, FileSystemLabel, DriveType, HealthStatus, OperationalStatus, Size, SizeRemaining"])
-                .output() {
-                Ok(ps_output) => {
-                    let ps_stdout = String::from_utf8_lossy(&ps_output.stdout);
-                    result["fallback_volume_info"] = json!(ps_stdout.to_string());
+        if output.status.success() {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            
+            // Parse chkdsk output
+            let mut check_info = json!({
+                "raw_output": output_str.to_string(),
+                "status": "Unknown",
+                "errors_found": false
+            });
+            
+            // Check for common chkdsk responses
+            if output_str.contains("Windows has scanned the file system and found no problems") {
+                check_info["status"] = json!("Healthy");
+                check_info["message"] = json!("No file system errors found");
+                check_info["errors_found"] = json!(false);
+            } else if output_str.contains("found problems") || output_str.contains("errors found") {
+                check_info["status"] = json!("Errors Found");
+                check_info["message"] = json!("File system errors detected");
+                check_info["errors_found"] = json!(true);
+            } else if output_str.contains("scan completed successfully") {
+                check_info["status"] = json!("Scan Completed");
+                check_info["message"] = json!("Scan completed successfully");
+            }
+            
+            // Also get disk info from WMI
+            let wmi_con = WMIConnection::new(self.com_lib.into())?;
+            if let Ok(results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+                "SELECT * FROM Win32_DiskDrive"
+            ) {
+                let mut disk_info = Vec::new();
+                for result in results {
+                    let mut info = serde_json::Map::new();
+                    for (key, value) in result {
+                        info.insert(key, self.variant_to_json(value));
+                    }
+                    disk_info.push(Value::Object(info));
                 }
-                Err(_) => {}
+                check_info["disk_drives"] = json!(disk_info);
+            }
+            
+            Ok(check_info)
+        } else {
+            let error_str = String::from_utf8_lossy(&output.stderr);
+            
+            // Check if it's an elevation error
+            if error_str.contains("requires elevated") || error_str.contains("Access is denied") {
+                // If we can't run chkdsk, at least get disk info
+                let wmi_con = WMIConnection::new(self.com_lib.into())?;
+                let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(
+                    "SELECT * FROM Win32_DiskDrive"
+                )?;
+                
+                let mut disk_info = Vec::new();
+                for result in results {
+                    let mut info = serde_json::Map::new();
+                    for (key, value) in result {
+                        info.insert(key, self.variant_to_json(value));
+                    }
+                    disk_info.push(Value::Object(info));
+                }
+                
+                Ok(json!({
+                    "note": "Full chkdsk scan requires admin privileges. Showing disk status from WMI.",
+                    "suggestion": "Run as administrator for full disk scan",
+                    "disk_drives": disk_info,
+                    "raw_error": error_str.to_string()
+                }))
+            } else {
+                Err(anyhow::anyhow!("Chkdsk failed: {}", error_str))
             }
         }
-
-        Ok(result)
     }
 
     pub fn run_dism_health(&self) -> Result<Value> {
-        // Run DISM health check
-        let output = Self::create_command("dism")
-            .args(&["/online", "/cleanup-image", "/checkhealth"])
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to run DISM: {}. Make sure you're running as administrator.", e))?;
+        // Run DISM health check using secure execution
+        let output = Self::execute_secure_command("dism", &["/online", "/cleanup-image", "/checkhealth"])?;
         
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        
-        let mut result = json!({
-            "command": "dism /online /cleanup-image /checkhealth",
-            "exit_code": output.status.code().unwrap_or(-1),
-            "stdout": stdout.to_string(),
-            "stderr": stderr.to_string(),
-            "success": output.status.success()
-        });
-
-        // If basic check succeeds, also try scan health for more detailed info
         if output.status.success() {
-            match Self::create_command("dism")
-                .args(&["/online", "/cleanup-image", "/scanhealth"])
-                .output() {
-                Ok(scan_output) => {
-                    let scan_stdout = String::from_utf8_lossy(&scan_output.stdout);
-                    result["detailed_scan"] = json!({
-                        "stdout": scan_stdout.to_string(),
-                        "success": scan_output.status.success()
-                    });
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            
+            // Parse DISM output
+            let mut health_info = json!({
+                "raw_output": output_str.to_string(),
+                "status": "Unknown",
+                "repairable": false
+            });
+            
+            // Check for common DISM responses
+            if output_str.contains("No component store corruption detected") {
+                health_info["status"] = json!("Healthy");
+                health_info["message"] = json!("No component store corruption detected");
+                health_info["repairable"] = json!(false);
+            } else if output_str.contains("The component store is repairable") {
+                health_info["status"] = json!("Repairable");
+                health_info["message"] = json!("The component store is repairable");
+                health_info["repairable"] = json!(true);
+            } else if output_str.contains("The component store is corrupted") {
+                health_info["status"] = json!("Corrupted");
+                health_info["message"] = json!("The component store is corrupted");
+                health_info["repairable"] = json!(true);
+            }
+            
+            // Try to run scanhealth for more detailed info
+            let scan_output = Self::execute_secure_command("dism", &["/online", "/cleanup-image", "/scanhealth"]);
+                
+            if let Ok(scan) = scan_output {
+                if scan.status.success() {
+                    let scan_str = String::from_utf8_lossy(&scan.stdout);
+                    health_info["scan_output"] = json!(scan_str.to_string());
+                    
+                    // Extract percentage if available
+                    if let Some(percent_pos) = scan_str.find("The component store is") {
+                        let relevant_text = &scan_str[percent_pos..];
+                        if let Some(end) = relevant_text.find('\n') {
+                            health_info["scan_result"] = json!(&relevant_text[..end]);
+                        }
+                    }
                 }
-                Err(_) => {}
+            }
+            
+            Ok(health_info)
+        } else {
+            let error_str = String::from_utf8_lossy(&output.stderr);
+            
+            // Check if it's an elevation error
+            if error_str.contains("Error: 740") || error_str.contains("elevation required") {
+                Ok(json!({
+                    "error": "DISM requires administrator privileges",
+                    "suggestion": "Please run as administrator to check Windows image health",
+                    "raw_error": error_str.to_string()
+                }))
+            } else {
+                Err(anyhow::anyhow!("DISM health check failed: {}", error_str))
             }
         }
-
-        Ok(result)
     }
 
     pub fn run_ipconfig(&self) -> Result<Value> {
-        let output = Self::create_command("ipconfig")
-            .args(&["/all"])
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to run ipconfig: {}", e))?;
-        
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        
-        Ok(json!({
-            "command": "ipconfig /all",
-            "exit_code": output.status.code().unwrap_or(-1),
-            "success": output.status.success(),
-            "output": stdout.to_string(),
-            "stderr": stderr.to_string()
-        }))
+        // Use WMI for network configuration
+        self.get_native_network_adapters()
     }
 
     pub fn read_hosts_file(&self) -> Result<Value> {
         let hosts_path = "C:\\Windows\\System32\\drivers\\etc\\hosts";
-        
         match fs::read_to_string(hosts_path) {
-            Ok(content) => {
-                // Parse the hosts file to extract meaningful entries
-                let mut entries = Vec::new();
-                let mut comments = Vec::new();
-                
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    
-                    if trimmed.starts_with('#') {
-                        comments.push(trimmed.to_string());
-                    } else {
-                        // Parse IP and hostname entries
-                        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                        if parts.len() >= 2 {
-                            entries.push(json!({
-                                "ip": parts[0],
-                                "hostname": parts[1],
-                                "aliases": parts.get(2..).unwrap_or(&[]).to_vec()
-                            }));
-                        }
-                    }
-                }
-                
-                Ok(json!({
-                    "file_path": hosts_path,
-                    "total_lines": content.lines().count(),
-                    "entries": entries,
-                    "comments": comments,
-                    "raw_content": content
-                }))
-            }
-            Err(e) => Err(anyhow::anyhow!("Failed to read hosts file: {}", e))
+            Ok(content) => Ok(json!({
+                "path": hosts_path,
+                "content": content,
+                "entries": self.parse_hosts_file(&content)
+            })),
+            Err(e) => Ok(json!({
+                "path": hosts_path,
+                "error": format!("Failed to read hosts file: {}", e)
+            }))
         }
+    }
+    
+    fn parse_hosts_file(&self, content: &str) -> Vec<Value> {
+        let mut entries = Vec::new();
+        
+        for line in content.lines() {
+            let line = line.trim();
+            if !line.is_empty() && !line.starts_with('#') {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    entries.push(json!({
+                        "ip": parts[0],
+                        "hostname": parts[1],
+                        "aliases": parts[2..].join(" ")
+                    }));
+                }
+            }
+        }
+        
+        entries
     }
 
     pub fn run_dsregcmd(&self) -> Result<Value> {
-        let output = Self::create_command("dsregcmd")
-            .args(&["/status"])
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to run dsregcmd: {}", e))?;
+        // Check domain join status via WMI
+        let wmi_con = WMIConnection::new(self.com_lib.into())?;
         
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let cs_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(
+            "SELECT Domain, DomainRole, PartOfDomain FROM Win32_ComputerSystem"
+        )?;
         
-        // Parse dsregcmd output for structured data
-        let mut device_state = json!({});
-        let mut tenant_details = json!({});
-        let mut user_state = json!({});
-        
-        let mut current_section = "";
-        for line in stdout.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
+        if let Some(result) = cs_results.first() {
+            let mut info = serde_json::Map::new();
+            for (key, value) in result {
+                info.insert(key.clone(), self.variant_to_json(value.clone()));
             }
-            
-            if trimmed.contains("Device State") {
-                current_section = "device";
-            } else if trimmed.contains("Tenant Details") {
-                current_section = "tenant";
-            } else if trimmed.contains("User State") {
-                current_section = "user";
-            } else if trimmed.contains(" : ") {
-                let parts: Vec<&str> = trimmed.splitn(2, " : ").collect();
-                if parts.len() == 2 {
-                    let key = parts[0].trim();
-                    let value = parts[1].trim();
-                    
-                    match current_section {
-                        "device" => device_state[key] = json!(value),
-                        "tenant" => tenant_details[key] = json!(value),
-                        "user" => user_state[key] = json!(value),
-                        _ => {}
-                    }
-                }
-            }
+            Ok(Value::Object(info))
+        } else {
+            Ok(json!({
+                "error": "Failed to query domain information"
+            }))
         }
-        
-        Ok(json!({
-            "command": "dsregcmd /status",
-            "exit_code": output.status.code().unwrap_or(-1),
-            "success": output.status.success(),
-            "device_state": device_state,
-            "tenant_details": tenant_details,
-            "user_state": user_state,
-            "raw_output": stdout.to_string(),
-            "stderr": stderr.to_string()
-        }))
     }
 
-    /// Get system information using native Windows APIs (replaces multiple WMI calls)
-    pub fn get_native_system_info(&self) -> Result<Value> {
-        self.windows_api.get_system_info()
-    }
-
-    /// Get disk space using native Windows APIs (replaces external commands)
-    pub fn get_native_disk_space(&self) -> Result<Value> {
-        self.windows_api.get_disk_space()
-    }
-
-    /// Get network adapters using native Windows APIs (replaces external commands)
-    pub fn get_native_network_adapters(&self) -> Result<Value> {
-        self.windows_api.get_network_adapters()
-    }
-
-    /// Get services using native Windows APIs (replaces external commands)
     pub fn get_native_services(&self) -> Result<Value> {
-        self.windows_api.get_services()
-    }
-
-    pub fn get_event_logs(&self) -> Result<Value> {
-        // Try native Windows API first, fallback to wevtutil if needed
-        #[cfg(windows)]
-        {
-            // For now, keep the external command but with better error handling
-            let mut logs = HashMap::new();
-            
-            for log_name in &["System", "Application"] {
-                let output = Self::create_command("wevtutil")
-                    .args(&["qe", log_name, "/c:50", "/f:text", "/rd:true"])
-                    .output();
-                
-                match output {
-                    Ok(output) if output.status.success() => {
-                        let text = String::from_utf8_lossy(&output.stdout);
-                        logs.insert(log_name.to_string(), text.to_string());
-                    }
-                    _ => {
-                        logs.insert(log_name.to_string(), format!("Failed to read {} log", log_name));
-                    }
-                }
+        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(
+            "SELECT Name, DisplayName, State, StartMode, PathName FROM Win32_Service"
+        )?;
+        
+        let mut services = Vec::new();
+        for result in results {
+            let mut service_info = serde_json::Map::new();
+            for (key, value) in result {
+                service_info.insert(key, self.variant_to_json(value));
             }
-            
-            Ok(json!(logs))
+            services.push(Value::Object(service_info));
         }
         
-        #[cfg(not(windows))]
-        Err(anyhow::anyhow!("Event logs only available on Windows"))
+        Ok(Value::Array(services))
     }
 
     pub fn get_battery_report(&self) -> Result<Value> {
         let temp_file = std::env::temp_dir().join("wfdiag_battery.html");
         let temp_path = temp_file.to_string_lossy();
         
-        let output = Self::create_command("powercfg")
-            .args(&["/batteryreport", "/output", &temp_path])
-            .output()?;
+        let output = Self::execute_secure_command("powercfg", &["/batteryreport", "/output", &temp_path])?;
         
         if output.status.success() && temp_file.exists() {
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -514,135 +682,93 @@ impl NativeDiagnostics {
         let document = Html::parse_document(html_content);
         
         // Selectors for different sections of the battery report
-        let table_selector = Selector::parse("table").unwrap();
+        let battery_info_selector = Selector::parse("table").unwrap();
         let row_selector = Selector::parse("tr").unwrap();
-        let cell_selector = Selector::parse("td, th").unwrap();
+        let cell_selector = Selector::parse("td").unwrap();
         
         let mut battery_info = json!({
-            "batteries": [],
-            "recent_usage": [],
-            "usage_history": [],
-            "battery_capacity_history": []
+            "report_generated": true,
+            "batteries": []
         });
-
-        // Extract battery information from tables
-        for table in document.select(&table_selector) {
-            let rows: Vec<_> = table.select(&row_selector).collect();
-            if rows.is_empty() {
-                continue;
-            }
-
-            // Get table headers to identify the table type
-            let headers: Vec<String> = rows[0]
-                .select(&cell_selector)
-                .map(|cell| cell.text().collect::<String>().trim().to_string())
-                .collect();
-
-            if headers.is_empty() {
-                continue;
-            }
-
-            // Identify table type and extract relevant data
-            match headers[0].to_lowercase().as_str() {
-                h if h.contains("battery") && h.contains("information") => {
-                    // Battery information table
-                    let mut batteries = Vec::new();
-                    for row in rows.iter().skip(1) {
-                        let cells: Vec<String> = row
-                            .select(&cell_selector)
+        
+        // Find all tables
+        for (table_index, table) in document.select(&battery_info_selector).enumerate() {
+            // Look for battery information table (usually the first few tables)
+            if table_index < 5 {
+                let rows: Vec<_> = table.select(&row_selector).collect();
+                
+                // Extract battery basic info
+                if rows.len() > 2 && table_index == 1 {
+                    let mut battery_data = Vec::new();
+                    
+                    for row in rows.iter().skip(1) { // Skip header
+                        let cells: Vec<_> = row.select(&cell_selector)
                             .map(|cell| cell.text().collect::<String>().trim().to_string())
                             .collect();
                         
                         if cells.len() >= 2 {
-                            batteries.push(json!({
-                                "property": cells[0],
-                                "value": cells.get(1).unwrap_or(&"".to_string())
+                            battery_data.push(json!({
+                                "property": cells[0].clone(),
+                                "value": cells[1].clone()
                             }));
                         }
                     }
-                    battery_info["batteries"] = json!(batteries);
+                    
+                    if !battery_data.is_empty() {
+                        battery_info["batteries"] = json!(battery_data);
+                    }
                 }
-                h if h.contains("recent") && h.contains("usage") => {
-                    // Recent usage table
+                
+                // Look for recent usage
+                if table_index == 2 {
                     let mut usage_data = Vec::new();
-                    for row in rows.iter().skip(1) {
-                        let cells: Vec<String> = row
-                            .select(&cell_selector)
+                    
+                    for row in rows.iter().skip(1).take(10) { // Last 10 usage entries
+                        let cells: Vec<_> = row.select(&cell_selector)
                             .map(|cell| cell.text().collect::<String>().trim().to_string())
                             .collect();
                         
-                        if cells.len() >= 3 {
+                        if cells.len() >= 4 {
                             usage_data.push(json!({
-                                "start_time": cells.get(0).unwrap_or(&"".to_string()),
-                                "state": cells.get(1).unwrap_or(&"".to_string()),
-                                "capacity_remaining": cells.get(2).unwrap_or(&"".to_string()),
-                                "duration": cells.get(3).unwrap_or(&"".to_string())
+                                "start_time": cells[0].clone(),
+                                "state": cells[1].clone(),
+                                "capacity_remaining": cells[2].clone(),
+                                "duration": cells[3].clone()
                             }));
                         }
                     }
+                    
                     battery_info["recent_usage"] = json!(usage_data);
                 }
-                h if h.contains("usage") && h.contains("history") => {
-                    // Usage history table
-                    let mut history_data = Vec::new();
-                    for row in rows.iter().skip(1) {
-                        let cells: Vec<String> = row
-                            .select(&cell_selector)
-                            .map(|cell| cell.text().collect::<String>().trim().to_string())
-                            .collect();
-                        
-                        if cells.len() >= 2 {
-                            history_data.push(json!({
-                                "period": cells.get(0).unwrap_or(&"".to_string()),
-                                "battery_life": cells.get(1).unwrap_or(&"".to_string())
-                            }));
-                        }
-                    }
-                    battery_info["usage_history"] = json!(history_data);
-                }
-                h if h.contains("capacity") && h.contains("history") => {
-                    // Battery capacity history
-                    let mut capacity_data = Vec::new();
-                    for row in rows.iter().skip(1) {
-                        let cells: Vec<String> = row
-                            .select(&cell_selector)
+                
+                // Look for battery capacity history
+                if table_index == 3 {
+                    let mut capacity_history = Vec::new();
+                    
+                    for row in rows.iter().skip(1).take(5) { // Last 5 capacity readings
+                        let cells: Vec<_> = row.select(&cell_selector)
                             .map(|cell| cell.text().collect::<String>().trim().to_string())
                             .collect();
                         
                         if cells.len() >= 3 {
-                            capacity_data.push(json!({
-                                "period": cells.get(0).unwrap_or(&"".to_string()),
-                                "full_charge_capacity": cells.get(1).unwrap_or(&"".to_string()),
-                                "design_capacity": cells.get(2).unwrap_or(&"".to_string())
+                            capacity_history.push(json!({
+                                "period": cells[0].clone(),
+                                "full_charge_capacity": cells[1].clone(),
+                                "design_capacity": cells[2].clone()
                             }));
                         }
                     }
-                    battery_info["battery_capacity_history"] = json!(capacity_data);
+                    
+                    battery_info["battery_capacity_history"] = json!(capacity_history);
                 }
-                _ => {}
             }
         }
-
-        // Extract summary information using regex patterns
-        let text_content = document.root_element().text().collect::<String>();
         
-        // Extract computer name
-        if let Ok(computer_regex) = Regex::new(r"Computer name\s+(.+)") {
-            if let Some(caps) = computer_regex.captures(&text_content) {
-                battery_info["computer_name"] = json!(caps[1].trim());
-            }
-        }
-
-        // Extract report time
-        if let Ok(time_regex) = Regex::new(r"Report generated at\s+(.+)") {
-            if let Some(caps) = time_regex.captures(&text_content) {
-                battery_info["report_generated_at"] = json!(caps[1].trim());
-            }
-        }
-
-        // Calculate battery health if capacity data is available
-        if let Some(capacity_history) = battery_info["battery_capacity_history"].as_array() {
-            if let Some(latest) = capacity_history.first() {
+        // Try to calculate battery health percentage
+        if let Some(_batteries) = battery_info["batteries"].as_array() {
+            if let Some(latest) = battery_info["battery_capacity_history"].as_array()
+                .and_then(|h| h.first()) {
+                
                 if let (Some(full_charge), Some(design_capacity)) = (
                     latest["full_charge_capacity"].as_str(),
                     latest["design_capacity"].as_str()
@@ -694,35 +820,232 @@ impl NativeDiagnostics {
         
         if let Ok(entries) = fs::read_dir(minidump_path) {
             for entry in entries.filter_map(Result::ok) {
-                if let Some(ext) = entry.path().extension() {
-                    if ext.to_string_lossy().eq_ignore_ascii_case("dmp") {
-                        if let Ok(metadata) = entry.metadata() {
-                            dumps.push(json!({
-                                "filename": entry.file_name().to_string_lossy(),
-                                "size": metadata.len(),
-                                "modified": metadata.modified()
-                                    .ok()
-                                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                    .map(|d| d.as_secs()),
-                            }));
-                        }
+                if let Ok(metadata) = entry.metadata() {
+                    if entry.path().extension().and_then(|s| s.to_str()) == Some("dmp") {
+                        dumps.push(json!({
+                            "filename": entry.file_name().to_string_lossy(),
+                            "size": metadata.len(),
+                            "created": metadata.created().ok().map(|t| {
+                                match t.duration_since(std::time::UNIX_EPOCH) {
+                                    Ok(d) => d.as_secs(),
+                                    Err(_) => 0
+                                }
+                            }).unwrap_or(0),
+                            "path": entry.path().to_string_lossy()
+                        }));
                     }
                 }
             }
         }
         
-        // Sort by modified time (newest first)
-        dumps.sort_by(|a, b| {
-            let a_time = a.get("modified").and_then(|v| v.as_u64()).unwrap_or(0);
-            let b_time = b.get("modified").and_then(|v| v.as_u64()).unwrap_or(0);
-            b_time.cmp(&a_time)
-        });
-        
-        let total_count = dumps.len();
         Ok(json!({
-            "dumps": dumps.into_iter().take(5).collect::<Vec<_>>(),
-            "total_count": total_count
+            "dumps": dumps,
+            "count": dumps.len(),
+            "path": minidump_path.to_string_lossy()
         }))
     }
-}
 
+    pub fn get_store_apps(&self) -> Result<Value> {
+        // Use PowerShell to get Windows Store apps
+        let executor = crate::security::SecureCommandExecutor::new();
+        let output = executor.execute_powershell_script(
+            "Get-AppxPackage | Select-Object Name, Version, PackageFullName, InstallLocation, Publisher | ConvertTo-Json"
+        )?;
+        
+        if output.status.success() {
+            let json_str = String::from_utf8_lossy(&output.stdout);
+            match serde_json::from_str(&json_str) {
+                Ok(value) => Ok(value),
+                Err(_) => {
+                    // If JSON parsing fails, return raw output
+                    Ok(json!({
+                        "raw_output": json_str.to_string(),
+                        "error": "Failed to parse PowerShell output as JSON"
+                    }))
+                }
+            }
+        } else {
+            Err(anyhow::anyhow!("Failed to get store apps: {}", 
+                String::from_utf8_lossy(&output.stderr)))
+        }
+    }
+
+    pub fn get_performance_data(&self) -> Result<Value> {
+        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let mut perf_data = json!({});
+        
+        // Get CPU performance data
+        if let Ok(cpu_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+            "SELECT * FROM Win32_PerfFormattedData_PerfOS_Processor WHERE Name='_Total'"
+        ) {
+            if let Some(result) = cpu_results.first() {
+                let mut cpu_info = json!({});
+                for (key, value) in result {
+                    cpu_info[key] = self.variant_to_json(value.clone());
+                }
+                perf_data["cpu_performance"] = cpu_info;
+            }
+        }
+        
+        // Get memory performance data
+        if let Ok(mem_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+            "SELECT * FROM Win32_PerfFormattedData_PerfOS_Memory"
+        ) {
+            if let Some(result) = mem_results.first() {
+                let mut mem_info = json!({});
+                for (key, value) in result {
+                    mem_info[key] = self.variant_to_json(value.clone());
+                }
+                perf_data["memory_performance"] = mem_info;
+            }
+        }
+        
+        // Get disk performance data
+        if let Ok(disk_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+            "SELECT * FROM Win32_PerfFormattedData_PerfDisk_PhysicalDisk WHERE Name='_Total'"
+        ) {
+            if let Some(result) = disk_results.first() {
+                let mut disk_info = json!({});
+                for (key, value) in result {
+                    disk_info[key] = self.variant_to_json(value.clone());
+                }
+                perf_data["disk_performance"] = disk_info;
+            }
+        }
+        
+        Ok(perf_data)
+    }
+
+    pub fn get_scheduled_tasks(&self) -> Result<Value> {
+        // Use PowerShell to get scheduled tasks
+        let executor = crate::security::SecureCommandExecutor::new();
+        let output = executor.execute_powershell_script(
+            "Get-ScheduledTask | Where-Object {$_.State -ne 'Disabled'} | Select-Object TaskName, State, TaskPath, Description, Author, Date | ConvertTo-Json"
+        )?;
+        
+        if output.status.success() {
+            let json_str = String::from_utf8_lossy(&output.stdout);
+            match serde_json::from_str(&json_str) {
+                Ok(value) => Ok(value),
+                Err(_) => {
+                    Ok(json!({
+                        "raw_output": json_str.to_string(),
+                        "error": "Failed to parse PowerShell output as JSON"
+                    }))
+                }
+            }
+        } else {
+            Err(anyhow::anyhow!("Failed to get scheduled tasks: {}", 
+                String::from_utf8_lossy(&output.stderr)))
+        }
+    }
+
+    pub fn get_windows_update_history(&self) -> Result<Value> {
+        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let mut update_info = json!({});
+        
+        // Get installed hotfixes
+        if let Ok(hotfix_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+            "SELECT * FROM Win32_QuickFixEngineering"
+        ) {
+            let mut hotfixes = Vec::new();
+            for result in hotfix_results {
+                let mut hotfix = json!({});
+                for (key, value) in result {
+                    hotfix[key] = self.variant_to_json(value);
+                }
+                hotfixes.push(hotfix);
+            }
+            update_info["installed_updates"] = json!(hotfixes);
+        }
+        
+        // Try to get Windows Update history via PowerShell as fallback
+        let executor = crate::security::SecureCommandExecutor::new();
+        let ps_output = executor.execute_powershell_script(
+            "Get-HotFix | Select-Object Description, HotFixID, InstalledOn, InstalledBy | ConvertTo-Json"
+        )?;
+        
+        if ps_output.status.success() {
+            let json_str = String::from_utf8_lossy(&ps_output.stdout);
+            if let Ok(value) = serde_json::from_str::<Value>(&json_str) {
+                update_info["hotfix_details"] = value;
+            }
+        }
+        
+        Ok(update_info)
+    }
+
+    pub fn get_driver_verifier(&self) -> Result<Value> {
+        // Run verifier command to get current settings
+        let output = Self::execute_secure_command("verifier", &["/querysettings"])?;
+        
+        if output.status.success() {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            
+            // Parse verifier output
+            let mut verifier_info = json!({
+                "raw_output": output_str.to_string(),
+                "enabled": false,
+                "drivers": []
+            });
+            
+            // Check if verifier is enabled
+            if output_str.contains("No drivers are currently verified") {
+                verifier_info["enabled"] = json!(false);
+                verifier_info["status"] = json!("Driver Verifier is not active");
+            } else if output_str.contains("The following drivers are being verified") {
+                verifier_info["enabled"] = json!(true);
+                verifier_info["status"] = json!("Driver Verifier is active");
+                
+                // Extract verified drivers if any
+                let lines: Vec<&str> = output_str.lines().collect();
+                let mut drivers = Vec::new();
+                let mut in_driver_list = false;
+                
+                for line in lines {
+                    if line.contains("The following drivers are being verified") {
+                        in_driver_list = true;
+                        continue;
+                    }
+                    if in_driver_list && !line.trim().is_empty() && !line.contains(":") {
+                        drivers.push(line.trim().to_string());
+                    }
+                }
+                
+                verifier_info["verified_drivers"] = json!(drivers);
+            }
+            
+            Ok(verifier_info)
+        } else {
+            // Verifier might require admin privileges
+            Ok(json!({
+                "error": "Failed to query driver verifier settings. Administrator privileges may be required.",
+                "raw_error": String::from_utf8_lossy(&output.stderr).to_string()
+            }))
+        }
+    }
+
+    fn create_command(program: &str) -> std::process::Command {
+        // Create secure command - this just creates the command object
+        // Actual execution validation happens in execute_command
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let mut cmd = std::process::Command::new(program);
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd
+        }
+        #[cfg(not(windows))]
+        {
+            std::process::Command::new(program)
+        }
+    }
+
+    /// Secure command execution with validation
+    fn execute_secure_command(program: &str, args: &[&str]) -> Result<std::process::Output> {
+        let executor = crate::security::SecureCommandExecutor::new();
+        executor.execute_command(program, args)
+            .map_err(|e| anyhow::anyhow!("Security validation failed: {}", e))
+    }
+}

@@ -1,24 +1,11 @@
 import React, { useEffect, useState, useRef } from 'react';
 import {
-  Card,
-  Title3,
-  Caption1,
   ProgressBar,
-  makeStyles,
-  tokens,
-  Badge,
-  Divider,
   Text,
   Button,
+  Badge,
 } from '@fluentui/react-components';
 import {
-  DesktopRegular,
-  Memory16Regular,
-  HardDriveRegular,
-  NetworkCheckRegular,
-  AppsListDetailRegular,
-  ArrowDownloadRegular,
-  ArrowUploadRegular,
   ArrowLeftRegular,
 } from '@fluentui/react-icons';
 import { listen } from '@tauri-apps/api/event';
@@ -36,6 +23,7 @@ import {
   Filler,
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
+import './styles.css';
 
 // Register Chart.js components
 ChartJS.register(
@@ -49,63 +37,6 @@ ChartJS.register(
   Legend,
   Filler
 );
-
-const useStyles = makeStyles({
-  container: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
-    gap: tokens.spacingVerticalM,
-    padding: tokens.spacingVerticalM,
-  },
-  card: {
-    padding: tokens.spacingVerticalM,
-  },
-  chartCard: {
-    padding: tokens.spacingVerticalM,
-    gridColumn: 'span 2',
-  },
-  fullWidthCard: {
-    padding: tokens.spacingVerticalM,
-    gridColumn: '1 / -1',
-  },
-  header: {
-    display: 'flex',
-    alignItems: 'center',
-    marginBottom: tokens.spacingVerticalS,
-    gap: tokens.spacingHorizontalS,
-  },
-  metric: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: tokens.spacingVerticalXS,
-  },
-  processTable: {
-    width: '100%',
-    borderCollapse: 'collapse',
-    fontSize: tokens.fontSizeBase200,
-  },
-  processHeader: {
-    textAlign: 'left',
-    padding: tokens.spacingVerticalXS,
-    borderBottom: `1px solid ${tokens.colorNeutralStroke1}`,
-    fontWeight: tokens.fontWeightSemibold,
-  },
-  processCell: {
-    padding: tokens.spacingVerticalXS,
-    borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
-  },
-  networkStats: {
-    display: 'flex',
-    gap: tokens.spacingHorizontalL,
-    marginTop: tokens.spacingVerticalS,
-  },
-  networkMetric: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: tokens.spacingHorizontalXS,
-  },
-});
 
 interface DiskInfo {
   name: string;
@@ -178,7 +109,6 @@ const formatBytes = (bytes: number): string => {
 };
 
 export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, onToggle, onBack }) => {
-  const styles = useStyles();
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [cpuHistory, setCpuHistory] = useState<number[]>([]);
   const [memoryHistory, setMemoryHistory] = useState<number[]>([]);
@@ -188,6 +118,13 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
   const [networkConnections, setNetworkConnections] = useState<NetworkConnection[]>([]);
   const [showNetworkConnections, setShowNetworkConnections] = useState(false);
   const unlistenRef = useRef<(() => void) | null>(null);
+
+  // Auto-start monitoring when component mounts
+  useEffect(() => {
+    if (!isActive) {
+      onToggle(true);
+    }
+  }, []);
 
   useEffect(() => {
     const setupMonitoring = async () => {
@@ -260,8 +197,8 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
       {
         label: 'CPU Usage %',
         data: cpuHistory,
-        borderColor: tokens.colorBrandForeground1,
-        backgroundColor: `${tokens.colorBrandBackground2}40`,
+        borderColor: '#3b82f6',
+        backgroundColor: 'rgba(59, 130, 246, 0.1)',
         fill: true,
         tension: 0.4,
       },
@@ -274,8 +211,8 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
       {
         label: 'Memory Usage %',
         data: memoryHistory,
-        borderColor: tokens.colorPaletteGreenForeground1,
-        backgroundColor: `${tokens.colorPaletteGreenBackground2}40`,
+        borderColor: '#10b981',
+        backgroundColor: 'rgba(16, 185, 129, 0.1)',
         fill: true,
         tension: 0.4,
       },
@@ -288,16 +225,16 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
       {
         label: 'Upload KB/s',
         data: networkUploadHistory,
-        borderColor: tokens.colorPaletteBlueForeground2,
-        backgroundColor: `${tokens.colorPaletteBlueBackground2}40`,
+        borderColor: '#8b5cf6',
+        backgroundColor: 'rgba(139, 92, 246, 0.1)',
         fill: true,
         tension: 0.4,
       },
       {
         label: 'Download KB/s',
         data: networkDownloadHistory,
-        borderColor: tokens.colorPalettePurpleForeground2,
-        backgroundColor: `${tokens.colorPalettePurpleBackground2}40`,
+        borderColor: '#f59e0b',
+        backgroundColor: 'rgba(245, 158, 11, 0.1)',
         fill: true,
         tension: 0.4,
       },
@@ -311,11 +248,16 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
         label: 'CPU Core Usage %',
         data: stats?.per_cpu_utilization || [],
         backgroundColor: stats?.per_cpu_utilization.map(val => 
-          val > 80 ? tokens.colorPaletteRedBackground3 :
-          val > 50 ? tokens.colorPaletteYellowBackground3 :
-          tokens.colorPaletteGreenBackground3
+          val > 80 ? 'rgba(239, 68, 68, 0.8)' :
+          val > 50 ? 'rgba(245, 158, 11, 0.8)' :
+          'rgba(16, 185, 129, 0.8)'
         ) || [],
-        borderWidth: 0,
+        borderColor: stats?.per_cpu_utilization.map(val => 
+          val > 80 ? '#ef4444' :
+          val > 50 ? '#f59e0b' :
+          '#10b981'
+        ) || [],
+        borderWidth: 1,
       },
     ],
   };
@@ -327,12 +269,39 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
       legend: {
         display: true,
         position: 'top' as const,
+        labels: {
+          color: '#94a3b8',
+          font: {
+            family: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto',
+          },
+        },
+      },
+      tooltip: {
+        backgroundColor: 'rgba(30, 41, 59, 0.95)',
+        borderColor: 'rgba(59, 130, 246, 0.3)',
+        borderWidth: 1,
+        titleColor: '#f1f5f9',
+        bodyColor: '#94a3b8',
       },
     },
     scales: {
       y: {
         beginAtZero: true,
         max: 100,
+        grid: {
+          color: 'rgba(148, 163, 184, 0.1)',
+        },
+        ticks: {
+          color: '#94a3b8',
+        },
+      },
+      x: {
+        grid: {
+          color: 'rgba(148, 163, 184, 0.1)',
+        },
+        ticks: {
+          color: '#94a3b8',
+        },
       },
     },
   };
@@ -340,318 +309,485 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
   const networkChartOptions = {
     ...chartOptions,
     scales: {
+      ...chartOptions.scales,
       y: {
+        ...chartOptions.scales.y,
         beginAtZero: true,
+        max: undefined,
       },
     },
   };
 
   if (!isActive || !stats) {
     return (
-      <div style={{ padding: tokens.spacingVerticalL, textAlign: 'center' }}>
-        <Text>System monitoring is not active. Enable it from the toolbar to see real-time stats.</Text>
+      <div className="glass-card" style={{ 
+        padding: 48, 
+        textAlign: 'center',
+        background: 'linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(139, 92, 246, 0.1))',
+        border: '1px solid rgba(59, 130, 246, 0.3)',
+      }}>
+        <i className="fas fa-chart-line" style={{ 
+          fontSize: 64, 
+          background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
+          WebkitBackgroundClip: 'text',
+          WebkitTextFillColor: 'transparent',
+          marginBottom: 24 
+        }}></i>
+        <Text size={500} weight="bold" block style={{ marginBottom: 12, color: '#f1f5f9' }}>
+          System Monitoring {!isActive ? 'Inactive' : 'Starting...'}
+        </Text>
+        <Text size={300} block style={{ marginBottom: 24, color: '#94a3b8' }}>
+          {!isActive ? 'Click the button below to start real-time system monitoring' : 'Initializing monitoring services...'}
+        </Text>
+        {!isActive && (
+          <Button 
+            appearance="primary" 
+            onClick={() => onToggle(true)} 
+            size="large"
+            style={{
+              background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
+              border: 'none',
+              padding: '12px 32px',
+            }}
+          >
+            <i className="fas fa-play" style={{ marginRight: 8 }}></i>
+            Start Monitoring
+          </Button>
+        )}
       </div>
     );
   }
 
   return (
     <div>
-      {/* Header with back button */}
-      <div style={{ 
-        padding: tokens.spacingVerticalM, 
+      {/* Header with gradient background */}
+      <div className="glass-card" style={{ 
+        padding: 16, 
+        marginBottom: 24,
+        background: 'linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(139, 92, 246, 0.1))',
         display: 'flex', 
         alignItems: 'center', 
-        gap: tokens.spacingHorizontalM,
-        borderBottom: `1px solid ${tokens.colorNeutralStroke1}`
+        gap: 16,
       }}>
         {onBack && (
           <Button 
             appearance="secondary" 
             icon={<ArrowLeftRegular />} 
             onClick={() => {
-              onToggle(false); // Stop monitoring
-              onBack(); // Navigate back
+              onToggle(false);
+              onBack();
+            }}
+            style={{
+              background: 'rgba(30, 41, 59, 0.8)',
+              border: '1px solid rgba(255, 255, 255, 0.1)',
+              color: '#f1f5f9',
             }}
           >
             Back to Home
           </Button>
         )}
-        <Title3 style={{ flex: 1 }}>Real-time System Monitor</Title3>
-        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS }}>
-          <Text>Auto-refresh: </Text>
-          <Badge appearance="filled" color="success">Active</Badge>
+        <div style={{ flex: 1 }}>
+          <Text size={500} weight="bold" style={{ color: '#f1f5f9' }}>
+            <i className="fas fa-chart-line" style={{ marginRight: 12, color: '#3b82f6' }}></i>
+            Real-time System Monitor
+          </Text>
+        </div>
+        <Button 
+          appearance={isActive ? "secondary" : "primary"}
+          onClick={() => onToggle(!isActive)}
+          style={{
+            background: isActive ? 'rgba(239, 68, 68, 0.8)' : 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
+            border: 'none',
+            color: 'white',
+          }}
+        >
+          <i className={isActive ? "fas fa-stop" : "fas fa-play"} style={{ marginRight: 8 }}></i>
+          {isActive ? 'Stop Monitoring' : 'Start Monitoring'}
+        </Button>
+        <div className={`status-badge ${isActive ? 'success' : 'warning'}`}>
+          <i className="fas fa-circle icon-pulse" style={{ fontSize: 8 }}></i>
+          {isActive ? 'Live' : 'Inactive'}
         </div>
       </div>
       
-      <div className={styles.container}>
-      {/* CPU Card */}
-      <Card className={styles.card}>
-        <div className={styles.header}>
-          <DesktopRegular fontSize={24} />
-          <Title3>CPU</Title3>
+      <div style={{ 
+        display: 'grid', 
+        gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', 
+        gap: 24,
+      }}>
+        {/* CPU Card */}
+        <div className="glass-card" style={{ padding: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16, gap: 12 }}>
+            <div className="category-icon">
+              <i className="fas fa-microchip"></i>
+            </div>
+            <Text size={400} weight="semibold" style={{ color: '#f1f5f9' }}>CPU</Text>
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+              <Text size={200} style={{ color: '#94a3b8' }}>Usage</Text>
+              <Badge 
+                appearance="filled" 
+                style={{
+                  background: stats.cpu_utilization > 80 ? '#ef4444' : 
+                             stats.cpu_utilization > 50 ? '#f59e0b' : '#10b981',
+                }}
+              >
+                {stats.cpu_utilization.toFixed(1)}%
+              </Badge>
+            </div>
+            <ProgressBar 
+              value={stats.cpu_utilization / 100} 
+              style={{ height: 8 }}
+            />
+          </div>
+          <Text size={200} style={{ color: '#94a3b8' }}>
+            <i className="fas fa-tachometer-alt" style={{ marginRight: 6 }}></i>
+            Frequency: {stats.cpu_frequency} MHz
+          </Text>
         </div>
-        <div className={styles.metric}>
-          <Text>Usage</Text>
-          <Badge appearance="filled" color={stats.cpu_utilization > 80 ? 'danger' : stats.cpu_utilization > 50 ? 'warning' : 'success'}>
-            {stats.cpu_utilization.toFixed(1)}%
-          </Badge>
-        </div>
-        <ProgressBar value={stats.cpu_utilization / 100} />
-        <Caption1 style={{ marginTop: tokens.spacingVerticalXS }}>
-          Frequency: {stats.cpu_frequency} MHz
-        </Caption1>
-      </Card>
 
-      {/* Memory Card */}
-      <Card className={styles.card}>
-        <div className={styles.header}>
-          <Memory16Regular fontSize={24} />
-          <Title3>Memory</Title3>
+        {/* Memory Card */}
+        <div className="glass-card" style={{ padding: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16, gap: 12 }}>
+            <div className="category-icon" style={{ background: 'linear-gradient(135deg, #10b981, #3b82f6)' }}>
+              <i className="fas fa-memory"></i>
+            </div>
+            <Text size={400} weight="semibold" style={{ color: '#f1f5f9' }}>Memory</Text>
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+              <Text size={200} style={{ color: '#94a3b8' }}>Usage</Text>
+              <Badge 
+                appearance="filled"
+                style={{
+                  background: stats.memory_utilization > 80 ? '#ef4444' : 
+                             stats.memory_utilization > 50 ? '#f59e0b' : '#10b981',
+                }}
+              >
+                {stats.memory_utilization.toFixed(1)}%
+              </Badge>
+            </div>
+            <ProgressBar 
+              value={stats.memory_utilization / 100}
+              style={{ height: 8 }}
+            />
+          </div>
+          <Text size={200} style={{ color: '#94a3b8' }}>
+            <i className="fas fa-database" style={{ marginRight: 6 }}></i>
+            {stats.memory_used_gb.toFixed(1)} GB / {stats.memory_total_gb.toFixed(1)} GB
+          </Text>
+          <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid rgba(255, 255, 255, 0.1)' }}>
+            <Text size={200} style={{ color: '#94a3b8' }}>
+              <i className="fas fa-exchange-alt" style={{ marginRight: 6 }}></i>
+              Swap: {stats.swap_utilization.toFixed(1)}%
+            </Text>
+          </div>
         </div>
-        <div className={styles.metric}>
-          <Text>Usage</Text>
-          <Badge appearance="filled" color={stats.memory_utilization > 80 ? 'danger' : stats.memory_utilization > 50 ? 'warning' : 'success'}>
-            {stats.memory_utilization.toFixed(1)}%
-          </Badge>
-        </div>
-        <ProgressBar value={stats.memory_utilization / 100} />
-        <Caption1 style={{ marginTop: tokens.spacingVerticalXS }}>
-          {stats.memory_used_gb.toFixed(1)} GB / {stats.memory_total_gb.toFixed(1)} GB
-        </Caption1>
-        <Divider style={{ margin: `${tokens.spacingVerticalS} 0` }} />
-        <Text size={200}>Swap: {stats.swap_utilization.toFixed(1)}%</Text>
-      </Card>
 
-      {/* Disk Cards - Show all physical disks */}
-      {stats.disks && stats.disks.map((disk, index) => (
-        <Card key={index} className={styles.card}>
-          <div className={styles.header}>
-            <HardDriveRegular fontSize={24} />
-            <div style={{ flex: 1 }}>
-              <Title3>{disk.mount_point}</Title3>
-              <Caption1>{disk.name || 'Local Disk'} • {disk.disk_type} • {disk.file_system}</Caption1>
+        {/* Disk Cards */}
+        {stats.disks && stats.disks.map((disk, index) => (
+          <div key={index} className="glass-card" style={{ padding: 20 }}>
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16, gap: 12 }}>
+              <div className="category-icon" style={{ background: 'linear-gradient(135deg, #f59e0b, #ef4444)' }}>
+                <i className="fas fa-hdd"></i>
+              </div>
+              <div style={{ flex: 1 }}>
+                <Text size={400} weight="semibold" style={{ color: '#f1f5f9', marginLeft: 4 }}>{disk.mount_point}</Text>
+                <Text size={100} style={{ color: '#94a3b8' }}>
+                  {disk.name || 'Local Disk'} • {disk.disk_type} • {disk.file_system}
+                </Text>
+              </div>
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                <Text size={200} style={{ color: '#94a3b8' }}>Usage</Text>
+                <Badge 
+                  appearance="filled"
+                  style={{
+                    background: disk.utilization > 80 ? '#ef4444' : 
+                               disk.utilization > 50 ? '#f59e0b' : '#10b981',
+                  }}
+                >
+                  {disk.utilization.toFixed(1)}%
+                </Badge>
+              </div>
+              <ProgressBar 
+                value={disk.utilization / 100}
+                style={{ height: 8 }}
+              />
+            </div>
+            <Text size={200} style={{ color: '#94a3b8' }}>
+              <i className="fas fa-chart-pie" style={{ marginRight: 6 }}></i>
+              {disk.used_gb.toFixed(1)} GB / {disk.total_gb.toFixed(1)} GB
+              <span style={{ opacity: 0.7, marginLeft: 8 }}>
+                ({disk.available_gb.toFixed(1)} GB free)
+              </span>
+            </Text>
+          </div>
+        ))}
+
+        {/* Network Card */}
+        <div className="glass-card" style={{ padding: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16, gap: 12 }}>
+            <div className="category-icon" style={{ background: 'linear-gradient(135deg, #8b5cf6, #ec4899)' }}>
+              <i className="fas fa-network-wired"></i>
+            </div>
+            <Text size={400} weight="semibold" style={{ color: '#f1f5f9' }}>Network</Text>
+          </div>
+          <div style={{ display: 'flex', gap: 24, marginTop: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <i className="fas fa-upload" style={{ color: '#8b5cf6' }}></i>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <Text size={100} style={{ color: '#94a3b8' }}>Upload</Text>
+                <Text size={300} weight="semibold" style={{ color: '#f1f5f9' }}>
+                  {stats.network_upload_kb.toFixed(1)} KB/s
+                </Text>
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <i className="fas fa-download" style={{ color: '#f59e0b' }}></i>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <Text size={100} style={{ color: '#94a3b8' }}>Download</Text>
+                <Text size={300} weight="semibold" style={{ color: '#f1f5f9' }}>
+                  {stats.network_download_kb.toFixed(1)} KB/s
+                </Text>
+              </div>
             </div>
           </div>
-          <div className={styles.metric}>
-            <Text>Usage</Text>
-            <Badge appearance="filled" color={disk.utilization > 80 ? 'danger' : disk.utilization > 50 ? 'warning' : 'success'}>
-              {disk.utilization.toFixed(1)}%
-            </Badge>
-          </div>
-          <ProgressBar value={disk.utilization / 100} />
-          <Caption1 style={{ marginTop: tokens.spacingVerticalXS }}>
-            {disk.used_gb.toFixed(1)} GB / {disk.total_gb.toFixed(1)} GB
-            <span style={{ opacity: 0.7, marginLeft: 8 }}>
-              ({disk.available_gb.toFixed(1)} GB free)
-            </span>
-          </Caption1>
-        </Card>
-      ))}
-
-      {/* Network Card */}
-      <Card className={styles.card}>
-        <div className={styles.header}>
-          <NetworkCheckRegular fontSize={24} />
-          <Title3>Network</Title3>
         </div>
-        <div className={styles.networkStats}>
-          <div className={styles.networkMetric}>
-            <ArrowUploadRegular />
-            <Text>{stats.network_upload_kb.toFixed(1)} KB/s</Text>
-          </div>
-          <div className={styles.networkMetric}>
-            <ArrowDownloadRegular />
-            <Text>{stats.network_download_kb.toFixed(1)} KB/s</Text>
+
+        {/* CPU History Chart */}
+        <div className="glass-card" style={{ gridColumn: 'span 2', padding: 20 }}>
+          <Text size={400} weight="semibold" style={{ marginBottom: 16, color: '#f1f5f9', display: 'block' }}>
+            <i className="fas fa-chart-area" style={{ marginRight: 8, color: '#3b82f6' }}></i>
+            CPU Usage History
+          </Text>
+          <div style={{ height: '200px' }}>
+            <Line data={cpuChartData} options={chartOptions} />
           </div>
         </div>
-      </Card>
 
-      {/* CPU History Chart */}
-      <Card className={styles.chartCard}>
-        <Title3 style={{ marginBottom: tokens.spacingVerticalM }}>CPU Usage History</Title3>
-        <div style={{ height: '200px' }}>
-          <Line data={cpuChartData} options={chartOptions} />
+        {/* Memory History Chart */}
+        <div className="glass-card" style={{ gridColumn: 'span 2', padding: 20 }}>
+          <Text size={400} weight="semibold" style={{ marginBottom: 16, color: '#f1f5f9', display: 'block' }}>
+            <i className="fas fa-chart-area" style={{ marginRight: 8, color: '#10b981' }}></i>
+            Memory Usage History
+          </Text>
+          <div style={{ height: '200px' }}>
+            <Line data={memoryChartData} options={chartOptions} />
+          </div>
         </div>
-      </Card>
 
-      {/* Memory History Chart */}
-      <Card className={styles.chartCard}>
-        <Title3 style={{ marginBottom: tokens.spacingVerticalM }}>Memory Usage History</Title3>
-        <div style={{ height: '200px' }}>
-          <Line data={memoryChartData} options={chartOptions} />
+        {/* CPU Cores Chart */}
+        <div className="glass-card" style={{ gridColumn: 'span 2', padding: 20 }}>
+          <Text size={400} weight="semibold" style={{ marginBottom: 16, color: '#f1f5f9', display: 'block' }}>
+            <i className="fas fa-chart-bar" style={{ marginRight: 8, color: '#8b5cf6' }}></i>
+            CPU Cores
+          </Text>
+          <div style={{ height: '200px' }}>
+            <Bar data={cpuCoreData} options={chartOptions} />
+          </div>
         </div>
-      </Card>
 
-      {/* CPU Cores Chart */}
-      <Card className={styles.chartCard}>
-        <Title3 style={{ marginBottom: tokens.spacingVerticalM }}>CPU Cores</Title3>
-        <div style={{ height: '200px' }}>
-          <Bar data={cpuCoreData} options={chartOptions} />
+        {/* Network Chart */}
+        <div className="glass-card" style={{ gridColumn: 'span 2', padding: 20 }}>
+          <Text size={400} weight="semibold" style={{ marginBottom: 16, color: '#f1f5f9', display: 'block' }}>
+            <i className="fas fa-chart-line" style={{ marginRight: 8, color: '#f59e0b' }}></i>
+            Network Activity
+          </Text>
+          <div style={{ height: '200px' }}>
+            <Line data={networkChartData} options={networkChartOptions} />
+          </div>
         </div>
-      </Card>
 
-      {/* Network Chart */}
-      <Card className={styles.chartCard}>
-        <Title3 style={{ marginBottom: tokens.spacingVerticalM }}>Network Activity</Title3>
-        <div style={{ height: '200px' }}>
-          <Line data={networkChartData} options={networkChartOptions} />
+        {/* Network Connections */}
+        <div className="glass-card" style={{ gridColumn: '1 / -1', padding: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16, gap: 12 }}>
+            <Text size={400} weight="semibold" style={{ flex: 1, color: '#f1f5f9' }}>
+              <i className="fas fa-plug" style={{ marginRight: 8, color: '#3b82f6' }}></i>
+              Network Connections
+            </Text>
+            <Button 
+              appearance="secondary" 
+              size="small"
+              onClick={async () => {
+                try {
+                  const connections = await invoke<NetworkConnection[]>('get_network_connections');
+                  setNetworkConnections(connections);
+                  setShowNetworkConnections(true);
+                } catch (error) {
+                  console.error('Failed to get network connections:', error);
+                }
+              }}
+              style={{
+                background: 'rgba(59, 130, 246, 0.1)',
+                border: '1px solid rgba(59, 130, 246, 0.3)',
+                color: '#60a5fa',
+              }}
+            >
+              <i className="fas fa-sync" style={{ marginRight: 6 }}></i>
+              Refresh Connections
+            </Button>
+          </div>
+          {showNetworkConnections && networkConnections.length > 0 && (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#94a3b8' }}>Protocol</th>
+                    <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#94a3b8' }}>Local Address</th>
+                    <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#94a3b8' }}>Remote Address</th>
+                    <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#94a3b8' }}>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {networkConnections.slice(0, 20).map((conn, index) => (
+                    <tr key={index}>
+                      <td style={{ padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                        <Badge appearance="tint" size="small" style={{ background: 'rgba(59, 130, 246, 0.1)', color: '#60a5fa' }}>
+                          {conn.protocol}
+                        </Badge>
+                      </td>
+                      <td style={{ padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.05)', color: '#f1f5f9', fontSize: 12 }}>
+                        {conn.local_addr}
+                      </td>
+                      <td style={{ padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.05)', color: '#f1f5f9', fontSize: 12 }}>
+                        {conn.remote_addr}
+                      </td>
+                      <td style={{ padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                        <Badge 
+                          appearance="tint" 
+                          size="small"
+                          style={{
+                            background: conn.status === 'ESTABLISHED' ? 'rgba(16, 185, 129, 0.1)' :
+                                       conn.status === 'LISTENING' ? 'rgba(59, 130, 246, 0.1)' :
+                                       conn.status === 'TIME_WAIT' ? 'rgba(245, 158, 11, 0.1)' :
+                                       'rgba(148, 163, 184, 0.1)',
+                            color: conn.status === 'ESTABLISHED' ? '#10b981' :
+                                  conn.status === 'LISTENING' ? '#3b82f6' :
+                                  conn.status === 'TIME_WAIT' ? '#f59e0b' :
+                                  '#94a3b8',
+                          }}
+                        >
+                          {conn.status}
+                        </Badge>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {networkConnections.length > 20 && (
+                <Text size={200} style={{ marginTop: 12, color: '#94a3b8' }}>
+                  Showing first 20 of {networkConnections.length} connections
+                </Text>
+              )}
+            </div>
+          )}
+          {showNetworkConnections && networkConnections.length === 0 && (
+            <Text style={{ color: '#94a3b8' }}>No active network connections found</Text>
+          )}
         </div>
-      </Card>
 
-      {/* Network Connections */}
-      <Card className={styles.fullWidthCard}>
-        <div className={styles.header}>
-          <NetworkCheckRegular fontSize={24} />
-          <Title3>Network Connections</Title3>
-          <Button 
-            appearance="secondary" 
-            size="small"
-            onClick={async () => {
-              try {
-                const connections = await invoke<NetworkConnection[]>('get_network_connections');
-                setNetworkConnections(connections);
-                setShowNetworkConnections(true);
-              } catch (error) {
-                console.error('Failed to get network connections:', error);
-              }
-            }}
-          >
-            Refresh Connections
-          </Button>
-        </div>
-        {showNetworkConnections && networkConnections.length > 0 && (
-          <div style={{ overflowX: 'auto', marginTop: tokens.spacingVerticalM }}>
-            <table className={styles.processTable}>
+        {/* Top Processes */}
+        <div className="glass-card" style={{ gridColumn: '1 / -1', padding: 20 }}>
+          <Text size={400} weight="semibold" style={{ marginBottom: 16, color: '#f1f5f9', display: 'block' }}>
+            <i className="fas fa-list-ul" style={{ marginRight: 8, color: '#8b5cf6' }}></i>
+            Top Processes (by CPU Usage)
+          </Text>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr>
-                  <th className={styles.processHeader}>Protocol</th>
-                  <th className={styles.processHeader}>Local Address</th>
-                  <th className={styles.processHeader}>Remote Address</th>
-                  <th className={styles.processHeader}>Status</th>
+                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#94a3b8' }}>PID</th>
+                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#94a3b8' }}>Name</th>
+                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#94a3b8' }}>Status</th>
+                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#94a3b8' }}>CPU %</th>
+                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#94a3b8' }}>Memory</th>
+                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#94a3b8' }}>Disk I/O</th>
+                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#94a3b8', maxWidth: 300 }}>Command</th>
                 </tr>
               </thead>
               <tbody>
-                {networkConnections.slice(0, 20).map((conn, index) => (
-                  <tr key={index}>
-                    <td className={styles.processCell}>
-                      <Badge appearance="tint" size="small">
-                        {conn.protocol}
-                      </Badge>
+                {stats.top_processes.map((process) => (
+                  <tr key={process.pid}>
+                    <td style={{ padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.05)', color: '#f1f5f9', fontSize: 12 }}>
+                      {process.pid}
                     </td>
-                    <td className={styles.processCell}>
-                      <Text size={200}>{conn.local_addr}</Text>
+                    <td style={{ padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.05)', color: '#f1f5f9', fontSize: 12 }} title={process.name}>
+                      {process.name.length > 20 ? process.name.substring(0, 20) + '...' : process.name}
                     </td>
-                    <td className={styles.processCell}>
-                      <Text size={200}>{conn.remote_addr}</Text>
-                    </td>
-                    <td className={styles.processCell}>
+                    <td style={{ padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
                       <Badge 
                         appearance="tint" 
-                        color={
-                          conn.status === 'ESTABLISHED' ? 'success' :
-                          conn.status === 'LISTENING' ? 'brand' :
-                          conn.status === 'TIME_WAIT' ? 'warning' :
-                          'subtle'
-                        }
                         size="small"
+                        style={{
+                          background: process.status === 'Running' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(148, 163, 184, 0.1)',
+                          color: process.status === 'Running' ? '#10b981' : '#94a3b8',
+                        }}
                       >
-                        {conn.status}
+                        {process.status}
                       </Badge>
                     </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {networkConnections.length > 20 && (
-              <Text size={200} style={{ marginTop: tokens.spacingVerticalS }}>
-                Showing first 20 of {networkConnections.length} connections
-              </Text>
-            )}
-          </div>
-        )}
-        {showNetworkConnections && networkConnections.length === 0 && (
-          <Text>No active network connections found</Text>
-        )}
-      </Card>
-
-      {/* Top Processes */}
-      <Card className={styles.fullWidthCard}>
-        <div className={styles.header}>
-          <AppsListDetailRegular fontSize={24} />
-          <Title3>Top Processes (by CPU Usage)</Title3>
-        </div>
-        <div style={{ overflowX: 'auto' }}>
-          <table className={styles.processTable}>
-            <thead>
-              <tr>
-                <th className={styles.processHeader}>PID</th>
-                <th className={styles.processHeader}>Name</th>
-                <th className={styles.processHeader}>Status</th>
-                <th className={styles.processHeader}>CPU %</th>
-                <th className={styles.processHeader}>Memory</th>
-                <th className={styles.processHeader}>Disk I/O</th>
-                <th className={styles.processHeader} style={{ maxWidth: '300px' }}>Command</th>
-              </tr>
-            </thead>
-            <tbody>
-              {stats.top_processes.map((process) => (
-                <tr key={process.pid}>
-                  <td className={styles.processCell}>{process.pid}</td>
-                  <td className={styles.processCell} title={process.name}>
-                    {process.name.length > 20 ? process.name.substring(0, 20) + '...' : process.name}
-                  </td>
-                  <td className={styles.processCell}>
-                    <Badge 
-                      appearance="tint" 
-                      color={process.status === 'Running' ? 'success' : 'subtle'}
-                      size="small"
-                    >
-                      {process.status}
-                    </Badge>
-                  </td>
-                  <td className={styles.processCell}>
-                    <Badge 
-                      appearance="filled" 
-                      color={process.cpu_percent > 50 ? 'danger' : process.cpu_percent > 20 ? 'warning' : 'success'}
-                    >
-                      {process.cpu_percent.toFixed(1)}%
-                    </Badge>
-                  </td>
-                  <td className={styles.processCell}>
-                    <div>
-                      <Text size={200}>{process.memory_mb.toFixed(1)} MB</Text>
+                    <td style={{ padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
                       <Badge 
-                        appearance="tint" 
-                        color={process.memory_percent > 50 ? 'danger' : process.memory_percent > 20 ? 'warning' : 'brand'}
-                        size="small"
-                        style={{ marginLeft: '8px' }}
+                        appearance="filled"
+                        style={{
+                          background: process.cpu_percent > 50 ? '#ef4444' : 
+                                     process.cpu_percent > 20 ? '#f59e0b' : '#10b981',
+                        }}
                       >
-                        {process.memory_percent.toFixed(1)}%
+                        {process.cpu_percent.toFixed(1)}%
                       </Badge>
-                    </div>
-                  </td>
-                  <td className={styles.processCell}>
-                    <div style={{ fontSize: '11px' }}>
+                    </td>
+                    <td style={{ padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                      <div>
+                        <Text size={200} style={{ color: '#f1f5f9' }}>{process.memory_mb.toFixed(1)} MB</Text>
+                        <Badge 
+                          appearance="tint" 
+                          size="small"
+                          style={{
+                            marginLeft: 8,
+                            background: process.memory_percent > 50 ? 'rgba(239, 68, 68, 0.1)' : 
+                                       process.memory_percent > 20 ? 'rgba(245, 158, 11, 0.1)' : 
+                                       'rgba(59, 130, 246, 0.1)',
+                            color: process.memory_percent > 50 ? '#ef4444' : 
+                                  process.memory_percent > 20 ? '#f59e0b' : '#3b82f6',
+                          }}
+                        >
+                          {process.memory_percent.toFixed(1)}%
+                        </Badge>
+                      </div>
+                    </td>
+                    <td style={{ padding: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.05)', fontSize: 11, color: '#94a3b8' }}>
                       {process.disk_read_bytes > 0 || process.disk_write_bytes > 0 ? (
                         <>
                           <div>R: {formatBytes(process.disk_read_bytes)}</div>
                           <div>W: {formatBytes(process.disk_write_bytes)}</div>
                         </>
                       ) : (
-                        <Text size={100}>-</Text>
+                        <Text size={100} style={{ color: '#475569' }}>-</Text>
                       )}
-                    </div>
-                  </td>
-                  <td className={styles.processCell} style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={process.command}>
-                    <Text size={100}>{process.command}</Text>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                    </td>
+                    <td style={{ 
+                      padding: 8, 
+                      borderBottom: '1px solid rgba(255, 255, 255, 0.05)', 
+                      maxWidth: 300, 
+                      overflow: 'hidden', 
+                      textOverflow: 'ellipsis', 
+                      whiteSpace: 'nowrap',
+                      color: '#94a3b8',
+                      fontSize: 11
+                    }} title={process.command}>
+                      {process.command}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </Card>
-    </div>
+      </div>
     </div>
   );
 };

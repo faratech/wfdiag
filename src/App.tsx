@@ -1,57 +1,24 @@
 import React, { useState, useEffect } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
 import { SystemMonitoring } from './SystemMonitoring'
 import { OpenAIIntegration } from './OpenAIIntegration'
+import { ComparisonView } from './ComparisonView'
+import './styles.css'
 import { 
-  Switch,
   Button,
-  Card,
-  Checkbox,
-  ProgressBar,
-  Spinner,
-  MessageBar,
-  MessageBarBody,
-  MessageBarTitle,
-  Dialog,
-  DialogTrigger,
-  DialogSurface,
-  DialogTitle,
-  DialogBody,
-  DialogActions,
-  DialogContent,
-  RadioGroup,
-  Radio,
-  Input,
-  Dropdown,
-  Option,
+  Tab,
+  TabList,
+  SelectTabData,
   FluentProvider,
-  webLightTheme,
   webDarkTheme,
-  Badge,
+  Text,
+  Divider,
+  tokens,
 } from '@fluentui/react-components'
-import {
-  bundleIcon,
-  WindowFilled,
-  WindowRegular,
-  CheckmarkCircleFilled,
-  CheckmarkCircleRegular,
-  ShieldCheckmarkFilled,
-  ShieldCheckmarkRegular,
-  ArrowUploadFilled,
-  ArrowUploadRegular,
-  CopyFilled,
-  CopyRegular,
-  BrainCircuitRegular,
-} from '@fluentui/react-icons'
-
-const WindowIcon = bundleIcon(WindowFilled, WindowRegular)
-const CheckmarkIcon = bundleIcon(CheckmarkCircleFilled, CheckmarkCircleRegular)
-const ShieldIcon = bundleIcon(ShieldCheckmarkFilled, ShieldCheckmarkRegular)
-const UploadIcon = bundleIcon(ArrowUploadFilled, ArrowUploadRegular)
-const CopyIcon = bundleIcon(CopyFilled, CopyRegular)
 
 interface SystemInfo {
   computer_name: string
@@ -74,48 +41,26 @@ interface TaskResult {
   duration_ms: number
 }
 
-type ViewMode = 'home' | 'systemCheck' | 'progress' | 'results' | 'monitoring' | 'ai'
-type CheckType = 'basic' | 'standard' | 'complete'
+type TabValue = 'diagnostics' | 'monitoring' | 'ai'
 
 function App() {
-  const [isAdvancedMode, setIsAdvancedMode] = useState(false)
-  const [currentView, setCurrentView] = useState<ViewMode>('home')
+  const [selectedTab, setSelectedTab] = useState<TabValue>('diagnostics')
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null)
   const [availableTasks, setAvailableTasks] = useState<DiagnosticTask[]>([])
-  const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set())
-  const [lastAdvancedSelection, setLastAdvancedSelection] = useState<Set<string>>(new Set())
-  const [checkType, setCheckType] = useState<CheckType>('basic')
-  const [includeDXDiag, setIncludeDXDiag] = useState(false)
-  const [includeAdminTasks, setIncludeAdminTasks] = useState(false)
-  const [currentProgress, setCurrentProgress] = useState(0)
-  const [currentTaskName, setCurrentTaskName] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [results, setResults] = useState<Record<string, TaskResult>>({})
   const [isRunning, setIsRunning] = useState(false)
-  const [showExportDialog, setShowExportDialog] = useState(false)
-  const [exportFormat, setExportFormat] = useState<'text' | 'json'>('text')
-  const [searchQuery, setSearchQuery] = useState('')
-  const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
-  const [expandedCategory, setExpandedCategory] = useState<string | null>(null)
-  const [highlightedTask, setHighlightedTask] = useState<string | null>(null)
-  const [outputMode, setOutputMode] = useState<'rich' | 'json'>('rich')
-  const [isDarkMode, setIsDarkMode] = useState(() => {
-    return window.matchMedia?.('(prefers-color-scheme: dark)').matches || false
-  })
-  const [windowsVersion, setWindowsVersion] = useState<string>('')
-  const [systemUptime, setSystemUptime] = useState<string>('')
+  const [currentProgress, setCurrentProgress] = useState(0)
+  const [currentTaskName, setCurrentTaskName] = useState('')
   const [isMonitoringActive, setIsMonitoringActive] = useState(false)
+  const [showComparison, setShowComparison] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [filteredResults, setFilteredResults] = useState<Record<string, TaskResult>>({})
+  const [scanStartTime, setScanStartTime] = useState<number>(0)
 
   useEffect(() => {
     loadSystemInfo()
     loadAvailableTasks()
-    loadWindowsVersion()
-    
-    // Update uptime every second
-    const uptimeInterval = setInterval(updateUptime, 1000)
-    updateUptime() // Initial call
-    
-    return () => clearInterval(uptimeInterval)
   }, [])
 
   const loadSystemInfo = async () => {
@@ -136,135 +81,94 @@ function App() {
     }
   }
 
-  const loadWindowsVersion = async () => {
-    try {
-      // Get enhanced system info for Windows version
-      const systemResult = await invoke('run_diagnostic_task', { taskId: 'systeminfo' })
-      if (systemResult && typeof systemResult === 'object' && 'output' in systemResult) {
-        const output = (systemResult as any).output
-        try {
-          const parsed = JSON.parse(output)
-          if (parsed.os_version && parsed.os_version.windows_version) {
-            setWindowsVersion(parsed.os_version.windows_version)
-          }
-        } catch {
-          // Fallback to basic detection
-          setWindowsVersion('Windows NT')
-        }
-      }
-    } catch (error) {
-      console.error('Failed to load Windows version:', error)
-      setWindowsVersion('Windows NT')
-    }
+  const runQuickScan = async () => {
+    // Essential tasks for quick system overview
+    const quickTasks = availableTasks.filter(task => 
+      ['comp_system', 'os_info', 'processor', 'physical_memory', 'disk_drive', 
+       'logical_disk', 'network_adapter', 'systeminfo'].includes(task.id)
+    ).map(t => t.id)
+    
+    await runDiagnostics(quickTasks)
   }
 
-  const updateUptime = async () => {
-    try {
-      const uptimeData = await invoke<any>('get_uptime')
-      if (uptimeData && uptimeData.formatted) {
-        setSystemUptime(uptimeData.formatted)
-      }
-    } catch (error) {
-      console.error('Failed to get uptime:', error)
-    }
+  const runFullScan = async () => {
+    // All available tasks
+    const allTasks = availableTasks
+      .filter(task => !task.admin_required || systemInfo?.is_admin)
+      .map(t => t.id)
+    
+    await runDiagnostics(allTasks)
   }
 
-  const getSelectedTaskIds = (): string[] => {
-    if (isAdvancedMode) {
-      return Array.from(selectedTasks)
-    }
-
-    // Filter tasks based on check type
-    let tasks = availableTasks.filter(task => {
-      if (!includeAdminTasks && task.admin_required) return false
-      if (!includeDXDiag && task.id === 'dxdiag') return false
-      return true
-    })
-
-    switch (checkType) {
-      case 'basic':
-        // Basic check: essential system and hardware info
-        return tasks
-          .filter(t => ['System', 'Hardware', 'Storage'].includes(t.category))
-          .filter(t => ['comp_system', 'os_info', 'processor', 'physical_memory', 'disk_drive', 'logical_disk', 'network_adapter'].includes(t.id))
-          .map(t => t.id)
-      case 'standard':
-        // Standard check: all non-admin tasks except debug/developer
-        return tasks
-          .filter(t => !['Debug', 'Logs'].includes(t.category))
-          .map(t => t.id)
-      case 'complete':
-        // Complete check: all selected tasks
-        return tasks.map(t => t.id)
-      default:
-        return []
-    }
-  }
-
-  const startDiagnostics = async () => {
-    const taskIds = getSelectedTaskIds()
-    if (taskIds.length === 0) {
-      alert('Please select at least one task')
-      return
-    }
+  const runDiagnostics = async (taskIds: string[]) => {
+    if (taskIds.length === 0) return
 
     setIsRunning(true)
     setCurrentProgress(0)
     setResults({})
-    setCurrentView('progress')
+    setScanStartTime(Date.now())
 
     try {
       const sessionId = await invoke<string>('start_diagnostics', { taskIds })
       setSessionId(sessionId)
 
-      // Run tasks in parallel batches for better performance
-      const BATCH_SIZE = 5 // Run 5 tasks at a time
+      // Set up progress tracking
       let completedTasks = 0
+      const totalTasks = taskIds.length
       
-      for (let i = 0; i < taskIds.length; i += BATCH_SIZE) {
-        const batch = taskIds.slice(i, i + BATCH_SIZE)
-        const batchTasks = batch.map(taskId => availableTasks.find(t => t.id === taskId)).filter(Boolean)
-        
-        if (batchTasks.length > 0) {
-          setCurrentTaskName(`Running ${batchTasks.map(t => t!.name).join(', ')}`)
+      // Listen for task progress events
+      const unlisten = await listen<{
+        task_id: string
+        status: 'running' | 'completed'
+        task_name?: string
+        success?: boolean
+      }>('task-progress', (event: any) => {
+        if (event.payload.status === 'running' && event.payload.task_name) {
+          setCurrentTaskName(event.payload.task_name)
+        } else if (event.payload.status === 'completed') {
+          completedTasks++
+          setCurrentProgress((completedTasks / totalTasks) * 100)
         }
-        
-        const batchPromises = batch.map(async (taskId) => {
-          try {
-            const result = await invoke<TaskResult>('run_diagnostic_task', { taskId })
-            setResults(prev => ({ ...prev, [taskId]: result }))
-            completedTasks++
-            setCurrentProgress((completedTasks / taskIds.length) * 100)
-            return { taskId, success: true }
-          } catch (error) {
-            console.error(`Failed to run task ${taskId}:`, error)
-            setResults(prev => ({ 
-              ...prev, 
-              [taskId]: { 
-                success: false, 
-                output: '', 
-                error: String(error),
-                duration_ms: 0 
-              } 
-            }))
-            completedTasks++
-            setCurrentProgress((completedTasks / taskIds.length) * 100)
-            return { taskId, success: false }
-          }
+      })
+
+      try {
+        // Run all diagnostics in parallel with max 5 concurrent
+        const results = await invoke<Array<[string, TaskResult]>>('run_diagnostics_parallel', { 
+          taskIds,
+          maxConcurrent: 5 
         })
         
-        await Promise.all(batchPromises)
+        // Convert array of tuples to object
+        const resultsObj = results.reduce((acc, [taskId, result]) => {
+          acc[taskId] = result
+          return acc
+        }, {} as Record<string, TaskResult>)
+        
+        setResults(resultsObj)
+      } finally {
+        // Clean up event listener
+        unlisten()
       }
 
       setCurrentProgress(100)
-      setTimeout(() => {
-        setCurrentView('results')
+      
+      // Auto-save scan to history after results are set
+      setTimeout(async () => {
+        const scanDuration = Date.now() - scanStartTime
+        try {
+          const savedScanId = await invoke<string>('save_current_scan', {
+            durationMs: scanDuration,
+            tags: taskIds.length === availableTasks.length ? ['Full Scan'] : ['Quick Scan']
+          })
+          console.log('Scan auto-saved successfully with ID:', savedScanId)
+        } catch (error) {
+          console.error('Failed to auto-save scan:', error)
+        }
         setIsRunning(false)
       }, 500)
     } catch (error) {
       console.error('Failed to start diagnostics:', error)
       setIsRunning(false)
-      setCurrentView('home')
     }
   }
 
@@ -272,10 +176,9 @@ function App() {
     if (!sessionId) return
     
     try {
-      // Create forum-formatted text
       const content = await invoke<string>('export_results', { 
         format: 'text',
-        includeRaw: false 
+        includeRaw: true 
       })
       
       const forumPost = `[CODE]
@@ -284,46 +187,60 @@ Generated: ${new Date().toLocaleString()}
 Computer: ${systemInfo?.computer_name}
 OS: ${systemInfo?.os_version}
 Admin Mode: ${systemInfo?.is_admin ? 'Yes' : 'No'}
-
 ${content}
 [/CODE]`
       
       await writeText(forumPost)
-      alert('Results copied to clipboard! You can now paste them in the forum.')
     } catch (error) {
       console.error('Failed to copy to clipboard:', error)
-      alert('Failed to copy to clipboard')
     }
   }
 
-  const handleExport = async () => {
+  const exportResults = async () => {
     if (!sessionId) return
 
     try {
       const content = await invoke<string>('export_results', { 
-        format: exportFormat,
+        format: 'text',
         includeRaw: true 
       })
 
-      // Save to file
+      const fullReport = `=== WindowsForum Diagnostic Report ===
+Generated: ${new Date().toLocaleString()}
+Computer: ${systemInfo?.computer_name}
+OS: ${systemInfo?.os_version}
+Admin Mode: ${systemInfo?.is_admin ? 'Yes' : 'No'}
+${content}`
+
       const filePath = await save({
-        defaultPath: `wf-diagnostics-${new Date().toISOString().split('T')[0]}.${exportFormat === 'json' ? 'json' : 'txt'}`,
+        defaultPath: `wf-diagnostics-${new Date().toISOString().split('T')[0]}.txt`,
         filters: [{
-          name: exportFormat === 'json' ? 'JSON' : 'Text',
-          extensions: [exportFormat === 'json' ? 'json' : 'txt']
+          name: 'Text',
+          extensions: ['txt']
         }]
       })
 
       if (filePath) {
-        await writeTextFile(filePath, content)
-        alert('Results exported successfully!')
+        try {
+          await writeTextFile(filePath, fullReport)
+          console.log('File exported successfully to:', filePath)
+        } catch (writeError) {
+          console.error('Failed to write file:', writeError)
+          // Try using the backend save function as a fallback
+          try {
+            await invoke('save_results_to_file', { 
+              path: filePath,
+              content: fullReport
+            })
+            console.log('File exported successfully using backend to:', filePath)
+          } catch (backendError) {
+            console.error('Backend save also failed:', backendError)
+          }
+        }
       }
     } catch (error) {
       console.error('Failed to export results:', error)
-      alert('Failed to export results')
     }
-
-    setShowExportDialog(false)
   }
 
   const restartAsAdmin = async () => {
@@ -334,1429 +251,855 @@ ${content}
     }
   }
 
-  const renderHome = () => {
-    const hasResults = Object.keys(results).length > 0
-    const healthAnalysis = hasResults ? analyzeResults() : null
+
+  const getHealthScore = () => {
+    const totalTasks = Object.keys(results).length
+    if (totalTasks === 0) return null
     
-    return (
-      <div className="home-container">
-        <Card className="welcome-card">
-          <h2>Welcome to WindowsForum Diagnostic Tool</h2>
-          <p>This tool helps you understand your system and diagnose potential issues. 
-             You can share the results on WindowsForum.com to get help from our community.</p>
-        </Card>
-
-        {/* System Health Summary - always visible if we have results */}
-        {hasResults && healthAnalysis && (
-          <Card style={{ marginBottom: 24, border: '2px solid var(--colorBrandBackground)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <h3>Last System Health Check</h3>
-                <div style={{ fontSize: 36, fontWeight: 'bold', color: 
-                  healthAnalysis.healthScore >= 90 ? 'green' :
-                  healthAnalysis.healthScore >= 70 ? 'orange' : 'red'
-                }}>
-                  {healthAnalysis.healthScore}%
-                </div>
-                <p style={{ opacity: 0.8 }}>
-                  {healthAnalysis.successfulTasks} of {healthAnalysis.totalTasks} diagnostics completed
-                </p>
-              </div>
-              <div style={{ textAlign: 'right' }}>
-                {healthAnalysis.issues.length > 0 && (
-                  <MessageBar intent="error" style={{ marginBottom: 8, maxWidth: 300 }}>
-                    <MessageBarBody>
-                      <MessageBarTitle>{healthAnalysis.issues.length} Issues Found</MessageBarTitle>
-                      View detailed results for more information.
-                    </MessageBarBody>
-                  </MessageBar>
-                )}
-                {healthAnalysis.warnings.length > 0 && (
-                  <MessageBar intent="warning" style={{ maxWidth: 300 }}>
-                    <MessageBarBody>
-                      <MessageBarTitle>{healthAnalysis.warnings.length} Warnings</MessageBarTitle>
-                      Check detailed results for recommendations.
-                    </MessageBarBody>
-                  </MessageBar>
-                )}
-                <Button 
-                  appearance="primary" 
-                  onClick={() => setCurrentView('results')}
-                  style={{ marginTop: 8 }}
-                >
-                  View Details
-                </Button>
-              </div>
-            </div>
-          </Card>
-        )}
-
-        <h3>What would you like to do?</h3>
-      
-      <div className="action-grid">
-        <Card 
-          className="action-card"
-          onClick={() => setCurrentView('systemCheck')}
-        >
-          <CheckmarkIcon className="action-card-icon" />
-          <h4>System Check</h4>
-          <p>Analyze your system for potential issues</p>
-        </Card>
-        
-        <Card 
-          className="action-card"
-          onClick={() => {
-            setCurrentView('monitoring')
-            setIsMonitoringActive(true)
-          }}
-        >
-          <WindowIcon className="action-card-icon" />
-          <h4>Real-time Monitor</h4>
-          <p>View live system performance metrics</p>
-        </Card>
-
-        <Card 
-          className="action-card"
-          onClick={() => setCurrentView('ai')}
-        >
-          <BrainCircuitRegular className="action-card-icon" />
-          <h4>AI Analysis</h4>
-          <p>Use OpenAI to analyze system issues</p>
-        </Card>
-
-        <Card 
-          className="action-card"
-          onClick={() => {
-            // Show system info in results view
-            setCurrentView('results')
-          }}
-        >
-          <WindowIcon className="action-card-icon" />
-          <h4>System Information</h4>
-          <p>View detailed information about your PC</p>
-        </Card>
-
-        <Card 
-          className="action-card"
-          onClick={() => setShowExportDialog(true)}
-          style={{ opacity: Object.keys(results).length === 0 ? 0.5 : 1 }}
-        >
-          <UploadIcon className="action-card-icon" />
-          <h4>Export for Forum</h4>
-          <p>Create a report to share on WindowsForum.com</p>
-        </Card>
-
-        <Card 
-          className="action-card"
-          style={{ opacity: 0.5 }}
-        >
-          <ShieldIcon className="action-card-icon" />
-          <h4>BSOD Analysis</h4>
-          <p>Coming Soon</p>
-        </Card>
-      </div>
-
-      {systemInfo && !systemInfo.is_admin && (
-        <MessageBar intent="warning" style={{ marginTop: 24 }}>
-          <MessageBarBody>
-            <MessageBarTitle>Limited functionality</MessageBarTitle>
-            Some diagnostic tasks require administrator privileges.
-            <Button 
-              appearance="primary" 
-              size="small" 
-              onClick={restartAsAdmin}
-              style={{ marginLeft: 12 }}
-            >
-              Restart as Admin
-            </Button>
-          </MessageBarBody>
-        </MessageBar>
-      )}
-    </div>
-    )
+    const successfulTasks = Object.values(results).filter(r => r.success).length
+    return Math.round((successfulTasks / totalTasks) * 100)
   }
 
-  const renderSystemCheck = () => (
-    <div className="home-container">
-      <Button onClick={() => setCurrentView('home')} appearance="subtle">
-        ← Back to Home
-      </Button>
-
-      <h2 style={{ marginTop: 24, marginBottom: 24 }}>System Check Options</h2>
-
-      <Card style={{ padding: 24 }}>
-        <h3 style={{ marginBottom: 16 }}>Choose check type:</h3>
-        
-        <RadioGroup 
-          value={checkType} 
-          onChange={(_, data) => setCheckType(data.value as CheckType)}
-        >
-          <Radio value="basic" label={
-            <div>
-              <strong>Basic Check</strong>
-              <div style={{ fontSize: 14, opacity: 0.7 }}>Essential system information (30 seconds)</div>
-            </div>
-          } />
-          <Radio value="standard" label={
-            <div style={{ marginTop: 12 }}>
-              <strong>Standard Check</strong>
-              <div style={{ fontSize: 14, opacity: 0.7 }}>Comprehensive analysis (2-3 minutes)</div>
-            </div>
-          } />
-          <Radio value="complete" label={
-            <div style={{ marginTop: 12 }}>
-              <strong>Complete Check</strong>
-              <div style={{ fontSize: 14, opacity: 0.7 }}>Full system diagnostic (5-10 minutes)</div>
-            </div>
-          } />
-        </RadioGroup>
-
-        <Card style={{ marginTop: 16, padding: 16, background: 'var(--colorNeutralBackground2)' }}>
-          <h4 style={{ marginBottom: 8 }}>Optional Tasks</h4>
-          <Checkbox 
-            label="Include DirectX Diagnostics (adds 2-4 seconds)"
-            checked={includeDXDiag}
-            onChange={(_, data) => setIncludeDXDiag(data.checked as boolean)}
-          />
-          <Checkbox 
-            label="Include Administrator Tasks (DISM, Chkdsk, etc.)"
-            checked={includeAdminTasks}
-            onChange={(_, data) => setIncludeAdminTasks(data.checked as boolean)}
-            style={{ marginTop: 8 }}
-          />
-        </Card>
-
-        <Button 
-          appearance="primary" 
-          size="large"
-          onClick={startDiagnostics}
-          style={{ marginTop: 24 }}
-        >
-          Start Check
-        </Button>
-      </Card>
-    </div>
-  )
-
-  const renderProgress = () => (
-    <div className="progress-container">
-      <h2>Checking Your System</h2>
+  // Search and filter functionality
+  useEffect(() => {
+    if (!searchQuery) {
+      setFilteredResults(results)
+      return
+    }
+    
+    const query = searchQuery.toLowerCase()
+    const filtered: Record<string, TaskResult> = {}
+    
+    for (const [taskId, result] of Object.entries(results)) {
+      // Search in task ID
+      if (taskId.toLowerCase().includes(query)) {
+        filtered[taskId] = result
+        continue
+      }
       
-      <ProgressBar 
-        value={currentProgress} 
-        max={100}
-        className="progress-bar"
-      />
+      // Search in error messages
+      if (result.error && result.error.toLowerCase().includes(query)) {
+        filtered[taskId] = result
+        continue
+      }
       
-      <p style={{ fontSize: 20, margin: '16px 0' }}>{Math.round(currentProgress)}%</p>
-      <p style={{ opacity: 0.7 }}>{currentTaskName}</p>
-      
-      <Spinner size="large" style={{ marginTop: 32 }} />
-      <p style={{ marginTop: 16, opacity: 0.7 }}>This may take a few minutes...</p>
-    </div>
-  )
+      // Search in output
+      if (result.output.toLowerCase().includes(query)) {
+        filtered[taskId] = result
+      }
+    }
+    
+    setFilteredResults(filtered)
+  }, [searchQuery, results])
 
   const parseOutput = (output: string) => {
     try {
       return JSON.parse(output)
     } catch {
-      // If not JSON, return raw output
       return output
     }
   }
 
-  const formatRichOutput = (data: any) => {
-    if (typeof data === 'string') {
-      // Handle plain text with better formatting
+  const renderResultItem = (key: string, value: any, depth: number = 0): React.ReactNode => {
+    if (value === null || value === undefined || value === '') return null
+    
+    // Prevent infinite recursion
+    if (depth > 10) {
       return (
-        <div style={{ lineHeight: 1.6 }}>
-          {data.split('\n').map((line, index) => (
-            <div key={index} style={{ marginBottom: line.trim() ? 4 : 8 }}>
-              {line.trim() || <br />}
-            </div>
-          ))}
+        <div key={key} className="result-section" style={{ marginLeft: depth * 16 }}>
+          <div className="result-label">
+            <i className="fas fa-exclamation-triangle" style={{ fontSize: 10 }}></i>
+            {key}
+          </div>
+          <div className="result-value">[Content too deeply nested to display]</div>
         </div>
       )
     }
-
-    // Special handling for battery report
-    if (typeof data === 'object' && data !== null && data.battery_summary) {
-      return renderBatteryReport(data)
+    
+    // Format key for better readability
+    const formattedKey = key
+      .replace(/_/g, ' ')
+      .replace(/([A-Z])/g, ' $1')
+      .replace(/^./, str => str.toUpperCase())
+      .trim()
+    
+    // Add helpful icons based on key content
+    const getIcon = (key: string) => {
+      const lowerKey = key.toLowerCase()
+      if (lowerKey.includes('error') || lowerKey.includes('fail')) return 'fa-times-circle'
+      if (lowerKey.includes('success') || lowerKey.includes('pass')) return 'fa-check-circle'
+      if (lowerKey.includes('warning')) return 'fa-exclamation-triangle'
+      if (lowerKey.includes('info')) return 'fa-info-circle'
+      if (lowerKey.includes('cpu')) return 'fa-microchip'
+      if (lowerKey.includes('memory') || lowerKey.includes('ram')) return 'fa-memory'
+      if (lowerKey.includes('disk') || lowerKey.includes('storage')) return 'fa-hdd'
+      if (lowerKey.includes('network')) return 'fa-network-wired'
+      if (lowerKey.includes('driver')) return 'fa-cogs'
+      if (lowerKey.includes('service')) return 'fa-server'
+      if (lowerKey.includes('process')) return 'fa-tasks'
+      if (lowerKey.includes('version')) return 'fa-code-branch'
+      if (lowerKey.includes('name')) return 'fa-tag'
+      if (lowerKey.includes('path')) return 'fa-folder'
+      if (lowerKey.includes('date') || lowerKey.includes('time')) return 'fa-clock'
+      if (lowerKey.includes('size')) return 'fa-weight'
+      if (lowerKey.includes('status')) return 'fa-signal'
+      return 'fa-angle-right'
     }
-
-    if (Array.isArray(data)) {
-      if (data.length === 0) {
-        return <span style={{ opacity: 0.6, fontStyle: 'italic' }}>No items found</span>
+    
+    if (typeof value === 'boolean') {
+      return (
+        <div key={key} className="result-grid" style={{ marginLeft: depth * 16 }}>
+          <div className="result-label">
+            <i className={`fas ${getIcon(key)}`} style={{ fontSize: 10 }}></i>
+            {formattedKey}
+          </div>
+          <div className="result-value" style={{ color: value ? '#10b981' : '#ef4444' }}>
+            <i className={`fas ${value ? 'fa-check' : 'fa-times'}`} style={{ marginRight: 6 }}></i>
+            {value ? 'Enabled' : 'Disabled'}
+          </div>
+        </div>
+      )
+    }
+    
+    if (typeof value === 'object' && value !== null) {
+      // Check for circular reference by trying to stringify
+      try {
+        JSON.stringify(value)
+      } catch (e) {
+        return (
+          <div key={key} className="result-section" style={{ marginLeft: depth * 16 }}>
+            <div className="result-label">
+              <i className="fas fa-exclamation-circle" style={{ fontSize: 10 }}></i>
+              {formattedKey}
+            </div>
+            <div className="result-value" style={{ color: '#f59e0b' }}>[Circular reference detected]</div>
+          </div>
+        )
       }
       
       return (
-        <div>
-          <div style={{ marginBottom: 12, fontSize: 14, fontWeight: 600, color: 'var(--colorBrandBackground)' }}>
-            {data.length} item{data.length !== 1 ? 's' : ''} found
-          </div>
-          {data.map((item, index) => (
-            <div key={index} style={{ 
-              marginBottom: 16, 
-              padding: 12, 
-              background: 'var(--colorNeutralBackground3)', 
-              borderRadius: 6,
-              border: '1px solid var(--colorNeutralStroke2)'
-            }}>
-              <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
-                Item {index + 1}
-              </div>
-              {typeof item === 'object' ? formatObjectAsTable(item) : String(item)}
-            </div>
-          ))}
-        </div>
-      )
-    }
-
-    if (typeof data === 'object' && data !== null) {
-      return formatObjectAsTable(data)
-    }
-
-    return String(data)
-  }
-
-  const renderBatteryReport = (data: any) => {
-    const summary = data.battery_summary || {}
-    
-    return (
-      <div style={{ padding: 16 }}>
-        {/* Battery Health Status */}
-        {summary.battery_health_percentage && (
-          <Card style={{ marginBottom: 16, padding: 16 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div>
-                <h4 style={{ margin: 0, marginBottom: 8 }}>Battery Health</h4>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-                  <div style={{ fontSize: 48, fontWeight: 'bold', color: 
-                    summary.battery_health_percentage >= 80 ? 'green' :
-                    summary.battery_health_percentage >= 60 ? 'orange' : 'red'
-                  }}>
-                    {summary.battery_health_percentage}%
-                  </div>
-                  <div>
-                    <Badge 
-                      appearance="filled" 
-                      color={
-                        summary.battery_health_status === 'Good' ? 'success' :
-                        summary.battery_health_status === 'Fair' ? 'warning' : 'danger'
-                      }
-                    >
-                      {summary.battery_health_status}
-                    </Badge>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </Card>
-        )}
-
-        {/* Battery Information */}
-        {summary.batteries && summary.batteries.length > 0 && (
-          <Card style={{ marginBottom: 16, padding: 16 }}>
-            <h4 style={{ margin: 0, marginBottom: 12 }}>Battery Information</h4>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <tbody>
-                {summary.batteries.map((item: any, index: number) => (
-                  <tr key={index} style={{ borderBottom: '1px solid var(--colorNeutralStroke2)' }}>
-                    <td style={{ padding: 8, fontWeight: 600, width: '40%' }}>{item.property}</td>
-                    <td style={{ padding: 8 }}>{item.value}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </Card>
-        )}
-
-        {/* Recent Usage */}
-        {summary.recent_usage && summary.recent_usage.length > 0 && (
-          <Card style={{ marginBottom: 16, padding: 16 }}>
-            <h4 style={{ margin: 0, marginBottom: 12 }}>Recent Usage</h4>
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
-                <thead>
-                  <tr style={{ borderBottom: '2px solid var(--colorNeutralStroke2)' }}>
-                    <th style={{ padding: 8, textAlign: 'left' }}>Start Time</th>
-                    <th style={{ padding: 8, textAlign: 'left' }}>State</th>
-                    <th style={{ padding: 8, textAlign: 'left' }}>Capacity</th>
-                    <th style={{ padding: 8, textAlign: 'left' }}>Duration</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {summary.recent_usage.slice(0, 10).map((usage: any, index: number) => (
-                    <tr key={index} style={{ borderBottom: '1px solid var(--colorNeutralStroke2)' }}>
-                      <td style={{ padding: 8 }}>{usage.start_time}</td>
-                      <td style={{ padding: 8 }}>
-                        <Badge color={usage.state === 'Active' ? 'success' : 'informative'}>
-                          {usage.state}
-                        </Badge>
-                      </td>
-                      <td style={{ padding: 8 }}>{usage.capacity_remaining}</td>
-                      <td style={{ padding: 8 }}>{usage.duration}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Card>
-        )}
-
-        {/* Battery Capacity History */}
-        {summary.battery_capacity_history && summary.battery_capacity_history.length > 0 && (
-          <Card style={{ marginBottom: 16, padding: 16 }}>
-            <h4 style={{ margin: 0, marginBottom: 12 }}>Capacity History</h4>
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
-                <thead>
-                  <tr style={{ borderBottom: '2px solid var(--colorNeutralStroke2)' }}>
-                    <th style={{ padding: 8, textAlign: 'left' }}>Period</th>
-                    <th style={{ padding: 8, textAlign: 'left' }}>Full Charge Capacity</th>
-                    <th style={{ padding: 8, textAlign: 'left' }}>Design Capacity</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {summary.battery_capacity_history.slice(0, 5).map((history: any, index: number) => (
-                    <tr key={index} style={{ borderBottom: '1px solid var(--colorNeutralStroke2)' }}>
-                      <td style={{ padding: 8 }}>{history.period}</td>
-                      <td style={{ padding: 8 }}>{history.full_charge_capacity}</td>
-                      <td style={{ padding: 8 }}>{history.design_capacity}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Card>
-        )}
-
-        {/* Fallback to HTML content if no parsed data */}
-        {data.html_content && !summary.batteries && (
-          <Card style={{ padding: 16 }}>
-            <h4 style={{ margin: 0, marginBottom: 12 }}>Battery Report Available</h4>
-            <p style={{ marginBottom: 12 }}>
-              The battery report has been generated. You can view the raw HTML report in JSON mode or save it for detailed analysis.
-            </p>
-            <Button appearance="secondary" onClick={() => setOutputMode('json')}>
-              View Raw Data
-            </Button>
-          </Card>
-        )}
-      </div>
-    )
-  }
-
-  const formatObjectAsTable = (obj: any) => {
-    const entries = Object.entries(obj).filter(([, value]) => 
-      value !== null && value !== undefined && value !== '' && value !== 'null'
-    )
-    
-    if (entries.length === 0) return <span style={{ opacity: 0.6, fontStyle: 'italic' }}>No data available</span>
-
-    return (
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '6px 16px', fontSize: 13 }}>
-        {entries.map(([key, value]) => {
-          const formattedKey = key
-            .replace(/([A-Z])/g, ' $1')
-            .replace(/^./, str => str.toUpperCase())
-            .replace(/Id$/, 'ID')
-            .replace(/Cpu/, 'CPU')
-            .replace(/Ram/, 'RAM')
-            .replace(/Usb/, 'USB')
-            .replace(/Pci/, 'PCI')
-            .replace(/Bios/, 'BIOS')
-            .replace(/Os/, 'OS')
-          
-          let formattedValue: React.ReactNode = String(value)
-          
-          // Format specific data types
-          if (typeof value === 'number') {
-            // Format large numbers with commas
-            if (value > 1000) {
-              formattedValue = value.toLocaleString()
-            } else {
-              formattedValue = String(value)
-            }
-          } else if (typeof value === 'boolean') {
-            formattedValue = (
-              <span style={{ color: value ? 'green' : 'red', fontWeight: 600 }}>
-                {value ? '✓ Yes' : '✗ No'}
-              </span>
-            )
-          } else if (typeof value === 'string') {
-            // Format file sizes
-            if (key.toLowerCase().includes('size') && /^\d+$/.test(value)) {
-              const bytes = parseInt(value)
-              if (bytes > 1024 * 1024 * 1024) {
-                formattedValue = `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-              } else if (bytes > 1024 * 1024) {
-                formattedValue = `${(bytes / (1024 * 1024)).toFixed(2)} MB`
-              } else if (bytes > 1024) {
-                formattedValue = `${(bytes / 1024).toFixed(2)} KB`
-              } else {
-                formattedValue = `${bytes} bytes`
-              }
-            }
-            // Format URLs as links
-            else if (value.startsWith('http://') || value.startsWith('https://')) {
-              formattedValue = (
-                <a href={value} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--colorBrandBackground)' }}>
-                  {value}
-                </a>
-              )
-            }
-            // Format file paths
-            else if (value.includes('\\') || value.includes('/')) {
-              formattedValue = (
-                <span style={{ fontFamily: 'Consolas, monospace', fontSize: 12 }}>
-                  {value}
+        <div key={key} className="collapsible-section" style={{ marginTop: 8, marginLeft: depth * 16 }}>
+          <div className="collapsible-header">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <i className={`fas ${getIcon(key)}`} style={{ color: '#60a5fa' }}></i>
+              <Text size={300} weight="semibold" style={{ color: '#f1f5f9' }}>{formattedKey}</Text>
+              {Array.isArray(value) && (
+                <span className="status-badge" style={{ fontSize: 11, padding: '2px 8px' }}>
+                  {value.length} items
                 </span>
-              )
-            }
-            // Format dates
-            else if (value.match(/^\d{4}-\d{2}-\d{2}/) || value.includes('GMT') || value.includes('UTC')) {
-              try {
-                const date = new Date(value)
-                if (!isNaN(date.getTime())) {
-                  formattedValue = date.toLocaleString()
-                }
-              } catch {
-                // Keep original value if parsing fails
-              }
-            }
-          } else if (typeof value === 'object') {
-            formattedValue = (
-              <details style={{ marginTop: 4 }}>
-                <summary style={{ cursor: 'pointer', color: 'var(--colorBrandBackground)' }}>
-                  View details
-                </summary>
-                <div style={{ marginTop: 8, padding: 8, background: 'var(--colorNeutralBackground2)', borderRadius: 4 }}>
-                  <pre style={{ margin: 0, fontSize: 11, whiteSpace: 'pre-wrap' }}>
-                    {JSON.stringify(value, null, 2)}
-                  </pre>
-                </div>
-              </details>
-            )
-          }
-
-          return (
-            <React.Fragment key={key}>
-              <strong style={{ 
-                color: 'var(--colorBrandBackground)', 
-                textAlign: 'right',
-                paddingRight: 8,
-                fontSize: 12
-              }}>
-                {formattedKey}:
-              </strong>
-              <span style={{ wordBreak: 'break-word' }}>
-                {formattedValue}
-              </span>
-            </React.Fragment>
-          )
-        })}
-      </div>
-    )
-  }
-
-  const renderTaskOutput = (result: TaskResult) => {
-    if (!result.output) return null
-
-    const parsedData = parseOutput(result.output)
-
-    switch (outputMode) {
-      case 'rich':
-        return (
-          <div className="result-data" style={{ background: 'var(--colorNeutralBackground1)', border: '1px solid var(--colorNeutralStroke2)' }}>
-            {formatRichOutput(parsedData)}
+              )}
+            </div>
+            <i className="fas fa-chevron-down" style={{ color: '#94a3b8' }}></i>
           </div>
-        )
-      
-      case 'json':
-        return (
-          <div className="result-data">
-            <pre style={{ 
-              fontSize: 12, 
-              fontFamily: 'Consolas, monospace',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-              maxHeight: 400,
-              overflow: 'auto',
-              margin: 0,
-              padding: 0,
-              background: 'transparent'
-            }}>
-              {typeof parsedData === 'object' ? JSON.stringify(parsedData, null, 2) : result.output}
-            </pre>
-          </div>
-        )
-      
-      default:
-        return null
-    }
-  }
-
-  const analyzeResults = () => {
-    const issues: string[] = []
-    const warnings: string[] = []
-    let totalTasks = 0
-    let successfulTasks = 0
-    let failedTasks = 0
-    
-    Object.entries(results).forEach(([taskId, result]) => {
-      totalTasks++
-      if (result.success) {
-        successfulTasks++
-        
-        // Analyze output for potential issues
-        const output = result.output.toLowerCase()
-        
-        try {
-          // Try to parse JSON output for more accurate analysis
-          const parsedOutput = JSON.parse(result.output)
-          
-          // Check for BSOD minidumps
-          if (taskId === 'minidump' && Array.isArray(parsedOutput) && parsedOutput.length > 0) {
-            issues.push(`${parsedOutput.length} crash dump(s) found - system has experienced crashes`)
-          }
-          
-          // Check memory information
-          if (taskId === 'physical_memory' && Array.isArray(parsedOutput)) {
-            const totalMemoryGB = parsedOutput.reduce((sum, mem) => {
-              const capacity = parseInt(mem.Capacity || '0')
-              return sum + (capacity / (1024 * 1024 * 1024))
-            }, 0)
-            if (totalMemoryGB < 4) {
-              warnings.push('Low system memory detected (less than 4GB)')
-            }
-          }
-          
-          // Check disk space
-          if (taskId === 'disk_drive' && Array.isArray(parsedOutput)) {
-            parsedOutput.forEach(disk => {
-              // WMI disk_drive doesn't have FreeSpace, that's in disk_partition or logical_disk
-              // Only analyze if we have meaningful size data
-              const size = parseInt(disk.Size || '0')
-              if (size > 0) {
-                // For physical drives, we can't easily determine free space from WMI Win32_DiskDrive
-                // We'll skip the analysis here and rely on logical disk info instead
-                // This prevents false 100% full reports
-              }
-            })
-          }
-          
-          // Check logical disk space (accurate free space analysis)
-          if (taskId === 'logical_disk' && Array.isArray(parsedOutput)) {
-            parsedOutput.forEach(disk => {
-              const size = parseInt(disk.Size || '0')
-              const freeSpace = parseInt(disk.FreeSpace || '0')
-              const deviceId = disk.DeviceID || disk.Caption || 'Unknown'
-              
-              if (size > 0 && !isNaN(freeSpace)) {
-                const usedSpace = size - freeSpace
-                const usedPercent = (usedSpace / size) * 100
-                
-                // Only report on actual drives (not network drives, etc.)
-                if (disk.DriveType === 3 || disk.DriveType === '3') { // Fixed disk
-                  if (usedPercent > 90) {
-                    issues.push(`Drive ${deviceId} is ${Math.round(usedPercent)}% full`)
-                  } else if (usedPercent > 80) {
-                    warnings.push(`Drive ${deviceId} is ${Math.round(usedPercent)}% full`)
+          <div className="collapsible-content">
+            {Array.isArray(value) ? (
+              value.slice(0, 100).map((item, idx) => ( // Limit array items to prevent UI freeze
+                <div key={`${key}-${idx}`} style={{ marginBottom: 8 }}>
+                  {typeof item === 'object' && item !== null ? 
+                    Object.entries(item).slice(0, 50).map(([k, v]) => renderResultItem(k, v, depth + 1)) : // Limit object properties
+                    <Text size={200}>{String(item)}</Text>
                   }
-                }
-              }
-            })
-          }
-          
-          // Check network adapters
-          if (taskId === 'network_adapter' && Array.isArray(parsedOutput)) {
-            // Filter out virtual, loopback, and other non-physical adapters
-            const physicalAdapters = parsedOutput.filter(adapter => {
-              const name = (adapter.Name || adapter.Description || '').toLowerCase()
-              const isPhysical = !name.includes('virtual') && 
-                               !name.includes('loopback') && 
-                               !name.includes('miniport') &&
-                               !name.includes('teredo') &&
-                               !name.includes('isatap') &&
-                               adapter.PhysicalAdapter !== false
-              return isPhysical
-            })
-            
-            const disabledPhysicalAdapters = physicalAdapters.filter(adapter => 
-              adapter.NetEnabled === false || 
-              adapter.NetConnectionStatus === 'Disconnected' ||
-              adapter.NetConnectionStatus === '0' || // Disconnected
-              adapter.NetConnectionStatus === '7'    // Media disconnected
-            )
-            
-            if (disabledPhysicalAdapters.length > 0) {
-              warnings.push(`${disabledPhysicalAdapters.length} physical network adapter(s) disabled or disconnected`)
-            }
-          }
-          
-          // Check system drivers
-          if (taskId === 'system_driver' && Array.isArray(parsedOutput)) {
-            const problemDrivers = parsedOutput.filter(driver => {
-              const state = driver.State || ''
-              const startMode = driver.StartMode || ''
-              const name = (driver.Name || '').toLowerCase()
-              
-              // Only consider drivers that should be running but aren't
-              const shouldBeRunning = startMode === 'Auto' || startMode === 'System' || startMode === 'Boot'
-              const notRunning = state !== 'Running' && state !== 'Stopped'
-              
-              // Filter out known system drivers that are legitimately stopped
-              const isSystemDriver = !name.includes('test') && 
-                                   !name.includes('sample') && 
-                                   !name.includes('debug')
-              
-              return shouldBeRunning && notRunning && isSystemDriver
-            })
-            
-            if (problemDrivers.length > 0) {
-              warnings.push(`${problemDrivers.length} system driver(s) not running properly`)
-            }
-          }
-          
-          // Check services
-          if (taskId === 'services' && Array.isArray(parsedOutput)) {
-            const criticalStopped = parsedOutput.filter(service => 
-              service.StartMode === 'Auto' && service.State !== 'Running' &&
-              ['Windows Update', 'Security Center', 'Windows Defender'].some(critical => 
-                (service.DisplayName || service.Name || '').includes(critical)
-              )
-            )
-            if (criticalStopped.length > 0) {
-              issues.push(`${criticalStopped.length} critical service(s) stopped`)
-            }
-          }
-          
-        } catch {
-          // Fallback to string analysis if JSON parsing fails
-          
-          // Check for common error patterns in string output
-          if (output.includes('error') || output.includes('failed') || output.includes('critical')) {
-            if (taskId === 'event_logs') {
-              warnings.push('Critical events found in system logs')
-            } else if (taskId === 'chkdsk') {
-              issues.push('Disk errors detected by chkdsk')
-            } else if (taskId === 'dism_health') {
-              issues.push('Windows image corruption detected')
-            }
-          }
-          
-          // Check for low disk space patterns
-          if (taskId === 'disk_drive' && (output.includes('low') || output.includes('full'))) {
-            warnings.push('Low disk space detected')
-          }
-          
-          // Check for BSOD dumps in string format
-          if (taskId === 'minidump' && output.includes('.dmp')) {
-            issues.push('System crash dumps found')
-          }
-        }
-      } else {
-        failedTasks++
-        issues.push(`Failed to run ${taskId}`)
-      }
-    })
-    
-    // Calculate health score based on execution success AND detected issues
-    let baseScore = Math.round((successfulTasks / totalTasks) * 100)
-    
-    // Reduce score based on issues found
-    let healthScore = baseScore
-    healthScore -= issues.length * 15  // Major issues: -15 points each
-    healthScore -= warnings.length * 8  // Warnings: -8 points each
-    
-    // Ensure score doesn't go below 0
-    healthScore = Math.max(0, healthScore)
-    
-    // If no tasks completed successfully, cap at 20%
-    if (successfulTasks === 0) {
-      healthScore = Math.min(healthScore, 20)
-    }
-    
-    return {
-      totalTasks,
-      successfulTasks,
-      failedTasks,
-      issues,
-      warnings,
-      healthScore
-    }
-  }
-
-  const renderResults = () => {
-    // Filter tasks based on search and category
-    const filteredTasks = availableTasks.filter(task => {
-      const hasResult = results[task.id] !== undefined
-      const matchesSearch = searchQuery === '' || 
-        task.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        task.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (results[task.id]?.output || '').toLowerCase().includes(searchQuery.toLowerCase())
-      const matchesCategory = !selectedCategory || task.category === selectedCategory
-      
-      return hasResult && matchesSearch && matchesCategory
-    })
-    
-    const tasksByCategory = filteredTasks.reduce((acc, task) => {
-      if (!acc[task.category]) acc[task.category] = []
-      acc[task.category].push(task)
-      return acc
-    }, {} as Record<string, DiagnosticTask[]>)
-
-    const healthAnalysis = analyzeResults()
-    
-    return (
-      <div className="results-container">
-        <div className="results-main">
-          {/* Health Summary Card */}
-          <Card style={{ marginBottom: 24, border: '2px solid var(--colorBrandBackground)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <h3>System Health Summary</h3>
-                <div style={{ fontSize: 48, fontWeight: 'bold', color: 
-                  healthAnalysis.healthScore >= 90 ? 'green' :
-                  healthAnalysis.healthScore >= 70 ? 'orange' : 'red'
-                }}>
-                  {healthAnalysis.healthScore}%
+                  {idx < value.length - 1 && idx < 99 && <Divider style={{ margin: '8px 0' }} />}
                 </div>
-                <p style={{ opacity: 0.8 }}>
-                  {healthAnalysis.successfulTasks} of {healthAnalysis.totalTasks} diagnostics completed
-                </p>
-              </div>
-              <div style={{ textAlign: 'right' }}>
-                {healthAnalysis.issues.length > 0 && (
-                  <MessageBar intent="error" style={{ marginBottom: 8 }}>
-                    <MessageBarBody>
-                      <MessageBarTitle>{healthAnalysis.issues.length} Issues Found</MessageBarTitle>
-                      <ul style={{ margin: '8px 0', paddingLeft: 20 }}>
-                        {healthAnalysis.issues.map((issue, i) => (
-                          <li key={i}>{issue}</li>
-                        ))}
-                      </ul>
-                    </MessageBarBody>
-                  </MessageBar>
-                )}
-                {healthAnalysis.warnings.length > 0 && (
-                  <MessageBar intent="warning">
-                    <MessageBarBody>
-                      <MessageBarTitle>{healthAnalysis.warnings.length} Warnings</MessageBarTitle>
-                      <ul style={{ margin: '8px 0', paddingLeft: 20 }}>
-                        {healthAnalysis.warnings.map((warning, i) => (
-                          <li key={i}>{warning}</li>
-                        ))}
-                      </ul>
-                    </MessageBarBody>
-                  </MessageBar>
-                )}
-              </div>
-            </div>
-          </Card>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-            <div>
-              <h2>Detailed Results</h2>
-              <p style={{ opacity: 0.8 }}>
-                {Object.keys(results).length} diagnostics completed
-              </p>
-            </div>
-            <div>
-              <Button 
-                appearance="primary"
-                icon={<CopyIcon />}
-                onClick={copyToClipboard}
-              >
-                Copy for Forum
-              </Button>
-              <Button 
-                icon={<UploadIcon />}
-                onClick={() => setShowExportDialog(true)}
-                style={{ marginLeft: 8 }}
-              >
-                Export File
-              </Button>
-              <Button 
-                onClick={() => {
-                  setResults({})
-                  setCurrentView('home')
-                }}
-                style={{ marginLeft: 8 }}
-              >
-                New Check
-              </Button>
-            </div>
-          </div>
-
-          <div style={{ 
-            display: 'flex', 
-            gap: 12, 
-            marginBottom: 24,
-            alignItems: 'center',
-            flexWrap: 'wrap'
-          }}>
-            <Input
-              placeholder="Search results..."
-              value={searchQuery}
-              onChange={(_, data) => setSearchQuery(data.value)}
-              style={{ flex: 1, minWidth: 200 }}
-            />
-            <Dropdown
-              placeholder="All Categories"
-              value={selectedCategory || ''}
-              onOptionSelect={(_, data) => setSelectedCategory(data.optionValue === '' ? null : (data.optionValue || null))}
-              style={{ minWidth: 200 }}
-            >
-              <Option value="">All Categories</Option>
-              {Object.keys(availableTasks.reduce((acc, task) => {
-                if (results[task.id]) acc[task.category] = true
-                return acc
-              }, {} as Record<string, boolean>)).map(cat => (
-                <Option key={cat} value={cat}>{cat}</Option>
-              ))}
-            </Dropdown>
-            
-            {/* Output Mode Toggle */}
-            <Checkbox
-              checked={outputMode === 'json'}
-              onChange={(_, data) => setOutputMode(data.checked ? 'json' : 'rich')}
-              label="JSON"
-            />
-            
-            <Button 
-              onClick={() => {
-                setSearchQuery('')
-                setSelectedCategory(null)
-              }}
-            >
-              Clear Filters
-            </Button>
-          </div>
-
-          {Object.entries(tasksByCategory).map(([category, tasks]) => (
-            <div key={category} data-category={category}>
-              <h3 style={{ 
-                marginTop: 32, 
-                marginBottom: 16,
-                padding: '8px 0',
-                borderBottom: selectedCategory === category ? '2px solid var(--colorBrandBackground)' : '1px solid var(--colorNeutralStroke1)'
-              }}>
-                {category}
-                <span style={{ 
-                  fontSize: 14, 
-                  opacity: 0.7, 
-                  marginLeft: 12,
-                  fontWeight: 'normal'
-                }}>
-                  ({tasks.filter(task => results[task.id]?.success).length}/{tasks.length} completed)
-                </span>
-              </h3>
-              {tasks.map(task => {
-                const result = results[task.id]
-                if (!result) return null
-
-                return (
-                  <Card 
-                    key={task.id} 
-                    className="result-card" 
-                    data-task-id={task.id}
-                    style={{
-                      border: highlightedTask === task.id ? '2px solid var(--colorBrandBackground)' : undefined,
-                      boxShadow: highlightedTask === task.id ? '0 4px 12px rgba(0, 123, 255, 0.2)' : undefined,
-                      transition: 'all 0.3s ease'
-                    }}
-                  >
-                    <div className="result-card-header">
-                      <div>
-                        <h4>{task.name}</h4>
-                        <p style={{ fontSize: 12, opacity: 0.7 }}>{task.description}</p>
-                        <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-                          <span style={{ 
-                            fontSize: 10, 
-                            padding: '2px 6px', 
-                            borderRadius: 2,
-                            background: 'var(--colorBrandBackground)',
-                            color: 'white'
-                          }}>
-                            {task.category}
-                          </span>
-                          {task.admin_required && (
-                            <span style={{ 
-                              fontSize: 10, 
-                              padding: '2px 6px', 
-                              borderRadius: 2,
-                              background: 'orange',
-                              color: 'white'
-                            }}>
-                              Admin
-                            </span>
-                          )}
-                          <span style={{ fontSize: 10, opacity: 0.6 }}>
-                            {result.duration_ms}ms
-                          </span>
-                        </div>
-                      </div>
-                      <div style={{ 
-                        color: result.success ? 'green' : 'red',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: 'flex-end'
-                      }}>
-                        <span style={{ fontSize: 14, fontWeight: 600 }}>
-                          {result.success ? '✓ Success' : '✗ Failed'}
-                        </span>
-                        {highlightedTask === task.id && (
-                          <span style={{ 
-                            fontSize: 10, 
-                            color: 'var(--colorBrandBackground)',
-                            marginTop: 4
-                          }}>
-                            📍 Selected
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    {renderTaskOutput(result)}
-                    {result.error && (
-                      <MessageBar intent="error" style={{ marginTop: 12 }}>
-                        <MessageBarBody>{result.error}</MessageBarBody>
-                      </MessageBar>
-                    )}
-                  </Card>
-                )
-              })}
-            </div>
-          ))}
-        </div>
-
-        <div className="category-sidebar">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <h3 style={{ margin: 0 }}>Categories</h3>
-            {selectedCategory && (
-              <Button
-                appearance="transparent"
-                size="small"
-                onClick={() => {
-                  setSelectedCategory(null)
-                  setExpandedCategory(null)
-                  setHighlightedTask(null)
-                  setSearchQuery('')
-                  // Scroll to top of results
-                  document.querySelector('.results-main')?.scrollTo({ top: 0, behavior: 'smooth' })
-                }}
-              >
-                View All
-              </Button>
+              ))
+            ) : (
+              Object.entries(value).slice(0, 50).map(([k, v]) => renderResultItem(k, v, depth + 1)) // Limit object properties
+            )}
+            {Array.isArray(value) && value.length > 100 && (
+              <Text size={200} style={{ fontStyle: 'italic', color: tokens.colorNeutralForeground3 }}>
+                ... and {value.length - 100} more items
+              </Text>
             )}
           </div>
-          {Object.keys(tasksByCategory).map(category => {
-            const categoryTasks = tasksByCategory[category]
-            const isExpanded = expandedCategory === category
-            const completedTasks = categoryTasks.filter(task => results[task.id]?.success).length
-            const totalTasks = categoryTasks.length
+        </div>
+      )
+    }
+    
+    return (
+      <div key={key} className="result-grid" style={{ marginLeft: depth * 16 }}>
+        <div className="result-label">
+          <i className={`fas ${getIcon(key)}`} style={{ fontSize: 10 }}></i>
+          {formattedKey}
+        </div>
+        <div className="result-value">
+          {String(value)}
+        </div>
+      </div>
+    )
+  }
+
+  const renderDiagnosticsTab = () => {
+    const healthScore = getHealthScore()
+    const hasResults = Object.keys(results).length > 0
+    const resultsByCategory = availableTasks.reduce((acc, task) => {
+      if (results[task.id]) {
+        if (!acc[task.category]) acc[task.category] = []
+        acc[task.category].push({ task, result: results[task.id] })
+      }
+      return acc
+    }, {} as Record<string, Array<{ task: DiagnosticTask; result: TaskResult }>>)
+
+    // Show comparison view if selected
+    if (showComparison) {
+      return (
+        <ComparisonView
+          onClose={() => setShowComparison(false)}
+        />
+      )
+    }
+
+    return (
+      <div style={{ maxWidth: 1200, margin: '0 auto' }}>
+        {/* Quick Actions - Welcome Screen */}
+        {!isRunning && !hasResults && (
+          <div className="glass-card" style={{ marginBottom: 24, padding: 48, textAlign: 'center' }}>
+            <div className="gradient-bg" style={{ 
+              width: 80, 
+              height: 80, 
+              borderRadius: '50%', 
+              display: 'flex', 
+              alignItems: 'center', 
+              justifyContent: 'center',
+              margin: '0 auto 24px',
+              boxShadow: '0 8px 24px rgba(59, 130, 246, 0.4)'
+            }}>
+              <i className="fas fa-laptop-medical" style={{ color: 'white', fontSize: 40 }}></i>
+            </div>
             
-            return (
-              <div key={category} style={{ marginBottom: 12 }}>
+            <Text size={700} weight="bold" block style={{ marginBottom: 12, color: '#f1f5f9' }}>
+              Welcome to System Diagnostics
+            </Text>
+            <Text size={400} block style={{ marginBottom: 32, color: '#94a3b8', maxWidth: 600, margin: '0 auto 32px' }}>
+              Choose a scan type to analyze your Windows system. Quick Scan covers essential checks, 
+              while Full Scan performs comprehensive analysis of all components.
+            </Text>
+            
+            <div style={{ display: 'flex', gap: 20, justifyContent: 'center', marginBottom: 32 }}>
+              <button 
+                className="modern-button primary"
+                onClick={runQuickScan}
+                style={{ fontSize: 16, padding: '14px 28px' }}
+              >
+                <i className="fas fa-bolt"></i>
+                Quick Scan
+                <span style={{ opacity: 0.8, fontSize: 14, marginLeft: 8 }}>(~30 sec)</span>
+              </button>
+              <button 
+                className="modern-button success"
+                onClick={runFullScan}
+                style={{ fontSize: 16, padding: '14px 28px' }}
+              >
+                <i className="fas fa-search-plus"></i>
+                Full Scan
+                <span style={{ opacity: 0.8, fontSize: 14, marginLeft: 8 }}>(3-5 min)</span>
+              </button>
+            </div>
+
+            {/* Info Cards */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginTop: 32 }}>
+              <div style={{ background: 'rgba(59, 130, 246, 0.1)', padding: 16, borderRadius: 8, border: '1px solid rgba(59, 130, 246, 0.3)' }}>
+                <i className="fas fa-shield-alt" style={{ color: '#3b82f6', fontSize: 24, marginBottom: 8 }}></i>
+                <Text size={300} weight="semibold" block style={{ color: '#f1f5f9', marginBottom: 4 }}>Security Check</Text>
+                <Text size={200} style={{ color: '#94a3b8' }}>Analyzes system security settings</Text>
+              </div>
+              <div style={{ background: 'rgba(16, 185, 129, 0.1)', padding: 16, borderRadius: 8, border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                <i className="fas fa-microchip" style={{ color: '#10b981', fontSize: 24, marginBottom: 8 }}></i>
+                <Text size={300} weight="semibold" block style={{ color: '#f1f5f9', marginBottom: 4 }}>Hardware Analysis</Text>
+                <Text size={200} style={{ color: '#94a3b8' }}>Checks CPU, RAM, and devices</Text>
+              </div>
+              <div style={{ background: 'rgba(139, 92, 246, 0.1)', padding: 16, borderRadius: 8, border: '1px solid rgba(139, 92, 246, 0.3)' }}>
+                <i className="fas fa-cogs" style={{ color: '#8b5cf6', fontSize: 24, marginBottom: 8 }}></i>
+                <Text size={300} weight="semibold" block style={{ color: '#f1f5f9', marginBottom: 4 }}>Performance</Text>
+                <Text size={200} style={{ color: '#94a3b8' }}>Identifies bottlenecks</Text>
+              </div>
+            </div>
+
+            {systemInfo && !systemInfo.is_admin && (
+              <div className="status-badge warning" style={{ marginTop: 24, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+                  <i className="fas fa-info-circle"></i>
+                  <Text size={300} weight="semibold" style={{ color: '#f59e0b', marginLeft: 8 }}>
+                    Running without administrator privileges
+                  </Text>
+                </div>
+                <Text size={200} style={{ color: '#94a3b8', marginBottom: 8 }}>
+                  {availableTasks.filter(task => !task.admin_required || systemInfo?.is_admin).length} of {availableTasks.length} diagnostic tasks available • 5 admin-only tasks hidden (disk check, DISM health, battery report, driver verifier, crash dumps)
+                </Text>
                 <Button 
-                  appearance={selectedCategory === category ? "primary" : "subtle"}
-                  style={{ 
-                    width: '100%', 
-                    justifyContent: 'space-between', 
-                    marginBottom: 4,
-                    padding: '8px 12px'
+                  appearance="transparent" 
+                  size="small"
+                  onClick={restartAsAdmin}
+                  style={{ color: '#f59e0b', padding: '4px 12px', border: '1px solid rgba(245, 158, 11, 0.3)' }}
+                >
+                  <i className="fas fa-shield-alt" style={{ marginRight: 6 }}></i>
+                  Restart as Administrator for Full Access
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Progress - Scanning Animation */}
+        {isRunning && (
+          <div className="glass-card scan-animation" style={{ marginBottom: 24, padding: 48, textAlign: 'center' }}>
+            <div style={{ position: 'relative', display: 'inline-block' }}>
+              <i className="fas fa-spinner icon-spin" style={{ fontSize: 64, color: '#3b82f6', marginBottom: 24 }}></i>
+            </div>
+            <Text size={600} weight="bold" block style={{ marginBottom: 8, color: '#f1f5f9' }}>
+              Scanning Your System...
+            </Text>
+            <Text size={300} block style={{ marginBottom: 24, color: '#94a3b8' }}>
+              <i className="fas fa-tasks" style={{ marginRight: 8 }}></i>
+              {currentTaskName}
+            </Text>
+            <div className="modern-progress" style={{ maxWidth: 500, margin: '0 auto 16px', height: 12 }}>
+              <div className="modern-progress-bar" style={{ width: `${currentProgress}%` }}></div>
+            </div>
+            <Text size={400} weight="semibold" style={{ color: '#3b82f6' }}>
+              {Math.round(currentProgress)}% Complete
+            </Text>
+          </div>
+        )}
+
+        {/* Search and Comparison Bar */}
+        {hasResults && !isRunning && (
+          <div className="glass-card" style={{ 
+            marginBottom: 24, 
+            padding: 16,
+            background: 'linear-gradient(135deg, rgba(59, 130, 246, 0.05), rgba(139, 92, 246, 0.05))'
+          }}>
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+              <div style={{ flex: 1, position: 'relative' }}>
+                <input
+                  type="text"
+                  placeholder="Search in results (task names, errors, output)..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '10px 40px 10px 16px',
+                    background: 'rgba(30, 41, 59, 0.6)',
+                    border: '1px solid rgba(59, 130, 246, 0.3)',
+                    borderRadius: 8,
+                    color: '#f1f5f9',
+                    fontSize: 14
                   }}
-                  onClick={() => {
-                    // Toggle expansion and scroll to category
-                    if (isExpanded) {
-                      setExpandedCategory(null)
-                    } else {
-                      setExpandedCategory(category)
-                    }
-                    setSelectedCategory(category)
-                    
-                    // Scroll to category section
-                    setTimeout(() => {
-                      const element = document.querySelector(`[data-category="${category}"]`)
-                      element?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                    }, 100)
+                />
+                <i className="fas fa-search" style={{
+                  position: 'absolute',
+                  right: 16,
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  color: '#94a3b8'
+                }}></i>
+              </div>
+              <button 
+                className="modern-button"
+                onClick={() => {
+                  console.log('Opening comparison view')
+                  setShowComparison(true)
+                }}
+                style={{
+                  background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)',
+                  padding: '10px 20px'
+                }}
+              >
+                <i className="fas fa-history" style={{ marginRight: 8 }}></i>
+                Compare with Previous
+              </button>
+              {searchQuery && (
+                <div style={{ 
+                  padding: '6px 12px',
+                  background: 'rgba(59, 130, 246, 0.2)',
+                  borderRadius: 6,
+                  fontSize: 13,
+                  color: '#60a5fa',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8
+                }}>
+                  <i className="fas fa-filter" style={{ fontSize: 12 }}></i>
+                  {Object.keys(filteredResults).length} of {Object.keys(results).length} results
+                </div>
+              )}
+              {searchQuery && (
+                <button
+                  className="modern-button"
+                  onClick={() => setSearchQuery('')}
+                  style={{
+                    background: 'rgba(239, 68, 68, 0.2)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    padding: '6px 12px',
+                    fontSize: 13
                   }}
                 >
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
-                    <span style={{ fontWeight: selectedCategory === category ? 600 : 400 }}>
-                      {category}
-                    </span>
-                    <span style={{ fontSize: 11, opacity: 0.7 }}>
-                      {completedTasks}/{totalTasks} completed
-                    </span>
+                  <i className="fas fa-times" style={{ marginRight: 6 }}></i>
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Results with Left Sidebar Navigation */}
+        {hasResults && !isRunning && !showComparison && (
+          <div style={{ display: 'flex', gap: 24, height: 'calc(100vh - 250px)' }}>
+            {/* Left Sidebar Navigation */}
+            <div className="glass-card scrollable-container" style={{ 
+              width: 280, 
+              padding: 20,
+              height: '100%',
+              position: 'sticky',
+              top: 20,
+              overflowY: 'scroll',
+              overflowX: 'hidden'
+            }}>
+              <div style={{ marginBottom: 24 }}>
+                <Text size={400} weight="bold" style={{ color: '#f1f5f9', marginBottom: 12, display: 'block' }}>
+                  <i className="fas fa-chart-pie" style={{ marginRight: 8 }}></i>
+                  Health Score
+                </Text>
+                <div className="health-score-circle" style={{ 
+                  '--score': healthScore,
+                  width: 80,
+                  height: 80,
+                  margin: '0 auto',
+                  position: 'relative'
+                } as React.CSSProperties}>
+                  <div className="health-score-value" style={{ fontSize: 24, fontWeight: 'bold' }}>
+                    {healthScore}%
                   </div>
-                  <span style={{ fontSize: 12 }}>
-                    {isExpanded ? '▼' : '▶'}
-                  </span>
-                </Button>
+                </div>
                 
-                {/* Expanded task list */}
-                {isExpanded && (
-                  <div style={{ 
-                    paddingLeft: 12, 
-                    borderLeft: '2px solid var(--colorNeutralStroke2)',
-                    marginLeft: 8 
-                  }}>
-                    {categoryTasks.map(task => {
-                      const taskResult = results[task.id]
-                      return (
-                        <Button
-                          key={task.id}
-                          appearance="transparent"
-                          size="small"
-                          style={{ 
-                            width: '100%', 
-                            justifyContent: 'flex-start', 
-                            marginBottom: 2,
-                            padding: '4px 8px',
-                            minHeight: 'auto'
-                          }}
-                          onClick={() => {
-                            // Highlight and scroll to specific task
-                            setHighlightedTask(task.id)
-                            
-                            // Clear highlight after a few seconds
-                            setTimeout(() => setHighlightedTask(null), 3000)
-                            
-                            // Scroll to specific task
-                            setTimeout(() => {
-                              const element = document.querySelector(`[data-task-id="${task.id}"]`)
-                              element?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-                            }, 100)
-                          }}
-                        >
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <span style={{ 
-                              fontSize: 10,
-                              color: taskResult?.success ? 'green' : taskResult ? 'red' : 'orange'
-                            }}>
-                              {taskResult?.success ? '✓' : taskResult ? '✗' : '○'}
-                            </span>
-                            <span style={{ fontSize: 12 }}>{task.name}</span>
-                          </div>
-                        </Button>
-                      )
-                    })}
-                  </div>
-                )}
+                <div style={{ marginTop: 12, textAlign: 'center' }}>
+                  {healthScore !== null && healthScore >= 90 && (
+                    <div className="status-badge success">
+                      <i className="fas fa-check-circle"></i>
+                      Excellent
+                    </div>
+                  )}
+                  {healthScore !== null && healthScore >= 70 && healthScore < 90 && (
+                    <div className="status-badge warning">
+                      <i className="fas fa-exclamation-circle"></i>
+                      Good
+                    </div>
+                  )}
+                  {healthScore !== null && healthScore < 70 && (
+                    <div className="status-badge danger">
+                      <i className="fas fa-times-circle"></i>
+                      Needs Attention
+                    </div>
+                  )}
+                </div>
               </div>
-            )
-          })}
-        </div>
+
+              <Divider style={{ margin: '20px 0' }} />
+              
+              {/* Navigation Menu */}
+              <Text size={300} weight="semibold" style={{ color: '#94a3b8', marginBottom: 12, display: 'block' }}>
+                CATEGORIES
+              </Text>
+              {Object.entries(resultsByCategory).map(([category, items]) => {
+                const catInfo = (() => {
+                  const categoryMap: Record<string, { icon: string, color: string }> = {
+                    'System': { icon: 'fa-desktop', color: '#3b82f6' },
+                    'Hardware': { icon: 'fa-microchip', color: '#10b981' },
+                    'Storage': { icon: 'fa-hdd', color: '#8b5cf6' },
+                    'Network': { icon: 'fa-network-wired', color: '#f59e0b' },
+                    'Drivers': { icon: 'fa-cogs', color: '#ef4444' },
+                    'Software': { icon: 'fa-th', color: '#06b6d4' },
+                    'Logs': { icon: 'fa-file-alt', color: '#ec4899' },
+                    'Debug': { icon: 'fa-bug', color: '#a855f7' },
+                    'Performance': { icon: 'fa-tachometer-alt', color: '#14b8a6' }
+                  }
+                  return categoryMap[category] || { icon: 'fa-folder', color: '#64748b' }
+                })()
+                
+                return (
+                  <a
+                    key={category}
+                    href={`#category-${category}`}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '10px 12px',
+                      borderRadius: 8,
+                      marginBottom: 4,
+                      textDecoration: 'none',
+                      background: 'rgba(30, 41, 59, 0.3)',
+                      transition: 'all 0.2s'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = 'rgba(59, 130, 246, 0.1)'
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = 'rgba(30, 41, 59, 0.3)'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <i className={`fas ${catInfo.icon}`} style={{ color: catInfo.color, width: 16 }}></i>
+                      <Text size={200} style={{ color: '#f1f5f9' }}>{category}</Text>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <span style={{ 
+                        fontSize: 11, 
+                        color: items.every(i => i.result.success) ? '#10b981' : '#f59e0b'
+                      }}>
+                        {items.filter(i => i.result.success).length}/{items.length}
+                      </span>
+                    </div>
+                  </a>
+                )
+              })}
+              
+              <Divider style={{ margin: '20px 0' }} />
+              
+              {/* Actions */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <button className="modern-button primary" onClick={copyToClipboard} style={{ width: '100%' }}>
+                  <i className="fas fa-copy"></i>
+                  Copy Report
+                </button>
+                <button className="modern-button success" onClick={exportResults} style={{ width: '100%' }}>
+                  <i className="fas fa-download"></i>
+                  Export
+                </button>
+                <button className="modern-button" onClick={() => setResults({})} style={{ 
+                  width: '100%',
+                  background: 'rgba(30, 41, 59, 0.8)',
+                  color: '#94a3b8'
+                }}>
+                  <i className="fas fa-redo"></i>
+                  New Scan
+                </button>
+              </div>
+            </div>
+
+            {/* Main Content Area - All Results Visible */}
+            <div className="scrollable-container" style={{ 
+              flex: 1, 
+              overflowY: 'scroll',
+              overflowX: 'hidden',
+              height: '100%',
+              paddingRight: 10
+            }}>
+              {searchQuery && Object.keys(filteredResults).length === 0 && (
+                <div className="glass-card" style={{ 
+                  padding: 48, 
+                  textAlign: 'center',
+                  marginBottom: 24
+                }}>
+                  <i className="fas fa-search" style={{ fontSize: 48, color: '#64748b', marginBottom: 16 }}></i>
+                  <Text size={400} style={{ color: '#94a3b8', display: 'block' }}>
+                    No results found for "{searchQuery}"
+                  </Text>
+                  <Text size={200} style={{ color: '#64748b', display: 'block', marginTop: 8 }}>
+                    Try searching for different keywords
+                  </Text>
+                </div>
+              )}
+              {Object.entries(searchQuery ? 
+                // Filter categories based on search results
+                availableTasks.reduce((acc, task) => {
+                  if (filteredResults[task.id]) {
+                    if (!acc[task.category]) acc[task.category] = []
+                    acc[task.category].push({ task, result: filteredResults[task.id] })
+                  }
+                  return acc
+                }, {} as Record<string, Array<{ task: DiagnosticTask; result: TaskResult }>>)
+                : resultsByCategory
+              ).map(([category, items]) => {
+                const getCategoryInfo = (cat: string) => {
+                  const categoryMap: Record<string, { icon: string, color: string, description: string }> = {
+                    'System': { icon: 'fa-desktop', color: '#3b82f6', description: 'Operating system and configuration' },
+                    'Hardware': { icon: 'fa-microchip', color: '#10b981', description: 'CPU, RAM, motherboard details' },
+                    'Storage': { icon: 'fa-hdd', color: '#8b5cf6', description: 'Disk drives and storage information' },
+                    'Network': { icon: 'fa-network-wired', color: '#f59e0b', description: 'Network adapters and connectivity' },
+                    'Drivers': { icon: 'fa-cogs', color: '#ef4444', description: 'Device drivers and versions' },
+                    'Software': { icon: 'fa-th', color: '#06b6d4', description: 'Installed programs and features' },
+                    'Logs': { icon: 'fa-file-alt', color: '#ec4899', description: 'Event logs and system history' },
+                    'Debug': { icon: 'fa-bug', color: '#a855f7', description: 'Debugging and crash information' },
+                    'Performance': { icon: 'fa-tachometer-alt', color: '#14b8a6', description: 'System performance metrics' }
+                  }
+                  return categoryMap[cat] || { icon: 'fa-folder', color: '#64748b', description: 'System information' }
+                }
+                
+                const catInfo = getCategoryInfo(category)
+                
+                try {
+                  return (
+                    <div key={category} id={`category-${category}`} className="glass-card" style={{ marginBottom: 24, padding: 0 }}>
+                      {/* Category Header - Always Visible */}
+                      <div style={{ 
+                        background: `linear-gradient(135deg, ${catInfo.color}22, ${catInfo.color}11)`,
+                        borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+                        padding: 20
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+                          <div className="category-icon" style={{ background: catInfo.color }}>
+                            <i className={`fas ${catInfo.icon}`}></i>
+                          </div>
+                          <div style={{ flex: 1 }}>
+                            <Text size={500} weight="bold" style={{ color: '#f1f5f9' }}>{category}</Text>
+                            <Text size={300} style={{ color: '#94a3b8', display: 'block', marginTop: 2 }}>
+                              {catInfo.description}
+                            </Text>
+                          </div>
+                          {items.every(i => i.result.success) ? (
+                            <div className="status-badge success">
+                              <i className="fas fa-check-circle"></i>
+                              All Tests Passed
+                            </div>
+                          ) : (
+                            <div className="status-badge warning">
+                              <i className="fas fa-exclamation-circle"></i>
+                              {items.filter(i => i.result.success).length} of {items.length} Passed
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      
+                      {/* All Results - Always Visible */}
+                      <div style={{ padding: 20 }}>
+                        {items.map(({ task, result }) => {
+                          try {
+                            return (
+                              <div key={task.id} className="result-section" style={{ 
+                                marginBottom: 16,
+                                padding: 16,
+                                borderRadius: 8,
+                                background: 'rgba(30, 41, 59, 0.3)'
+                              }}>
+                                {/* Task Header */}
+                                <div style={{ 
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 12,
+                                  marginBottom: 12,
+                                  paddingBottom: 12,
+                                  borderBottom: '1px solid rgba(255, 255, 255, 0.05)'
+                                }}>
+                                  {result.success ? 
+                                    <i className="fas fa-check-circle" style={{ color: '#10b981', fontSize: 18 }}></i> :
+                                    <i className="fas fa-times-circle" style={{ color: '#ef4444', fontSize: 18 }}></i>
+                                  }
+                                  <Text size={300} weight="semibold" style={{ color: '#f1f5f9' }}>{task.name}</Text>
+                                  <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <i className="fas fa-clock" style={{ fontSize: 10, color: '#64748b' }}></i>
+                                    <Text size={200} style={{ color: '#64748b' }}>
+                                      {result.duration_ms}ms
+                                    </Text>
+                                  </div>
+                                </div>
+                                
+                                {/* Task Results - Always Visible */}
+                                <div style={{ paddingLeft: 30 }}>
+                            {result.error ? (
+                              <Text size={200} style={{ color: tokens.colorPaletteRedForeground1 }}>
+                                Error: {result.error}
+                              </Text>
+                            ) : (
+                              <div>
+                                {(() => {
+                                  try {
+                                    const parsed = parseOutput(result.output)
+                                    if (typeof parsed === 'object' && parsed !== null) {
+                                      if (Array.isArray(parsed)) {
+                                        return parsed.map((item, idx) => (
+                                          <div key={idx} style={{ marginBottom: 12 }}>
+                                            {typeof item === 'object' && item !== null ? 
+                                              Object.entries(item).filter(([, v]) => v !== undefined).map(([k, v]) => <React.Fragment key={k}>{renderResultItem(k, v)}</React.Fragment>) :
+                                              <Text size={200}>{String(item)}</Text>
+                                            }
+                                            {idx < parsed.length - 1 && <Divider style={{ marginTop: 8 }} />}
+                                          </div>
+                                        ))
+                                      } else {
+                                        return Object.entries(parsed).filter(([, v]) => v !== undefined).map(([k, v]) => <React.Fragment key={k}>{renderResultItem(k, v)}</React.Fragment>)
+                                      }
+                                    }
+                                    return <Text size={200} style={{ whiteSpace: 'pre-wrap' }}>{result.output}</Text>
+                                  } catch (error) {
+                                    console.error('Error rendering result:', error, 'Task:', task.name, 'Output:', result.output)
+                                    return <Text size={200} style={{ whiteSpace: 'pre-wrap' }}>{String(result.output)}</Text>
+                                  }
+                                })()}
+                              </div>
+                            )}
+                                </div>
+                              </div>
+                            )
+                          } catch (error) {
+                            console.error('Error rendering task:', task.name, error)
+                            return (
+                              <div key={task.id} className="result-section" style={{ marginBottom: 16, padding: 12 }}>
+                                <Text size={200} style={{ color: '#ef4444' }}>
+                                  <i className="fas fa-exclamation-triangle" style={{ marginRight: 8 }}></i>
+                                  Error rendering {task.name}
+                                </Text>
+                              </div>
+                            )
+                          }
+                        })}
+                      </div>
+                    </div>
+                  )
+                } catch (categoryError) {
+                  console.error('Error rendering category:', category, categoryError)
+                  return (
+                    <div key={category} className="glass-card" style={{ marginBottom: 16, padding: 20 }}>
+                      <Text size={200} style={{ color: '#ef4444' }}>
+                        <i className="fas fa-exclamation-triangle" style={{ marginRight: 8 }}></i>
+                        Error rendering category: {category}
+                      </Text>
+                    </div>
+                  )
+                }
+              })}
+            </div>
+          </div>
+        )}
+        
       </div>
     )
   }
 
-  const renderAdvancedView = () => (
-    <div className="advanced-container">
-      <div className="task-sidebar">
-        <div style={{ padding: '16px 12px', borderBottom: '1px solid var(--colorNeutralStroke1)' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <h3>Diagnostic Tasks</h3>
-            <div>
-              <Button size="small" onClick={() => {
-                const allIds = new Set(availableTasks.map(t => t.id))
-                setSelectedTasks(allIds)
-              }}>All</Button>
-              <Button size="small" onClick={() => setSelectedTasks(new Set())} style={{ marginLeft: 4 }}>
-                None
-              </Button>
-            </div>
-          </div>
-        </div>
-
-        <div className="task-list">
-          {availableTasks.map(task => (
-            <div key={task.id} className="task-item">
-              <Checkbox
-                label={
-                  <div>
-                    <div style={{ fontWeight: 600 }}>{task.name}</div>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>{task.description}</div>
-                    <div style={{ marginTop: 4 }}>
-                      <span style={{ 
-                        fontSize: 10, 
-                        padding: '2px 6px', 
-                        borderRadius: 2,
-                        background: 'var(--colorBrandBackground)',
-                        color: 'white',
-                        marginRight: 4
-                      }}>
-                        {task.category}
-                      </span>
-                      {task.admin_required && (
-                        <span style={{ 
-                          fontSize: 10, 
-                          padding: '2px 6px', 
-                          borderRadius: 2,
-                          background: 'orange',
-                          color: 'white'
-                        }}>
-                          Admin
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                }
-                checked={selectedTasks.has(task.id)}
-                onChange={(_, data) => {
-                  const newSelected = new Set(selectedTasks)
-                  if (data.checked) {
-                    newSelected.add(task.id)
-                  } else {
-                    newSelected.delete(task.id)
-                  }
-                  setSelectedTasks(newSelected)
-                }}
-              />
-            </div>
-          ))}
-        </div>
-
-        <div className="task-controls">
-          <Button 
-            appearance="primary"
-            disabled={selectedTasks.size === 0 || isRunning}
-            onClick={startDiagnostics}
-            style={{ width: '100%' }}
-          >
-            Run Diagnostics ({selectedTasks.size} selected)
-          </Button>
-        </div>
-      </div>
-
-      <div style={{ flex: 1, padding: 24, overflow: 'auto' }}>
-        {currentView === 'progress' ? renderProgress() : 
-         currentView === 'results' ? renderResults() :
-         (
-          <div>
-            {/* Health Summary for Advanced Mode */}
-            {Object.keys(results).length > 0 && (() => {
-              const healthAnalysis = analyzeResults()
-              return (
-                <Card style={{ marginBottom: 24, border: '2px solid var(--colorBrandBackground)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
-                      <h3>System Health Summary</h3>
-                      <div style={{ fontSize: 36, fontWeight: 'bold', color: 
-                        healthAnalysis.healthScore >= 90 ? 'green' :
-                        healthAnalysis.healthScore >= 70 ? 'orange' : 'red'
-                      }}>
-                        {healthAnalysis.healthScore}%
-                      </div>
-                      <p style={{ opacity: 0.8 }}>
-                        {healthAnalysis.successfulTasks} of {healthAnalysis.totalTasks} diagnostics completed
-                      </p>
-                    </div>
-                    <Button 
-                      appearance="primary" 
-                      onClick={() => setCurrentView('results')}
-                    >
-                      View Detailed Results
-                    </Button>
-                  </div>
-                </Card>
-              )
-            })()}
-            
-            <div style={{ textAlign: 'center', paddingTop: Object.keys(results).length > 0 ? 20 : 100 }}>
-              <h2>Advanced Diagnostics</h2>
-              <p style={{ marginTop: 16, opacity: 0.7 }}>
-                Select diagnostic tasks from the left panel to begin.<br/>
-                This mode provides full control over all diagnostic options.
-              </p>
-            </div>
-          </div>
-         )}
-      </div>
-    </div>
-  )
-
   return (
-    <FluentProvider theme={isDarkMode ? webDarkTheme : webLightTheme}>
-      <div className="app-container">
-        <header className="header">
-          <div className="header-title">
-            <WindowIcon style={{ fontSize: 32 }} />
-            <div>
-              <h1>WindowsForum Diagnostic Tool</h1>
-              <div style={{ fontSize: 14, opacity: 0.7, margin: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                {systemInfo && (
-                  <p style={{ margin: 0 }}>
-                    {systemInfo.computer_name} • {windowsVersion || systemInfo.os_version}
-                  </p>
-                )}
-                {systemUptime && (
-                  <p style={{ margin: 0, fontSize: 12, opacity: 0.6 }}>
-                    Uptime: {systemUptime}
-                  </p>
-                )}
+    <FluentProvider theme={webDarkTheme}>
+      <div style={{ 
+        minHeight: '100vh', 
+        background: '#0f172a', 
+        color: '#f1f5f9',
+        height: '100vh',
+        position: 'relative',
+        overflow: 'hidden'
+      }}>
+        {/* Modern Header with Glass Effect */}
+        <header className="glass-card" style={{ 
+          borderRadius: 0,
+          borderTop: 'none',
+          borderLeft: 'none',
+          borderRight: 'none',
+          padding: '20px 24px',
+          marginBottom: 0
+        }}>
+          <div style={{ maxWidth: 1200, margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+              <div style={{ 
+                width: 45, 
+                height: 45, 
+                borderRadius: 10, 
+                display: 'flex', 
+                alignItems: 'center', 
+                justifyContent: 'center',
+                boxShadow: '0 4px 12px rgba(59, 130, 246, 0.3)',
+                overflow: 'hidden',
+                background: 'white'
+              }}>
+                <img 
+                  src="/icon.png" 
+                  alt="WF Diagnostics" 
+                  style={{ 
+                    width: '100%', 
+                    height: '100%', 
+                    objectFit: 'contain' 
+                  }}
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <Text size={600} weight="bold" style={{ color: '#f1f5f9' }}>WF Diagnostics</Text>
+                <Text size={200} style={{ color: '#94a3b8' }}>Professional System Analysis Tool</Text>
+              </div>
+              <div className="status-badge success" style={{ marginLeft: 16 }}>
+                <i className="fas fa-check-circle"></i>
+                v2.0.8
               </div>
             </div>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-            <Switch 
-              checked={isDarkMode}
-              onChange={(_, data) => setIsDarkMode(data.checked)}
-              label={isDarkMode ? '🌙' : '☀️'}
-            />
-            <span>View:</span>
-            <div style={{ position: 'relative' }}>
-              <Switch 
-                checked={isAdvancedMode}
-                disabled={isRunning}
-                onChange={(_, data) => {
-                const newMode = data.checked
-                const oldMode = isAdvancedMode
-                
-                // Preserve selections when switching modes
-                if (oldMode && !newMode) {
-                  // Switching from advanced to standard - save current selection
-                  setLastAdvancedSelection(new Set(selectedTasks))
-                  setSelectedTasks(new Set()) // Clear for standard mode
-                } else if (!oldMode && newMode) {
-                  // Switching from standard to advanced - restore previous selection
-                  setSelectedTasks(new Set(lastAdvancedSelection))
-                }
-                
-                setIsAdvancedMode(newMode)
-                
-                // Smart view switching logic
-                if (currentView === 'progress') {
-                  // Don't change view if diagnostics are running (this shouldn't happen due to disabled state)
-                  return
-                } else if (currentView === 'results') {
-                  // Stay in results view if we have results - user can see results in both modes
-                  return
-                } else if (currentView === 'systemCheck' && newMode) {
-                  // If switching to advanced from system check, systemCheck is not available in advanced mode
-                  setCurrentView('home')
-                } else if (currentView === 'systemCheck' && !newMode) {
-                  // Switching from advanced to standard while somehow in systemCheck - shouldn't happen but handle it
-                  return
-                } else {
-                  // For home view or any other view, no change needed
-                  return
-                }
-              }}
-              label={isAdvancedMode ? "Advanced" : "Standard"}
-            />
-            {isRunning && (
-              <span style={{ 
-                fontSize: 11, 
-                opacity: 0.6, 
-                position: 'absolute', 
-                bottom: -16, 
-                left: 0,
-                whiteSpace: 'nowrap'
-              }}>
-                Mode switching disabled during diagnostics
-              </span>
+            {systemInfo && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
+                <div className="tooltip">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <i className="fas fa-desktop" style={{ color: '#94a3b8' }}></i>
+                    <Text size={300} style={{ color: '#94a3b8' }}>{systemInfo.computer_name}</Text>
+                  </div>
+                  <span className="tooltip-text">{systemInfo.os_version}</span>
+                </div>
+                {systemInfo.is_admin ? (
+                  <div className="status-badge success">
+                    <i className="fas fa-shield-alt"></i>
+                    Admin
+                  </div>
+                ) : (
+                  <div className="status-badge warning">
+                    <i className="fas fa-user"></i>
+                    <span>Standard</span>
+                  </div>
+                )}
+              </div>
             )}
-            </div>
           </div>
         </header>
 
-        <main className="main-content">
-          {isAdvancedMode ? renderAdvancedView() : (
-            <div className="view-container">
-              {currentView === 'home' && renderHome()}
-              {currentView === 'systemCheck' && renderSystemCheck()}
-              {currentView === 'progress' && renderProgress()}
-              {currentView === 'results' && renderResults()}
-              {currentView === 'monitoring' && (
-                <SystemMonitoring 
-                  isActive={isMonitoringActive} 
-                  onToggle={setIsMonitoringActive}
-                  onBack={() => setCurrentView('home')}
-                />
-              )}
-              {currentView === 'ai' && (
-                <OpenAIIntegration 
-                  sessionId={sessionId || ''}
-                  onRunDiagnostics={(taskIds) => {
-                    // Could optionally run diagnostics here
-                    console.log('AI requested diagnostics:', taskIds)
-                  }}
-                  onBack={() => setCurrentView('home')}
-                />
-              )}
-            </div>
-          )}
-        </main>
-
-        <footer className="status-bar">
-          <span>
-            {isRunning ? 'Running diagnostics...' : 
-             Object.keys(results).length > 0 ? `${Object.keys(results).length} tasks completed` :
-             'Ready'}
-          </span>
-          <div>
-            <a href="https://www.windowsforum.com" target="_blank" style={{ marginRight: 16 }}>
-              WindowsForum.com
-            </a>
-            <span style={{ opacity: 0.5 }}>v2.0.7-{__BUILD_TIME__}</span>
+        {/* Modern Tab Navigation */}
+        <div style={{ 
+          background: 'rgba(30, 41, 59, 0.5)',
+          borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+          padding: '0 24px'
+        }}>
+          <div style={{ maxWidth: 1200, margin: '0 auto' }}>
+            <TabList 
+              selectedValue={selectedTab} 
+              onTabSelect={(_, data: SelectTabData) => setSelectedTab(data.value as TabValue)}
+              style={{ borderBottom: 'none' }}
+            >
+              <Tab value="diagnostics" style={{ 
+                color: selectedTab === 'diagnostics' ? '#3b82f6' : '#94a3b8',
+                fontWeight: selectedTab === 'diagnostics' ? 600 : 400
+              }}>
+                <i className="fas fa-stethoscope" style={{ marginRight: 8 }}></i>
+                Diagnostics
+              </Tab>
+              <Tab value="monitoring" style={{ 
+                color: selectedTab === 'monitoring' ? '#3b82f6' : '#94a3b8',
+                fontWeight: selectedTab === 'monitoring' ? 600 : 400
+              }}>
+                <i className="fas fa-chart-line" style={{ marginRight: 8 }}></i>
+                System Monitor
+              </Tab>
+              <Tab value="ai" style={{ 
+                color: selectedTab === 'ai' ? '#3b82f6' : '#94a3b8',
+                fontWeight: selectedTab === 'ai' ? 600 : 400
+              }}>
+                <i className="fas fa-brain" style={{ marginRight: 8 }}></i>
+                AI Analysis
+              </Tab>
+            </TabList>
           </div>
-        </footer>
+        </div>
 
-        {/* Export Dialog */}
-        <Dialog open={showExportDialog} onOpenChange={(_, data) => setShowExportDialog(data.open)}>
-          <DialogSurface>
-            <DialogBody>
-              <DialogTitle>Export for WindowsForum.com</DialogTitle>
-              <DialogContent>
-                <p>Your diagnostic report is ready to share!</p>
-                
-                <Card style={{ marginTop: 16, padding: 16, background: 'var(--colorNeutralBackground2)' }}>
-                  <strong>Report includes:</strong>
-                  <p style={{ marginTop: 8, fontSize: 14 }}>
-                    • {Object.keys(results).length} diagnostic tasks<br/>
-                    • System information<br/>
-                    • All test results and outputs
-                  </p>
-                </Card>
-
-                <h4 style={{ marginTop: 16, marginBottom: 8 }}>Choose export format:</h4>
-                <RadioGroup 
-                  value={exportFormat} 
-                  onChange={(_, data) => setExportFormat(data.value as 'text' | 'json')}
-                >
-                  <Radio value="text" label={
-                    <div>
-                      <strong>Forum Text Format</strong>
-                      <div style={{ fontSize: 12, opacity: 0.7 }}>Formatted for easy reading in forum posts</div>
-                    </div>
-                  } />
-                  <Radio value="json" label={
-                    <div style={{ marginTop: 8 }}>
-                      <strong>JSON Format</strong>
-                      <div style={{ fontSize: 12, opacity: 0.7 }}>Complete data for advanced analysis</div>
-                    </div>
-                  } />
-                </RadioGroup>
-
-                <MessageBar intent="info" style={{ marginTop: 16 }}>
-                  <MessageBarBody>
-                    Tip: Create a new thread on WindowsForum.com and paste or attach this report
-                  </MessageBarBody>
-                </MessageBar>
-              </DialogContent>
-              <DialogActions>
-                <DialogTrigger disableButtonEnhancement>
-                  <Button appearance="secondary">Cancel</Button>
-                </DialogTrigger>
-                <Button appearance="primary" onClick={handleExport}>Export</Button>
-              </DialogActions>
-            </DialogBody>
-          </DialogSurface>
-        </Dialog>
+        {/* Main Content Area */}
+        <main style={{ 
+          padding: '24px',
+          height: 'calc(100vh - 180px)',
+          overflowY: 'auto',
+          overflowX: 'hidden'
+        }}>
+          <div style={{ maxWidth: selectedTab === 'ai' ? 1400 : 1200, margin: '0 auto' }}>
+            {selectedTab === 'diagnostics' && renderDiagnosticsTab()}
+            {selectedTab === 'monitoring' && (
+              <SystemMonitoring 
+                isActive={isMonitoringActive} 
+                onToggle={setIsMonitoringActive}
+              />
+            )}
+            {selectedTab === 'ai' && (
+              <OpenAIIntegration 
+                sessionId={sessionId || ''}
+              />
+            )}
+          </div>
+        </main>
       </div>
     </FluentProvider>
   )

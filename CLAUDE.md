@@ -14,6 +14,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Frontend only dev**: `npm run dev` - Runs Vite dev server without Tauri (limited functionality)
 - **Type checking**: `npx tsc --noEmit` - Run TypeScript compiler to check for type errors
 
+### Package Signing (Windows)
+- **Build MSIX package**: `.\build-msix.ps1` - PowerShell script to build MSIX for Store
+- **Sign MSIX package**: `.\sign-msix.ps1` - Sign MSIX with certificate
+- **Sign MSI installer**: `.\sign-msi.ps1` - Sign MSI installer package
+- **Sign exe**: `.\sign-exe.ps1` - Sign the executable with certificate
+- **Create certificate**: `.\create-cert.ps1` - Create self-signed certificate for testing
+
 ### Rust Backend
 - **Check Rust code**: `cd src-tauri && cargo check` - Quick syntax and type checking
 - **Format Rust code**: `cd src-tauri && cargo fmt` - Format code according to Rust standards
@@ -32,6 +39,7 @@ This is a Tauri v2 application with a clear separation between frontend and back
 - Single-page application in `App.tsx` handling all UI logic
 - Real-time monitoring component in `SystemMonitoring.tsx`
 - OpenAI integration component in `OpenAIIntegration.tsx`
+- OAuth authentication components in `OAuthLogin.tsx` and `LoginDialog.tsx`
 - Uses Vite for fast development and optimized production builds
 
 ### Backend (src-tauri/)
@@ -44,14 +52,21 @@ This is a Tauri v2 application with a clear separation between frontend and back
 - **windows_native.rs**: Direct Windows API bindings and wrappers
 - **monitoring.rs**: Real-time system monitoring with CPU, memory, disk, and network stats
 - **openai_integration.rs**: OpenAI Responses API integration for AI-powered system analysis
+- **oauth.rs**: OAuth2 authentication implementation for WindowsForum
+- **auth.rs**: Authentication state management and token handling
+- **windowsforum_proxy.rs**: Proxy service for WindowsForum authentication
+- **results_storage.rs**: Scan results storage and comparison system
 
 ### Key Dependencies (Latest Versions)
-- Tauri: v2.6.2
+- Tauri: v2.8.0
 - sysinfo: v0.36 (system information)
 - windows: v0.61 (Windows API bindings)
 - wmi: v0.17 (Windows Management Instrumentation)
-- reqwest: v0.12 (HTTP client for OpenAI)
+- reqwest: v0.12 (HTTP client for OpenAI and OAuth)
 - winreg: v0.55 (Windows Registry access)
+- async-openai: v0.25 (OpenAI API client)
+- warp: v0.3 (Web server for OAuth callback)
+- tokio: v1.0 (Async runtime)
 
 ### Key Architectural Decisions
 1. **Tauri v2 Migration**: Uses new plugin architecture with separate packages for filesystem, dialog, clipboard, process, and shell
@@ -61,6 +76,8 @@ This is a Tauri v2 application with a clear separation between frontend and back
 5. **Error Handling**: Comprehensive error handling with fallbacks for each diagnostic
 6. **State Management**: Frontend uses React hooks, backend uses Rust's ownership model
 7. **Real-time Monitoring**: Uses Tauri events to stream system stats from backend to frontend
+8. **OAuth2 Authentication**: Implements OAuth2 flow with WindowsForum for secure user authentication
+9. **Local Callback Server**: Uses Warp to handle OAuth callbacks on localhost:3000
 
 ## Tauri v2 Specific Configuration
 
@@ -113,6 +130,14 @@ All backend functionality is exposed through these Tauri commands in `lib.rs`:
 - `get_network_connections`: Get active network connections
 - `analyze_with_openai`: Legacy OpenAI analysis
 - `analyze_system_with_ai`: OpenAI Responses API with function calling
+- `start_oauth_flow`: Initiate WindowsForum OAuth2 authentication
+- `complete_oauth`: Complete OAuth2 flow with authorization code
+- `refresh_oauth_token`: Refresh expired OAuth2 tokens
+- `get_auth_status`: Check current authentication status
+- `logout`: Clear authentication tokens
+- `list_scan_history`: List all saved diagnostic scan summaries
+- `load_scan`: Load a specific scan by ID with full results
+- `compare_scans`: Compare two scans and find differences
 
 ### Windows API Integration
 The backend makes extensive use of Windows APIs through the `windows` crate:

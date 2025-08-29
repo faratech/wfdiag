@@ -287,13 +287,30 @@ pub fn get_all_tasks() -> Vec<DiagnosticTask> {
     ]
 }
 
+// Synchronous wrapper for running diagnostic tasks (used by OpenAI integration)
+pub fn run_diagnostic_task_sync(task_id: &str) -> Result<TaskResult, String> {
+    // Use block_in_place to run the async function in the current runtime
+    tokio::task::block_in_place(|| {
+        // Get the current runtime handle
+        let handle = tokio::runtime::Handle::current();
+        
+        // Block on the async function using the current runtime
+        handle.block_on(async {
+            Ok(run_diagnostic_task(task_id).await)
+        })
+    })
+}
+
 pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
     let start = std::time::Instant::now();
     
     // Run native diagnostics in a blocking task to avoid blocking the async runtime
     let task_id_owned = task_id.to_string();
     let native_result = tokio::task::spawn_blocking(move || {
-        let diagnostics = NativeDiagnostics::new();
+        let diagnostics = match NativeDiagnostics::new() {
+            Ok(d) => d,
+            Err(e) => return Err(e),
+        };
         
         match task_id_owned.as_str() {
             "comp_system" => diagnostics.run_wmi_query("Win32_ComputerSystem"),
@@ -371,18 +388,9 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
 }
 
 fn run_command(cmd: &str, args: &[&str]) -> TaskResult {
-    use std::os::windows::process::CommandExt;
-    
-    #[cfg(windows)]
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    
-    let mut command = Command::new(cmd);
-    command.args(args);
-    
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    
-    match command.output() {
+    // Use secure command execution
+    let executor = crate::security::SecureCommandExecutor::new();
+    match executor.execute_command(cmd, args) {
         Ok(output) => {
             let output_str = String::from_utf8_lossy(&output.stdout).to_string();
             let error_str = String::from_utf8_lossy(&output.stderr).to_string();
@@ -404,7 +412,30 @@ fn run_command(cmd: &str, args: &[&str]) -> TaskResult {
 }
 
 fn run_powershell(script: &str) -> TaskResult {
-    run_command("powershell", &["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script])
+    // Use secure PowerShell execution
+    let executor = crate::security::SecureCommandExecutor::new();
+    match executor.execute_powershell_script(script) {
+        Ok(output) => {
+            TaskResult {
+                success: output.status.success(),
+                output: String::from_utf8_lossy(&output.stdout).to_string(),
+                error: if !output.stderr.is_empty() { 
+                    Some(String::from_utf8_lossy(&output.stderr).to_string()) 
+                } else { 
+                    None 
+                },
+                duration_ms: 0,
+            }
+        }
+        Err(e) => {
+            TaskResult {
+                success: false,
+                output: String::new(),
+                error: Some(e.to_string()),
+                duration_ms: 0,
+            }
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -423,50 +454,39 @@ async fn run_dxdiag() -> TaskResult {
     let temp_file = std::env::temp_dir().join("wfdiag_dxdiag.txt");
     let temp_path = temp_file.to_string_lossy();
     
-    // Start dxdiag
-    match Command::new("dxdiag")
-        .args(&["/t", &temp_path, "/whql:off"])
-        .spawn()
-    {
-        Ok(mut child) => {
-            // Wait up to 10 seconds for dxdiag to complete
-            for _ in 0..20 {
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                if temp_file.exists() {
-                    // Check if file is still being written
-                    match fs::metadata(&temp_file) {
-                        Ok(metadata) => {
-                            if metadata.len() > 0 {
-                                // Give it another second to finish
-                                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                                break;
-                            }
+    // Start dxdiag using secure execution
+    let executor = crate::security::SecureCommandExecutor::new();
+    match executor.execute_command("dxdiag", &["/t", &temp_path, "/whql:off"]) {
+        Ok(output) => {
+            if output.status.success() {
+                // Wait a moment for dxdiag to finish writing the file
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                
+                // Read the output file
+                match fs::read_to_string(&temp_file) {
+                    Ok(content) => {
+                        let _ = fs::remove_file(&temp_file);
+                        TaskResult {
+                            success: true,
+                            output: content,
+                            error: None,
+                            duration_ms: 0,
                         }
-                        Err(_) => continue,
                     }
-                }
-            }
-            
-            // Try to kill the process if it's still running
-            let _ = child.kill();
-            
-            // Read the output file
-            match fs::read_to_string(&temp_file) {
-                Ok(content) => {
-                    let _ = fs::remove_file(&temp_file);
-                    TaskResult {
-                        success: true,
-                        output: content,
-                        error: None,
+                    Err(e) => TaskResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Failed to read dxdiag output: {}", e)),
                         duration_ms: 0,
-                    }
+                    },
                 }
-                Err(e) => TaskResult {
+            } else {
+                TaskResult {
                     success: false,
-                    output: String::new(),
-                    error: Some(format!("Failed to read dxdiag output: {}", e)),
+                    output: String::from_utf8_lossy(&output.stdout).to_string(),
+                    error: Some(String::from_utf8_lossy(&output.stderr).to_string()),
                     duration_ms: 0,
-                },
+                }
             }
         }
         Err(e) => TaskResult {
@@ -483,9 +503,8 @@ fn run_event_logs() -> TaskResult {
     let mut has_error = false;
     
     for log_name in &["System", "Application"] {
-        match Command::new("wevtutil")
-            .args(&["qe", log_name, "/c:100", "/f:text"])
-            .output()
+        let executor = crate::security::SecureCommandExecutor::new();
+        match executor.execute_command("wevtutil", &["qe", log_name, "/c:100", "/f:text"])
         {
             Ok(result) => {
                 output.push_str(&format!("\n=== {} Event Log ===\n", log_name));
@@ -531,9 +550,8 @@ async fn run_battery_report() -> TaskResult {
     let temp_file = std::env::temp_dir().join("wfdiag_battery.html");
     let temp_path = temp_file.to_string_lossy();
     
-    match Command::new("powercfg")
-        .args(&["/batteryreport", "/output", &temp_path])
-        .output()
+    let executor = crate::security::SecureCommandExecutor::new();
+    match executor.execute_command("powercfg", &["/batteryreport", "/output", &temp_path])
     {
         Ok(output) => {
             if output.status.success() {

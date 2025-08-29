@@ -344,9 +344,8 @@ async fn collect_stats(
 pub async fn get_network_connections() -> Vec<NetworkConnection> {
     use std::process::Command;
     
-    let output = match Command::new("netstat")
-        .args(&["-an"])
-        .output() {
+    let executor = crate::security::SecureCommandExecutor::new();
+    let output = match executor.execute_command("netstat", &["-an"]) {
         Ok(output) => output,
         Err(_) => return vec![],
     };
