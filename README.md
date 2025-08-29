@@ -1,7 +1,7 @@
 # WF Diagnostics v2.0.8b - WindowsForum Diagnostic Tool
 
 [![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC_BY--NC--ND_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
-[![Version](https://img.shields.io/badge/version-2.0.8b-blue.svg)](https://github.com/faratech/wfdiag/releases)
+[![Version](https://img.shields.io/badge/version-2.0.9-blue.svg)](https://github.com/faratech/wfdiag/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightblue.svg)](https://github.com/faratech/wfdiag)
 [![Security](https://img.shields.io/badge/security-hardened-green.svg)](https://github.com/faratech/wfdiag)
 
@@ -205,8 +205,7 @@ This project is licensed under the **Creative Commons Attribution-NonCommercial-
 
 ### **Commercial Licensing**
 For commercial use, enterprise licensing, or to create derivative works, contact:
-- **Email**: admin@windowsforum.com
-- **Website**: https://windowsforum.com/contact
+- * [contact](https://windowsforum.com/misc/contact)
 
 ### **Attribution Requirements**
 When using or sharing this software, include:
@@ -223,7 +222,7 @@ While derivative works are restricted under the CC BY-NC-ND 4.0 license, you can
 ## 📞 Support
 
 - **Issues**: [GitHub Issues](https://github.com/faratech/wfdiag/issues)
-- **Documentation**: [WindowsForum.com](https://windowsforum.com)
+- **Documentation**: [WindowsForum.com](https://windowsforum.com/resources/windowsforum-com-diagnostic-tool.1/)
 - **Commercial Support**: admin@windowsforum.com
 
 ---
