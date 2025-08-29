@@ -57,16 +57,26 @@ jobs:
           fi
         done
 
-    - name: Generate attestations
+    - name: Create build metadata
       run: |
-        echo "📋 Generating SLSA attestations..."
+        echo "📋 Creating build metadata..."
         
-        # Generate attestations for all signed files
+        # Create a metadata file for all signed files
+        echo "# Sigstore Signing Metadata" > SIGNING_METADATA.md
+        echo "Generated on: $(date -u)" >> SIGNING_METADATA.md
+        echo "Commit SHA: ${{ github.sha }}" >> SIGNING_METADATA.md
+        echo "Repository: ${{ github.repository }}" >> SIGNING_METADATA.md
+        echo "" >> SIGNING_METADATA.md
+        echo "## Signed Files" >> SIGNING_METADATA.md
+        
         find . \( -name "*.exe" -o -name "*.msi" -o -name "*.msix" \) -type f | while read -r file; do
           if [ -f "$file" ]; then
-            echo "📋 Generating attestation for: $file"
-            cosign attest --yes --type slsaprovenance --predicate <(echo '{"buildType":"https://github.com/faratech/wfdiag/actions","builder":{"id":"https://github.com/actions/runner"},"materials":[{"uri":"git+https://github.com/faratech/wfdiag.git","digest":{"sha1":"'${{ github.sha }}'"}}]}') "$file"
-            echo "✅ Attestation generated for: $file"
+            echo "- **$file**" >> SIGNING_METADATA.md
+            echo "  - SHA256: $(sha256sum "$file" | cut -d' ' -f1)" >> SIGNING_METADATA.md
+            echo "  - Size: $(stat -c%s "$file") bytes" >> SIGNING_METADATA.md
+            echo "  - Signature: ${file}.sig" >> SIGNING_METADATA.md
+            echo "  - Certificate: ${file}.crt" >> SIGNING_METADATA.md
+            echo "" >> SIGNING_METADATA.md
           fi
         done
 
@@ -97,6 +107,7 @@ jobs:
         path: |
           **/*.sig
           **/*.crt
+          SIGNING_METADATA.md
         retention-days: 90
 
     - name: Summary
