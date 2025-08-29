@@ -1,4 +1,4 @@
-# WF Diagnostics v2.0.8b - WindowsForum Diagnostic Tool
+# WF Diagnostics v2.0.9 - WindowsForum Diagnostic Tool
 
 [![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC_BY--NC--ND_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
 [![Version](https://img.shields.io/badge/version-2.0.9-blue.svg)](https://github.com/faratech/wfdiag/releases)
