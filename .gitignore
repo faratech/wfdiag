@@ -62,6 +62,15 @@ certs/
 certificates/
 *.keystore
 *.jks
+*.enc
+*.dat
+*.token
+*.secret
+*.priv
+*_key
+*_key.*
+*.rsa
+*.dsa
 
 # Temporary and cache files
 .cache/
@@ -89,6 +98,12 @@ tempstats_app/
 *.rpm
 *.tar.gz
 
+# Allow release artifacts in release directory
+!release/
+!release/*.zip
+!release/*.exe
+!release/*.msi
+
 # Windows specific
 *.stackdump
 *.lnk
@@ -101,3 +116,21 @@ WFDiagnostics_*.msix
 *.nsis
 rebuild-msix-signed.ps1
 sign-*.ps1
+
+# Local configuration and user data
+config.json
+user_config.json
+settings.json
+local_settings.json
+diagnostic_data/
+scan_results/
+*.sqlite
+*.db
+*.database
+
+# API keys and tokens (extra protection)
+apikey.txt
+token.txt
+oauth_tokens.json
+credentials.json
+auth_tokens.json
