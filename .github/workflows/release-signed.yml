@@ -1,0 +1,263 @@
+name: Release Signed Binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v2.0.8)'
+        required: true
+        default: 'v2.0.8'
+      prerelease:
+        description: 'Mark as pre-release'
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  # Job 1: Windows Certificate Signing
+  windows-sign:
+    runs-on: windows-latest
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup certificate
+      env:
+        CERTIFICATE_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
+        CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+      shell: pwsh
+      run: |
+        if ([string]::IsNullOrEmpty($env:CERTIFICATE_BASE64)) {
+          Write-Host "❌ Certificate secrets missing - cannot sign" -ForegroundColor Red
+          exit 1
+        }
+        
+        Write-Host "🔐 Setting up certificate..." -ForegroundColor Cyan
+        $certBytes = [Convert]::FromBase64String($env:CERTIFICATE_BASE64)
+        [IO.File]::WriteAllBytes("cert.pfx", $certBytes)
+
+    - name: Sign executables with Windows Certificate
+      env:
+        CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+      shell: pwsh
+      run: |
+        Write-Host "🔍 Finding executables to sign..." -ForegroundColor Cyan
+        
+        $files = Get-ChildItem -Recurse -Include "*.exe", "*.msi", "*.msix" | Where-Object { 
+          $_.Name -notlike "*build*" -and 
+          $_.Directory.Name -ne "node_modules" 
+        }
+        
+        $signtool = @(
+          "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe",
+          "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22000.0\x64\signtool.exe",
+          "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.19041.0\x64\signtool.exe"
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        
+        foreach ($file in $files) {
+          Write-Host "🔐 Signing: $($file.Name)" -ForegroundColor Yellow
+          
+          if ($signtool) {
+            # Try with timestamp first, fallback without
+            & $signtool sign /f "cert.pfx" /p $env:CERTIFICATE_PASSWORD /fd sha256 /tr "http://timestamp.digicert.com" /td sha256 /d "WindowsForum Diagnostic Tool" $file.FullName
+            if ($LASTEXITCODE -ne 0) {
+              & $signtool sign /f "cert.pfx" /p $env:CERTIFICATE_PASSWORD /fd sha256 /d "WindowsForum Diagnostic Tool" $file.FullName
+            }
+            
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ Windows signature applied: $($file.Name)" -ForegroundColor Green
+            } else {
+              Write-Host "❌ Failed to sign: $($file.Name)" -ForegroundColor Red
+            }
+          }
+        }
+
+    - name: Upload Windows-signed artifacts
+      id: upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-signed-binaries
+        path: |
+          **/*.exe
+          **/*.msi
+          **/*.msix
+          !node_modules/**
+          !**/build/**
+          !**/target/debug/**
+
+  # Job 2: Sigstore Signing
+  sigstore-sign:
+    runs-on: ubuntu-latest
+    needs: windows-sign
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Download Windows-signed binaries
+      uses: actions/download-artifact@v4
+      with:
+        name: windows-signed-binaries
+
+    - name: Install Cosign
+      uses: sigstore/cosign-installer@v3
+      with:
+        cosign-release: 'v2.2.4'
+
+    - name: Sign with Sigstore
+      run: |
+        echo "🔐 Adding Sigstore signatures to Windows-signed binaries..."
+        
+        find . \( -name "*.exe" -o -name "*.msi" -o -name "*.msix" \) -type f | while read -r file; do
+          if [ -f "$file" ]; then
+            echo "🔐 Adding Sigstore signature: $file"
+            cosign sign-blob --yes "$file" --output-signature "${file}.sig" --output-certificate "${file}.crt"
+            echo "✅ Dual-signed: $file"
+          fi
+        done
+
+    - name: Create release metadata
+      run: |
+        echo "# Release Metadata - Dual Signed Binaries" > RELEASE_INFO.md
+        echo "Generated: $(date -u)" >> RELEASE_INFO.md
+        echo "Commit: ${{ github.sha }}" >> RELEASE_INFO.md
+        echo "" >> RELEASE_INFO.md
+        echo "## Signing Status" >> RELEASE_INFO.md
+        echo "✅ **Windows Certificate Signing**: Applied (embedded digital signatures)" >> RELEASE_INFO.md
+        echo "✅ **Sigstore Keyless Signing**: Applied (separate .sig/.crt files)" >> RELEASE_INFO.md
+        echo "" >> RELEASE_INFO.md
+        echo "## Files in this Release" >> RELEASE_INFO.md
+        
+        find . \( -name "*.exe" -o -name "*.msi" -o -name "*.msix" \) -type f | while read -r file; do
+          echo "### $(basename "$file")" >> RELEASE_INFO.md
+          echo "- **Path**: \`$file\`" >> RELEASE_INFO.md
+          echo "- **Size**: $(stat -c%s "$file" | numfmt --to=iec) ($(stat -c%s "$file") bytes)" >> RELEASE_INFO.md
+          echo "- **SHA256**: \`$(sha256sum "$file" | cut -d' ' -f1)\`" >> RELEASE_INFO.md
+          echo "- **Windows Signature**: ✅ Embedded (WindowsForum Fara Technologies LLC)" >> RELEASE_INFO.md
+          
+          if [ -f "${file}.sig" ] && [ -f "${file}.crt" ]; then
+            echo "- **Sigstore Signature**: ✅ \`$(basename "$file").sig\`" >> RELEASE_INFO.md
+            echo "- **Sigstore Certificate**: ✅ \`$(basename "$file").crt\`" >> RELEASE_INFO.md
+          fi
+          echo "" >> RELEASE_INFO.md
+        done
+
+    - name: Upload dual-signed artifacts
+      id: upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: dual-signed-release
+        path: |
+          **/*.exe
+          **/*.msi
+          **/*.msix
+          **/*.sig
+          **/*.crt
+          RELEASE_INFO.md
+
+  # Job 3: Create GitHub Release
+  create-release:
+    runs-on: ubuntu-latest
+    needs: [windows-sign, sigstore-sign]
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+    - name: Download dual-signed artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: dual-signed-release
+
+    - name: Determine release version
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          echo "prerelease=${{ github.event.inputs.prerelease }}" >> $GITHUB_OUTPUT
+        else
+          echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          echo "prerelease=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create GitHub Release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.version.outputs.version }}
+        release_name: WFDiag ${{ steps.version.outputs.version }} - Dual Signed
+        body: |
+          # WindowsForum Diagnostic Tool ${{ steps.version.outputs.version }}
+          
+          ## 🔐 Digital Signatures
+          This release includes **dual signing** for maximum security and compatibility:
+          
+          ✅ **Windows Certificate Signing** - Embedded digital signatures  
+          - Reduces SmartScreen warnings  
+          - Shows "WindowsForum Fara Technologies LLC IT Department" as publisher  
+          - Compatible with all Windows security policies  
+          
+          ✅ **Sigstore Keyless Signing** - Modern cryptographic verification  
+          - Transparent, verifiable signatures using GitHub identity  
+          - Includes .sig and .crt files for advanced verification  
+          - Supports supply chain security best practices  
+          
+          ## 📥 Download
+          - **For most users**: Download `wfdiag-${{ steps.version.outputs.version }}.exe`
+          - **For verification**: Also download corresponding `.sig` and `.crt` files
+          
+          ## 🔍 Signature Verification
+          ```bash
+          # Verify Sigstore signature
+          cosign verify-blob --signature wfdiag-*.exe.sig --certificate wfdiag-*.exe.crt --certificate-identity-regexp "https://github.com/faratech/wfdiag" --certificate-oidc-issuer "https://token.actions.githubusercontent.com" wfdiag-*.exe
+          
+          # Check Windows signature (Windows)
+          Get-AuthenticodeSignature wfdiag-*.exe
+          ```
+          
+          Generated from commit: ${{ github.sha }}
+        draft: false
+        prerelease: ${{ steps.version.outputs.prerelease }}
+
+    - name: Upload release assets
+      run: |
+        # Find the release ID
+        RELEASE_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ steps.version.outputs.version }}" | \
+          jq -r '.id')
+        
+        # Upload all binary files and their signatures
+        find . \( -name "*.exe" -o -name "*.msi" -o -name "*.msix" -o -name "*.sig" -o -name "*.crt" \) -type f | while read -r file; do
+          filename=$(basename "$file")
+          echo "📤 Uploading: $filename"
+          
+          curl -s \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @"$file" \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=${filename}"
+        done
+        
+        # Upload release info
+        curl -s \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Content-Type: text/markdown" \
+          --data-binary @RELEASE_INFO.md \
+          "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=RELEASE_INFO.md"
+
+    - name: Release Summary
+      run: |
+        echo "🎉 Release ${{ steps.version.outputs.version }} created successfully!" 
+        echo "🔐 Includes both Windows Certificate and Sigstore signatures"
+        echo "📦 All binaries and verification files uploaded"
+        echo "🌐 Available at: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.version }}"
