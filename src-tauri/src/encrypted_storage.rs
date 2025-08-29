@@ -1,10 +1,9 @@
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{Aead, KeyInit, OsRng, rand_core::RngCore},
     Aes256Gcm, Key, Nonce,
 };
 use anyhow::{anyhow, Result};
 use pbkdf2::pbkdf2_hmac;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::fs;

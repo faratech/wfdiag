@@ -1,8 +1,21 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dir)"
+      "Bash(dir)",
+      "Bash(cargo build:*)",
+      "Bash(ls:*)",
+      "Bash(npm run tauri build:*)",
+      "Bash(source:*)",
+      "Bash(export PATH=\"$PATH:$HOME/.cargo/bin\")",
+      "Bash(/root/.cargo/bin/cargo build)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run build:*)",
+      "Bash(cargo audit:*)",
+      "Read(D:\\temp\\wfdiag\\src/**)"
     ],
-    "deny": []
+    "deny": [],
+    "additionalDirectories": [
+      "d:\\temp\\wfdiag-tauri"
+    ]
   }
 }

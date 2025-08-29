@@ -1,0 +1,29 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": ["msix"],
+    "publisher": "CN=WindowsForum",
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "",
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "wix": null,
+      "nsis": null,
+      "msix": {
+        "displayName": "WF Diagnostics",
+        "publisherDisplayName": "WindowsForum",
+        "identityName": "WindowsForum.WFDiagnostics",
+        "msixVersion": "2.0.7.0",
+        "languages": ["en-US"],
+        "capabilities": [
+          "internetClient",
+          "internetClientServer",
+          "privateNetworkClientServer"
+        ]
+      }
+    }
+  }
+}
