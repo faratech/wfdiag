@@ -36,8 +36,7 @@ lerna-debug.log*
 .env.production.local
 .env.*.local
 
-# IDE files
-.vscode/
+# IDE files (allow some .vscode config)
 .idea/
 *.swp
 *.swo
@@ -50,11 +49,12 @@ lerna-debug.log*
 # Tauri specific
 src-tauri/target/
 src-tauri/gen/
+src-tauri/Cargo.lock
+.tauri/
 
 # Security sensitive files
 *.pfx
 *.p12
-*.pem
 *.key
 *.crt
 *.cer
@@ -71,6 +71,14 @@ certificates/
 *_key.*
 *.rsa
 *.dsa
+
+# Sigstore signatures (local development only)
+signatures/
+*.sig
+*.pem
+*.bundle
+*.rekor
+*-signature.json
 
 # Temporary and cache files
 .cache/
@@ -98,11 +106,13 @@ tempstats_app/
 *.rpm
 *.tar.gz
 
-# Allow release artifacts in release directory
+# Allow versioned release artifacts in release directory only
 !release/
 !release/*.zip
 !release/*.exe
 !release/*.msi
+!release/*.sig
+!release/*.pem
 
 # Windows specific
 *.stackdump
@@ -110,12 +120,23 @@ tempstats_app/
 
 # Build outputs that shouldn't be versioned
 src-tauri/target/release/
-src-tauri/target/debug/
+src-tauri/target/debug/  
 src-tauri/bundle/
 WFDiagnostics_*.msix
 *.nsis
+*.appx
+*.msixbundle
+
+# PowerShell build scripts (auto-generated)
 rebuild-msix-signed.ps1
 sign-*.ps1
+build-*.ps1
+create-*cert.ps1
+
+# Rust build artifacts
+**/*.rs.bk
+*.orig
+Cargo.lock.orig
 
 # Local configuration and user data
 config.json
@@ -134,3 +155,48 @@ token.txt
 oauth_tokens.json
 credentials.json
 auth_tokens.json
+
+# Development tools and artifacts
+.claude/
+.vscode/settings.json
+.vscode/launch.json
+*.code-workspace
+.history/
+.devcontainer/
+.dockerignore
+docker-compose.override.yml
+
+# Package manager locks (keep main package-lock.json but ignore temp ones)
+.pnpm-store/
+pnpm-lock.yaml
+yarn.lock
+.yarn/
+.pnp.*
+
+# GitHub Codespaces
+.devcontainer/
+.github/ISSUE_TEMPLATE/
+.github/PULL_REQUEST_TEMPLATE/
+
+# Performance and profiling
+.clinic/
+profile/
+*.cpuprofile
+*.heapprofile
+*.heapsnapshot
+*.perf
+
+# Modern build tools
+.turbo/
+.next/
+.nuxt/
+.output/
+.vercel/
+.netlify/
+
+# Backup and recovery files
+*.backup
+*.bak
+*.swp
+*.swo
+~$*

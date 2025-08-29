@@ -10,25 +10,25 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@fluentui/react-components": "^9.54.0",
-    "@fortawesome/fontawesome-free": "^7.0.0",
-    "@tauri-apps/api": "^2.6.0",
-    "@tauri-apps/plugin-clipboard-manager": "^2.3.0",
-    "@tauri-apps/plugin-dialog": "^2.3.0",
-    "@tauri-apps/plugin-fs": "^2.4.0",
-    "@tauri-apps/plugin-process": "^2.3.0",
-    "@tauri-apps/plugin-shell": "^2.3.0",
-    "chart.js": "^4.4.0",
-    "react": "^18.2.0",
-    "react-chartjs-2": "^5.2.0",
-    "react-dom": "^18.2.0"
+    "@fluentui/react-components": "*",
+    "@fortawesome/fontawesome-free": "*",
+    "@tauri-apps/api": "*",
+    "@tauri-apps/plugin-clipboard-manager": "*",
+    "@tauri-apps/plugin-dialog": "*",
+    "@tauri-apps/plugin-fs": "*",
+    "@tauri-apps/plugin-process": "*",
+    "@tauri-apps/plugin-shell": "*",
+    "chart.js": "*",
+    "react": "*",
+    "react-chartjs-2": "*",
+    "react-dom": "*"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.7.1",
-    "@types/react": "^18.2.15",
-    "@types/react-dom": "^18.2.7",
-    "@vitejs/plugin-react": "^4.0.3",
-    "typescript": "^5.0.2",
-    "vite": "^7.1.3"
+    "@tauri-apps/cli": "*",
+    "@types/react": "*",
+    "@types/react-dom": "*",
+    "@vitejs/plugin-react": "*",
+    "typescript": "*",
+    "vite": "*"
   }
 }
