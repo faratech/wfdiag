@@ -1,0 +1,117 @@
+name: Sign Existing Binaries
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'releases/**'
+      - 'src-tauri/target/release/*.exe'
+      - 'src-tauri/target/release/bundle/**/*.msi'
+      - 'src-tauri/target/release/bundle/**/*.msix'
+
+permissions:
+  id-token: write   # Required for OIDC authentication with Sigstore
+  contents: read    # Required to read repository contents
+
+jobs:
+  sign-binaries:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Cosign
+      uses: sigstore/cosign-installer@v3
+      with:
+        cosign-release: 'v2.2.4'
+
+    - name: Find and sign executables
+      run: |
+        echo "🔍 Finding binaries to sign..."
+        
+        # Find all exe files
+        find . -name "*.exe" -type f | while read -r file; do
+          if [ -f "$file" ]; then
+            echo "🔐 Signing executable: $file"
+            cosign sign-blob --yes "$file" --output-signature "${file}.sig" --output-certificate "${file}.crt"
+            echo "✅ Signed: $file"
+          fi
+        done
+        
+        # Find all MSI files
+        find . -name "*.msi" -type f | while read -r file; do
+          if [ -f "$file" ]; then
+            echo "🔐 Signing MSI installer: $file"
+            cosign sign-blob --yes "$file" --output-signature "${file}.sig" --output-certificate "${file}.crt"
+            echo "✅ Signed: $file"
+          fi
+        done
+        
+        # Find all MSIX files
+        find . -name "*.msix" -type f | while read -r file; do
+          if [ -f "$file" ]; then
+            echo "🔐 Signing MSIX package: $file"
+            cosign sign-blob --yes "$file" --output-signature "${file}.sig" --output-certificate "${file}.crt"
+            echo "✅ Signed: $file"
+          fi
+        done
+
+    - name: Generate attestations
+      run: |
+        echo "📋 Generating SLSA attestations..."
+        
+        # Generate attestations for all signed files
+        find . \( -name "*.exe" -o -name "*.msi" -o -name "*.msix" \) -type f | while read -r file; do
+          if [ -f "$file" ]; then
+            echo "📋 Generating attestation for: $file"
+            cosign attest --yes --type slsaprovenance --predicate <(echo '{"buildType":"https://github.com/faratech/wfdiag/actions","builder":{"id":"https://github.com/actions/runner"},"materials":[{"uri":"git+https://github.com/faratech/wfdiag.git","digest":{"sha1":"'${{ github.sha }}'"}}]}') "$file"
+            echo "✅ Attestation generated for: $file"
+          fi
+        done
+
+    - name: Verify signatures
+      run: |
+        echo "🔍 Verifying all signatures..."
+        
+        # Verify all signatures
+        find . -name "*.sig" -type f | while read -r sigfile; do
+          original="${sigfile%.sig}"
+          cert="${original}.crt"
+          
+          if [ -f "$original" ] && [ -f "$cert" ]; then
+            echo "🔍 Verifying: $original"
+            if cosign verify-blob --signature "$sigfile" --certificate "$cert" --certificate-identity-regexp "https://github.com/faratech/wfdiag" --certificate-oidc-issuer "https://token.actions.githubusercontent.com" "$original"; then
+              echo "✅ Verification successful: $original"
+            else
+              echo "❌ Verification failed: $original"
+              exit 1
+            fi
+          fi
+        done
+
+    - name: Upload signature artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: sigstore-signatures
+        path: |
+          **/*.sig
+          **/*.crt
+        retention-days: 90
+
+    - name: Summary
+      run: |
+        echo "## 🔐 Sigstore Signing Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Signed Files:" >> $GITHUB_STEP_SUMMARY
+        find . \( -name "*.exe" -o -name "*.msi" -o -name "*.msix" \) -type f | while read -r file; do
+          size=$(stat -c%s "$file" 2>/dev/null || echo "unknown")
+          echo "- \`$file\` (${size} bytes)" >> $GITHUB_STEP_SUMMARY
+        done
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Generated Artifacts:" >> $GITHUB_STEP_SUMMARY
+        find . \( -name "*.sig" -o -name "*.crt" \) -type f | while read -r file; do
+          echo "- \`$file\`" >> $GITHUB_STEP_SUMMARY
+        done
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "🎯 All binaries have been signed with Sigstore keyless signatures!"
