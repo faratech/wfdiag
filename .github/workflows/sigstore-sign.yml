@@ -1,17 +1,26 @@
 name: Build and Sign with Sigstore
 
 on:
-  push:
-    branches: [ main ]
-    tags: [ 'v*' ]
-  pull_request:
-    branches: [ main ]
-  release:
-    types: [ published ]
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: 'Force run this workflow (disabled by default)'
+        required: true
+        default: false
+        type: boolean
+  # Disabled - use sign-existing.yml for faster signing without rebuilding
+  # push:
+  #   branches: [ main ]
+  #   tags: [ 'v*' ]
+  # pull_request:
+  #   branches: [ main ]
+  # release:
+  #   types: [ published ]
 
 jobs:
   build-and-sign:
     runs-on: windows-latest
+    if: github.event.inputs.force_run == 'true'
     permissions:
       contents: read
       id-token: write  # Required for OIDC authentication with Sigstore
