@@ -58,7 +58,7 @@ src-tauri/Cargo.lock
 *.key
 *.crt
 *.cer
-certs/
+# certs/ - managed more specifically below
 certificates/
 *.keystore
 *.jks
@@ -200,3 +200,6 @@ profile/
 *.swp
 *.swo
 ~$*
+# Certificate files (keep public cert, hide private key and PFX)
+wfdiag-signing-cert.pfx
+certs/wfdiag-key.pem

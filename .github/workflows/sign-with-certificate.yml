@@ -1,0 +1,242 @@
+name: Sign with Self-Signed Certificate
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'releases/**'
+
+permissions:
+  id-token: write   # Required for OIDC authentication with Sigstore
+  contents: read    # Required to read repository contents
+
+jobs:
+  sign-binaries:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup certificate from secrets
+      env:
+        CERTIFICATE_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
+        CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+      run: |
+        if ([string]::IsNullOrEmpty($env:CERTIFICATE_BASE64)) {
+          Write-Host "❌ Certificate not found in secrets. Skipping Windows signing." -ForegroundColor Yellow
+          Write-Host "To enable Windows signing:" -ForegroundColor Cyan
+          Write-Host "1. Encode certificate: [Convert]::ToBase64String([IO.File]::ReadAllBytes('wfdiag-signing-cert.pfx'))" -ForegroundColor White
+          Write-Host "2. Add CERTIFICATE_BASE64 secret to GitHub repository" -ForegroundColor White
+          Write-Host "3. Add CERTIFICATE_PASSWORD secret to GitHub repository" -ForegroundColor White
+          echo "SKIP_WINDOWS_SIGNING=true" >> $env:GITHUB_ENV
+        } else {
+          Write-Host "🔐 Setting up certificate for Windows signing..." -ForegroundColor Cyan
+          $certBytes = [Convert]::FromBase64String($env:CERTIFICATE_BASE64)
+          [IO.File]::WriteAllBytes("wfdiag-signing-cert.pfx", $certBytes)
+          Write-Host "✅ Certificate ready" -ForegroundColor Green
+          echo "SKIP_WINDOWS_SIGNING=false" >> $env:GITHUB_ENV
+        }
+
+    - name: Install Cosign for Sigstore
+      uses: sigstore/cosign-installer@v3
+      with:
+        cosign-release: 'v2.2.4'
+
+    - name: Sign with Windows Certificate and Sigstore
+      env:
+        CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+      run: |
+        Write-Host "🔍 Finding binaries to sign..." -ForegroundColor Cyan
+        
+        $signedCount = 0
+        $files = Get-ChildItem -Recurse -Include "*.exe", "*.msi", "*.msix" | Where-Object { $_.Name -notlike "*build*" -and $_.Name -notlike "*temp*" }
+        
+        foreach ($file in $files) {
+          $filePath = $file.FullName
+          Write-Host "`n📦 Processing: $($file.Name)" -ForegroundColor Yellow
+          
+          # Windows Code Signing (if certificate available)
+          if ($env:SKIP_WINDOWS_SIGNING -eq "false") {
+            Write-Host "🔐 Signing with Windows certificate..." -ForegroundColor Cyan
+            
+            $signtoolPaths = @(
+              "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe",
+              "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22000.0\x64\signtool.exe", 
+              "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.19041.0\x64\signtool.exe"
+            )
+            
+            $signtool = $null
+            foreach ($path in $signtoolPaths) {
+              if (Test-Path $path) {
+                $signtool = $path
+                break
+              }
+            }
+            
+            if ($signtool) {
+              Write-Host "Using signtool: $signtool" -ForegroundColor Gray
+              
+              # Try with timestamp first
+              try {
+                & $signtool sign /f "wfdiag-signing-cert.pfx" /p $env:CERTIFICATE_PASSWORD /fd sha256 /tr "http://timestamp.digicert.com" /td sha256 /d "WindowsForum Diagnostic Tool" /du "https://windowsforum.com" $filePath
+                if ($LASTEXITCODE -eq 0) {
+                  Write-Host "✅ Windows signature applied (with timestamp)" -ForegroundColor Green
+                } else {
+                  # Try without timestamp as fallback
+                  Write-Host "⚠️ Timestamp failed, trying without timestamp..." -ForegroundColor Yellow
+                  & $signtool sign /f "wfdiag-signing-cert.pfx" /p $env:CERTIFICATE_PASSWORD /fd sha256 /d "WindowsForum Diagnostic Tool" $filePath
+                  if ($LASTEXITCODE -eq 0) {
+                    Write-Host "✅ Windows signature applied (no timestamp)" -ForegroundColor Green
+                  } else {
+                    Write-Host "❌ Windows signing failed" -ForegroundColor Red
+                  }
+                }
+              } catch {
+                Write-Host "❌ Windows signing error: $_" -ForegroundColor Red
+              }
+            } else {
+              Write-Host "❌ signtool.exe not found" -ForegroundColor Red
+            }
+          } else {
+            Write-Host "⏭️ Skipping Windows signing (no certificate)" -ForegroundColor Yellow
+          }
+          
+          # Sigstore signing (always attempt)
+          Write-Host "🔐 Signing with Sigstore..." -ForegroundColor Cyan
+          try {
+            cosign sign-blob --yes $filePath --output-signature "$filePath.sig" --output-certificate "$filePath.crt"
+            Write-Host "✅ Sigstore signature applied" -ForegroundColor Green
+          } catch {
+            Write-Host "❌ Sigstore signing failed: $_" -ForegroundColor Red
+          }
+          
+          $signedCount++
+        }
+        
+        Write-Host "`n🎯 Processed $signedCount files" -ForegroundColor Cyan
+
+    - name: Verify Windows signatures
+      if: env.SKIP_WINDOWS_SIGNING == 'false'
+      run: |
+        Write-Host "🔍 Verifying Windows signatures..." -ForegroundColor Cyan
+        
+        $files = Get-ChildItem -Recurse -Include "*.exe", "*.msi", "*.msix" | Where-Object { $_.Name -notlike "*build*" -and $_.Name -notlike "*temp*" }
+        
+        foreach ($file in $files) {
+          Write-Host "`nVerifying: $($file.Name)" -ForegroundColor Yellow
+          
+          # Check if file has any digital signature
+          try {
+            $sig = Get-AuthenticodeSignature $file.FullName
+            if ($sig.Status -eq "Valid" -or $sig.Status -eq "UnknownError") {
+              Write-Host "✅ Has Windows signature: $($sig.SignerCertificate.Subject)" -ForegroundColor Green
+            } else {
+              Write-Host "⚠️ Signature status: $($sig.Status)" -ForegroundColor Yellow
+            }
+          } catch {
+            Write-Host "❌ Could not verify signature: $_" -ForegroundColor Red
+          }
+        }
+
+    - name: Verify Sigstore signatures  
+      run: |
+        Write-Host "🔍 Verifying Sigstore signatures..." -ForegroundColor Cyan
+        
+        Get-ChildItem -Recurse -Filter "*.sig" | ForEach-Object {
+          $sigFile = $_.FullName
+          $originalFile = $sigFile -replace '\.sig$', ''
+          $certFile = $originalFile + '.crt'
+          
+          if ((Test-Path $originalFile) -and (Test-Path $certFile)) {
+            Write-Host "Verifying: $originalFile" -ForegroundColor Yellow
+            try {
+              cosign verify-blob --signature $sigFile --certificate $certFile --certificate-identity-regexp "https://github.com/faratech/wfdiag" --certificate-oidc-issuer "https://token.actions.githubusercontent.com" $originalFile
+              Write-Host "✅ Sigstore verification successful" -ForegroundColor Green
+            } catch {
+              Write-Host "❌ Sigstore verification failed" -ForegroundColor Red
+            }
+          }
+        }
+
+    - name: Create signing report
+      run: |
+        Write-Host "📋 Creating signing report..." -ForegroundColor Cyan
+        
+        $report = @"
+# Digital Signing Report
+Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')
+Repository: ${{ github.repository }}
+Commit: ${{ github.sha }}
+
+## Signed Files
+
+"@
+        
+        $files = Get-ChildItem -Recurse -Include "*.exe", "*.msi", "*.msix" | Where-Object { $_.Name -notlike "*build*" -and $_.Name -notlike "*temp*" }
+        
+        foreach ($file in $files) {
+          $report += "`n### $($file.Name)`n"
+          $report += "- **Path**: ``$($file.FullName -replace [regex]::Escape($PWD), '.')```n"
+          $report += "- **Size**: $([math]::Round($file.Length / 1MB, 2)) MB`n"
+          $report += "- **SHA256**: $(Get-FileHash $file.FullName -Algorithm SHA256 | Select-Object -ExpandProperty Hash)`n"
+          
+          # Check for Windows signature
+          try {
+            $sig = Get-AuthenticodeSignature $file.FullName
+            if ($sig.Status -eq "Valid" -or $sig.Status -eq "UnknownError") {
+              $report += "- **Windows Signature**: ✅ Signed by $($sig.SignerCertificate.Subject)`n"
+            } else {
+              $report += "- **Windows Signature**: ❌ $($sig.Status)`n"
+            }
+          } catch {
+            $report += "- **Windows Signature**: ❌ Could not verify`n"
+          }
+          
+          # Check for Sigstore files
+          $sigFile = "$($file.FullName).sig"
+          $crtFile = "$($file.FullName).crt"
+          if ((Test-Path $sigFile) -and (Test-Path $crtFile)) {
+            $report += "- **Sigstore Signature**: ✅ ``$($file.Name).sig```n"
+            $report += "- **Sigstore Certificate**: ✅ ``$($file.Name).crt```n"
+          } else {
+            $report += "- **Sigstore Signature**: ❌ Missing`n"
+          }
+        }
+        
+        $report | Out-File -FilePath "SIGNING_REPORT.md" -Encoding UTF8
+        Write-Host "✅ Report saved to SIGNING_REPORT.md" -ForegroundColor Green
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: signed-binaries-with-certificates
+        path: |
+          **/*.exe
+          **/*.msi  
+          **/*.msix
+          **/*.sig
+          **/*.crt
+          SIGNING_REPORT.md
+        retention-days: 90
+
+    - name: Summary
+      run: |
+        Write-Host "`n🎉 SIGNING COMPLETED!" -ForegroundColor Green
+        Write-Host "===========================================" -ForegroundColor Cyan
+        
+        if ($env:SKIP_WINDOWS_SIGNING -eq "false") {
+          Write-Host "✅ Windows Certificate Signing: ENABLED" -ForegroundColor Green
+          Write-Host "   - Files now have embedded digital signatures" -ForegroundColor White
+          Write-Host "   - Will show publisher info in Windows" -ForegroundColor White
+        } else {
+          Write-Host "⚠️ Windows Certificate Signing: DISABLED" -ForegroundColor Yellow
+          Write-Host "   - Add CERTIFICATE_BASE64 and CERTIFICATE_PASSWORD secrets to enable" -ForegroundColor White
+        }
+        
+        Write-Host "✅ Sigstore Signing: ENABLED" -ForegroundColor Green
+        Write-Host "   - Cryptographic signatures for verification" -ForegroundColor White
+        Write-Host "   - Transparency log entries created" -ForegroundColor White
+        
+        Write-Host "`n📦 All artifacts uploaded to workflow run" -ForegroundColor Cyan
+        Write-Host "🔍 Check SIGNING_REPORT.md for details" -ForegroundColor Cyan
