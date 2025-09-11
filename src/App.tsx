@@ -18,6 +18,7 @@ import {
   Text,
   Divider,
   tokens,
+  Badge,
 } from '@fluentui/react-components'
 
 interface SystemInfo {
@@ -41,7 +42,7 @@ interface TaskResult {
   duration_ms: number
 }
 
-type TabValue = 'diagnostics' | 'monitoring' | 'ai'
+type TabValue = 'diagnostics' | 'monitoring' | 'ai' | 'issues'
 
 function App() {
   const [selectedTab, setSelectedTab] = useState<TabValue>('diagnostics')
@@ -57,6 +58,7 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const [filteredResults, setFilteredResults] = useState<Record<string, TaskResult>>({})
   const [scanStartTime, setScanStartTime] = useState<number>(0)
+  const [issues, setIssues] = useState<any[]>([])
 
   useEffect(() => {
     loadSystemInfo()
@@ -165,10 +167,20 @@ function App() {
           console.error('Failed to auto-save scan:', error)
         }
         setIsRunning(false)
+        detectIssues()
       }, 500)
     } catch (error) {
       console.error('Failed to start diagnostics:', error)
       setIsRunning(false)
+    }
+  }
+
+  const detectIssues = async () => {
+    try {
+      const issues = await invoke<any[]>('detect_issues')
+      setIssues(issues)
+    } catch (error) {
+      console.error('Failed to detect issues:', error)
     }
   }
 
@@ -965,6 +977,68 @@ ${content}`
     )
   }
 
+  const renderIssuesTab = () => {
+    return (
+      <div style={{ maxWidth: 1200, margin: '0 auto' }}>
+        <div className="glass-card" style={{ padding: 24 }}>
+          <Text size={500} weight="semibold" style={{ color: '#f1f5f9', display: 'block', marginBottom: 16 }}>
+            <i className="fas fa-exclamation-triangle" style={{ marginRight: 8, color: '#ef4444' }}></i>
+            Detected Issues
+          </Text>
+          {issues.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: 48, color: '#94a3b8' }}>
+              <Text size={300}>No issues detected.</Text>
+            </div>
+          ) : (
+            <div>
+              {issues.map((issue, index) => (
+                <div
+                  key={index}
+                  style={{
+                    padding: 16,
+                    marginBottom: 8,
+                    background: 'rgba(30, 41, 59, 0.3)',
+                    borderRadius: 8,
+                    border: '1px solid rgba(71, 85, 105, 0.3)'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <Text size={400} weight="semibold" style={{ color: '#f1f5f9' }}>
+                        {issue.title}
+                      </Text>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <Badge appearance="tint" style={{ background: 'rgba(100, 116, 139, 0.2)', color: '#94a3b8' }}>
+                        {issue.category}
+                      </Badge>
+                      <Badge 
+                        appearance="filled"
+                        style={{ 
+                          background: issue.severity === 'Critical' ? '#ef4444' :
+                                     issue.severity === 'Warning' ? '#f59e0b' :
+                                     '#10b981'
+                        }}
+                      >
+                        {issue.severity}
+                      </Badge>
+                    </div>
+                  </div>
+                  <Text size={200} style={{ color: '#cbd5e1', display: 'block', marginBottom: 8 }}>
+                    {issue.description}
+                  </Text>
+                  <Text size={200} style={{ color: '#94a3b8' }}>
+                    {issue.recommendation}
+                  </Text>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <FluentProvider theme={webDarkTheme}>
       <div style={{ 
@@ -1074,6 +1148,13 @@ ${content}`
                 <i className="fas fa-brain" style={{ marginRight: 8 }}></i>
                 AI Analysis
               </Tab>
+              <Tab value="issues" style={{ 
+                color: selectedTab === 'issues' ? '#ef4444' : '#94a3b8',
+                fontWeight: selectedTab === 'issues' ? 600 : 400
+              }}>
+                <i className="fas fa-exclamation-triangle" style={{ marginRight: 8 }}></i>
+                Issues ({issues.length})
+              </Tab>
             </TabList>
           </div>
         </div>
@@ -1098,6 +1179,7 @@ ${content}`
                 sessionId={sessionId || ''}
               />
             )}
+            {selectedTab === 'issues' && renderIssuesTab()}
           </div>
         </main>
       </div>

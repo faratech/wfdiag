@@ -24,7 +24,7 @@ tauri-plugin-process = "*"
 tauri-plugin-shell = "*"
 tokio = { version = "*", features = ["full"] }
 anyhow = "*"
-chrono = "*"
+chrono = { version = "*", features = ["serde"] }
 sysinfo = "*"
 scraper = "*"
 regex = "*"
@@ -44,6 +44,7 @@ aes-gcm = "*"
 pbkdf2 = "*"
 hmac = "*"
 zeroize = { version = "*", features = ["derive"] }
+
 
 # Windows-specific dependencies
 [target.'cfg(windows)'.dependencies]
