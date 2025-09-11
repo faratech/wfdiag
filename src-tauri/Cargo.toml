@@ -1,6 +1,6 @@
-[package]
+﻿[package]
 name = "wfdiag-tauri"
-version = "2.0.9"
+version = "2.1.0"
 description = "WindowsForum Diagnostic Tool"
 authors = ["WindowsForum"]
 edition = "2024"
@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "*", features = [] }
 
 [dependencies]
-tauri = { version = "*", features = ["devtools"] }
+tauri = { version = "*", features = [] }
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 # Tauri plugins for v2
@@ -27,8 +27,7 @@ anyhow = "*"
 chrono = { version = "*", features = ["serde"] }
 sysinfo = "*"
 scraper = "*"
-regex = "*"
-reqwest = { version = "*", features = ["json", "cookies", "stream"] }
+reqwest = { version = "*", features = ["json"] }
 uuid = { version = "*", features = ["v4"] }
 futures = "*"
 open = "*"
@@ -38,11 +37,10 @@ sha2 = "*"
 base64 = "*"
 url = "*"
 warp = "*"
-keyring = { version = "*", default-features = false, features = ["linux-native", "windows-native"] }
+keyring = { version = "*", features = ["crypto-rust"] }
 # Encryption dependencies
 aes-gcm = "*"
 pbkdf2 = "*"
-hmac = "*"
 zeroize = { version = "*", features = ["derive"] }
 
 
