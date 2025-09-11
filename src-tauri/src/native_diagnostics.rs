@@ -20,8 +20,8 @@ impl NativeDiagnostics {
         Ok(Self { com_lib })
     }
 
-    pub fn run_wmi_query(&self, class_name: &str) -> Result<Value> {
-        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+    pub fn run_wmi_query(&self, class_name: &str, namespace: Option<&str>) -> Result<Value> {
+        let wmi_con = WMIConnection::new_with_namespace(self.com_lib.into(), namespace.unwrap_or("root\CIMV2"))?;
         let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(&format!("SELECT * FROM {}", class_name))?;
         
         let mut json_results = Vec::new();
@@ -614,7 +614,7 @@ impl NativeDiagnostics {
         entries
     }
 
-    pub fn run_dsregcmd(&self) -> Result<Value> {
+    '''    pub fn run_dsregcmd(&self) -> Result<Value> {
         // Check domain join status via WMI
         let wmi_con = WMIConnection::new(self.com_lib.into())?;
         
@@ -635,7 +635,62 @@ impl NativeDiagnostics {
         }
     }
 
-    pub fn get_native_services(&self) -> Result<Value> {
+    pub fn get_disk_fragmentation(&self) -> Result<Value> {
+        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let disks: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT Name FROM Win32_LogicalDisk WHERE DriveType=3")?;
+        
+        let mut fragmentation_results = Vec::new();
+        
+        for disk in disks {
+            if let Some(wmi::Variant::String(drive_letter)) = disk.get("Name") {
+                let mut result_info = json!({
+                    "drive": drive_letter,
+                    "fragmentation_percent": null,
+                    "status": "Not analyzed",
+                    "raw_output": ""
+                });
+
+                match Self::execute_secure_command("defrag", &[drive_letter, "/A"]) {
+                    Ok(output) => {
+                        let output_str = String::from_utf8_lossy(&output.stdout);
+                        result_info["raw_output"] = json!(output_str.to_string());
+
+                        if output.status.success() {
+                            if let Some(percent) = self.parse_defrag_output(&output_str) {
+                                result_info["fragmentation_percent"] = json!(percent);
+                                result_info["status"] = json!("Analyzed");
+                            } else {
+                                result_info["status"] = json!("Analysis failed: Could not parse output");
+                            }
+                        } else {
+                            let error_str = String::from_utf8_lossy(&output.stderr);
+                            result_info["status"] = json!(format!("Analysis failed: {}", error_str));
+                        }
+                    },
+                    Err(e) => {
+                        result_info["status"] = json!(format!("Execution failed: {}", e));
+                    }
+                }
+                fragmentation_results.push(result_info);
+            }
+        }
+        
+        Ok(json!(fragmentation_results))
+    }
+
+    fn parse_defrag_output(&self, output: &str) -> Option<u32> {
+        // Look for a line like "Total fragmented space = 15 %"
+        // Or "Current fragmentation = 15 %"
+        output.lines()
+            .find(|line| line.contains("fragmented space =") || line.contains("Current fragmentation ="))
+            .and_then(|line| {
+                line.split('%').next()
+                    .and_then(|part| part.split('=').last())
+                    .and_then(|num_str| num_str.trim().parse::<u32>().ok())
+            })
+    }
+
+    pub fn get_native_services(&self) -> Result<Value> {''
         let wmi_con = WMIConnection::new(self.com_lib.into())?;
         let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(
             "SELECT Name, DisplayName, State, StartMode, PathName FROM Win32_Service"

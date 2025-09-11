@@ -7,9 +7,11 @@ mod openai_integration;
 mod results_storage;
 mod windows_native;
 mod security;
+mod issue_detector;
 mod encrypted_storage;
 
-use diagnostics::{DiagnosticTask, TaskResult};
+use crate::diagnostics::{DiagnosticTask, TaskResult};
+use crate::issue_detector::{Issue, IssueSeverity};
 use keyring::{Entry, Error as KeyringError};
 use monitoring::{NetworkConnection, SystemMonitor};
 use serde::{Deserialize, Serialize};
@@ -50,7 +52,8 @@ fn format_json_value(value: &serde_json::Value, indent_level: usize) -> String {
                     }
                     _ => {
                         result.push_str(&format!(
-                            "{}{}: {}\n",
+                            "{}{} : {}
+",
                             indent,
                             formatted_key,
                             val.as_str().unwrap_or(&val.to_string())
@@ -163,8 +166,7 @@ async fn get_system_info() -> Result<SystemInfo, String> {
                     std::mem::size_of::<TOKEN_ELEVATION>() as u32,
                     &mut ret_len,
                 )
-                .is_ok()
-                {
+                .is_ok() {
                     is_elevated = elevation.TokenIsElevated != 0;
                 }
             }
@@ -387,12 +389,12 @@ async fn export_results(
     if let Some(ref session) = *current {
         // Get all available tasks to map IDs to names
         let all_tasks = diagnostics::get_all_tasks();
-        let task_map: std::collections::HashMap<String, &DiagnosticTask> =
+        let task_map: std::collections::HashMap<String, &DiagnosticTask> = 
             all_tasks.iter().map(|t| (t.id.clone(), t)).collect();
 
         match format.as_str() {
             "json" => {
-                let json =
+                let json = 
                     serde_json::to_string_pretty(&session.results).map_err(|e| e.to_string())?;
                 Ok(json)
             }
@@ -429,7 +431,7 @@ async fn export_results(
 
                                 if result.success {
                                     // Parse and format the output
-                                    if let Ok(parsed) =
+                                    if let Ok(parsed) = 
                                         serde_json::from_str::<serde_json::Value>(&result.output)
                                     {
                                         text.push_str(&format_json_value(&parsed, 1));
@@ -669,7 +671,19 @@ async fn compare_scans(
     }
 }
 
-
+#[tauri::command]
+async fn detect_issues(
+    state: State<'_, AppState>,
+) -> Result<Vec<Issue>, String> {
+    let current = state.current_session.lock().await;
+    if let Some(ref session) = *current {
+        let issue_detector = issue_detector::IssueDetector::new();
+        let issues = issue_detector.detect_issues(&session.results);
+        Ok(issues)
+    } else {
+        Err("No active session".to_string())
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -731,6 +745,7 @@ pub fn run() {
             openai_integration::analyze_with_openai,
             openai_integration::analyze_system_with_ai,
             shell_open,
+            detect_issues,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
