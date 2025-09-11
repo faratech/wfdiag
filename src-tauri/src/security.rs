@@ -107,6 +107,12 @@ impl SecureCommandExecutor {
             max_args: 1,
         });
 
+        allowed_commands.insert("defrag".to_string(), CommandConfig {
+            executable: "defrag.exe".to_string(),
+            allowed_args: vec!["/A".to_string()], // Analysis only, no modifications
+            max_args: 2, // drive letter and /A flag only
+        });
+
         Self { allowed_commands }
     }
 
@@ -195,6 +201,15 @@ impl SecureCommandExecutor {
                     Ok(())
                 } else {
                     Err(anyhow::anyhow!("Invalid ipconfig arguments"))
+                }
+            }
+            "defrag" => {
+                // Only allow drive letter and /A flag (analysis only)
+                if args.len() == 2 && args[1] == "/A" {
+                    self.validate_drive_letter(args[0])?;
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("Invalid defrag arguments - only analysis mode allowed"))
                 }
             }
             _ => {
@@ -324,6 +339,25 @@ impl SecureCommandExecutor {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_drive_letter(&self, drive: &str) -> Result<()> {
+        // Validate drive letter format (A: through Z:)
+        if drive.len() != 2 {
+            return Err(anyhow::anyhow!("Drive letter must be in format 'X:'"));
+        }
+        
+        let chars: Vec<char> = drive.chars().collect();
+        if chars.len() != 2 || chars[1] != ':' {
+            return Err(anyhow::anyhow!("Drive letter must be in format 'X:'"));
+        }
+        
+        let letter = chars[0].to_ascii_uppercase();
+        if !letter.is_ascii_alphabetic() || letter < 'A' || letter > 'Z' {
+            return Err(anyhow::anyhow!("Drive letter must be A-Z"));
+        }
+        
         Ok(())
     }
 
