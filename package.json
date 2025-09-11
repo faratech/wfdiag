@@ -1,34 +1,36 @@
-{
-  "name": "wfdiag-tauri-ui",
-  "private": true,
-  "version": "2.0.9",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
-    "tauri": "tauri"
-  },
-  "dependencies": {
-    "@fluentui/react-components": "*",
-    "@fortawesome/fontawesome-free": "*",
-    "@tauri-apps/api": "*",
-    "@tauri-apps/plugin-clipboard-manager": "*",
-    "@tauri-apps/plugin-dialog": "*",
-    "@tauri-apps/plugin-fs": "*",
-    "@tauri-apps/plugin-process": "*",
-    "@tauri-apps/plugin-shell": "*",
-    "chart.js": "*",
-    "react": "*",
-    "react-chartjs-2": "*",
-    "react-dom": "*"
-  },
-  "devDependencies": {
-    "@tauri-apps/cli": "*",
-    "@types/react": "*",
-    "@types/react-dom": "*",
-    "@vitejs/plugin-react": "*",
-    "typescript": "*",
-    "vite": "*"
-  }
+﻿{
+    "name":  "wfdiag-tauri-ui",
+    "private":  true,
+    "version":  "2.1.0",
+    "type":  "module",
+    "scripts":  {
+                    "dev":  "vite",
+                    "build":  "tsc \u0026\u0026 vite build",
+                    "preview":  "vite preview",
+                    "tauri":  "tauri",
+                    "update-version":  "node scripts/update-version.js",
+                    "version-sync":  "node scripts/update-version.js"
+                },
+    "dependencies":  {
+                         "@fluentui/react-components":  "*",
+                         "@fluentui/react-icons":  "*",
+                         "@fortawesome/fontawesome-free":  "*",
+                         "@tauri-apps/api":  "*",
+                         "@tauri-apps/plugin-clipboard-manager":  "*",
+                         "@tauri-apps/plugin-dialog":  "*",
+                         "@tauri-apps/plugin-fs":  "*",
+                         "@tauri-apps/plugin-shell":  "*",
+                         "chart.js":  "*",
+                         "react":  "*",
+                         "react-chartjs-2":  "*",
+                         "react-dom":  "*"
+                     },
+    "devDependencies":  {
+                            "@tauri-apps/cli":  "*",
+                            "@types/react":  "*",
+                            "@types/react-dom":  "*",
+                            "@vitejs/plugin-react":  "*",
+                            "typescript":  "*",
+                            "vite":  "*"
+                        }
 }
