@@ -1,48 +1,52 @@
-{
-  "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
-    "devUrl": "http://localhost:3000",
-    "frontendDist": "../dist"
-  },
-  "bundle": {
-    "active": true,
-    "targets": "all",
-    "icon": ["icons/icon.ico"],
-    "windows": {
-      "certificateThumbprint": null,
-      "digestAlgorithm": "sha256",
-      "timestampUrl": ""
-    }
-  },
-  "productName": "WF Diagnostics",
-  "version": "2.0.9",
-  "identifier": "com.windowsforum.diagnostics",
-  "plugins": {},
-  "app": {
-    "security": {
-      "csp": null,
-      "dangerousDisableAssetCspModification": false,
-      "assetProtocol": {
-        "enable": false
-      }
-    },
-    "windows": [
-      {
-        "title": "WindowsForum Diagnostic Tool",
-        "width": 1200,
-        "height": 800,
-        "minWidth": 900,
-        "minHeight": 600,
-        "resizable": true,
-        "fullscreen": false,
-        "decorations": true,
-        "transparent": false,
-        "skipTaskbar": false,
-        "alwaysOnTop": false,
-        "visible": true,
-        "center": true
-      }
-    ]
-  }
+﻿{
+    "build":  {
+                  "beforeDevCommand":  "npm run dev",
+                  "beforeBuildCommand":  "npm run build",
+                  "devUrl":  "http://localhost:3000",
+                  "frontendDist":  "../dist"
+              },
+    "bundle":  {
+                   "active":  true,
+                   "targets":  "all",
+                   "icon":  [
+                                "icons/icon.ico"
+                            ],
+                   "windows":  {
+                                   "certificateThumbprint":  null,
+                                   "digestAlgorithm":  "sha256",
+                                   "timestampUrl":  ""
+                               }
+               },
+    "productName":  "WF Diagnostics",
+    "version":  "2.1.0",
+    "identifier":  "com.windowsforum.diagnostics",
+    "plugins":  {
+
+                },
+    "app":  {
+                "security":  {
+                                 "csp":  null,
+                                 "dangerousDisableAssetCspModification":  false,
+                                 "assetProtocol":  {
+                                                       "enable":  false
+                                                   }
+                             },
+                "windows":  [
+                                {
+                                    "title":  "WindowsForum Diagnostic Tool",
+                                    "width":  1200,
+                                    "height":  800,
+                                    "minWidth":  900,
+                                    "minHeight":  600,
+                                    "resizable":  true,
+                                    "fullscreen":  false,
+                                    "decorations":  true,
+                                    "transparent":  false,
+                                    "skipTaskbar":  false,
+                                    "alwaysOnTop":  false,
+                                    "visible":  true,
+                                    "center":  true
+                                }
+                            ]
+            }
 }

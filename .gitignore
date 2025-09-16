@@ -166,12 +166,13 @@ auth_tokens.json
 .dockerignore
 docker-compose.override.yml
 
-# Package manager locks (keep main package-lock.json but ignore temp ones)
+# Package manager
 .pnpm-store/
 pnpm-lock.yaml
 yarn.lock
 .yarn/
 .pnp.*
+package-lock.json
 
 # GitHub Codespaces
 .devcontainer/
