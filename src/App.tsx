@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+﻿import React, { useState, useEffect } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { save } from '@tauri-apps/plugin-dialog'
@@ -535,7 +535,7 @@ ${content}`
                   </Text>
                 </div>
                 <Text size={200} style={{ color: '#94a3b8', marginBottom: 8 }}>
-                  {availableTasks.filter(task => !task.admin_required || systemInfo?.is_admin).length} of {availableTasks.length} diagnostic tasks available • 5 admin-only tasks hidden (disk check, DISM health, battery report, driver verifier, crash dumps)
+                  {availableTasks.filter(task => !task.admin_required || systemInfo?.is_admin).length} of {availableTasks.length} diagnostic tasks available â€¢ 5 admin-only tasks hidden (disk check, DISM health, battery report, driver verifier, crash dumps)
                 </Text>
                 <Button 
                   appearance="transparent" 
@@ -1087,7 +1087,7 @@ ${content}`
               </div>
               <div className="status-badge success" style={{ marginLeft: 16 }}>
                 <i className="fas fa-check-circle"></i>
-                v2.0.8
+                v2.1.0
               </div>
             </div>
             {systemInfo && (
