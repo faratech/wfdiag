@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::fs;
 use wmi::{COMLibrary, WMIConnection};
 use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
@@ -21,7 +21,11 @@ impl NativeDiagnostics {
     }
 
     pub fn run_wmi_query(&self, class_name: &str, namespace: Option<&str>) -> Result<Value> {
-        let wmi_con = WMIConnection::new_with_namespace(self.com_lib.into(), namespace.unwrap_or("root\CIMV2"))?;
+        let wmi_con = if let Some(ns) = namespace {
+            WMIConnection::with_namespace_path(ns, self.com_lib.into())?
+        } else {
+            WMIConnection::new(self.com_lib.into())?
+        };
         let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(&format!("SELECT * FROM {}", class_name))?;
         
         let mut json_results = Vec::new();
@@ -614,7 +618,7 @@ impl NativeDiagnostics {
         entries
     }
 
-    '''    pub fn run_dsregcmd(&self) -> Result<Value> {
+    pub fn run_dsregcmd(&self) -> Result<Value> {
         // Check domain join status via WMI
         let wmi_con = WMIConnection::new(self.com_lib.into())?;
         
@@ -690,7 +694,7 @@ impl NativeDiagnostics {
             })
     }
 
-    pub fn get_native_services(&self) -> Result<Value> {''
+    pub fn get_native_services(&self) -> Result<Value> {
         let wmi_con = WMIConnection::new(self.com_lib.into())?;
         let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(
             "SELECT Name, DisplayName, State, StartMode, PathName FROM Win32_Service"
@@ -863,16 +867,17 @@ impl NativeDiagnostics {
 
     pub fn get_minidumps(&self) -> Result<Value> {
         let minidump_path = Path::new("C:\\Windows\\Minidump");
-        
+
         if !minidump_path.exists() {
             return Ok(json!({
                 "dumps": [],
-                "message": "No minidump directory found"
+                "message": "No minidump directory found",
+                "can_copy": false
             }));
         }
-        
+
         let mut dumps = Vec::new();
-        
+
         if let Ok(entries) = fs::read_dir(minidump_path) {
             for entry in entries.filter_map(Result::ok) {
                 if let Ok(metadata) = entry.metadata() {
@@ -892,11 +897,108 @@ impl NativeDiagnostics {
                 }
             }
         }
-        
+
+        // Check if Desktop\Minidumps exists
+        let desktop_minidumps = self.get_desktop_minidumps_path();
+        let desktop_minidumps_exists = desktop_minidumps.as_ref().map_or(false, |p| p.exists());
+
         Ok(json!({
             "dumps": dumps,
             "count": dumps.len(),
-            "path": minidump_path.to_string_lossy()
+            "path": minidump_path.to_string_lossy(),
+            "can_copy": !dumps.is_empty(),
+            "desktop_path": desktop_minidumps.map(|p| p.to_string_lossy().to_string()),
+            "desktop_path_exists": desktop_minidumps_exists
+        }))
+    }
+
+    /// Get the Desktop\Minidumps path for the current user
+    fn get_desktop_minidumps_path(&self) -> Option<PathBuf> {
+        if let Some(desktop_path) = dirs::desktop_dir() {
+            Some(desktop_path.join("Minidumps"))
+        } else {
+            None
+        }
+    }
+
+    /// Copy minidumps to Desktop\Minidumps for easy sharing on forums
+    pub fn copy_minidumps_to_desktop(&self) -> Result<Value> {
+        let minidump_path = Path::new("C:\\Windows\\Minidump");
+
+        if !minidump_path.exists() {
+            return Ok(json!({
+                "success": false,
+                "message": "No minidump directory found",
+                "copied_files": []
+            }));
+        }
+
+        // Get Desktop\Minidumps path
+        let desktop_minidumps = match self.get_desktop_minidumps_path() {
+            Some(path) => path,
+            None => {
+                return Ok(json!({
+                    "success": false,
+                    "message": "Could not determine Desktop path",
+                    "copied_files": []
+                }));
+            }
+        };
+
+        // Create Desktop\Minidumps directory if it doesn't exist
+        if !desktop_minidumps.exists() {
+            if let Err(e) = fs::create_dir_all(&desktop_minidumps) {
+                return Ok(json!({
+                    "success": false,
+                    "message": format!("Failed to create Desktop\\Minidumps directory: {}", e),
+                    "copied_files": []
+                }));
+            }
+        }
+
+        let mut copied_files = Vec::new();
+        let mut errors = Vec::new();
+        let mut total_copied = 0;
+
+        // Copy all .dmp files
+        if let Ok(entries) = fs::read_dir(minidump_path) {
+            for entry in entries.filter_map(Result::ok) {
+                if entry.path().extension().and_then(|s| s.to_str()) == Some("dmp") {
+                    let source_file = entry.path();
+                    let filename = entry.file_name();
+                    let dest_file = desktop_minidumps.join(&filename);
+
+                    match fs::copy(&source_file, &dest_file) {
+                        Ok(bytes_copied) => {
+                            total_copied += 1;
+                            copied_files.push(json!({
+                                "filename": filename.to_string_lossy(),
+                                "source": source_file.to_string_lossy(),
+                                "destination": dest_file.to_string_lossy(),
+                                "size": bytes_copied
+                            }));
+                        }
+                        Err(e) => {
+                            errors.push(format!("Failed to copy {}: {}", filename.to_string_lossy(), e));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(json!({
+            "success": total_copied > 0,
+            "message": if total_copied > 0 {
+                format!("Successfully copied {} minidump file(s) to Desktop\\Minidumps", total_copied)
+            } else if !errors.is_empty() {
+                format!("Failed to copy minidumps: {}", errors.join(", "))
+            } else {
+                "No minidump files found to copy".to_string()
+            },
+            "copied_files": copied_files,
+            "destination_path": desktop_minidumps.to_string_lossy(),
+            "total_copied": total_copied,
+            "errors": errors
         }))
     }
 

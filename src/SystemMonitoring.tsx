@@ -25,6 +25,20 @@ import {
 import { Line, Bar } from 'react-chartjs-2';
 import './styles.css';
 
+// Sanitize data to prevent prototype pollution
+const sanitizeChartData = (data: any): any => {
+  if (typeof data !== 'object' || data === null) return data;
+  if (Array.isArray(data)) return data.map(sanitizeChartData);
+
+  const sanitized: any = {};
+  for (const key in data) {
+    if (data.hasOwnProperty(key) && !['__proto__', 'constructor', 'prototype'].includes(key)) {
+      sanitized[key] = sanitizeChartData(data[key]);
+    }
+  }
+  return sanitized;
+};
+
 // Register Chart.js components
 ChartJS.register(
   CategoryScale,
@@ -191,7 +205,7 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
     };
   }, [isActive, onToggle]);
 
-  const cpuChartData = {
+  const cpuChartData = sanitizeChartData({
     labels: timeLabels,
     datasets: [
       {
@@ -203,9 +217,9 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
         tension: 0.4,
       },
     ],
-  };
+  });
 
-  const memoryChartData = {
+  const memoryChartData = sanitizeChartData({
     labels: timeLabels,
     datasets: [
       {
@@ -217,9 +231,9 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
         tension: 0.4,
       },
     ],
-  };
+  });
 
-  const networkChartData = {
+  const networkChartData = sanitizeChartData({
     labels: timeLabels,
     datasets: [
       {
@@ -239,20 +253,20 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
         tension: 0.4,
       },
     ],
-  };
+  });
 
-  const cpuCoreData = {
+  const cpuCoreData = sanitizeChartData({
     labels: stats?.per_cpu_utilization.map((_, i) => `Core ${i}`) || [],
     datasets: [
       {
         label: 'CPU Core Usage %',
         data: stats?.per_cpu_utilization || [],
-        backgroundColor: stats?.per_cpu_utilization.map(val => 
+        backgroundColor: stats?.per_cpu_utilization.map(val =>
           val > 80 ? 'rgba(239, 68, 68, 0.8)' :
           val > 50 ? 'rgba(245, 158, 11, 0.8)' :
           'rgba(16, 185, 129, 0.8)'
         ) || [],
-        borderColor: stats?.per_cpu_utilization.map(val => 
+        borderColor: stats?.per_cpu_utilization.map(val =>
           val > 80 ? '#ef4444' :
           val > 50 ? '#f59e0b' :
           '#10b981'
@@ -260,7 +274,7 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
         borderWidth: 1,
       },
     ],
-  };
+  });
 
   const chartOptions = {
     responsive: true,

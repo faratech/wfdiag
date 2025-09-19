@@ -8,7 +8,7 @@ import { SystemMonitoring } from './SystemMonitoring'
 import { OpenAIIntegration } from './OpenAIIntegration'
 import { ComparisonView } from './ComparisonView'
 import './styles.css'
-import { 
+import {
   Button,
   Tab,
   TabList,
@@ -19,6 +19,7 @@ import {
   Divider,
   tokens,
   Badge,
+  Spinner,
 } from '@fluentui/react-components'
 
 interface SystemInfo {
@@ -59,6 +60,9 @@ function App() {
   const [filteredResults, setFilteredResults] = useState<Record<string, TaskResult>>({})
   const [scanStartTime, setScanStartTime] = useState<number>(0)
   const [issues, setIssues] = useState<any[]>([])
+  const [copyingMinidumps, setCopyingMinidumps] = useState(false)
+  const [fixingIssue, setFixingIssue] = useState<string | null>(null)
+  const [fixResults, setFixResults] = useState<Record<string, any>>({})
 
   useEffect(() => {
     loadSystemInfo()
@@ -71,6 +75,23 @@ function App() {
       setSystemInfo(info)
     } catch (error) {
       console.error('Failed to load system info:', error)
+    }
+  }
+
+  const handleCopyMinidumps = async () => {
+    setCopyingMinidumps(true)
+    try {
+      const result = await invoke<any>('copy_minidumps_to_desktop')
+      if (result.success) {
+        alert(`Success! ${result.message}\n\nFiles copied to: ${result.destination_path}\n\nYou can now easily share these minidump files on WindowsForum.com for analysis.`)
+      } else {
+        alert(`Failed to copy minidumps: ${result.message}`)
+      }
+    } catch (error) {
+      console.error('Failed to copy minidumps:', error)
+      alert(`Error copying minidumps: ${error}`)
+    } finally {
+      setCopyingMinidumps(false)
     }
   }
 
@@ -178,6 +199,15 @@ function App() {
   const detectIssues = async () => {
     try {
       const issues = await invoke<any[]>('detect_issues')
+      console.log('Detected issues from backend:', issues)
+      issues.forEach((issue, idx) => {
+        console.log(`Issue ${idx}:`, {
+          id: issue.id,
+          title: issue.title,
+          hasId: 'id' in issue,
+          keys: Object.keys(issue)
+        })
+      })
       setIssues(issues)
     } catch (error) {
       console.error('Failed to detect issues:', error)
@@ -907,6 +937,54 @@ ${content}`
                                 
                                 {/* Task Results - Always Visible */}
                                 <div style={{ paddingLeft: 30 }}>
+                            {/* Special handling for minidump task */}
+                            {task.id === 'minidump' && !result.error && (() => {
+                              try {
+                                const minidumpData = JSON.parse(result.output)
+                                if (minidumpData.can_copy) {
+                                  return (
+                                    <div style={{
+                                      marginBottom: 16,
+                                      padding: 12,
+                                      background: 'rgba(59, 130, 246, 0.1)',
+                                      borderRadius: 8,
+                                      border: '1px solid rgba(59, 130, 246, 0.3)'
+                                    }}>
+                                      <Text size={300} weight="semibold" style={{ color: '#60a5fa', display: 'block', marginBottom: 8 }}>
+                                        <i className="fas fa-upload" style={{ marginRight: 8 }}></i>
+                                        Copy Minidumps for Forum Sharing
+                                      </Text>
+                                      <Text size={200} style={{ color: '#94a3b8', display: 'block', marginBottom: 12 }}>
+                                        Copy all minidump files to Desktop\\Minidumps for easy sharing on WindowsForum.com
+                                      </Text>
+                                      <Button
+                                        appearance="primary"
+                                        size="small"
+                                        disabled={copyingMinidumps}
+                                        onClick={handleCopyMinidumps}
+                                        style={{ background: '#3b82f6', border: 'none' }}
+                                      >
+                                        {copyingMinidumps ? (
+                                          <>
+                                            <Spinner size="tiny" style={{ marginRight: 8 }} />
+                                            Copying...
+                                          </>
+                                        ) : (
+                                          <>
+                                            <i className="fas fa-copy" style={{ marginRight: 8 }}></i>
+                                            Copy to Desktop\\Minidumps
+                                          </>
+                                        )}
+                                      </Button>
+                                    </div>
+                                  )
+                                }
+                                return null
+                              } catch (e) {
+                                return null
+                              }
+                            })()}
+
                             {result.error ? (
                               <Text size={200} style={{ color: tokens.colorPaletteRedForeground1 }}>
                                 Error: {result.error}
@@ -978,28 +1056,87 @@ ${content}`
   }
 
   const renderIssuesTab = () => {
+    // Sort issues: detected issues first, then by severity
+    const sortedIssues = [...issues].sort((a, b) => {
+      if (a.detected !== b.detected) {
+        return a.detected ? -1 : 1;
+      }
+      const severityOrder: Record<string, number> = { Critical: 0, Warning: 1, Info: 2, Ok: 3 };
+      return (severityOrder[a.severity] || 999) - (severityOrder[b.severity] || 999);
+    });
+
+    const canAutoFix = (issueId: string) => {
+      const fixableIssues = [
+        'disk_fragmentation',
+        'temp_files',
+        'windows_update_service',
+        'dns_cache',
+        'icon_cache',
+        'prefetch_files',
+        'recycle_bin',
+        'stopped_services',
+        'high_cpu_usage',
+        'high_memory_usage'
+      ]
+      return fixableIssues.includes(issueId)
+    }
+
+    const requiresAdmin = (issueId: string) => {
+      const adminRequiredIssues = [
+        'disk_fragmentation',
+        'temp_files',
+        'windows_update_service',
+        'stopped_services'
+      ]
+      return adminRequiredIssues.includes(issueId)
+    }
+
+    const handleFixIssue = async (issueId: string) => {
+      setFixingIssue(issueId)
+      try {
+        const result = await invoke<any>('fix_issue', { issueId })
+        setFixResults(prev => ({ ...prev, [issueId]: result }))
+        if (result.success) {
+          // Re-run diagnostics after successful fix
+          setTimeout(() => detectIssues(), 2000)
+        }
+      } catch (error) {
+        console.error('Failed to fix issue:', error)
+        setFixResults(prev => ({
+          ...prev,
+          [issueId]: { success: false, message: String(error) }
+        }))
+      } finally {
+        setFixingIssue(null)
+      }
+    }
+
     return (
       <div style={{ maxWidth: 1200, margin: '0 auto' }}>
         <div className="glass-card" style={{ padding: 24 }}>
           <Text size={500} weight="semibold" style={{ color: '#f1f5f9', display: 'block', marginBottom: 16 }}>
-            <i className="fas fa-exclamation-triangle" style={{ marginRight: 8, color: '#ef4444' }}></i>
-            Detected Issues
+            <i className="fas fa-shield-alt" style={{ marginRight: 8, color: '#3b82f6' }}></i>
+            System Health Check
           </Text>
-          {issues.length === 0 ? (
+          {sortedIssues.length === 0 ? (
             <div style={{ textAlign: 'center', padding: 48, color: '#94a3b8' }}>
-              <Text size={300}>No issues detected.</Text>
+              <Text size={300}>Running diagnostics to check for issues...</Text>
             </div>
           ) : (
             <div>
-              {issues.map((issue, index) => (
+              {sortedIssues.map((issue, index) => (
                 <div
                   key={index}
                   style={{
                     padding: 16,
                     marginBottom: 8,
-                    background: 'rgba(30, 41, 59, 0.3)',
+                    background: issue.severity === 'Ok'
+                      ? 'rgba(16, 185, 129, 0.1)'
+                      : 'rgba(30, 41, 59, 0.3)',
                     borderRadius: 8,
-                    border: '1px solid rgba(71, 85, 105, 0.3)'
+                    border: issue.severity === 'Ok'
+                      ? '1px solid rgba(16, 185, 129, 0.3)'
+                      : '1px solid rgba(71, 85, 105, 0.3)'
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
@@ -1007,29 +1144,85 @@ ${content}`
                       <Text size={400} weight="semibold" style={{ color: '#f1f5f9' }}>
                         {issue.title}
                       </Text>
+                      {issue.id && (
+                        <Text size={100} style={{ color: '#64748b' }}>
+                          (ID: {issue.id})
+                        </Text>
+                      )}
                     </div>
                     <div style={{ display: 'flex', gap: 8 }}>
                       <Badge appearance="tint" style={{ background: 'rgba(100, 116, 139, 0.2)', color: '#94a3b8' }}>
                         {issue.category}
                       </Badge>
-                      <Badge 
+                      <Badge
                         appearance="filled"
-                        style={{ 
+                        style={{
                           background: issue.severity === 'Critical' ? '#ef4444' :
                                      issue.severity === 'Warning' ? '#f59e0b' :
+                                     issue.severity === 'Info' ? '#3b82f6' :
+                                     issue.severity === 'Ok' ? '#10b981' :
                                      '#10b981'
                         }}
                       >
-                        {issue.severity}
+                        {issue.severity === 'Ok' ? '✓ OK' : issue.severity}
                       </Badge>
                     </div>
                   </div>
                   <Text size={200} style={{ color: '#cbd5e1', display: 'block', marginBottom: 8 }}>
                     {issue.description}
                   </Text>
-                  <Text size={200} style={{ color: '#94a3b8' }}>
+                  <Text size={200} style={{ color: '#94a3b8', display: 'block', marginBottom: 12 }}>
                     {issue.recommendation}
                   </Text>
+
+                  {canAutoFix(issue.id) && issue.detected && (
+                    <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                      <Button
+                        appearance="primary"
+                        size="small"
+                        disabled={fixingIssue !== null}
+                        onClick={() => handleFixIssue(issue.id)}
+                        style={{
+                          background: fixingIssue === issue.id ? '#475569' : '#3b82f6',
+                          border: 'none'
+                        }}
+                      >
+                        {fixingIssue === issue.id ? (
+                          <>
+                            <Spinner size="tiny" style={{ marginRight: 8 }} />
+                            Fixing...
+                          </>
+                        ) : (
+                          <>
+                            <i className="fas fa-wrench" style={{ marginRight: 8 }}></i>
+                            Fix {requiresAdmin(issue.id) && '(Opens Tool)'}
+                          </>
+                        )}
+                      </Button>
+                      {requiresAdmin(issue.id) && !fixingIssue && (
+                        <Text size={100} style={{ color: '#fbbf24' }}>
+                          <i className="fas fa-shield-alt" style={{ marginRight: 4 }}></i>
+                          Admin required
+                        </Text>
+                      )}
+
+                      {fixResults[issue.id] && (
+                        <div style={{ flex: 1 }}>
+                          {fixResults[issue.id].success ? (
+                            <Text size={200} style={{ color: '#10b981' }}>
+                              <i className="fas fa-check-circle" style={{ marginRight: 4 }}></i>
+                              {fixResults[issue.id].message}
+                            </Text>
+                          ) : (
+                            <Text size={200} style={{ color: '#ef4444' }}>
+                              <i className="fas fa-times-circle" style={{ marginRight: 4 }}></i>
+                              {fixResults[issue.id].message}
+                            </Text>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -1153,7 +1346,7 @@ ${content}`
                 fontWeight: selectedTab === 'issues' ? 600 : 400
               }}>
                 <i className="fas fa-exclamation-triangle" style={{ marginRight: 8 }}></i>
-                Issues ({issues.length})
+                Issues ({issues.filter(i => i.detected).length})
               </Tab>
             </TabList>
           </div>

@@ -361,7 +361,7 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             "hosts_file" => diagnostics.read_hosts_file(),
             "dsregcmd" => diagnostics.run_dsregcmd(),
             "windows_update" => diagnostics.get_windows_update_history(),
-            "firewall_status" => diagnostics.run_wmi_query("FirewallProduct", Some("root\SecurityCenter2")),
+            "firewall_status" => diagnostics.run_wmi_query("FirewallProduct", Some(r"root\SecurityCenter2")),
             _ => Err(anyhow::anyhow!("Not implemented in native diagnostics")),
         }
     }).await.unwrap_or_else(|_| Err(anyhow::anyhow!("Task panicked")));

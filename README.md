@@ -1,7 +1,7 @@
-# WF Diagnostics v2.0.9 - WindowsForum Diagnostic Tool
+# WF Diagnostics v2.1.0 - WindowsForum Diagnostic Tool
 
 [![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC_BY--NC--ND_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
-[![Version](https://img.shields.io/badge/version-2.0.9-blue.svg)](https://github.com/faratech/wfdiag/releases)
+[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](https://github.com/faratech/wfdiag/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightblue.svg)](https://github.com/faratech/wfdiag)
 [![Security](https://img.shields.io/badge/security-hardened-green.svg)](https://github.com/faratech/wfdiag)
 
