@@ -173,6 +173,7 @@ yarn.lock
 .yarn/
 .pnp.*
 package-lock.json
+nul
 
 # GitHub Codespaces
 .devcontainer/

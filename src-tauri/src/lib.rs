@@ -8,6 +8,7 @@ mod results_storage;
 mod windows_native;
 mod security;
 mod issue_detector;
+mod issue_fixer;
 mod encrypted_storage;
 
 use crate::diagnostics::{DiagnosticTask, TaskResult};
@@ -495,6 +496,14 @@ async fn get_uptime() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
+async fn fix_issue(issue_id: String) -> Result<issue_fixer::FixResult, String> {
+    let fixer = issue_fixer::IssueFixer::new();
+    fixer.fix_issue(&issue_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn restart_as_admin() -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -685,6 +694,13 @@ async fn detect_issues(
     }
 }
 
+#[tauri::command]
+async fn copy_minidumps_to_desktop() -> Result<serde_json::Value, String> {
+    let diagnostics = native_diagnostics::NativeDiagnostics::new().unwrap();
+    diagnostics.copy_minidumps_to_desktop()
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let scan_storage = ScanStorage::new()
@@ -733,6 +749,7 @@ pub fn run() {
             export_results,
             save_results_to_file,
             get_uptime,
+            fix_issue,
             restart_as_admin,
             start_monitoring,
             stop_monitoring,
@@ -746,6 +763,7 @@ pub fn run() {
             openai_integration::analyze_system_with_ai,
             shell_open,
             detect_issues,
+            copy_minidumps_to_desktop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
