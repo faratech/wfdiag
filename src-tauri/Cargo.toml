@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "wfdiag-tauri"
 version = "2.1.0"
 description = "WindowsForum Diagnostic Tool"
@@ -38,6 +38,7 @@ base64 = "*"
 url = "*"
 warp = "*"
 keyring = { version = "*", features = ["crypto-rust"] }
+dirs = "*"
 # Encryption dependencies
 aes-gcm = "*"
 pbkdf2 = "*"

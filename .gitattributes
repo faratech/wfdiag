@@ -1,0 +1,7 @@
+# Encrypt the release folder contents
+release/** filter=git-crypt diff=git-crypt
+releases/** filter=git-crypt diff=git-crypt
+
+# Exception: Don't encrypt text files that might be needed publicly
+*.md !filter !diff
+*.txt !filter !diff
