@@ -681,6 +681,25 @@ async fn compare_scans(
 }
 
 #[tauri::command]
+async fn clear_scan_history(
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    println!("Clearing scan history via Tauri command...");
+
+    let storage = state.scan_storage.lock().await;
+    match storage.clear_history() {
+        Ok(_) => {
+            println!("Scan history cleared successfully");
+            Ok("Scan history cleared successfully".to_string())
+        }
+        Err(e) => {
+            println!("Failed to clear scan history: {}", e);
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
 async fn detect_issues(
     state: State<'_, AppState>,
 ) -> Result<Vec<Issue>, String> {
@@ -759,6 +778,7 @@ pub fn run() {
             list_scan_history,
             load_scan,
             compare_scans,
+            clear_scan_history,
             openai_integration::analyze_with_openai,
             openai_integration::analyze_system_with_ai,
             shell_open,
