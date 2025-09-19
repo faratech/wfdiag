@@ -408,4 +408,44 @@ impl ScanStorage {
         
         Ok(())
     }
+
+    pub fn clear_history(&self) -> Result<(), String> {
+        println!("Clearing all scan history...");
+
+        // Get list of all scan files (returns filenames without .enc extension)
+        let scan_files = self.encrypted_storage.list_files()
+            .map_err(|e| format!("Failed to list scan files: {}", e))?;
+
+        let mut deleted_count = 0;
+        let mut failed_count = 0;
+
+        // Delete each scan - list_files returns the base filename (without .enc)
+        for scan_file in scan_files {
+            // Skip if not a scan file (we only want to delete scan_* files)
+            if !scan_file.starts_with("scan_") {
+                continue;
+            }
+
+            match self.encrypted_storage.delete(&scan_file) {
+                Ok(_) => {
+                    deleted_count += 1;
+                    println!("Deleted scan: {}", scan_file);
+                }
+                Err(e) => {
+                    failed_count += 1;
+                    println!("Warning: Failed to delete scan '{}': {}", scan_file, e);
+                }
+            }
+        }
+
+        println!("Clear history completed: {} deleted, {} failed", deleted_count, failed_count);
+
+        if failed_count > 0 {
+            Err(format!("Cleared {} scans, but {} failed to delete", deleted_count, failed_count))
+        } else if deleted_count == 0 {
+            Ok(()) // No scans to delete is not an error
+        } else {
+            Ok(())
+        }
+    }
 }

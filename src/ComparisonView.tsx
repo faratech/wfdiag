@@ -175,17 +175,45 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({ onClose }) => {
     <div style={{ maxWidth: 1000, margin: '0 auto', padding: 24 }}>
       {/* Header */}
       <div className="glass-card" style={{ padding: 24, marginBottom: 24 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-          <Button
-            appearance="subtle"
-            onClick={onClose}
-            icon={<ArrowLeftRegular />}
-          >
-            Back
-          </Button>
-          <Text size={500} weight="semibold" style={{ color: '#f1f5f9' }}>
-            Scan Comparison
-          </Text>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <Button
+              appearance="subtle"
+              onClick={onClose}
+              icon={<ArrowLeftRegular />}
+            >
+              Back
+            </Button>
+            <Text size={500} weight="semibold" style={{ color: '#f1f5f9' }}>
+              Scan Comparison
+            </Text>
+          </div>
+          {!comparison && scans.length > 0 && (
+            <Button
+              appearance="subtle"
+              onClick={async () => {
+                const confirmClear = window.confirm('Are you sure you want to clear all scan history? This action cannot be undone.')
+                if (confirmClear) {
+                  try {
+                    const { invoke } = await import('@tauri-apps/api/core')
+                    await invoke('clear_scan_history')
+                    await refreshScans()
+                    setSelectedCurrent('')
+                    setSelectedPrevious('')
+                  } catch (error) {
+                    console.error('Failed to clear scan history:', error)
+                    alert('Failed to clear scan history: ' + error)
+                  }
+                }
+              }}
+              style={{
+                color: '#ef4444',
+                borderColor: 'rgba(239, 68, 68, 0.3)'
+              }}
+            >
+              Clear History
+            </Button>
+          )}
         </div>
 
         {!comparison && (
