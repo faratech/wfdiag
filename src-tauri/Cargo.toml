@@ -1,6 +1,6 @@
 [package]
 name = "wfdiag-tauri"
-version = "2.1.0-beta"
+version = "2.1.0"
 description = "WindowsForum Diagnostic Tool"
 authors = ["WindowsForum"]
 edition = "2024"
@@ -30,7 +30,6 @@ scraper = "*"
 reqwest = { version = "*", features = ["json"] }
 uuid = { version = "*", features = ["v4"] }
 futures = "*"
-open = "*"
 async-openai = "*"
 rand = "*"
 sha2 = "*"

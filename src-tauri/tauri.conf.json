@@ -11,14 +11,18 @@
                    "icon":  [
                                 "icons/icon.ico"
                             ],
+                   "publisher": "CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4",
                    "windows":  {
                                    "certificateThumbprint":  null,
                                    "digestAlgorithm":  "sha256",
-                                   "timestampUrl":  ""
+                                   "timestampUrl":  "",
+                                   "webviewInstallMode": {
+                                       "type": "downloadBootstrapper"
+                                   }
                                }
                },
-    "productName":  "WF Diagnostics",
-    "version":  "2.1.0b",
+    "productName":  "WindowsForum Diagnostics",
+    "version":  "2.1.0",
     "identifier":  "com.windowsforum.diagnostics",
     "plugins":  {
 
