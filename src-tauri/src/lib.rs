@@ -134,10 +134,6 @@ async fn clear_api_key() -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-async fn shell_open(path: String) -> Result<(), String> {
-    open::that(path).map_err(|e| e.to_string())
-}
 
 #[tauri::command]
 async fn get_system_info() -> Result<SystemInfo, String> {
@@ -739,7 +735,7 @@ pub fn run() {
             // Handle deep links for OAuth callbacks
             #[cfg(desktop)]
             {
-                let handle = app.handle().clone();
+                let _handle = app.handle().clone();
                 std::thread::spawn(move || {
                     // Listen for deep link URLs
                     tauri::async_runtime::block_on(async move {
@@ -781,7 +777,6 @@ pub fn run() {
             clear_scan_history,
             openai_integration::analyze_with_openai,
             openai_integration::analyze_system_with_ai,
-            shell_open,
             detect_issues,
             copy_minidumps_to_desktop,
         ])
