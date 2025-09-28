@@ -71,6 +71,7 @@ certificates/
 *_key.*
 *.rsa
 *.dsa
+*.msix
 
 # Sigstore signatures (local development only)
 signatures/
