@@ -8,7 +8,7 @@ The version is defined in `/version.json`:
 
 ```json
 {
-  "version": "2.1.0",
+  "version": "2.1.1",
   "name": "WF Diagnostics", 
   "description": "WindowsForum Diagnostic Tool"
 }

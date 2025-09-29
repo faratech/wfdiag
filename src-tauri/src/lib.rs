@@ -710,6 +710,25 @@ async fn detect_issues(
 }
 
 #[tauri::command]
+async fn open_url(url: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(&["/C", "start", "", &url])
+            .spawn()
+            .map_err(|e| format!("Failed to open URL: {}", e))?;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // For non-Windows systems, we'd need the opener crate
+        return Err("URL opening is only supported on Windows currently".to_string());
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn copy_minidumps_to_desktop() -> Result<serde_json::Value, String> {
     let diagnostics = native_diagnostics::NativeDiagnostics::new().unwrap();
     diagnostics.copy_minidumps_to_desktop()
@@ -779,6 +798,7 @@ pub fn run() {
             openai_integration::analyze_system_with_ai,
             detect_issues,
             copy_minidumps_to_desktop,
+            open_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

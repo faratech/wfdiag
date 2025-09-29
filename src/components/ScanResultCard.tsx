@@ -37,7 +37,8 @@ const useStyles = makeStyles({
   titleSection: {
     display: 'flex',
     alignItems: 'center',
-    ...shorthands.gap(tokens.spacingHorizontalM),
+    ...shorthands.gap(tokens.spacingHorizontalL),
+    flex: 1,
   },
   metaSection: {
     display: 'flex',
@@ -51,8 +52,8 @@ const useStyles = makeStyles({
   dataGrid: {
     display: 'grid',
     gridTemplateColumns: 'minmax(150px, 1fr) 2fr',
-    ...shorthands.gap(tokens.spacingHorizontalS, tokens.spacingVerticalXS),
-    marginBottom: tokens.spacingVerticalS,
+    ...shorthands.gap(tokens.spacingHorizontalM, tokens.spacingVerticalS),
+    marginBottom: tokens.spacingVerticalM,
   },
   dataLabel: {
     color: tokens.colorNeutralForeground3,
@@ -64,21 +65,21 @@ const useStyles = makeStyles({
     wordBreak: 'break-word',
   },
   errorMessage: {
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
+    ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalL),
     backgroundColor: 'rgba(239, 68, 68, 0.1)',
     ...shorthands.border('1px', 'solid', 'rgba(239, 68, 68, 0.3)'),
     ...shorthands.borderRadius(tokens.borderRadiusSmall),
-    marginTop: tokens.spacingVerticalS,
+    marginTop: tokens.spacingVerticalM,
   },
   codeBlock: {
     fontFamily: 'Consolas, "Courier New", monospace',
     fontSize: tokens.fontSizeBase200,
-    ...shorthands.padding(tokens.spacingVerticalS),
+    ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalM),
     backgroundColor: 'rgba(0, 0, 0, 0.3)',
     ...shorthands.borderRadius(tokens.borderRadiusSmall),
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-word',
-    marginTop: tokens.spacingVerticalS,
+    marginTop: tokens.spacingVerticalM,
   },
   expandIcon: {
     transition: 'transform 0.2s ease',

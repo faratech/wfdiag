@@ -175,7 +175,7 @@ support@windowsforum.com
 ## Privacy Policy URL
 https://windowsforum.com/privacy
 
-## Release Notes (Version 2.1.0)
+## Release Notes (Version 2.1.1)
 
 ### What's New
 • Modern Fluent UI redesign with enhanced dark theme

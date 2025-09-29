@@ -410,6 +410,25 @@ main {
   }
 }
 
+/* New optimized animations */
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(200%);
+  }
+}
+
 /* Result items styling for clarity */
 .result-section {
   background: rgba(30, 41, 59, 0.5);
