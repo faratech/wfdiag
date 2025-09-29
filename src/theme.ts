@@ -8,35 +8,48 @@ import {
   shorthands
 } from '@fluentui/react-components'
 
-// WF Diagnostics brand colors
+// WF Diagnostics optimized brand colors
 const wfDiagnosticsBrand: BrandVariants = {
-  10: '#020305',
-  20: '#0A1929',
-  30: '#0F2642',
-  40: '#143356',
-  50: '#1A416B',
-  60: '#1F4F80',
-  70: '#2563EB', // Primary brand color
-  80: '#3B82F6',
-  90: '#60A5FA',
-  100: '#93C5FD',
-  110: '#BFDBFE',
-  120: '#DBEAFE',
-  130: '#EFF6FF',
-  140: '#F0F9FF',
-  150: '#F7FBFF',
-  160: '#FAFCFF',
+  10: '#030712',   // Darkest
+  20: '#0F1629',   // Deep navy
+  30: '#1A2341',   // Dark navy
+  40: '#243054',   // Navy
+  50: '#2E3D67',   // Medium navy
+  60: '#384B7A',   // Light navy
+  70: '#4F69FF',   // Primary brand (vibrant blue)
+  80: '#6B7FFF',   // Light primary
+  90: '#8B9EFF',   // Lighter primary
+  100: '#A8B7FF',  // Pastel primary
+  110: '#C3CEFF',  // Very light primary
+  120: '#DCE2FF',  // Ultra light primary
+  130: '#EEF1FF',  // Near white blue
+  140: '#F5F7FF',  // Off white
+  150: '#FAFBFF',  // Almost white
+  160: '#FFFFFF',  // Pure white
 }
 
-// Create custom dark theme extending Fluent UI's dark theme
+// Create custom dark theme with optimized colors
 export const wfDarkTheme: Theme = {
   ...createDarkTheme(wfDiagnosticsBrand),
-  // Custom color overrides for specific UI elements
-  colorNeutralBackground1: '#0F172A', // Main background
-  colorNeutralBackground2: '#1E293B', // Card backgrounds
-  colorNeutralBackground3: '#334155', // Elevated surfaces
-  colorNeutralStroke1: 'rgba(255, 255, 255, 0.1)',
-  colorNeutralStroke2: 'rgba(255, 255, 255, 0.05)',
+  // Optimized color palette for professional look
+  colorNeutralBackground1: '#0A0F1F', // Rich dark background
+  colorNeutralBackground2: '#101729', // Card backgrounds
+  colorNeutralBackground3: '#1A2238', // Elevated elements
+  colorNeutralBackground4: '#242E48', // Hover backgrounds
+  colorNeutralBackground5: '#2E3A58', // Active backgrounds
+  colorNeutralBackground6: '#3A4768', // Selected items
+  colorNeutralStroke1: 'rgba(139, 158, 255, 0.08)', // Subtle borders with brand tint
+  colorNeutralStroke2: 'rgba(139, 158, 255, 0.04)', // Faint dividers
+  colorNeutralStroke3: 'rgba(139, 158, 255, 0.15)', // Focus borders
+  colorNeutralForeground1: '#FAFBFF', // Primary text (slight blue tint)
+  colorNeutralForeground2: '#E8ECFF', // Secondary text
+  colorNeutralForeground3: '#A8B7FF', // Muted text with brand tint
+  colorNeutralForeground4: '#7B8BBF', // Disabled text
+  colorBrandForeground1: '#6B7FFF', // Brand text
+  colorBrandForeground2: '#8B9EFF', // Brand text hover
+  colorBrandBackground: '#4F69FF', // Primary brand
+  colorBrandBackgroundHover: '#6B7FFF', // Brand hover
+  colorBrandBackgroundPressed: '#384BCC', // Brand pressed
 }
 
 // Light theme (for future use)
@@ -44,36 +57,49 @@ export const wfLightTheme: Theme = createLightTheme(wfDiagnosticsBrand)
 
 // Shared styles using Fluent UI's makeStyles
 export const useAppStyles = makeStyles({
-  // Glass morphism effect for cards
+  // Optimized card design with subtle depth
   glassCard: {
-    backgroundColor: 'rgba(30, 41, 59, 0.8)',
-    backdropFilter: 'blur(10px)',
-    ...shorthands.border('1px', 'solid', 'rgba(255, 255, 255, 0.1)'),
+    background: 'linear-gradient(135deg, rgba(17, 24, 39, 0.7), rgba(31, 41, 55, 0.5))',
+    backdropFilter: 'blur(24px) saturate(150%)',
+    ...shorthands.border('1px', 'solid', 'rgba(148, 163, 184, 0.08)'),
     ...shorthands.borderRadius(tokens.borderRadiusLarge),
     ...shorthands.padding(tokens.spacingVerticalL, tokens.spacingHorizontalL),
-    boxShadow: tokens.shadow16,
-    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+    boxShadow: '0 0 0 1px rgba(59, 130, 246, 0.05), 0 1px 2px rgba(0, 0, 0, 0.05)',
+    transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+    position: 'relative',
+    ...shorthands.overflow('hidden'),
+
+    '&::before': {
+      content: '""',
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      height: '1px',
+      background: 'linear-gradient(90deg, transparent, rgba(148, 163, 184, 0.1), transparent)',
+    },
 
     ':hover': {
-      backgroundColor: 'rgba(30, 41, 59, 0.9)',
-      boxShadow: tokens.shadow28,
+      backgroundColor: 'rgba(31, 41, 55, 0.8)',
+      boxShadow: '0 0 0 1px rgba(59, 130, 246, 0.1), 0 4px 6px rgba(0, 0, 0, 0.1)',
+      transform: 'translateY(-1px)',
     }
   },
 
-  // Gradient backgrounds for CTAs
+  // Minimalist button design
   gradientButton: {
-    background: 'linear-gradient(135deg, #3B82F6 0%, #8B5CF6 100%)',
-    ...shorthands.border('none'),
+    background: tokens.colorBrandBackground,
+    ...shorthands.border('1px', 'solid', 'transparent'),
     color: tokens.colorNeutralForegroundOnBrand,
-    ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalL),
-    ...shorthands.borderRadius(tokens.borderRadiusMedium),
-    fontWeight: tokens.fontWeightSemibold,
+    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
+    ...shorthands.borderRadius(tokens.borderRadiusSmall),
+    fontWeight: tokens.fontWeightRegular,
     cursor: 'pointer',
-    transition: 'all 0.2s ease',
+    transition: 'all 0.15s ease',
 
     ':hover': {
-      transform: 'translateY(-2px)',
-      boxShadow: '0 8px 24px rgba(59, 130, 246, 0.4)',
+      background: tokens.colorBrandBackgroundHover,
+      transform: 'translateY(-1px)',
     },
 
     ':active': {

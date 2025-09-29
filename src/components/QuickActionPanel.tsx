@@ -32,35 +32,59 @@ const useStyles = makeStyles({
   },
 
   welcomeCard: {
-    background: 'linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(139, 92, 246, 0.1))',
-    ...shorthands.border('1px', 'solid', 'rgba(59, 130, 246, 0.3)'),
-    ...shorthands.padding(tokens.spacingVerticalXXL),
+    background: 'radial-gradient(ellipse at top, rgba(59, 130, 246, 0.15), transparent 70%)',
+    ...shorthands.border('1px', 'solid', 'rgba(59, 130, 246, 0.1)'),
+    ...shorthands.padding(tokens.spacingVerticalXXXL),
     textAlign: 'center',
     position: 'relative',
     ...shorthands.overflow('hidden'),
+    boxShadow: 'inset 0 1px 0 rgba(148, 163, 184, 0.1)',
 
     '&::before': {
       content: '""',
       position: 'absolute',
       top: 0,
+      left: '-100%',
+      width: '200%',
+      height: '2px',
+      background: 'linear-gradient(90deg, transparent, #3B82F6, transparent)',
+      animation: 'scan 3s linear infinite',
+    },
+
+    '&::after': {
+      content: '""',
+      position: 'absolute',
+      bottom: 0,
       left: 0,
       right: 0,
-      height: '4px',
-      background: 'linear-gradient(90deg, #3B82F6, #8B5CF6, #3B82F6)',
-      animation: 'shimmer 3s infinite',
+      height: '100px',
+      background: 'linear-gradient(180deg, transparent, rgba(5, 8, 16, 0.8))',
+      pointerEvents: 'none',
     }
   },
 
   iconContainer: {
-    width: '80px',
-    height: '80px',
-    ...shorthands.margin('0', 'auto', tokens.spacingVerticalL),
+    width: '72px',
+    height: '72px',
+    ...shorthands.margin('0', 'auto', tokens.spacingVerticalXL),
     ...shorthands.borderRadius('50%'),
-    background: 'linear-gradient(135deg, #3B82F6, #8B5CF6)',
+    background: 'conic-gradient(from 180deg, #3B82F6, #60A5FA, #3B82F6)',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    boxShadow: '0 8px 24px rgba(59, 130, 246, 0.4)',
+    boxShadow: '0 10px 30px rgba(59, 130, 246, 0.3), inset 0 -3px 6px rgba(0, 0, 0, 0.2)',
+    position: 'relative',
+    animation: 'float 6s ease-in-out infinite',
+
+    '&::before': {
+      content: '""',
+      position: 'absolute',
+      width: '84px',
+      height: '84px',
+      ...shorthands.borderRadius('50%'),
+      ...shorthands.border('2px', 'solid', 'rgba(59, 130, 246, 0.2)'),
+      animation: 'pulse 2s ease-in-out infinite',
+    }
   },
 
   scanButtons: {
@@ -84,22 +108,40 @@ const useStyles = makeStyles({
   },
 
   featureCard: {
-    ...shorthands.padding(tokens.spacingVerticalL),
-    backgroundColor: 'rgba(30, 41, 59, 0.4)',
-    ...shorthands.border('1px', 'solid', 'rgba(255, 255, 255, 0.05)'),
-    ...shorthands.borderRadius(tokens.borderRadiusMedium),
-    transition: 'all 0.3s ease',
+    ...shorthands.padding(tokens.spacingVerticalXL),
+    background: 'linear-gradient(135deg, rgba(17, 24, 39, 0.6), rgba(31, 41, 55, 0.4))',
+    ...shorthands.border('1px', 'solid', 'rgba(148, 163, 184, 0.08)'),
+    ...shorthands.borderRadius(tokens.borderRadiusLarge),
+    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+    position: 'relative',
+    ...shorthands.overflow('hidden'),
+
+    '&::before': {
+      content: '""',
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      width: '100%',
+      height: '1px',
+      background: 'linear-gradient(90deg, transparent, rgba(59, 130, 246, 0.3), transparent)',
+      opacity: 0,
+      transition: 'opacity 0.3s ease',
+    },
 
     ':hover': {
-      backgroundColor: 'rgba(30, 41, 59, 0.6)',
-      transform: 'translateY(-2px)',
-      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.2)',
+      background: 'linear-gradient(135deg, rgba(31, 41, 55, 0.8), rgba(55, 65, 81, 0.6))',
+      transform: 'translateY(-4px) scale(1.02)',
+      boxShadow: '0 12px 24px rgba(0, 0, 0, 0.3)',
+
+      '&::before': {
+        opacity: 1,
+      }
     }
   },
 
   featureIcon: {
     fontSize: '24px',
-    marginBottom: tokens.spacingVerticalS,
+    marginBottom: tokens.spacingVerticalM,
   },
 
   progressCard: {
@@ -110,14 +152,14 @@ const useStyles = makeStyles({
   progressInfo: {
     display: 'flex',
     justifyContent: 'space-between',
-    marginTop: tokens.spacingVerticalS,
+    marginTop: tokens.spacingVerticalL,
   },
 
   resultsHeader: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: tokens.spacingVerticalL,
+    marginBottom: tokens.spacingVerticalXL,
   },
 
   resultsActions: {
@@ -180,11 +222,11 @@ export const QuickActionPanel: React.FC<QuickActionPanelProps> = ({
             <Clock20Regular style={{ fontSize: '40px', color: 'white' }} />
           </div>
 
-          <Title2 block style={{ marginBottom: tokens.spacingVerticalS }}>
+          <Title2 block style={{ marginBottom: tokens.spacingVerticalM }}>
             Scanning Your System...
           </Title2>
 
-          <Body1 block style={{ color: tokens.colorNeutralForeground3, marginBottom: tokens.spacingVerticalL }}>
+          <Body1 block style={{ color: tokens.colorNeutralForeground3, marginBottom: tokens.spacingVerticalXL }}>
             {currentTask || 'Initializing scan...'}
           </Body1>
 
@@ -342,24 +384,24 @@ export const QuickActionPanel: React.FC<QuickActionPanelProps> = ({
         <div className={styles.featureGrid}>
           <div className={styles.featureCard}>
             <CheckmarkCircle20Regular className={styles.featureIcon} style={{ color: tokens.colorPaletteGreenForeground1 }} />
-            <Title3>Security Check</Title3>
-            <Caption1 style={{ color: tokens.colorNeutralForeground3 }}>
+            <Title3 style={{ marginBottom: tokens.spacingVerticalS }}>Security Check</Title3>
+            <Caption1 style={{ color: tokens.colorNeutralForeground3, display: 'block', marginTop: tokens.spacingVerticalXS }}>
               Analyzes system security settings and configurations
             </Caption1>
           </div>
 
           <div className={styles.featureCard}>
             <ErrorCircle20Regular className={styles.featureIcon} style={{ color: tokens.colorPaletteBlueForeground2 }} />
-            <Title3>Hardware Analysis</Title3>
-            <Caption1 style={{ color: tokens.colorNeutralForeground3 }}>
+            <Title3 style={{ marginBottom: tokens.spacingVerticalS }}>Hardware Analysis</Title3>
+            <Caption1 style={{ color: tokens.colorNeutralForeground3, display: 'block', marginTop: tokens.spacingVerticalXS }}>
               Checks CPU, RAM, storage, and device health
             </Caption1>
           </div>
 
           <div className={styles.featureCard}>
             <Clock20Regular className={styles.featureIcon} style={{ color: tokens.colorPalettePurpleForeground2 }} />
-            <Title3>Performance Metrics</Title3>
-            <Caption1 style={{ color: tokens.colorNeutralForeground3 }}>
+            <Title3 style={{ marginBottom: tokens.spacingVerticalS }}>Performance Metrics</Title3>
+            <Caption1 style={{ color: tokens.colorNeutralForeground3, display: 'block', marginTop: tokens.spacingVerticalXS }}>
               Identifies bottlenecks and optimization opportunities
             </Caption1>
           </div>

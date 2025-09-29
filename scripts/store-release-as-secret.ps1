@@ -1,6 +1,6 @@
 # PowerShell script to store release file as GitHub Secret
 param(
-    [string]$FilePath = "release\wfdiag-2.1.0.exe",
+    [string]$FilePath = "release\wfdiag-2.1.1.exe",
     [string]$SecretName = "RELEASE_BINARY_BASE64"
 )
 

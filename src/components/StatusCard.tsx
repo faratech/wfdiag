@@ -29,17 +29,20 @@ const useStyles = makeStyles({
   },
   header: {
     display: 'flex',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     justifyContent: 'space-between',
-    marginBottom: tokens.spacingVerticalL,
+    marginBottom: tokens.spacingVerticalXL,
   },
   statusIcon: {
     display: 'flex',
     alignItems: 'center',
-    ...shorthands.gap(tokens.spacingHorizontalS),
+    ...shorthands.gap(tokens.spacingHorizontalM),
   },
   content: {
-    marginBottom: tokens.spacingVerticalM,
+    marginBottom: tokens.spacingVerticalL,
+    ...shorthands.gap(tokens.spacingVerticalS),
+    display: 'flex',
+    flexDirection: 'column',
   },
   actions: {
     display: 'flex',
@@ -47,8 +50,8 @@ const useStyles = makeStyles({
     flexWrap: 'wrap',
   },
   infoSection: {
-    marginTop: tokens.spacingVerticalM,
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
+    marginTop: tokens.spacingVerticalL,
+    ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalL),
     backgroundColor: 'rgba(59, 130, 246, 0.1)',
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
     ...shorthands.border('1px', 'solid', 'rgba(59, 130, 246, 0.3)'),

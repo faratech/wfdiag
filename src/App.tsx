@@ -16,6 +16,7 @@ import {
   ScanResultCard,
   SettingsDialog,
   StatusCard,
+  AboutDialog,
   type TabValue,
   type SettingsData
 } from './components'
@@ -26,7 +27,6 @@ import {
   Divider,
   tokens,
   Badge,
-  Spinner,
   Card,
   Caption1,
   Title3,
@@ -52,7 +52,7 @@ const useStyles = makeStyles({
     overflow: 'hidden',
   },
   contentArea: {
-    padding: tokens.spacingVerticalXL,
+    padding: tokens.spacingVerticalXXL,
     height: 'calc(100vh - 180px)',
     overflowY: 'auto',
     overflowX: 'hidden',
@@ -80,15 +80,15 @@ const useStyles = makeStyles({
     paddingRight: tokens.spacingHorizontalM,
   },
   searchBar: {
-    marginBottom: tokens.spacingVerticalL,
+    marginBottom: tokens.spacingVerticalXL,
   },
   categoryNav: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
+    ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalL),
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
-    marginBottom: tokens.spacingVerticalXS,
+    marginBottom: tokens.spacingVerticalS,
     textDecoration: 'none',
     background: 'rgba(30, 41, 59, 0.3)',
     transition: 'all 0.2s',
@@ -100,7 +100,8 @@ const useStyles = makeStyles({
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    marginBottom: tokens.spacingVerticalL,
+    marginBottom: tokens.spacingVerticalXL,
+    ...shorthands.gap(tokens.spacingVerticalM),
   },
   healthCircle: {
     width: '80px',
@@ -168,6 +169,7 @@ function App() {
   const [fixingIssue, setFixingIssue] = useState<string | null>(null)
   // const [fixResults, setFixResults] = useState<Record<string, any>>({})
   const [showSettings, setShowSettings] = useState(false)
+  const [showAbout, setShowAbout] = useState(false)
   const [settings, setSettings] = useState<SettingsData>({
     autoSave: true,
     scanOnStartup: false,
@@ -396,6 +398,113 @@ ${content}`
     }
   }
 
+  const shareToWindowsForum = async () => {
+    if (!sessionId) return
+
+    try {
+      const content = await invoke<string>('export_results', {
+        format: 'text',
+        includeRaw: false
+      })
+
+      const forumPost = `[B]WindowsForum Diagnostic Report[/B]
+[CODE]
+Generated: ${new Date().toLocaleString()}
+Computer: ${systemInfo?.computer_name}
+OS: ${systemInfo?.os_version}
+Admin Mode: ${systemInfo?.is_admin ? 'Yes' : 'No'}
+
+${content}
+[/CODE]
+
+[I]Generated using WindowsForum Diagnostics Tool[/I]`
+
+      await writeText(forumPost)
+
+      // Open WindowsForum in browser
+      await invoke('open_url', { url: 'https://windowsforum.com/forums/windows-help-and-support.302/post-thread' })
+
+      alert('Diagnostic report copied to clipboard!\n\nThe WindowsForum new thread page will open in your browser.\nSimply paste (Ctrl+V) the report into your post.')
+    } catch (error) {
+      console.error('Failed to share to WindowsForum:', error)
+      alert('Failed to prepare share. Please try copying to clipboard instead.')
+    }
+  }
+
+  const emailReport = async () => {
+    if (!sessionId) return
+
+    try {
+      const content = await invoke<string>('export_results', {
+        format: 'text',
+        includeRaw: false
+      })
+
+      const subject = `Diagnostic Report - ${systemInfo?.computer_name} - ${new Date().toLocaleDateString()}`
+      const body = encodeURIComponent(`WindowsForum Diagnostic Report
+
+Generated: ${new Date().toLocaleString()}
+Computer: ${systemInfo?.computer_name}
+OS: ${systemInfo?.os_version}
+
+${content}`)
+
+      const mailtoLink = `mailto:?subject=${encodeURIComponent(subject)}&body=${body}`
+      await invoke('open_url', { url: mailtoLink })
+    } catch (error) {
+      console.error('Failed to email report:', error)
+      alert('Failed to prepare email. Please try exporting the report instead.')
+    }
+  }
+
+  const generateSupportPackage = async () => {
+    if (!sessionId) return
+
+    try {
+      // Export all formats to a support package
+      const jsonContent = await invoke<string>('export_results', {
+        format: 'json',
+        includeRaw: true
+      })
+
+      const textContent = await invoke<string>('export_results', {
+        format: 'text',
+        includeRaw: true
+      })
+
+      const htmlContent = await invoke<string>('export_results', {
+        format: 'html',
+        includeRaw: true
+      })
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
+      const packageName = `support-package-${timestamp}`
+
+      // Save JSON
+      const jsonPath = await save({
+        defaultPath: `${packageName}.json`,
+        filters: [{ name: 'JSON', extensions: ['json'] }]
+      })
+
+      if (jsonPath) {
+        await writeTextFile(jsonPath, jsonContent)
+
+        // Also save text version
+        const textPath = jsonPath.replace('.json', '.txt')
+        await writeTextFile(textPath, textContent)
+
+        // And HTML version
+        const htmlPath = jsonPath.replace('.json', '.html')
+        await writeTextFile(htmlPath, htmlContent)
+
+        alert(`Support package generated successfully!\n\nFiles saved:\n- ${jsonPath}\n- ${textPath}\n- ${htmlPath}`)
+      }
+    } catch (error) {
+      console.error('Failed to generate support package:', error)
+      alert('Failed to generate support package. Please try exporting individual files.')
+    }
+  }
+
   const restartAsAdmin = async () => {
     try {
       await invoke('restart_as_admin')
@@ -512,6 +621,9 @@ ${content}`
             isScanning={isRunning}
             onExport={hasResults ? exportResults : undefined}
             onCopyToClipboard={hasResults ? copyToClipboard : undefined}
+            onShareToForum={hasResults ? shareToWindowsForum : undefined}
+            onEmailReport={hasResults ? emailReport : undefined}
+            onGenerateSupportPackage={hasResults ? generateSupportPackage : undefined}
             onToggleFilter={() => {}}
             onClearResults={hasResults ? clearResults : undefined}
             onCompareScans={() => setShowComparison(true)}
@@ -700,7 +812,19 @@ ${content}`
 
           {sortedIssues.length === 0 ? (
             <div style={{ textAlign: 'center', padding: tokens.spacingVerticalXXL }}>
-              <Spinner size="large" label="Checking for issues..." />
+              {Object.keys(results).length === 0 ? (
+                <>
+                  <Info20Regular style={{ fontSize: '48px', color: tokens.colorNeutralForeground3, marginBottom: tokens.spacingVerticalM }} />
+                  <Title3 style={{ marginBottom: tokens.spacingVerticalM }}>No Scan Data Available</Title3>
+                  <Text style={{ display: 'block' }}>Please run a diagnostic scan first to check for system issues.</Text>
+                </>
+              ) : (
+                <>
+                  <CheckmarkCircle20Regular style={{ fontSize: '48px', color: '#10B981', marginBottom: tokens.spacingVerticalM }} />
+                  <Title3 style={{ marginBottom: tokens.spacingVerticalM }}>No Issues Found</Title3>
+                  <Text style={{ display: 'block' }}>Your system appears to be healthy with no issues detected.</Text>
+                </>
+              )}
             </div>
           ) : (
             <div style={{ marginTop: tokens.spacingVerticalL }}>
@@ -751,8 +875,9 @@ ${content}`
           isAdmin={systemInfo?.is_admin}
           onRestartAsAdmin={restartAsAdmin}
           onOpenSettings={() => setShowSettings(true)}
+          onOpenAbout={() => setShowAbout(true)}
           onExportDiagnostics={exportResults}
-          version="2.1.0"
+          version="2.1.1"
         />
 
         {/* Tab Navigation */}
@@ -794,6 +919,12 @@ ${content}`
           onOpenChange={setShowSettings}
           settings={settings}
           onSave={handleSettingsSave}
+        />
+
+        {/* About Dialog */}
+        <AboutDialog
+          open={showAbout}
+          onOpenChange={setShowAbout}
         />
       </div>
     </FluentProvider>

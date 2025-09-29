@@ -78,7 +78,9 @@ export interface CommandBarProps {
   // Export actions
   onExport?: () => void
   onCopyToClipboard?: () => void
-  onShare?: () => void
+  onShareToForum?: () => void
+  onEmailReport?: () => void
+  onGenerateSupportPackage?: () => void
 
   // View controls
   onToggleFilter?: () => void
@@ -101,7 +103,9 @@ export const CommandBar: React.FC<CommandBarProps> = ({
   isScanning = false,
   onExport,
   onCopyToClipboard,
-  onShare,
+  onShareToForum,
+  onEmailReport,
+  onGenerateSupportPackage,
   onToggleFilter,
   onClearResults,
   onCompareScans,
@@ -276,14 +280,14 @@ export const CommandBar: React.FC<CommandBarProps> = ({
           </MenuTrigger>
           <MenuPopover>
             <MenuList>
-              <MenuItem onClick={onShare}>
+              <MenuItem onClick={onShareToForum} disabled={!onShareToForum}>
                 Share to WindowsForum
               </MenuItem>
-              <MenuItem>
+              <MenuItem onClick={onEmailReport} disabled={!onEmailReport}>
                 Email Report
               </MenuItem>
               <MenuDivider />
-              <MenuItem>
+              <MenuItem onClick={onGenerateSupportPackage} disabled={!onGenerateSupportPackage}>
                 Generate Support Package
               </MenuItem>
             </MenuList>

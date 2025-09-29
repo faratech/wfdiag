@@ -28,13 +28,14 @@ const useStyles = makeStyles({
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    ...shorthands.padding(tokens.spacingVerticalL, tokens.spacingHorizontalXXL),
-    backgroundColor: 'rgba(15, 23, 42, 0.95)',
-    backdropFilter: 'blur(20px)',
-    borderBottom: `1px solid ${tokens.colorNeutralStroke1}`,
+    ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalXXL),
+    background: 'linear-gradient(180deg, rgba(5, 8, 16, 0.98) 0%, rgba(10, 15, 28, 0.95) 100%)',
+    backdropFilter: 'blur(24px) saturate(150%)',
+    borderBottom: `1px solid rgba(148, 163, 184, 0.1)`,
     position: 'sticky',
     top: 0,
     zIndex: 1000,
+    boxShadow: '0 1px 3px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.24)',
   },
 
   brandSection: {
@@ -44,19 +45,31 @@ const useStyles = makeStyles({
   },
 
   logo: {
-    width: '40px',
-    height: '40px',
-    ...shorthands.borderRadius(tokens.borderRadiusMedium),
-    background: 'linear-gradient(135deg, #3B82F6, #8B5CF6)',
+    width: '36px',
+    height: '36px',
+    ...shorthands.borderRadius(tokens.borderRadiusCircular),
+    background: 'linear-gradient(135deg, #3B82F6 0%, #2563EB 100%)',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    boxShadow: '0 4px 12px rgba(59, 130, 246, 0.3)',
+    boxShadow: '0 0 20px rgba(59, 130, 246, 0.2)',
+    position: 'relative',
+
+    '&::after': {
+      content: '""',
+      position: 'absolute',
+      width: '42px',
+      height: '42px',
+      ...shorthands.borderRadius(tokens.borderRadiusCircular),
+      ...shorthands.border('1px', 'solid', 'rgba(59, 130, 246, 0.2)'),
+      animation: 'pulse 3s infinite',
+    }
   },
 
   titleSection: {
     display: 'flex',
     flexDirection: 'column',
+    ...shorthands.gap(tokens.spacingVerticalXXS),
   },
 
   title: {
@@ -79,11 +92,17 @@ const useStyles = makeStyles({
   systemInfo: {
     display: 'flex',
     alignItems: 'center',
-    ...shorthands.gap(tokens.spacingHorizontalS),
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
-    backgroundColor: 'rgba(30, 41, 59, 0.5)',
-    ...shorthands.borderRadius(tokens.borderRadiusMedium),
-    ...shorthands.border('1px', 'solid', 'rgba(255, 255, 255, 0.05)'),
+    ...shorthands.gap(tokens.spacingHorizontalM),
+    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalL),
+    background: 'linear-gradient(135deg, rgba(17, 24, 39, 0.6), rgba(31, 41, 55, 0.4))',
+    ...shorthands.borderRadius(tokens.borderRadiusLarge),
+    ...shorthands.border('1px', 'solid', 'rgba(148, 163, 184, 0.08)'),
+    transition: 'all 0.2s ease',
+
+    '&:hover': {
+      background: 'linear-gradient(135deg, rgba(31, 41, 55, 0.7), rgba(55, 65, 81, 0.5))',
+      transform: 'translateX(-2px)',
+    }
   },
 
   divider: {
@@ -104,6 +123,7 @@ export interface NavigationHeaderProps {
   isAdmin?: boolean
   onRestartAsAdmin?: () => void
   onOpenSettings?: () => void
+  onOpenAbout?: () => void
   onExportDiagnostics?: () => void
   version?: string
 }
@@ -114,8 +134,9 @@ export const NavigationHeader: React.FC<NavigationHeaderProps> = ({
   isAdmin,
   onRestartAsAdmin,
   onOpenSettings,
+  onOpenAbout,
   onExportDiagnostics,
-  version = '2.1.0'
+  version = '2.1.1'
 }) => {
   const styles = useStyles()
 
@@ -149,8 +170,8 @@ export const NavigationHeader: React.FC<NavigationHeaderProps> = ({
           <>
             <div className={styles.systemInfo}>
               <Desktop20Regular primaryFill={tokens.colorNeutralForeground2} />
-              <div>
-                <Text size={200} weight="semibold" style={{ display: 'block' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalXXS }}>
+                <Text size={200} weight="semibold">
                   {computerName}
                 </Text>
                 <Text size={100} style={{ color: tokens.colorNeutralForeground3 }}>
@@ -218,12 +239,9 @@ export const NavigationHeader: React.FC<NavigationHeaderProps> = ({
                 <MenuItem onClick={onOpenSettings} icon={<Settings20Regular />}>
                   Settings
                 </MenuItem>
-                <MenuItem icon={<Info20Regular />}>
-                  About
-                </MenuItem>
                 <MenuDivider />
-                <MenuItem icon={<ArrowExportUp20Regular />}>
-                  Check for Updates
+                <MenuItem onClick={onOpenAbout} icon={<Info20Regular />}>
+                  About
                 </MenuItem>
               </MenuList>
             </MenuPopover>

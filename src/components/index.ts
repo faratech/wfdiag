@@ -28,6 +28,12 @@ export type { QuickActionPanelProps } from './QuickActionPanel'
 export { SettingsDialog } from './SettingsDialog'
 export type { SettingsDialogProps, SettingsData } from './SettingsDialog'
 
+export { AboutDialog } from './AboutDialog'
+export type { AboutDialogProps } from './AboutDialog'
+
 // Toolbar Components
 export { CommandBar } from './CommandBar'
 export type { CommandBarProps } from './CommandBar'
+
+// Data Display Components
+export { DataRow, MetricCard as DataMetricCard, DataList, CodeDisplay, DataGrid } from './DataDisplay'
