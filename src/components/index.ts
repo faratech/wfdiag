@@ -1,5 +1,11 @@
 // Export all Fluent UI enhanced components
 
+// Error Handling
+export { ErrorBoundary } from './ErrorBoundary'
+
+// Window Controls
+export { Titlebar } from './Titlebar'
+
 // Core UI Components
 export { MetricCard } from './MetricCard'
 export type { MetricCardProps } from './MetricCard'

@@ -142,46 +142,60 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
   }, []);
 
   useEffect(() => {
+    let isMounted = true;
+
     const setupMonitoring = async () => {
       if (isActive) {
         // Start monitoring
         try {
           await invoke('start_monitoring');
-          
+
+          // Only set up listener if component is still mounted
+          if (!isMounted) {
+            await invoke('stop_monitoring').catch(err =>
+              logger.error('SystemMonitoring', 'Failed to stop monitoring after unmount', err)
+            );
+            return;
+          }
+
           // Listen for system stats events
-          unlistenRef.current = await listen<SystemStats>('system-stats', (event) => {
+          const unlisten = await listen<SystemStats>('system-stats', (event) => {
             const newStats = event.payload;
             setStats(newStats);
-            
+
             // Update history arrays
             setCpuHistory(prev => {
               const updated = [...prev, newStats.cpu_utilization];
               return updated.slice(-MAX_DATA_POINTS);
             });
-            
+
             setMemoryHistory(prev => {
               const updated = [...prev, newStats.memory_utilization];
               return updated.slice(-MAX_DATA_POINTS);
             });
-            
+
             setNetworkUploadHistory(prev => {
               const updated = [...prev, newStats.network_upload_kb];
               return updated.slice(-MAX_DATA_POINTS);
             });
-            
+
             setNetworkDownloadHistory(prev => {
               const updated = [...prev, newStats.network_download_kb];
               return updated.slice(-MAX_DATA_POINTS);
             });
-            
+
             setTimeLabels(prev => {
               const updated = [...prev, new Date().toLocaleTimeString()];
               return updated.slice(-MAX_DATA_POINTS);
             });
           });
+
+          unlistenRef.current = unlisten;
         } catch (error) {
           logger.error('SystemMonitoring', 'Failed to start monitoring', error);
-          onToggle(false);
+          if (isMounted) {
+            onToggle(false);
+          }
         }
       } else {
         // Stop monitoring
@@ -200,8 +214,19 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
     setupMonitoring();
 
     return () => {
+      isMounted = false;
+
+      // Clean up event listener
       if (unlistenRef.current) {
         unlistenRef.current();
+        unlistenRef.current = null;
+      }
+
+      // Stop monitoring on unmount
+      if (isActive) {
+        invoke('stop_monitoring').catch(error =>
+          logger.error('SystemMonitoring', 'Failed to stop monitoring on cleanup', error)
+        );
       }
     };
   }, [isActive, onToggle]);

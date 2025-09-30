@@ -135,10 +135,65 @@ async fn clear_api_key() -> Result<(), String> {
 }
 
 
+/// Get detailed Windows version information from registry
+#[cfg(windows)]
+fn get_windows_version_info() -> String {
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    use winreg::RegKey;
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+
+    if let Ok(cv_key) = hklm.open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion") {
+        let product_name = cv_key.get_value::<String, _>("ProductName").unwrap_or_else(|_| "Windows".to_string());
+        let display_version = cv_key.get_value::<String, _>("DisplayVersion").ok();
+        let edition_id = cv_key.get_value::<String, _>("EditionID").ok();
+        let current_build = cv_key.get_value::<String, _>("CurrentBuild").ok();
+
+        // Determine Windows version (10 or 11) based on build number
+        let is_win11 = if let Some(build) = current_build.as_ref() {
+            build.parse::<u32>().unwrap_or(0) >= 22000
+        } else {
+            product_name.contains("Windows 11")
+        };
+
+        // Build the version string
+        let mut version_parts = Vec::new();
+
+        // Windows 10 or 11
+        if is_win11 {
+            version_parts.push("Windows 11".to_string());
+        } else if product_name.contains("Windows 10") {
+            version_parts.push("Windows 10".to_string());
+        } else {
+            // Fallback to product name if not 10/11
+            version_parts.push(product_name.clone());
+        }
+
+        // Add edition (Home, Pro, Enterprise, etc.)
+        if let Some(edition) = edition_id {
+            version_parts.push(edition);
+        }
+
+        // Add version number (e.g., 23H2, 22H2)
+        if let Some(display_ver) = display_version {
+            version_parts.push(format!("({})", display_ver));
+        }
+
+        return version_parts.join(" ");
+    }
+
+    "Windows".to_string()
+}
+
 #[tauri::command]
 async fn get_system_info() -> Result<SystemInfo, String> {
     let computer_name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Unknown".to_string());
-    let os_version = std::env::var("OS").unwrap_or_else(|_| "Windows".to_string());
+
+    #[cfg(windows)]
+    let os_version = get_windows_version_info();
+
+    #[cfg(not(windows))]
+    let os_version = std::env::var("OS").unwrap_or_else(|_| "Unknown".to_string());
 
     #[cfg(windows)]
     let is_admin = {

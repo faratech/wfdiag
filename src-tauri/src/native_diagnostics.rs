@@ -739,11 +739,14 @@ impl NativeDiagnostics {
     /// Parse battery report HTML and extract key information
     fn parse_battery_html(&self, html_content: &str) -> Result<Value> {
         let document = Html::parse_document(html_content);
-        
+
         // Selectors for different sections of the battery report
-        let battery_info_selector = Selector::parse("table").unwrap();
-        let row_selector = Selector::parse("tr").unwrap();
-        let cell_selector = Selector::parse("td").unwrap();
+        let battery_info_selector = Selector::parse("table")
+            .map_err(|e| anyhow::anyhow!("Failed to parse table selector: {:?}", e))?;
+        let row_selector = Selector::parse("tr")
+            .map_err(|e| anyhow::anyhow!("Failed to parse tr selector: {:?}", e))?;
+        let cell_selector = Selector::parse("td")
+            .map_err(|e| anyhow::anyhow!("Failed to parse td selector: {:?}", e))?;
         
         let mut battery_info = json!({
             "report_generated": true,
