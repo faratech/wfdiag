@@ -173,7 +173,6 @@ pnpm-lock.yaml
 yarn.lock
 .yarn/
 .pnp.*
-package-lock.json
 nul
 
 # GitHub Codespaces
