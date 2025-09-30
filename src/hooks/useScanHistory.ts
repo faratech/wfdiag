@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import * as logger from '../utils/logger'
 
 export interface ScanSummary {
   id: string
@@ -43,9 +44,9 @@ export function useScanHistory(): UseScanHistoryReturn {
     try {
       setLoading(true)
       setError(null)
-      
-      console.log('Fetching scan history...')
-      
+
+      logger.debug('useScanHistory', 'Fetching scan history...')
+
       const scanList = await invoke<ScanSummary[]>('list_scan_history')
       
       // Validate the response
@@ -61,17 +62,17 @@ export function useScanHistory(): UseScanHistoryReturn {
         scan.timestamp &&
         typeof scan.task_count === 'number'
       )
-      
+
       if (validScans.length !== scanList.length) {
-        console.warn(`Filtered out ${scanList.length - validScans.length} invalid scans`)
+        logger.warn('useScanHistory', `Filtered out ${scanList.length - validScans.length} invalid scans`)
       }
-      
-      console.log(`Successfully loaded ${validScans.length} scans`)
+
+      logger.info('useScanHistory', `Successfully loaded ${validScans.length} scans`)
       setScans(validScans)
       
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err)
-      console.error('Failed to fetch scan history:', errorMessage)
+      logger.error('useScanHistory', 'Failed to fetch scan history', errorMessage)
       setError(`Failed to load scan history: ${errorMessage}`)
       setScans([])
     } finally {
@@ -81,8 +82,8 @@ export function useScanHistory(): UseScanHistoryReturn {
 
   const loadScan = async (scanId: string): Promise<ScanRecord | null> => {
     try {
-      console.log('Loading scan:', scanId)
-      
+      logger.debug('useScanHistory', 'Loading scan', scanId)
+
       if (!scanId) {
         throw new Error('Scan ID is required')
       }
@@ -97,13 +98,13 @@ export function useScanHistory(): UseScanHistoryReturn {
       if (!scan.id || !scan.timestamp || !scan.results) {
         throw new Error('Invalid scan data structure')
       }
-      
-      console.log(`Successfully loaded scan ${scan.id} with ${scan.task_count} results`)
+
+      logger.info('useScanHistory', `Successfully loaded scan ${scan.id} with ${scan.task_count} results`)
       return scan
-      
+
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err)
-      console.error(`Failed to load scan ${scanId}:`, errorMessage)
+      logger.error('useScanHistory', `Failed to load scan ${scanId}`, errorMessage)
       return null
     }
   }

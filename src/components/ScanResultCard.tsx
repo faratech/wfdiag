@@ -213,7 +213,11 @@ export const ScanResultCard: React.FC<ScanResultCardProps> = ({
           <div>
             <Subtitle2>{taskName}</Subtitle2>
             {taskDescription && (
-              <Caption2 style={{ color: tokens.colorNeutralForeground3 }}>
+              <Caption2 style={{
+                color: tokens.colorNeutralForeground3,
+                marginTop: tokens.spacingVerticalXXS,
+                display: 'block'
+              }}>
                 {taskDescription}
               </Caption2>
             )}

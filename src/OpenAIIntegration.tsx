@@ -15,6 +15,7 @@ import {
   WarningFilled,
 } from '@fluentui/react-icons';
 import { invoke } from '@tauri-apps/api/core';
+import * as logger from './utils/logger';
 import './styles.css';
 
 interface OpenAIIntegrationProps {
@@ -60,7 +61,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
           setApiKey(storedKey);
         }
       } catch (err) {
-        console.error('Failed to load stored API key:', err);
+        logger.error('OpenAIIntegration', 'Failed to load stored API key', err);
       }
     };
     loadStoredKey();
@@ -76,7 +77,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
         await invoke('clear_api_key');
       }
     } catch (err) {
-      console.error('Failed to store API key:', err);
+      logger.error('OpenAIIntegration', 'Failed to store API key', err);
     }
   };
 
@@ -130,7 +131,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
       // Clear the prompt for next message
       setPrompt('');
     } catch (err) {
-      console.error('OpenAI analysis error:', err);
+      logger.error('OpenAIIntegration', 'OpenAI analysis error', err);
       setError(err instanceof Error ? err.message : 'Analysis failed');
     } finally {
       setIsAnalyzing(false);

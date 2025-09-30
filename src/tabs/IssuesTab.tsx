@@ -2,6 +2,7 @@ import React from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useAppContext } from '../contexts/AppContext'
 import { StatusCard } from '../components'
+import * as logger from '../utils/logger'
 import {
   Card,
   Title3,
@@ -27,12 +28,12 @@ export const IssuesTab: React.FC = () => {
             const updatedIssues = await invoke<any[]>('detect_issues')
             setIssues(updatedIssues)
           } catch (error) {
-            console.error('Failed to detect issues:', error)
+            logger.error('IssuesTab', 'Failed to detect issues', error)
           }
         }, 2000)
       }
     } catch (error) {
-      console.error('Failed to fix issue:', error)
+      logger.error('IssuesTab', 'Failed to fix issue', error)
     } finally {
       setFixingIssue(null)
     }

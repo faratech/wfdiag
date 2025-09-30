@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { ScanSummary } from './useScanHistory'
+import * as logger from '../utils/logger'
 
 export interface TaskChange {
   task_id: string
@@ -44,8 +45,8 @@ export function useComparison(): UseComparisonReturn {
       setError(null)
       setComparison(null)
       
-      console.log('Comparing scans:', currentId, 'vs', previousId)
-      
+      logger.debug('useComparison', 'Comparing scans', { currentId, previousId })
+
       // Validate input
       if (!currentId || !previousId) {
         throw new Error('Both scan IDs are required for comparison')
@@ -60,9 +61,9 @@ export function useComparison(): UseComparisonReturn {
         currentId,
         previousId
       })
-      
-      console.log('Comparison result received:', result)
-      
+
+      logger.debug('useComparison', 'Comparison result received', { scanCount: result?.total_changes })
+
       // Validate response structure
       if (!result) {
         throw new Error('No comparison result received')
@@ -80,13 +81,13 @@ export function useComparison(): UseComparisonReturn {
       result.new_failures = Array.isArray(result.new_failures) ? result.new_failures : []
       result.new_successes = Array.isArray(result.new_successes) ? result.new_successes : []
       result.status_unchanged = Array.isArray(result.status_unchanged) ? result.status_unchanged : []
-      
-      console.log(`Comparison complete: ${result.total_changes} total changes`)
+
+      logger.info('useComparison', `Comparison complete: ${result.total_changes} total changes`)
       setComparison(result)
       
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err)
-      console.error('Comparison failed:', errorMessage)
+      logger.error('useComparison', 'Comparison failed', errorMessage)
       setError(`Failed to compare scans: ${errorMessage}`)
       setComparison(null)
     } finally {

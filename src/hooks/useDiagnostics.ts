@@ -5,6 +5,7 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
 import { useAppContext, type SystemInfo, type DiagnosticTask, type Issue } from '../contexts/AppContext'
 import { useToast } from '../contexts/ToastContext'
+import * as logger from '../utils/logger'
 
 export const useDiagnostics = () => {
   const {
@@ -25,7 +26,7 @@ export const useDiagnostics = () => {
       const info = await invoke<SystemInfo>('get_system_info')
       setSystemInfo(info)
     } catch (error) {
-      console.error('Failed to load system info:', error)
+      logger.error('useDiagnostics', 'Failed to load system info', error)
     }
   }, [setSystemInfo])
 
@@ -34,7 +35,7 @@ export const useDiagnostics = () => {
       const tasks = await invoke<DiagnosticTask[]>('get_available_tasks')
       setAvailableTasks(tasks)
     } catch (error) {
-      console.error('Failed to load tasks:', error)
+      logger.error('useDiagnostics', 'Failed to load tasks', error)
     }
   }, [setAvailableTasks])
 
@@ -43,7 +44,7 @@ export const useDiagnostics = () => {
       const issues = await invoke<Issue[]>('detect_issues')
       setIssues(issues)
     } catch (error) {
-      console.error('Failed to detect issues:', error)
+      logger.error('useDiagnostics', 'Failed to detect issues', error)
     }
   }, [setIssues])
 
@@ -75,7 +76,7 @@ ${content}
 
       await writeText(forumPost)
     } catch (error) {
-      console.error('Failed to copy to clipboard:', error)
+      logger.error('useDiagnostics', 'Failed to copy to clipboard', error)
     }
   }, [sessionId, systemInfo])
 
@@ -110,19 +111,19 @@ ${content}`
         try {
           await writeTextFile(filePath, fullReport)
         } catch (writeError) {
-          console.error('Failed to write file:', writeError)
+          logger.error('useDiagnostics', 'Failed to write file', writeError)
           try {
             await invoke('save_results_to_file', {
               path: filePath,
               content: fullReport
             })
           } catch (backendError) {
-            console.error('Backend save also failed:', backendError)
+            logger.error('useDiagnostics', 'Backend save also failed', backendError)
           }
         }
       }
     } catch (error) {
-      console.error('Failed to export results:', error)
+      logger.error('useDiagnostics', 'Failed to export results', error)
     }
   }, [sessionId, systemInfo, settings.exportFormat])
 
@@ -156,7 +157,7 @@ ${content}
         'Diagnostic report copied to clipboard. The WindowsForum new thread page will open in your browser. Simply paste (Ctrl+V) the report into your post.'
       )
     } catch (error) {
-      console.error('Failed to share to WindowsForum:', error)
+      logger.error('useDiagnostics', 'Failed to share to WindowsForum', error)
       showError(
         'Failed to Share',
         'Failed to prepare share. Please try copying to clipboard instead.'
@@ -185,7 +186,7 @@ ${content}`)
       const mailtoLink = `mailto:?subject=${encodeURIComponent(subject)}&body=${body}`
       await invoke('open_url', { url: mailtoLink })
     } catch (error) {
-      console.error('Failed to email report:', error)
+      logger.error('useDiagnostics', 'Failed to email report', error)
       showError(
         'Failed to Email Report',
         'Failed to prepare email. Please try exporting the report instead.'
@@ -235,7 +236,7 @@ ${content}`)
         )
       }
     } catch (error) {
-      console.error('Failed to generate support package:', error)
+      logger.error('useDiagnostics', 'Failed to generate support package', error)
       showError(
         'Failed to Generate Support Package',
         'Please try exporting individual files.'
@@ -247,7 +248,7 @@ ${content}`)
     try {
       await invoke('restart_as_admin')
     } catch (error) {
-      console.error('Failed to restart as admin:', error)
+      logger.error('useDiagnostics', 'Failed to restart as admin', error)
     }
   }, [])
 
