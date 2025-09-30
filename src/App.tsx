@@ -13,6 +13,7 @@ import {
   type SettingsData
 } from './components'
 import { AppProvider, useAppContext } from './contexts/AppContext'
+import { ToastProvider } from './contexts/ToastContext'
 import { useDiagnostics } from './hooks/useDiagnostics'
 import './styles.css'
 import {
@@ -136,9 +137,11 @@ const AppContent: React.FC = () => {
 const App: React.FC = () => {
   return (
     <FluentProvider theme={wfDarkTheme}>
-      <AppProvider>
-        <AppContent />
-      </AppProvider>
+      <ToastProvider>
+        <AppProvider>
+          <AppContent />
+        </AppProvider>
+      </ToastProvider>
     </FluentProvider>
   )
 }
