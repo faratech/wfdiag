@@ -4,6 +4,7 @@ import { save } from '@tauri-apps/plugin-dialog'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
 import { useAppContext, type SystemInfo, type DiagnosticTask, type Issue } from '../contexts/AppContext'
+import { useToast } from '../contexts/ToastContext'
 
 export const useDiagnostics = () => {
   const {
@@ -16,6 +17,8 @@ export const useDiagnostics = () => {
     settings,
     setIssues,
   } = useAppContext()
+
+  const { showSuccess, showError } = useToast()
 
   const loadSystemInfo = useCallback(async () => {
     try {
@@ -148,12 +151,18 @@ ${content}
 
       await invoke('open_url', { url: 'https://windowsforum.com/forums/windows-help-and-support.302/post-thread' })
 
-      alert('Diagnostic report copied to clipboard!\n\nThe WindowsForum new thread page will open in your browser.\nSimply paste (Ctrl+V) the report into your post.')
+      showSuccess(
+        'Report Ready to Share!',
+        'Diagnostic report copied to clipboard. The WindowsForum new thread page will open in your browser. Simply paste (Ctrl+V) the report into your post.'
+      )
     } catch (error) {
       console.error('Failed to share to WindowsForum:', error)
-      alert('Failed to prepare share. Please try copying to clipboard instead.')
+      showError(
+        'Failed to Share',
+        'Failed to prepare share. Please try copying to clipboard instead.'
+      )
     }
-  }, [sessionId, systemInfo])
+  }, [sessionId, systemInfo, showSuccess, showError])
 
   const emailReport = useCallback(async () => {
     if (!sessionId) return
@@ -177,9 +186,12 @@ ${content}`)
       await invoke('open_url', { url: mailtoLink })
     } catch (error) {
       console.error('Failed to email report:', error)
-      alert('Failed to prepare email. Please try exporting the report instead.')
+      showError(
+        'Failed to Email Report',
+        'Failed to prepare email. Please try exporting the report instead.'
+      )
     }
-  }, [sessionId, systemInfo])
+  }, [sessionId, systemInfo, showError])
 
   const generateSupportPackage = useCallback(async () => {
     if (!sessionId) return
@@ -217,13 +229,19 @@ ${content}`)
         const htmlPath = jsonPath.replace('.json', '.html')
         await writeTextFile(htmlPath, htmlContent)
 
-        alert(`Support package generated successfully!\n\nFiles saved:\n- ${jsonPath}\n- ${textPath}\n- ${htmlPath}`)
+        showSuccess(
+          'Support Package Generated!',
+          `Files saved:\n• ${jsonPath}\n• ${textPath}\n• ${htmlPath}`
+        )
       }
     } catch (error) {
       console.error('Failed to generate support package:', error)
-      alert('Failed to generate support package. Please try exporting individual files.')
+      showError(
+        'Failed to Generate Support Package',
+        'Please try exporting individual files.'
+      )
     }
-  }, [sessionId])
+  }, [sessionId, showSuccess, showError])
 
   const restartAsAdmin = useCallback(async () => {
     try {

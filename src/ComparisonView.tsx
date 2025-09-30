@@ -6,6 +6,13 @@ import {
   Dropdown,
   Option,
   Divider,
+  Dialog,
+  DialogTrigger,
+  DialogSurface,
+  DialogTitle,
+  DialogBody,
+  DialogActions,
+  DialogContent,
 } from '@fluentui/react-components'
 import {
   ArrowLeftRegular,
@@ -17,6 +24,7 @@ import {
 import { useScanHistory } from './hooks/useScanHistory'
 import { useComparison, ComparisonFilter } from './hooks/useComparison'
 import { useJsonDiff } from './hooks/useJsonDiff'
+import { useToast } from './contexts/ToastContext'
 import './styles.css'
 
 interface ComparisonViewProps {
@@ -27,10 +35,12 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({ onClose }) => {
   const { scans, loading: scansLoading, error: scansError, refreshScans } = useScanHistory()
   const { comparison, loading: compareLoading, error: compareError, compareScans, clearComparison, getFilteredChanges } = useComparison()
   const { findJsonDifferences, formatDifference } = useJsonDiff()
-  
+  const { showError, showSuccess } = useToast()
+
   const [selectedCurrent, setSelectedCurrent] = useState<string>('')
   const [selectedPrevious, setSelectedPrevious] = useState<string>('')
   const [filter, setFilter] = useState<ComparisonFilter>('all')
+  const [showClearDialog, setShowClearDialog] = useState(false)
 
   const handleCompare = async () => {
     if (!selectedCurrent || !selectedPrevious) {
@@ -44,6 +54,21 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({ onClose }) => {
     setSelectedCurrent('')
     setSelectedPrevious('')
     setFilter('all')
+  }
+
+  const handleClearHistory = async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('clear_scan_history')
+      await refreshScans()
+      setSelectedCurrent('')
+      setSelectedPrevious('')
+      setShowClearDialog(false)
+      showSuccess('History Cleared', 'All scan history has been successfully deleted.')
+    } catch (error) {
+      console.error('Failed to clear scan history:', error)
+      showError('Failed to Clear History', String(error))
+    }
   }
 
   const formatTimestamp = (timestamp: string) => {
@@ -189,30 +214,37 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({ onClose }) => {
             </Text>
           </div>
           {!comparison && scans.length > 0 && (
-            <Button
-              appearance="subtle"
-              onClick={async () => {
-                const confirmClear = window.confirm('Are you sure you want to clear all scan history? This action cannot be undone.')
-                if (confirmClear) {
-                  try {
-                    const { invoke } = await import('@tauri-apps/api/core')
-                    await invoke('clear_scan_history')
-                    await refreshScans()
-                    setSelectedCurrent('')
-                    setSelectedPrevious('')
-                  } catch (error) {
-                    console.error('Failed to clear scan history:', error)
-                    alert('Failed to clear scan history: ' + error)
-                  }
-                }
-              }}
-              style={{
-                color: '#ef4444',
-                borderColor: 'rgba(239, 68, 68, 0.3)'
-              }}
-            >
-              Clear History
-            </Button>
+            <Dialog open={showClearDialog} onOpenChange={(_, data) => setShowClearDialog(data.open)}>
+              <DialogTrigger disableButtonEnhancement>
+                <Button
+                  appearance="subtle"
+                  style={{
+                    color: '#ef4444',
+                    borderColor: 'rgba(239, 68, 68, 0.3)'
+                  }}
+                >
+                  Clear History
+                </Button>
+              </DialogTrigger>
+              <DialogSurface>
+                <DialogBody>
+                  <DialogTitle>Clear Scan History?</DialogTitle>
+                  <DialogContent>
+                    <Text>
+                      Are you sure you want to clear all scan history? This action cannot be undone.
+                    </Text>
+                  </DialogContent>
+                  <DialogActions>
+                    <DialogTrigger disableButtonEnhancement>
+                      <Button appearance="secondary">Cancel</Button>
+                    </DialogTrigger>
+                    <Button appearance="primary" onClick={handleClearHistory}>
+                      Clear History
+                    </Button>
+                  </DialogActions>
+                </DialogBody>
+              </DialogSurface>
+            </Dialog>
           )}
         </div>
 
