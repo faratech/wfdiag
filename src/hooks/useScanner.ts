@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useAppContext, type TaskResult } from '../contexts/AppContext'
@@ -23,27 +23,49 @@ export const useScanner = () => {
     setFilteredResults,
   } = useAppContext()
 
+  // Track the current running session to prevent race conditions
+  const currentSessionRef = useRef<string | null>(null)
+  const isRunningRef = useRef<boolean>(false)
+
   const runDiagnostics = useCallback(async (taskIds: string[]) => {
     if (taskIds.length === 0) return
 
+    // Prevent concurrent scans - race condition guard
+    if (isRunningRef.current) {
+      logger.warn('useScanner', 'Scan already in progress, ignoring new scan request')
+      return
+    }
+
+    isRunningRef.current = true
     setIsRunning(true)
     setCurrentProgress(0)
     setResults({})
     setScanStartTime(Date.now())
 
+    let unlisten: (() => void) | null = null
+
     try {
       const newSessionId = await invoke<string>('start_diagnostics', { taskIds })
+
+      // Store the session ID in ref to prevent race conditions
+      currentSessionRef.current = newSessionId
       setSessionId(newSessionId)
 
       let completedTasks = 0
       const totalTasks = taskIds.length
 
-      const unlisten = await listen<{
+      unlisten = await listen<{
         task_id: string
         status: 'running' | 'completed'
         task_name?: string
         success?: boolean
       }>('task-progress', (event: any) => {
+        // Only process events for the current session
+        if (currentSessionRef.current !== newSessionId) {
+          logger.debug('useScanner', 'Ignoring event from old session')
+          return
+        }
+
         if (event.payload.status === 'running' && event.payload.task_name) {
           setCurrentTaskName(event.payload.task_name)
         } else if (event.payload.status === 'completed') {
@@ -58,6 +80,12 @@ export const useScanner = () => {
           maxConcurrent: settings.maxConcurrentTasks || 5
         })
 
+        // Verify this is still the current session before updating results
+        if (currentSessionRef.current !== newSessionId) {
+          logger.warn('useScanner', 'Scan session changed, discarding results from old session')
+          return
+        }
+
         const resultsObj = scanResults.reduce((acc, [taskId, result]) => {
           acc[taskId] = result
           return acc
@@ -65,7 +93,11 @@ export const useScanner = () => {
 
         setResults(resultsObj)
       } finally {
-        unlisten()
+        // Always cleanup listener
+        if (unlisten) {
+          unlisten()
+          unlisten = null
+        }
       }
 
       setCurrentProgress(100)
@@ -81,15 +113,26 @@ export const useScanner = () => {
             logger.info('useScanner', 'Scan auto-saved successfully', savedScanId)
           } catch (error) {
             logger.error('useScanner', 'Failed to auto-save scan', error)
+          } finally {
+            isRunningRef.current = false
+            setIsRunning(false)
           }
-          setIsRunning(false)
         }, 500)
       } else {
+        isRunningRef.current = false
         setIsRunning(false)
       }
     } catch (error) {
       logger.error('useScanner', 'Failed to start diagnostics', error)
+
+      // Cleanup listener on error
+      if (unlisten) {
+        unlisten()
+      }
+
+      isRunningRef.current = false
       setIsRunning(false)
+      currentSessionRef.current = null
     }
   }, [
     availableTasks.length,
@@ -122,12 +165,15 @@ export const useScanner = () => {
   }, [availableTasks, systemInfo, runDiagnostics])
 
   const stopScan = useCallback(() => {
+    isRunningRef.current = false
+    currentSessionRef.current = null
     setIsRunning(false)
     setCurrentProgress(0)
     setCurrentTaskName('')
   }, [setIsRunning, setCurrentProgress, setCurrentTaskName])
 
   const clearResults = useCallback(() => {
+    currentSessionRef.current = null
     setResults({})
     setSessionId(null)
     setCurrentProgress(0)
@@ -162,6 +208,14 @@ export const useScanner = () => {
 
     setFilteredResults(filtered)
   }, [searchQuery, results, setFilteredResults])
+
+  // Cleanup on unmount - ensure refs are reset
+  useEffect(() => {
+    return () => {
+      isRunningRef.current = false
+      currentSessionRef.current = null
+    }
+  }, [])
 
   return {
     runQuickScan,

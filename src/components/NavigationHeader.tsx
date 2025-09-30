@@ -136,7 +136,7 @@ export const NavigationHeader: React.FC<NavigationHeaderProps> = ({
   onOpenSettings,
   onOpenAbout,
   onExportDiagnostics,
-  version = '2.1.1'
+  version = '2.1.2'
 }) => {
   const styles = useStyles()
 

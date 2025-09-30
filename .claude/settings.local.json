@@ -14,7 +14,8 @@
       "Read(D:\\temp\\wfdiag\\src/**)",
       "Bash(npm view:*)",
       "Bash(dir:*)",
-      "Bash(dir \"src-tauri\\target\\release\\bundle\\nsis\")"
+      "Bash(dir \"src-tauri\\target\\release\\bundle\\nsis\")",
+      "Bash(cargo check:*)"
     ],
     "deny": [],
     "additionalDirectories": [
