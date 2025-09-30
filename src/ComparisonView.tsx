@@ -25,6 +25,7 @@ import { useScanHistory } from './hooks/useScanHistory'
 import { useComparison, ComparisonFilter } from './hooks/useComparison'
 import { useJsonDiff } from './hooks/useJsonDiff'
 import { useToast } from './contexts/ToastContext'
+import * as logger from './utils/logger'
 import './styles.css'
 
 interface ComparisonViewProps {
@@ -66,7 +67,7 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({ onClose }) => {
       setShowClearDialog(false)
       showSuccess('History Cleared', 'All scan history has been successfully deleted.')
     } catch (error) {
-      console.error('Failed to clear scan history:', error)
+      logger.error('ComparisonView', 'Failed to clear scan history', error)
       showError('Failed to Clear History', String(error))
     }
   }

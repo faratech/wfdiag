@@ -8,6 +8,7 @@ import {
 import {
   ArrowLeftRegular,
 } from '@fluentui/react-icons';
+import * as logger from './utils/logger';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import {
@@ -179,7 +180,7 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
             });
           });
         } catch (error) {
-          console.error('Failed to start monitoring:', error);
+          logger.error('SystemMonitoring', 'Failed to start monitoring', error);
           onToggle(false);
         }
       } else {
@@ -191,7 +192,7 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
         try {
           await invoke('stop_monitoring');
         } catch (error) {
-          console.error('Failed to stop monitoring:', error);
+          logger.error('SystemMonitoring', 'Failed to stop monitoring', error);
         }
       }
     };
@@ -631,7 +632,7 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
                   setNetworkConnections(connections);
                   setShowNetworkConnections(true);
                 } catch (error) {
-                  console.error('Failed to get network connections:', error);
+                  logger.error('SystemMonitoring', 'Failed to get network connections', error);
                 }
               }}
               style={{

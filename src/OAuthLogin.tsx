@@ -16,6 +16,7 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-shell';
+import * as logger from './utils/logger';
 
 const useStyles = makeStyles({
   container: {
@@ -105,7 +106,7 @@ export const OAuthLogin: React.FC<OAuthLoginProps> = ({ onAuthChange }) => {
       setUserInfo(info);
       onAuthChange?.(authenticated, info || undefined);
     } catch (err) {
-      console.error('Failed to check OAuth status:', err);
+      logger.error('OAuthLogin', 'Failed to check OAuth status', err);
     }
   };
 

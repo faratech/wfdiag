@@ -2,6 +2,7 @@ import { useCallback, useEffect } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useAppContext, type TaskResult } from '../contexts/AppContext'
+import * as logger from '../utils/logger'
 
 export const useScanner = () => {
   const {
@@ -77,9 +78,9 @@ export const useScanner = () => {
               durationMs: scanDuration,
               tags: taskIds.length === availableTasks.length ? ['Full Scan'] : ['Quick Scan']
             })
-            console.log('Scan auto-saved successfully with ID:', savedScanId)
+            logger.info('useScanner', 'Scan auto-saved successfully', savedScanId)
           } catch (error) {
-            console.error('Failed to auto-save scan:', error)
+            logger.error('useScanner', 'Failed to auto-save scan', error)
           }
           setIsRunning(false)
         }, 500)
@@ -87,7 +88,7 @@ export const useScanner = () => {
         setIsRunning(false)
       }
     } catch (error) {
-      console.error('Failed to start diagnostics:', error)
+      logger.error('useScanner', 'Failed to start diagnostics', error)
       setIsRunning(false)
     }
   }, [
