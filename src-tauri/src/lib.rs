@@ -559,23 +559,38 @@ async fn restart_as_admin() -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::env;
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
+        use std::ptr;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
         let exe_path = env::current_exe().map_err(|e| e.to_string())?;
 
-        // Use PowerShell to restart with elevation - this is a special case for elevation
-        // We need to allow this specific PowerShell command for application restart
-        let restart_script = &format!("Start-Process '{}' -Verb RunAs", exe_path.display());
-        let executor = crate::security::SecureCommandExecutor::new();
-        
-        // This will fail security validation, so we use direct command for this specific elevation case
-        let mut command = Command::new("powershell");
-        command
-            .args(&["-Command", restart_script])
-            .creation_flags(0x08000000); // CREATE_NO_WINDOW
-        
-        command.spawn().map_err(|e| e.to_string())?;
+        // Convert path to wide string for Windows API
+        let exe_path_str = exe_path.to_string_lossy().to_string();
+        let mut exe_wide: Vec<u16> = exe_path_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let runas_wide: Vec<u16> = "runas".encode_utf16().chain(std::iter::once(0)).collect();
+
+        unsafe {
+            // Use ShellExecuteW with "runas" verb to trigger UAC elevation
+            let result = ShellExecuteW(
+                None,
+                PCWSTR(runas_wide.as_ptr()),
+                PCWSTR(exe_wide.as_ptr()),
+                PCWSTR(ptr::null()),
+                PCWSTR(ptr::null()),
+                SW_SHOWNORMAL,
+            );
+
+            // ShellExecuteW returns a value > 32 on success
+            if result.0 as i32 <= 32 {
+                return Err(format!("Failed to restart with elevation. Error code: {}", result.0 as i32));
+            }
+        }
+
+        // Give the elevated process time to start before exiting
+        std::thread::sleep(std::time::Duration::from_millis(500));
 
         // Exit current process
         std::process::exit(0);
