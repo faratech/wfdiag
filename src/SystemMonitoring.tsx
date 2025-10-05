@@ -81,6 +81,9 @@ interface SystemStats {
   disks: DiskInfo[];
   network_upload_kb: number;
   network_download_kb: number;
+  npu_available: boolean;
+  npu_name: string | null;
+  npu_utilization: number | null;
   top_processes: ProcessInfo[];
   timestamp: number;
 }
@@ -524,6 +527,49 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
             </Text>
           </div>
         </div>
+
+        {/* NPU Card - only show if NPU is detected */}
+        {stats.npu_available && (
+          <div className="glass-card" style={{ padding: 20 }}>
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16, gap: 12 }}>
+              <div className="category-icon" style={{ background: 'linear-gradient(135deg, #8b5cf6, #ec4899)' }}>
+                <i className="fas fa-brain"></i>
+              </div>
+              <Text size={400} weight="semibold" style={{ color: '#f1f5f9' }}>NPU</Text>
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <Text size={200} style={{ color: '#94a3b8', marginBottom: 8 }}>
+                <i className="fas fa-microchip" style={{ marginRight: 6 }}></i>
+                {stats.npu_name}
+              </Text>
+              {stats.npu_utilization !== null && (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                    <Text size={200} style={{ color: '#94a3b8' }}>Usage</Text>
+                    <Badge
+                      appearance="filled"
+                      style={{
+                        background: stats.npu_utilization > 80 ? '#ef4444' :
+                                   stats.npu_utilization > 50 ? '#f59e0b' : '#10b981',
+                      }}
+                    >
+                      {stats.npu_utilization.toFixed(1)}%
+                    </Badge>
+                  </div>
+                  <ProgressBar
+                    value={stats.npu_utilization / 100}
+                    style={{ height: 8 }}
+                  />
+                </div>
+              )}
+              {stats.npu_utilization === null && (
+                <Text size={200} style={{ color: '#64748b', fontStyle: 'italic' }}>
+                  Utilization monitoring not available
+                </Text>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Disk Cards */}
         {stats.disks && stats.disks.map((disk, index) => (
