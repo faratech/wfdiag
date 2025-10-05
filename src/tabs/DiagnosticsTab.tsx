@@ -297,9 +297,9 @@ export const DiagnosticsTab: React.FC = () => {
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS }}>
                       {getCategoryIcon(category)}
-                      <Body1>{category}</Body1>
+                      <Body1 style={{ color: tokens.colorNeutralForeground1 }}>{category}</Body1>
                     </div>
-                    <Caption1>
+                    <Caption1 style={{ color: tokens.colorNeutralForeground2 }}>
                       {items.filter(i => i.result.success).length}/{items.length}
                     </Caption1>
                   </a>
