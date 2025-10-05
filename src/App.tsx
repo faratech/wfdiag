@@ -87,7 +87,7 @@ const AppContent: React.FC = () => {
         onOpenSettings={() => setShowSettings(true)}
         onOpenAbout={() => setShowAbout(true)}
         onExportDiagnostics={exportResults}
-        version="2.1.2"
+        version="2.1.3"
       />
 
       {/* Tab Navigation */}
