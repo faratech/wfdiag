@@ -35,6 +35,25 @@ This application supports both x64 and ARM64 Windows architectures with native b
 - Reports architecture info via `get_architecture_info()` Tauri command
 - Architecture module in `src-tauri/src/architecture.rs` provides helper functions
 
+### Version Management
+Automated scripts to bump version numbers across all project files:
+
+**PowerShell (Windows):**
+- **Bump version**: `.\bump-version.ps1 2.1.4` - Updates version in all 8 project files
+- **Dry run**: `.\bump-version.ps1 2.1.4 -DryRun` - Preview changes without modifying files
+
+**Bash (Linux/macOS/Git Bash):**
+- **Bump version**: `./bump-version.sh 2.1.4` - Updates version in all 8 project files
+- **Dry run**: `./bump-version.sh 2.1.4 --dry-run` - Preview changes without modifying files
+
+**Files automatically updated:**
+- package.json, package-lock.json (NPM)
+- Cargo.toml, tauri.conf.json (Rust/Tauri)
+- AppxManifest.xml (Windows Store - gets .0 suffix)
+- App.tsx, AboutDialog.tsx, NavigationHeader.tsx (Frontend)
+
+See `VERSION-BUMP.md` for detailed documentation.
+
 ### Package Signing (Windows)
 - **Build MSIX package**: `.\build-msix.ps1` - PowerShell script to build MSIX for Store
 - **Sign MSIX package**: `.\sign-msix.ps1` - Sign MSIX with certificate
