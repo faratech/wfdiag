@@ -15,7 +15,8 @@
       "Bash(npm view:*)",
       "Bash(dir:*)",
       "Bash(dir \"src-tauri\\target\\release\\bundle\\nsis\")",
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "WebSearch"
     ],
     "deny": [],
     "additionalDirectories": [

@@ -14,23 +14,39 @@ impl WindowsNativeAPI {
         let mut system = System::new();
         system.refresh_memory();
         system.refresh_all();
-        
+
         // Get Windows version info
         let os_version = System::os_version().unwrap_or_else(|| "Unknown".to_string());
         let kernel_version = System::kernel_version().unwrap_or_else(|| "Unknown".to_string());
-        
+
         // Parse build number from kernel version or use registry
         let build_number = self.get_windows_build_number();
         let windows_version = self.get_windows_version_name(build_number);
-        
+
         // Get uptime in seconds
         let uptime_seconds = System::uptime();
-        
+
+        // Get architecture information
+        let arch_info = crate::architecture::get_architecture_info()
+            .unwrap_or_else(|_| crate::architecture::ArchitectureInfo {
+                process_arch: crate::architecture::ProcessorArchitecture::Unknown,
+                native_arch: crate::architecture::ProcessorArchitecture::Unknown,
+                is_emulated: false,
+                process_arch_name: "Unknown".to_string(),
+                native_arch_name: "Unknown".to_string(),
+                page_size: 4096,
+                processor_count: std::thread::available_parallelism().map(|p| p.get() as u32).unwrap_or(1),
+            });
+
         Ok(json!({
             "computer_name": std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Unknown".to_string()),
-            "processor_architecture": 9, // x64
-            "processor_count": std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1),
-            "page_size": 4096,
+            "processor_architecture": arch_info.process_arch.to_u16(),
+            "processor_architecture_name": arch_info.process_arch_name,
+            "native_architecture": arch_info.native_arch.to_u16(),
+            "native_architecture_name": arch_info.native_arch_name,
+            "is_emulated": arch_info.is_emulated,
+            "processor_count": arch_info.processor_count,
+            "page_size": arch_info.page_size,
             "memory": {
                 "total_physical": system.total_memory(),
                 "available_physical": system.available_memory(),
