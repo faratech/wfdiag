@@ -14,6 +14,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Frontend only dev**: `npm run dev` - Runs Vite dev server without Tauri (limited functionality)
 - **Type checking**: `npx tsc --noEmit` - Run TypeScript compiler to check for type errors
 
+### ARM64 Windows Support
+This application supports both x64 and ARM64 Windows architectures with native builds.
+
+**Prerequisites for ARM64 builds:**
+1. Install ARM64 build tools from Visual Studio Installer:
+   - Open Visual Studio Installer
+   - Select "Individual Components"
+   - Install "MSVC v143 - VS 2022 C++ ARM64 build tools"
+2. Add Rust ARM64 target: `rustup target add aarch64-pc-windows-msvc`
+
+**ARM64 Build Commands:**
+- **Build ARM64 exe**: `cd src-tauri && cargo build --release --target aarch64-pc-windows-msvc`
+- **Build ARM64 installer**: `npm run tauri build -- --target aarch64-pc-windows-msvc`
+- **Check ARM64 compilation**: `cd src-tauri && cargo check --target aarch64-pc-windows-msvc`
+
+**Architecture Detection:**
+- The app automatically detects both process and native architecture at runtime
+- Uses `IsWow64Process2` API to detect x64 emulation on ARM64 hardware
+- Reports architecture info via `get_architecture_info()` Tauri command
+- Architecture module in `src-tauri/src/architecture.rs` provides helper functions
+
 ### Package Signing (Windows)
 - **Build MSIX package**: `.\build-msix.ps1` - PowerShell script to build MSIX for Store
 - **Sign MSIX package**: `.\sign-msix.ps1` - Sign MSIX with certificate
@@ -50,6 +71,7 @@ This is a Tauri v2 application with a clear separation between frontend and back
 - **diagnostics.rs**: Core diagnostic task definitions and execution logic
 - **native_diagnostics.rs**: Windows-specific diagnostic implementations
 - **windows_native.rs**: Direct Windows API bindings and wrappers
+- **architecture.rs**: CPU architecture detection (x64, ARM64) and emulation detection
 - **monitoring.rs**: Real-time system monitoring with CPU, memory, disk, and network stats
 - **openai_integration.rs**: OpenAI Responses API integration for AI-powered system analysis
 - **oauth.rs**: OAuth2 authentication implementation for WindowsForum

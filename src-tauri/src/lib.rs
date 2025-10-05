@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod architecture;
 mod diagnostics;
 mod monitoring;
 mod native_diagnostics;
@@ -561,7 +562,6 @@ async fn restart_as_admin() -> Result<(), String> {
         use std::env;
         use std::ptr;
         use windows::core::PCWSTR;
-        use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::Shell::ShellExecuteW;
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -569,7 +569,7 @@ async fn restart_as_admin() -> Result<(), String> {
 
         // Convert path to wide string for Windows API
         let exe_path_str = exe_path.to_string_lossy().to_string();
-        let mut exe_wide: Vec<u16> = exe_path_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let exe_wide: Vec<u16> = exe_path_str.encode_utf16().chain(std::iter::once(0)).collect();
         let runas_wide: Vec<u16> = "runas".encode_utf16().chain(std::iter::once(0)).collect();
 
         unsafe {
@@ -805,6 +805,12 @@ async fn copy_minidumps_to_desktop() -> Result<serde_json::Value, String> {
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn get_architecture_info() -> Result<serde_json::Value, String> {
+    architecture::get_architecture_json()
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let scan_storage = ScanStorage::new()
@@ -845,6 +851,7 @@ pub fn run() {
             load_api_key,
             clear_api_key,
             get_system_info,
+            get_architecture_info,
             get_available_tasks,
             start_diagnostics,
             run_diagnostic_task,
