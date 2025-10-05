@@ -50,7 +50,7 @@ wmi = "*"
 winreg = "*"
 windows = { version = "*", features = [
     "Win32_Foundation",
-    "Win32_Security", 
+    "Win32_Security",
     "Win32_System_Threading",
     "Win32_System_SystemInformation",
     "Win32_System_Registry",
@@ -69,6 +69,8 @@ windows = { version = "*", features = [
     "Win32_System_Variant",
     "Win32_NetworkManagement_WNet",
     "Win32_System_Wmi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [features]
