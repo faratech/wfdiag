@@ -13,31 +13,36 @@ pub struct SystemStats {
     pub cpu_utilization: f32,
     pub per_cpu_utilization: Vec<f32>,
     pub cpu_frequency: u64,
-    
+
     // Memory
     pub memory_total_gb: f64,
     pub memory_used_gb: f64,
     pub memory_available_gb: f64,
     pub memory_utilization: f32,
-    
+
     // Swap
     pub swap_total_gb: f64,
     pub swap_used_gb: f64,
     pub swap_utilization: f32,
-    
+
     // Disk
     pub disk_utilization: f32,
     pub disk_read_bytes: u64,
     pub disk_write_bytes: u64,
     pub disks: Vec<DiskInfo>,
-    
+
     // Network
     pub network_upload_kb: f64,
     pub network_download_kb: f64,
-    
+
+    // NPU (Neural Processing Unit)
+    pub npu_available: bool,
+    pub npu_name: Option<String>,
+    pub npu_utilization: Option<f32>,
+
     // Process info
     pub top_processes: Vec<ProcessInfo>,
-    
+
     // Timestamp
     pub timestamp: i64,
 }
@@ -316,7 +321,10 @@ async fn collect_stats(
     // Disk I/O stats (aggregated from all processes)
     let disk_read_bytes = sys.processes().values().map(|p| p.disk_usage().read_bytes).sum();
     let disk_write_bytes = sys.processes().values().map(|p| p.disk_usage().written_bytes).sum();
-    
+
+    // NPU Detection (Windows-specific)
+    let (npu_available, npu_name, npu_utilization) = detect_npu().await;
+
     SystemStats {
         cpu_utilization,
         per_cpu_utilization,
@@ -334,6 +342,9 @@ async fn collect_stats(
         disks: disk_infos,
         network_upload_kb,
         network_download_kb,
+        npu_available,
+        npu_name,
+        npu_utilization,
         top_processes: processes,
         timestamp: chrono::Utc::now().timestamp(),
     }
@@ -378,3 +389,55 @@ pub async fn get_network_connections() -> Vec<NetworkConnection> {
     vec![]
 }
 
+// Detect NPU (Neural Processing Unit) on Windows
+#[cfg(windows)]
+async fn detect_npu() -> (bool, Option<String>, Option<f32>) {
+    use wmi::{COMLibrary, WMIConnection};
+    use std::collections::HashMap;
+
+    // Try to detect NPU via WMI
+    match COMLibrary::new() {
+        Ok(com_lib) => {
+            if let Ok(wmi_con) = WMIConnection::new(com_lib.into()) {
+                // Check for NPU in PnP devices (Intel NPU, AMD NPU, etc.)
+                if let Ok(results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+                    "SELECT Name, DeviceID FROM Win32_PnPEntity WHERE Name LIKE '%NPU%' OR Name LIKE '%Neural%' OR DeviceID LIKE '%NPU%'"
+                ) {
+                    if let Some(device) = results.first() {
+                        if let Some(wmi::Variant::String(name)) = device.get("Name") {
+                            // NPU detected but no utilization API available yet
+                            return (true, Some(name.clone()), None);
+                        }
+                    }
+                }
+
+                // Check CPU for integrated NPU (Intel Core Ultra, AMD Ryzen AI)
+                if let Ok(cpu_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+                    "SELECT Name FROM Win32_Processor"
+                ) {
+                    if let Some(cpu) = cpu_results.first() {
+                        if let Some(wmi::Variant::String(name)) = cpu.get("Name") {
+                            let name_lower = name.to_lowercase();
+                            // Intel Core Ultra has integrated NPU
+                            if name_lower.contains("core ultra") {
+                                return (true, Some(format!("{} (Integrated NPU)", name)), None);
+                            }
+                            // AMD Ryzen AI has XDNA NPU
+                            if name_lower.contains("ryzen ai") || name_lower.contains("ryzen 8000") || name_lower.contains("ryzen 9000") {
+                                return (true, Some(format!("{} (XDNA NPU)", name)), None);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(_) => {}
+    }
+
+    (false, None, None)
+}
+
+#[cfg(not(windows))]
+async fn detect_npu() -> (bool, Option<String>, Option<f32>) {
+    (false, None, None)
+}
