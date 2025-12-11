@@ -322,13 +322,25 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
                 disabled={isInstallingRuntime}
                 onClick={async () => {
                   setIsInstallingRuntime(true);
+                  setError(null);
                   try {
                     const result = await invoke('install_windows_app_runtime') as string;
-                    setError(null);
                     // Show success message
                     alert(result);
+                    // Recheck Phi Silica availability after installation
+                    try {
+                      const newStatus = await invoke('check_phi_silica_available') as PhiSilicaStatus;
+                      setPhiSilicaStatus(newStatus);
+                      if (newStatus.available) {
+                        setSelectedProvider('phi_silica');
+                      }
+                    } catch {
+                      // If recheck fails, just prompt user to restart
+                    }
                   } catch (err) {
-                    setError(err instanceof Error ? err.message : String(err));
+                    const errorMsg = err instanceof Error ? err.message : String(err);
+                    setError(errorMsg);
+                    alert(`Installation failed: ${errorMsg}`);
                   } finally {
                     setIsInstallingRuntime(false);
                   }
@@ -342,7 +354,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
                 {isInstallingRuntime ? (
                   <>
                     <Spinner size="tiny" style={{ marginRight: 8 }} />
-                    Installing...
+                    Downloading...
                   </>
                 ) : (
                   'Install Runtime'
