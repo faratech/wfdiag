@@ -144,8 +144,8 @@ fn get_runtime_installer_url() -> &'static str {
 #[cfg(windows)]
 pub async fn install_windows_app_runtime() -> Result<String, String> {
     use std::process::Command;
-    use std::path::PathBuf;
-    use std::fs;
+    use std::fs::File;
+    use std::io::Write;
 
     let url = get_runtime_installer_url();
 
@@ -153,37 +153,54 @@ pub async fn install_windows_app_runtime() -> Result<String, String> {
     let temp_dir = std::env::temp_dir();
     let installer_path = temp_dir.join("WindowsAppRuntimeInstall.exe");
 
-    // Download the installer using PowerShell
-    let download_cmd = format!(
-        "Invoke-WebRequest -Uri '{}' -OutFile '{}'",
-        url,
-        installer_path.display()
-    );
+    // Download using reqwest (no PowerShell window)
+    let response = reqwest::get(url)
+        .await
+        .map_err(|e| format!("Failed to download installer: {}", e))?;
 
-    let download_result = Command::new("powershell")
-        .args(["-Command", &download_cmd])
-        .output()
-        .map_err(|e| format!("Failed to start download: {}", e))?;
-
-    if !download_result.status.success() {
-        let error = String::from_utf8_lossy(&download_result.stderr);
-        return Err(format!("Failed to download installer: {}", error));
+    if !response.status().is_success() {
+        return Err(format!("Failed to download installer: HTTP {}", response.status()));
     }
 
-    // Run the installer (requires admin, will prompt UAC)
-    let install_result = Command::new(&installer_path)
+    let bytes = response.bytes()
+        .await
+        .map_err(|e| format!("Failed to read installer data: {}", e))?;
+
+    // Write to file
+    let mut file = File::create(&installer_path)
+        .map_err(|e| format!("Failed to create installer file: {}", e))?;
+    file.write_all(&bytes)
+        .map_err(|e| format!("Failed to write installer file: {}", e))?;
+    drop(file);
+
+    // Run the installer and wait for it to complete
+    let output = Command::new(&installer_path)
         .args(["--quiet"])
-        .spawn()
+        .output()
         .map_err(|e| format!("Failed to run installer: {}", e))?;
 
-    // Clean up the installer file after a delay (don't wait for install to complete)
-    let cleanup_path = installer_path.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        let _ = fs::remove_file(cleanup_path);
-    });
+    // Clean up installer file
+    let _ = std::fs::remove_file(&installer_path);
 
-    Ok("Windows App Runtime installer started. Please follow the prompts to complete installation, then restart the application.".to_string())
+    if output.status.success() {
+        Ok("Windows App Runtime installed successfully! Please restart the application to enable Phi Silica.".to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // Check for common error codes
+        if let Some(code) = output.status.code() {
+            match code {
+                0 => Ok("Windows App Runtime installed successfully! Please restart the application.".to_string()),
+                1602 => Err("Installation was cancelled by user.".to_string()),
+                1618 => Err("Another installation is in progress. Please wait and try again.".to_string()),
+                1641 | 3010 => Ok("Windows App Runtime installed! A system restart may be required.".to_string()),
+                _ => Err(format!("Installation failed with code {}. {}{}", code, stdout, stderr)),
+            }
+        } else {
+            Err(format!("Installation process terminated unexpectedly. {}{}", stdout, stderr))
+        }
+    }
 }
 
 #[tauri::command]
