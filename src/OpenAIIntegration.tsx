@@ -53,6 +53,7 @@ interface PhiSilicaStatus {
   available: boolean;
   message: string;
   error_code?: string;
+  needs_runtime_install?: boolean;
 }
 
 type AiProvider = 'openai' | 'phi_silica';
@@ -70,6 +71,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
   const [selectedProvider, setSelectedProvider] = useState<AiProvider>('openai');
   const [phiSilicaStatus, setPhiSilicaStatus] = useState<PhiSilicaStatus | null>(null);
   const [isCheckingPhiSilica, setIsCheckingPhiSilica] = useState(true);
+  const [isInstallingRuntime, setIsInstallingRuntime] = useState(false);
 
   // Check Phi Silica availability on mount
   useEffect(() => {
@@ -292,21 +294,61 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
         <div className="glass-card" style={{
           padding: 16,
           marginBottom: 24,
-          background: 'linear-gradient(135deg, rgba(148, 163, 184, 0.1), rgba(100, 116, 139, 0.1))',
-          border: '1px solid rgba(148, 163, 184, 0.2)',
+          background: phiSilicaStatus.needs_runtime_install
+            ? 'linear-gradient(135deg, rgba(6, 182, 212, 0.1), rgba(139, 92, 246, 0.1))'
+            : 'linear-gradient(135deg, rgba(148, 163, 184, 0.1), rgba(100, 116, 139, 0.1))',
+          border: phiSilicaStatus.needs_runtime_install
+            ? '1px solid rgba(6, 182, 212, 0.3)'
+            : '1px solid rgba(148, 163, 184, 0.2)',
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <BrainCircuitRegular fontSize={20} style={{ color: '#94a3b8' }} />
-            <div>
-              <Text size={200} style={{ color: '#94a3b8', display: 'block' }}>
-                <strong>On-device AI (Phi Silica)</strong>: {phiSilicaStatus.message}
-              </Text>
-              {phiSilicaStatus.error_code && (
-                <Text size={100} style={{ color: '#64748b', display: 'block', marginTop: 4, fontFamily: 'monospace' }}>
-                  Debug: {phiSilicaStatus.error_code}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <BrainCircuitRegular fontSize={20} style={{ color: phiSilicaStatus.needs_runtime_install ? '#06b6d4' : '#94a3b8' }} />
+              <div>
+                <Text size={200} style={{ color: phiSilicaStatus.needs_runtime_install ? '#67e8f9' : '#94a3b8', display: 'block' }}>
+                  <strong>On-device AI (Phi Silica)</strong>: {phiSilicaStatus.message}
                 </Text>
-              )}
+                {phiSilicaStatus.error_code && (
+                  <Text size={100} style={{ color: '#64748b', display: 'block', marginTop: 4, fontFamily: 'monospace' }}>
+                    Debug: {phiSilicaStatus.error_code}
+                  </Text>
+                )}
+              </div>
             </div>
+            {phiSilicaStatus.needs_runtime_install && (
+              <Button
+                appearance="primary"
+                size="small"
+                disabled={isInstallingRuntime}
+                onClick={async () => {
+                  setIsInstallingRuntime(true);
+                  try {
+                    const result = await invoke('install_windows_app_runtime') as string;
+                    setError(null);
+                    // Show success message
+                    alert(result);
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : String(err));
+                  } finally {
+                    setIsInstallingRuntime(false);
+                  }
+                }}
+                style={{
+                  background: 'linear-gradient(135deg, #06b6d4, #8b5cf6)',
+                  border: 'none',
+                  minWidth: 140,
+                }}
+              >
+                {isInstallingRuntime ? (
+                  <>
+                    <Spinner size="tiny" style={{ marginRight: 8 }} />
+                    Installing...
+                  </>
+                ) : (
+                  'Install Runtime'
+                )}
+              </Button>
+            )}
           </div>
         </div>
       )}

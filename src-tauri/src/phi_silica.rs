@@ -10,6 +10,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Windows App Runtime installer URL (latest stable)
+const WINDOWS_APP_RUNTIME_URL: &str = "https://aka.ms/windowsappsdk/1.6/latest/windowsappruntimeinstall-x64.exe";
+const WINDOWS_APP_RUNTIME_ARM64_URL: &str = "https://aka.ms/windowsappsdk/1.6/latest/windowsappruntimeinstall-arm64.exe";
+
 /// Response from checking Phi Silica availability
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhiSilicaStatus {
@@ -17,6 +21,9 @@ pub struct PhiSilicaStatus {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// Whether the Windows App Runtime needs to be installed
+    #[serde(default)]
+    pub needs_runtime_install: bool,
 }
 
 /// Check if Phi Silica is available on this device
@@ -33,12 +40,17 @@ pub fn is_phi_silica_available() -> PhiSilicaStatus {
                 "Phi Silica is not available. This feature requires a Copilot+ PC with Windows 11 24H2 or later.".to_string()
             },
             error_code: None,
+            needs_runtime_install: false,
         },
         Err(e) => {
             // Provide more detailed error information
             let error_code = format!("{:?}", e);
+            let needs_runtime = error_code.contains("CLASS_NOT_REGISTERED")
+                || error_code.contains("0x80040154")
+                || error_code.contains("0x80070002");
+
             let message = if error_code.contains("CLASS_NOT_REGISTERED") || error_code.contains("0x80040154") {
-                "Windows App Runtime is not installed. Please install Windows App Runtime 1.7 or later.".to_string()
+                "Windows App Runtime is not installed. Click 'Install Runtime' to enable Phi Silica.".to_string()
             } else if error_code.contains("NOT_FOUND") || error_code.contains("0x80070002") {
                 "Phi Silica component not found. This feature requires Windows 11 24H2 on a Copilot+ PC.".to_string()
             } else {
@@ -49,6 +61,7 @@ pub fn is_phi_silica_available() -> PhiSilicaStatus {
                 available: false,
                 message,
                 error_code: Some(error_code),
+                needs_runtime_install: needs_runtime,
             }
         },
     }
@@ -60,6 +73,7 @@ pub fn is_phi_silica_available() -> PhiSilicaStatus {
         available: false,
         message: "Phi Silica is only available on Windows".to_string(),
         error_code: None,
+        needs_runtime_install: false,
     }
 }
 
@@ -110,6 +124,72 @@ pub async fn generate_response(_prompt: &str) -> Result<String, String> {
 #[tauri::command]
 pub async fn check_phi_silica_available() -> Result<PhiSilicaStatus, String> {
     Ok(is_phi_silica_available())
+}
+
+/// Get the appropriate Windows App Runtime installer URL for this architecture
+#[cfg(windows)]
+fn get_runtime_installer_url() -> &'static str {
+    #[cfg(target_arch = "aarch64")]
+    {
+        WINDOWS_APP_RUNTIME_ARM64_URL
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        WINDOWS_APP_RUNTIME_URL
+    }
+}
+
+/// Tauri command to install Windows App Runtime
+#[tauri::command]
+#[cfg(windows)]
+pub async fn install_windows_app_runtime() -> Result<String, String> {
+    use std::process::Command;
+    use std::path::PathBuf;
+    use std::fs;
+
+    let url = get_runtime_installer_url();
+
+    // Download to temp directory
+    let temp_dir = std::env::temp_dir();
+    let installer_path = temp_dir.join("WindowsAppRuntimeInstall.exe");
+
+    // Download the installer using PowerShell
+    let download_cmd = format!(
+        "Invoke-WebRequest -Uri '{}' -OutFile '{}'",
+        url,
+        installer_path.display()
+    );
+
+    let download_result = Command::new("powershell")
+        .args(["-Command", &download_cmd])
+        .output()
+        .map_err(|e| format!("Failed to start download: {}", e))?;
+
+    if !download_result.status.success() {
+        let error = String::from_utf8_lossy(&download_result.stderr);
+        return Err(format!("Failed to download installer: {}", error));
+    }
+
+    // Run the installer (requires admin, will prompt UAC)
+    let install_result = Command::new(&installer_path)
+        .args(["--quiet"])
+        .spawn()
+        .map_err(|e| format!("Failed to run installer: {}", e))?;
+
+    // Clean up the installer file after a delay (don't wait for install to complete)
+    let cleanup_path = installer_path.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        let _ = fs::remove_file(cleanup_path);
+    });
+
+    Ok("Windows App Runtime installer started. Please follow the prompts to complete installation, then restart the application.".to_string())
+}
+
+#[tauri::command]
+#[cfg(not(windows))]
+pub async fn install_windows_app_runtime() -> Result<String, String> {
+    Err("Windows App Runtime can only be installed on Windows".to_string())
 }
 
 /// Tauri command to analyze system with Phi Silica
