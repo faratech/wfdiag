@@ -10,10 +10,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Windows App Runtime installer URL (latest stable)
-const WINDOWS_APP_RUNTIME_URL: &str = "https://aka.ms/windowsappsdk/1.6/latest/windowsappruntimeinstall-x64.exe";
-const WINDOWS_APP_RUNTIME_ARM64_URL: &str = "https://aka.ms/windowsappsdk/1.6/latest/windowsappruntimeinstall-arm64.exe";
-
 /// Response from checking Phi Silica availability
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhiSilicaStatus {
@@ -21,9 +17,21 @@ pub struct PhiSilicaStatus {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
-    /// Whether the Windows App Runtime needs to be installed
-    #[serde(default)]
-    pub needs_runtime_install: bool,
+    /// Windows build number
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub windows_build: Option<u32>,
+}
+
+/// Get Windows build number
+#[cfg(windows)]
+fn get_windows_build() -> Option<u32> {
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    use winreg::RegKey;
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let key = hklm.open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion").ok()?;
+    let build_str: String = key.get_value("CurrentBuildNumber").ok()?;
+    build_str.parse().ok()
 }
 
 /// Check if Phi Silica is available on this device
@@ -31,37 +39,57 @@ pub struct PhiSilicaStatus {
 pub fn is_phi_silica_available() -> PhiSilicaStatus {
     use crate::phi_silica_bindings::Microsoft::Windows::AI::Generative::LanguageModel;
 
+    let build = get_windows_build();
+
     match LanguageModel::IsAvailable() {
-        Ok(available) => PhiSilicaStatus {
-            available,
-            message: if available {
-                "Phi Silica is available on this device".to_string()
+        Ok(available) => {
+            if available {
+                PhiSilicaStatus {
+                    available: true,
+                    message: "Phi Silica is available on this device".to_string(),
+                    error_code: None,
+                    windows_build: build,
+                }
             } else {
-                "Phi Silica is not available. This feature requires a Copilot+ PC with Windows 11 24H2 or later.".to_string()
-            },
-            error_code: None,
-            needs_runtime_install: false,
+                // API exists but returned false - Phi Silica component not installed/available
+                PhiSilicaStatus {
+                    available: false,
+                    message: format!(
+                        "Phi Silica not available. Requires Copilot+ PC with Windows 11 24H2/25H2. Check Windows Update for Phi Silica component updates. Build: {}",
+                        build.map_or("unknown".to_string(), |b| b.to_string())
+                    ),
+                    error_code: None,
+                    windows_build: build,
+                }
+            }
         },
         Err(e) => {
-            // Provide more detailed error information
             let error_code = format!("{:?}", e);
-            let needs_runtime = error_code.contains("CLASS_NOT_REGISTERED")
-                || error_code.contains("0x80040154")
-                || error_code.contains("0x80070002");
 
-            let message = if error_code.contains("CLASS_NOT_REGISTERED") || error_code.contains("0x80040154") {
-                "Windows App Runtime is not installed. Click 'Install Runtime' to enable Phi Silica.".to_string()
-            } else if error_code.contains("NOT_FOUND") || error_code.contains("0x80070002") {
-                "Phi Silica component not found. This feature requires Windows 11 24H2 on a Copilot+ PC.".to_string()
+            // Parse the error to give helpful message
+            let message = if error_code.contains("0x80040154") || error_code.contains("CLASS_NOT_REGISTERED") {
+                format!(
+                    "Phi Silica API not registered. This requires a Copilot+ PC with NPU (40+ TOPS). Build: {}",
+                    build.map_or("unknown".to_string(), |b| b.to_string())
+                )
+            } else if error_code.contains("0x80070002") || error_code.contains("NOT_FOUND") {
+                format!(
+                    "Phi Silica component not found. Check Windows Update for Phi Silica updates (KB5072641/KB5072642/KB5072643). Build: {}",
+                    build.map_or("unknown".to_string(), |b| b.to_string())
+                )
             } else {
-                format!("Failed to check Phi Silica availability: {}", e)
+                format!(
+                    "Phi Silica check failed: {}. Build: {}",
+                    e,
+                    build.map_or("unknown".to_string(), |b| b.to_string())
+                )
             };
 
             PhiSilicaStatus {
                 available: false,
                 message,
                 error_code: Some(error_code),
-                needs_runtime_install: needs_runtime,
+                windows_build: build,
             }
         },
     }
@@ -73,7 +101,7 @@ pub fn is_phi_silica_available() -> PhiSilicaStatus {
         available: false,
         message: "Phi Silica is only available on Windows".to_string(),
         error_code: None,
-        needs_runtime_install: false,
+        windows_build: None,
     }
 }
 
@@ -126,87 +154,25 @@ pub async fn check_phi_silica_available() -> Result<PhiSilicaStatus, String> {
     Ok(is_phi_silica_available())
 }
 
-/// Get the appropriate Windows App Runtime installer URL for this architecture
-#[cfg(windows)]
-fn get_runtime_installer_url() -> &'static str {
-    #[cfg(target_arch = "aarch64")]
-    {
-        WINDOWS_APP_RUNTIME_ARM64_URL
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        WINDOWS_APP_RUNTIME_URL
-    }
-}
-
-/// Tauri command to install Windows App Runtime
+/// Tauri command to open Windows Update to check for Phi Silica updates
 #[tauri::command]
 #[cfg(windows)]
-pub async fn install_windows_app_runtime() -> Result<String, String> {
+pub async fn check_phi_silica_updates() -> Result<String, String> {
     use std::process::Command;
-    use std::fs::File;
-    use std::io::Write;
 
-    let url = get_runtime_installer_url();
+    // Open Windows Update settings
+    Command::new("cmd")
+        .args(["/c", "start", "ms-settings:windowsupdate"])
+        .spawn()
+        .map_err(|e| format!("Failed to open Windows Update: {}", e))?;
 
-    // Download to temp directory
-    let temp_dir = std::env::temp_dir();
-    let installer_path = temp_dir.join("WindowsAppRuntimeInstall.exe");
-
-    // Download using reqwest (no PowerShell window)
-    let response = reqwest::get(url)
-        .await
-        .map_err(|e| format!("Failed to download installer: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("Failed to download installer: HTTP {}", response.status()));
-    }
-
-    let bytes = response.bytes()
-        .await
-        .map_err(|e| format!("Failed to read installer data: {}", e))?;
-
-    // Write to file
-    let mut file = File::create(&installer_path)
-        .map_err(|e| format!("Failed to create installer file: {}", e))?;
-    file.write_all(&bytes)
-        .map_err(|e| format!("Failed to write installer file: {}", e))?;
-    drop(file);
-
-    // Run the installer and wait for it to complete
-    let output = Command::new(&installer_path)
-        .args(["--quiet"])
-        .output()
-        .map_err(|e| format!("Failed to run installer: {}", e))?;
-
-    // Clean up installer file
-    let _ = std::fs::remove_file(&installer_path);
-
-    if output.status.success() {
-        Ok("Windows App Runtime installed successfully! Please restart the application to enable Phi Silica.".to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        // Check for common error codes
-        if let Some(code) = output.status.code() {
-            match code {
-                0 => Ok("Windows App Runtime installed successfully! Please restart the application.".to_string()),
-                1602 => Err("Installation was cancelled by user.".to_string()),
-                1618 => Err("Another installation is in progress. Please wait and try again.".to_string()),
-                1641 | 3010 => Ok("Windows App Runtime installed! A system restart may be required.".to_string()),
-                _ => Err(format!("Installation failed with code {}. {}{}", code, stdout, stderr)),
-            }
-        } else {
-            Err(format!("Installation process terminated unexpectedly. {}{}", stdout, stderr))
-        }
-    }
+    Ok("Opening Windows Update. Check for updates to install Phi Silica component (KB5072641/KB5072642/KB5072643).".to_string())
 }
 
 #[tauri::command]
 #[cfg(not(windows))]
-pub async fn install_windows_app_runtime() -> Result<String, String> {
-    Err("Windows App Runtime can only be installed on Windows".to_string())
+pub async fn check_phi_silica_updates() -> Result<String, String> {
+    Err("Windows Update is only available on Windows".to_string())
 }
 
 /// Tauri command to analyze system with Phi Silica

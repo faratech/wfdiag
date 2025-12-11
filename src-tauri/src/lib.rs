@@ -881,7 +881,7 @@ pub fn run() {
             openai_integration::get_ai_provider_status,
             phi_silica::check_phi_silica_available,
             phi_silica::analyze_with_phi_silica,
-            phi_silica::install_windows_app_runtime,
+            phi_silica::check_phi_silica_updates,
             detect_issues,
             copy_minidumps_to_desktop,
             open_url,
