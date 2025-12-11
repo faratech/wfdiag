@@ -52,6 +52,7 @@ interface ConversationEntry {
 interface PhiSilicaStatus {
   available: boolean;
   message: string;
+  error_code?: string;
 }
 
 type AiProvider = 'openai' | 'phi_silica';
@@ -281,6 +282,30 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
               <Text size={200} style={{ color: '#94a3b8' }}>
                 Session ID: {sessionId}
               </Text>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Phi Silica Status - Show when not available to explain why */}
+      {!isCheckingPhiSilica && phiSilicaStatus && !phiSilicaStatus.available && (
+        <div className="glass-card" style={{
+          padding: 16,
+          marginBottom: 24,
+          background: 'linear-gradient(135deg, rgba(148, 163, 184, 0.1), rgba(100, 116, 139, 0.1))',
+          border: '1px solid rgba(148, 163, 184, 0.2)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <BrainCircuitRegular fontSize={20} style={{ color: '#94a3b8' }} />
+            <div>
+              <Text size={200} style={{ color: '#94a3b8', display: 'block' }}>
+                <strong>On-device AI (Phi Silica)</strong>: {phiSilicaStatus.message}
+              </Text>
+              {phiSilicaStatus.error_code && (
+                <Text size={100} style={{ color: '#64748b', display: 'block', marginTop: 4, fontFamily: 'monospace' }}>
+                  Debug: {phiSilicaStatus.error_code}
+                </Text>
+              )}
             </div>
           </div>
         </div>

@@ -2,6 +2,11 @@
 //!
 //! This module provides a wrapper around the Microsoft.Windows.AI.Generative
 //! WinRT APIs to enable local AI analysis using Phi Silica.
+//!
+//! Note: This requires:
+//! - A Copilot+ PC with NPU hardware
+//! - Windows 11 24H2 or later
+//! - Windows App Runtime 1.7 or later installed
 
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +15,8 @@ use serde::{Deserialize, Serialize};
 pub struct PhiSilicaStatus {
     pub available: bool,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 /// Check if Phi Silica is available on this device
@@ -23,12 +30,26 @@ pub fn is_phi_silica_available() -> PhiSilicaStatus {
             message: if available {
                 "Phi Silica is available on this device".to_string()
             } else {
-                "Phi Silica is not available. This feature requires a Copilot+ PC.".to_string()
+                "Phi Silica is not available. This feature requires a Copilot+ PC with Windows 11 24H2 or later.".to_string()
             },
+            error_code: None,
         },
-        Err(e) => PhiSilicaStatus {
-            available: false,
-            message: format!("Failed to check Phi Silica availability: {}", e),
+        Err(e) => {
+            // Provide more detailed error information
+            let error_code = format!("{:?}", e);
+            let message = if error_code.contains("CLASS_NOT_REGISTERED") || error_code.contains("0x80040154") {
+                "Windows App Runtime is not installed. Please install Windows App Runtime 1.7 or later.".to_string()
+            } else if error_code.contains("NOT_FOUND") || error_code.contains("0x80070002") {
+                "Phi Silica component not found. This feature requires Windows 11 24H2 on a Copilot+ PC.".to_string()
+            } else {
+                format!("Failed to check Phi Silica availability: {}", e)
+            };
+
+            PhiSilicaStatus {
+                available: false,
+                message,
+                error_code: Some(error_code),
+            }
         },
     }
 }
@@ -38,6 +59,7 @@ pub fn is_phi_silica_available() -> PhiSilicaStatus {
     PhiSilicaStatus {
         available: false,
         message: "Phi Silica is only available on Windows".to_string(),
+        error_code: None,
     }
 }
 
