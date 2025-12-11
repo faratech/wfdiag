@@ -12,7 +12,6 @@ dist/
 out/
 
 # Local build scripts and artifacts
-build-cross.py
 build-msix-bundle.sh
 msix-build/
 
