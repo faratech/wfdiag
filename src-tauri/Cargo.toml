@@ -1,6 +1,6 @@
 [package]
 name = "wfdiag-tauri"
-version = "2.1.3"
+version = "2.1.5"
 description = "WindowsForum Diagnostic Tool"
 authors = ["WindowsForum"]
 edition = "2024"
@@ -10,45 +10,49 @@ name = "wfdiag_tauri"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "*", features = [] }
+tauri-build = { version = "2.5", features = [] }
+windows-bindgen = "0.65"
 
 [dependencies]
-tauri = { version = "*", features = [] }
-serde = { version = "*", features = ["derive"] }
-serde_json = "*"
+tauri = { version = "2.9", features = [] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 # Tauri plugins for v2
-tauri-plugin-fs = "*"
-tauri-plugin-dialog = "*"
-tauri-plugin-clipboard-manager = "*"
-tauri-plugin-process = "*"
-tauri-plugin-shell = "*"
-tokio = { version = "*", features = ["full"] }
-anyhow = "*"
-chrono = { version = "*", features = ["serde"] }
-sysinfo = "*"
-scraper = "*"
-reqwest = { version = "*", features = ["json"] }
-uuid = { version = "*", features = ["v4"] }
-futures = "*"
-async-openai = "*"
-rand = "*"
-sha2 = "*"
-base64 = "*"
-url = "*"
-warp = "*"
-keyring = { version = "*", features = ["crypto-rust"] }
-dirs = "*"
+tauri-plugin-fs = "2.4"
+tauri-plugin-dialog = "2.4"
+tauri-plugin-clipboard-manager = "2.3"
+tauri-plugin-process = "2.3"
+tauri-plugin-shell = "2.3"
+tokio = { version = "1.47", features = ["full"] }
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+sysinfo = "0.37"
+scraper = "0.25"
+reqwest = { version = "0.12", features = ["json"] }
+uuid = { version = "1.17", features = ["v4"] }
+futures = "0.3"
+async-openai = "0.30"
+rand = "0.9"
+sha2 = "0.10"
+base64 = "0.22"
+url = "2.5"
+warp = "0.4"
+keyring = { version = "3.6", features = ["crypto-rust"] }
+dirs = "6.0"
 # Encryption dependencies
-aes-gcm = "*"
-pbkdf2 = "*"
-zeroize = { version = "*", features = ["derive"] }
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+zeroize = { version = "1.8", features = ["derive"] }
 
 
 # Windows-specific dependencies
 [target.'cfg(windows)'.dependencies]
-wmi = "*"
-winreg = "*"
-windows = { version = "*", features = [
+wmi = "0.18"
+winreg = "0.55"
+windows-core = "0.62"
+windows-future = "0.3"
+windows-collections = "0.3"
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Threading",
@@ -71,6 +75,8 @@ windows = { version = "*", features = [
     "Win32_System_Wmi",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    # DXCore for NPU detection
+    "Win32_Graphics_DXCore",
 ] }
 
 [features]

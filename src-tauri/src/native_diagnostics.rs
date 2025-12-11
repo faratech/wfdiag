@@ -3,28 +3,25 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::fs;
-use wmi::{COMLibrary, WMIConnection};
+use wmi::WMIConnection;
 use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 // Performance counter imports removed - not used in current implementation
 use winreg::enums::*;
 use winreg::RegKey;
 use scraper::{Html, Selector};
 
-pub struct NativeDiagnostics {
-    com_lib: COMLibrary,
-}
+pub struct NativeDiagnostics;
 
 impl NativeDiagnostics {
     pub fn new() -> Result<Self> {
-        let com_lib = COMLibrary::new()?;
-        Ok(Self { com_lib })
+        Ok(Self)
     }
 
     pub fn run_wmi_query(&self, class_name: &str, namespace: Option<&str>) -> Result<Value> {
         let wmi_con = if let Some(ns) = namespace {
-            WMIConnection::with_namespace_path(ns, self.com_lib.into())?
+            WMIConnection::with_namespace_path(ns)?
         } else {
-            WMIConnection::new(self.com_lib.into())?
+            WMIConnection::new()?
         };
         let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(&format!("SELECT * FROM {}", class_name))?;
         
@@ -57,7 +54,7 @@ impl NativeDiagnostics {
     }
 
     pub fn get_native_disk_space(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let wmi_con = WMIConnection::new()?;
         let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_LogicalDisk WHERE DriveType=3")?;
         
         let mut drives = Vec::new();
@@ -76,7 +73,7 @@ impl NativeDiagnostics {
     }
 
     pub fn get_native_network_adapters(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let wmi_con = WMIConnection::new()?;
         let config_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled=TRUE")?;
         let adapter_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_NetworkAdapter")?;
         
@@ -144,7 +141,7 @@ impl NativeDiagnostics {
 
     pub fn get_native_system_info(&self) -> Result<Value> {
         // Get OS info from WMI
-        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let wmi_con = WMIConnection::new()?;
         let os_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_OperatingSystem")?;
         let comp_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_ComputerSystem")?;
         
@@ -235,7 +232,7 @@ impl NativeDiagnostics {
     }
 
     pub fn get_drivers(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let wmi_con = WMIConnection::new()?;
         let mut drivers = Vec::new();
         
         // Get PnP signed drivers (main source on modern Windows)
@@ -284,7 +281,7 @@ impl NativeDiagnostics {
     }
 
     pub fn get_event_logs(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let wmi_con = WMIConnection::new()?;
         
         let mut all_events = Vec::new();
         
@@ -375,7 +372,7 @@ impl NativeDiagnostics {
     }
     
     fn get_directx_info_via_wmi(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let wmi_con = WMIConnection::new()?;
         let mut info = json!({
             "source": "WMI",
             "description": "DirectX information gathered from Windows Management Instrumentation"
@@ -466,7 +463,7 @@ impl NativeDiagnostics {
             }
             
             // Also get disk info from WMI
-            let wmi_con = WMIConnection::new(self.com_lib.into())?;
+            let wmi_con = WMIConnection::new()?;
             if let Ok(results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
                 "SELECT * FROM Win32_DiskDrive"
             ) {
@@ -488,7 +485,7 @@ impl NativeDiagnostics {
             // Check if it's an elevation error
             if error_str.contains("requires elevated") || error_str.contains("Access is denied") {
                 // If we can't run chkdsk, at least get disk info
-                let wmi_con = WMIConnection::new(self.com_lib.into())?;
+                let wmi_con = WMIConnection::new()?;
                 let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(
                     "SELECT * FROM Win32_DiskDrive"
                 )?;
@@ -620,7 +617,7 @@ impl NativeDiagnostics {
 
     pub fn run_dsregcmd(&self) -> Result<Value> {
         // Check domain join status via WMI
-        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let wmi_con = WMIConnection::new()?;
         
         let cs_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(
             "SELECT Domain, DomainRole, PartOfDomain FROM Win32_ComputerSystem"
@@ -640,7 +637,7 @@ impl NativeDiagnostics {
     }
 
     pub fn get_disk_fragmentation(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let wmi_con = WMIConnection::new()?;
         let disks: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT Name FROM Win32_LogicalDisk WHERE DriveType=3")?;
         
         let mut fragmentation_results = Vec::new();
@@ -695,7 +692,7 @@ impl NativeDiagnostics {
     }
 
     pub fn get_native_services(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let wmi_con = WMIConnection::new()?;
         let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(
             "SELECT Name, DisplayName, State, StartMode, PathName FROM Win32_Service"
         )?;
@@ -1031,7 +1028,7 @@ impl NativeDiagnostics {
     }
 
     pub fn get_performance_data(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let wmi_con = WMIConnection::new()?;
         let mut perf_data = json!({});
         
         // Get CPU performance data
@@ -1101,7 +1098,7 @@ impl NativeDiagnostics {
     }
 
     pub fn get_windows_update_history(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new(self.com_lib.into())?;
+        let wmi_con = WMIConnection::new()?;
         let mut update_info = json!({});
         
         // Get installed hotfixes

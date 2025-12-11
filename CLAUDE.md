@@ -72,7 +72,7 @@ See `VERSION-BUMP.md` for detailed documentation.
 This is a Tauri v2 application with a clear separation between frontend and backend:
 
 ### Frontend (src/)
-- **React 18** with TypeScript for UI
+- **React 19** with TypeScript for UI
 - **Fluent UI React Components** (@fluentui/react-components) for Windows-native look
 - **Tauri v2 API** for IPC communication with backend
 - **Chart.js** with react-chartjs-2 for real-time system monitoring graphs
@@ -99,15 +99,15 @@ This is a Tauri v2 application with a clear separation between frontend and back
 - **results_storage.rs**: Scan results storage and comparison system
 
 ### Key Dependencies (Latest Versions)
-- Tauri: v2.8.0
-- sysinfo: v0.36 (system information)
-- windows: v0.61 (Windows API bindings)
-- wmi: v0.17 (Windows Management Instrumentation)
+- Tauri: v2.9 (Tauri framework)
+- sysinfo: v0.37 (system information)
+- windows: v0.62 (Windows API bindings)
+- wmi: v0.18 (Windows Management Instrumentation)
 - reqwest: v0.12 (HTTP client for OpenAI and OAuth)
 - winreg: v0.55 (Windows Registry access)
-- async-openai: v0.25 (OpenAI API client)
-- warp: v0.3 (Web server for OAuth callback)
-- tokio: v1.0 (Async runtime)
+- async-openai: v0.30 (OpenAI API client)
+- warp: v0.4 (Web server for OAuth callback)
+- tokio: v1.48 (Async runtime)
 
 ### Key Architectural Decisions
 1. **Tauri v2 Migration**: Uses new plugin architecture with separate packages for filesystem, dialog, clipboard, process, and shell

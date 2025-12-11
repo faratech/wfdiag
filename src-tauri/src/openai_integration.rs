@@ -15,6 +15,61 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+/// AI Provider options
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum AiProvider {
+    OpenAI,
+    PhiSilica,  // Local Phi Silica via WindowsCopilotRuntimeServer
+}
+
+impl Default for AiProvider {
+    fn default() -> Self {
+        AiProvider::OpenAI
+    }
+}
+
+/// Phi Silica local server configuration
+const PHI_SILICA_BASE_URL: &str = "http://localhost:5001/v1";
+const PHI_SILICA_MODEL: &str = "phi-silica";  // Model name used by WindowsCopilotRuntimeServer
+
+/// Check if Phi Silica (WindowsCopilotRuntimeServer) is available
+async fn check_phi_silica_available() -> bool {
+    // Try to connect to the local Phi Silica server
+    match reqwest::Client::new()
+        .get(format!("{}/models", PHI_SILICA_BASE_URL))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    {
+        Ok(response) => response.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+/// Response for AI provider availability check
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiProviderStatus {
+    pub openai_available: bool,  // Always true (user provides API key)
+    pub phi_silica_available: bool,
+    pub phi_silica_info: Option<String>,
+}
+
+/// Tauri command to check AI provider availability
+#[tauri::command]
+pub async fn get_ai_provider_status() -> Result<AiProviderStatus, String> {
+    let phi_silica_available = check_phi_silica_available().await;
+
+    Ok(AiProviderStatus {
+        openai_available: true,
+        phi_silica_available,
+        phi_silica_info: if phi_silica_available {
+            Some("Phi Silica is available via WindowsCopilotRuntimeServer on localhost:5001".to_string())
+        } else {
+            Some("Phi Silica not available. Install WindowsCopilotRuntimeServer from Microsoft Store on a Copilot+ PC.".to_string())
+        },
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIRequest {
     pub api_key: String,
@@ -579,4 +634,124 @@ REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAG
     }
     
     Err("No response from OpenAI".to_string())
+}
+
+/// Analyze system using Phi Silica (WindowsCopilotRuntimeServer on localhost:5001)
+/// This uses the same OpenAI-compatible API but with a local endpoint
+#[tauri::command]
+pub async fn analyze_system_with_phi_silica(
+    prompt: String,
+    _app_handle: tauri::AppHandle,
+) -> Result<Value, String> {
+    // First check if Phi Silica server is available
+    if !check_phi_silica_available().await {
+        return Err("Phi Silica is not available. Please ensure WindowsCopilotRuntimeServer is running on your Copilot+ PC. You can download it from https://github.com/sykuang/WindowsCopilotRuntimeServer".to_string());
+    }
+
+    // Create client configured for local Phi Silica server
+    let config = OpenAIConfig::new()
+        .with_api_base(PHI_SILICA_BASE_URL)
+        .with_api_key("not-needed");  // Local server doesn't require API key
+    let client = Client::with_config(config);
+
+    // Get available diagnostic tasks for context
+    let available_tasks = crate::diagnostics::get_all_tasks();
+    let task_list: Vec<Value> = available_tasks.iter().map(|task| {
+        json!({
+            "name": task.id,
+            "description": task.description
+        })
+    }).collect();
+
+    // Simpler system prompt for Phi Silica (no tool calling)
+    // We'll run common diagnostics first and include results in the prompt
+    let mut diagnostic_output = String::new();
+    let common_diagnostics = vec![
+        "comp_system", "os_info", "processor", "physical_memory",
+        "logical_disk", "network_adapter"
+    ];
+
+    let mut diagnostics_run = Vec::new();
+    for task_id in &common_diagnostics {
+        if let Ok(result) = crate::diagnostics::run_diagnostic_task_sync(task_id) {
+            diagnostics_run.push(task_id.to_string());
+            diagnostic_output.push_str(&format!("\n=== {} ===\n", task_id));
+            diagnostic_output.push_str(&result.output);
+            if let Some(error) = result.error {
+                diagnostic_output.push_str(&format!("Error: {}", error));
+            }
+        }
+    }
+
+    // Build the full prompt with diagnostic data
+    let full_prompt = format!(
+        "You are a Windows system diagnostic expert. Analyze the following system information and respond to the user's question.\n\n\
+        Available diagnostic commands that could be run: {}\n\n\
+        Current system diagnostic results:\n{}\n\n\
+        User's question: {}",
+        task_list.iter().map(|t| format!("{}", t["name"])).collect::<Vec<_>>().join(", "),
+        diagnostic_output,
+        prompt
+    );
+
+    let system_message = ChatCompletionRequestSystemMessageArgs::default()
+        .content("You are a helpful Windows system diagnostic assistant running locally on a Copilot+ PC using Phi Silica. \
+                  Analyze the provided system information and give specific, actionable recommendations. \
+                  Be concise and focus on the most important findings.")
+        .build()
+        .map_err(|e| format!("Failed to build message: {}", e))?
+        .into();
+
+    let user_message = ChatCompletionRequestUserMessageArgs::default()
+        .content(ChatCompletionRequestUserMessageContent::Text(full_prompt))
+        .build()
+        .map_err(|e| format!("Failed to build message: {}", e))?
+        .into();
+
+    let messages = vec![system_message, user_message];
+
+    // Create request (no tools for Phi Silica - simpler model)
+    let request = CreateChatCompletionRequestArgs::default()
+        .model(PHI_SILICA_MODEL)
+        .messages(messages)
+        .build()
+        .map_err(|e| format!("Failed to build request: {}", e))?;
+
+    let response = client.chat().create(request).await
+        .map_err(|e| format!("Phi Silica API error: {}. Ensure WindowsCopilotRuntimeServer is running.", e))?;
+
+    if let Some(choice) = response.choices.first() {
+        let analysis = choice.message.content.clone().unwrap_or_default();
+        let (findings, recommendations) = parse_analysis(&analysis);
+
+        return Ok(json!({
+            "analysis": analysis,
+            "diagnostics_run": diagnostics_run,
+            "diagnostic_results": {},
+            "findings": findings,
+            "recommendations": recommendations,
+            "provider": "phi_silica"
+        }));
+    }
+
+    Err("No response from Phi Silica".to_string())
+}
+
+/// Unified AI analysis command that supports both OpenAI and Phi Silica
+#[tauri::command]
+pub async fn analyze_system_with_ai_provider(
+    provider: String,
+    api_key: Option<String>,
+    prompt: String,
+    app_handle: tauri::AppHandle,
+) -> Result<Value, String> {
+    match provider.as_str() {
+        "phi_silica" => {
+            analyze_system_with_phi_silica(prompt, app_handle).await
+        }
+        "openai" | _ => {
+            let key = api_key.ok_or("OpenAI API key is required")?;
+            analyze_system_with_ai(key, prompt, app_handle).await
+        }
+    }
 }

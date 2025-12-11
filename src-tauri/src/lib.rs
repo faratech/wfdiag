@@ -12,6 +12,11 @@ mod issue_detector;
 mod issue_fixer;
 mod encrypted_storage;
 
+// Phi Silica bindings and wrapper (generated at build time)
+#[cfg(windows)]
+mod phi_silica_bindings;
+mod phi_silica;
+
 use crate::diagnostics::{DiagnosticTask, TaskResult};
 use crate::issue_detector::{Issue, IssueSeverity};
 use keyring::{Entry, Error as KeyringError};
@@ -873,6 +878,9 @@ pub fn run() {
             clear_scan_history,
             openai_integration::analyze_with_openai,
             openai_integration::analyze_system_with_ai,
+            openai_integration::get_ai_provider_status,
+            phi_silica::check_phi_silica_available,
+            phi_silica::analyze_with_phi_silica,
             detect_issues,
             copy_minidumps_to_desktop,
             open_url,

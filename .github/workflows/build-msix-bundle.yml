@@ -1,0 +1,149 @@
+name: Build Multi-Architecture MSIX Bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., 2.1.4)'
+        required: true
+        default: '2.1.3'
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Tauri x64 MSIX
+        run: npm run tauri build -- --target x86_64-pc-windows-msvc --bundles msix
+
+      - name: Upload x64 MSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: msix-x64
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msix/*.msix
+
+  build-arm64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - name: Install ARM64 build tools
+        run: |
+          # Install Visual Studio ARM64 build tools via winget or VS installer
+          # This may require a self-hosted runner with VS2022 ARM64 tools pre-installed
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Tauri ARM64 MSIX
+        run: npm run tauri build -- --target aarch64-pc-windows-msvc --bundles msix
+
+      - name: Upload ARM64 MSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: msix-arm64
+          path: src-tauri/target/aarch64-pc-windows-msvc/release/bundle/msix/*.msix
+
+  create-bundle:
+    needs: [build-x64, build-arm64]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download x64 MSIX
+        uses: actions/download-artifact@v4
+        with:
+          name: msix-x64
+          path: bundle-input
+
+      - name: Download ARM64 MSIX
+        uses: actions/download-artifact@v4
+        with:
+          name: msix-arm64
+          path: bundle-input
+
+      - name: Create MSIX Bundle
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.version || '2.1.3' }}"
+
+          # Find MakeAppx.exe
+          $sdkPath = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*" -Directory |
+                     Sort-Object Name -Descending |
+                     Select-Object -First 1
+          $makeAppx = Join-Path $sdkPath.FullName "x64\MakeAppx.exe"
+
+          Write-Host "Using MakeAppx from: $makeAppx"
+          Write-Host "Bundle input contents:"
+          Get-ChildItem bundle-input -Recurse
+
+          # Create the bundle
+          & $makeAppx bundle /d bundle-input /p "WindowsForum_Diagnostics_${version}.msixbundle" /v
+
+          Write-Host "Bundle created successfully"
+
+      - name: Sign Bundle (if certificate available)
+        if: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+        shell: pwsh
+        run: |
+          # Decode certificate from secret
+          $certBytes = [Convert]::FromBase64String("${{ secrets.WINDOWS_CERTIFICATE }}")
+          $certPath = "certificate.pfx"
+          [IO.File]::WriteAllBytes($certPath, $certBytes)
+
+          # Find SignTool
+          $sdkPath = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*" -Directory |
+                     Sort-Object Name -Descending |
+                     Select-Object -First 1
+          $signTool = Join-Path $sdkPath.FullName "x64\signtool.exe"
+
+          # Sign the bundle
+          & $signTool sign /fd SHA256 /f $certPath /p "${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}" *.msixbundle
+
+          Remove-Item $certPath
+
+      - name: Upload MSIX Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: msixbundle
+          path: "*.msixbundle"
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: "*.msixbundle"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
