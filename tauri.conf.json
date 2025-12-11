@@ -22,7 +22,7 @@
                                }
                },
     "productName":  "WF Diagnostics",
-    "version":  "2.1.1",
+    "version":  "2.1.5",
     "identifier":  "com.windowsforum.diagnostics",
     "plugins":  {
 
