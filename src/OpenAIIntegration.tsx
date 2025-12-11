@@ -7,12 +7,16 @@ import {
   Spinner,
   Badge,
   MessageBar,
+  RadioGroup,
+  Radio,
+  Tooltip,
 } from '@fluentui/react-components';
 import {
   SendRegular,
   CheckmarkCircleFilled,
   ErrorCircleFilled,
   WarningFilled,
+  BrainCircuitRegular,
 } from '@fluentui/react-icons';
 import { invoke } from '@tauri-apps/api/core';
 import * as logger from './utils/logger';
@@ -27,6 +31,7 @@ interface OpenAIResponse {
   diagnostics_run: string[];
   findings: Finding[];
   recommendations: string[];
+  provider?: string;
 }
 
 interface Finding {
@@ -41,7 +46,15 @@ interface ConversationEntry {
   content: string;
   timestamp: Date;
   diagnosticsRun?: string[];
+  provider?: string;
 }
+
+interface PhiSilicaStatus {
+  available: boolean;
+  message: string;
+}
+
+type AiProvider = 'openai' | 'phi_silica';
 
 export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId }) => {
   const [apiKey, setApiKey] = useState('');
@@ -51,6 +64,32 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
   const [response, setResponse] = useState<OpenAIResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [conversationHistory, setConversationHistory] = useState<ConversationEntry[]>([]);
+
+  // AI Provider state
+  const [selectedProvider, setSelectedProvider] = useState<AiProvider>('openai');
+  const [phiSilicaStatus, setPhiSilicaStatus] = useState<PhiSilicaStatus | null>(null);
+  const [isCheckingPhiSilica, setIsCheckingPhiSilica] = useState(true);
+
+  // Check Phi Silica availability on mount
+  useEffect(() => {
+    const checkPhiSilica = async () => {
+      try {
+        setIsCheckingPhiSilica(true);
+        const status = await invoke('check_phi_silica_available') as PhiSilicaStatus;
+        setPhiSilicaStatus(status);
+        // If Phi Silica is available, default to it
+        if (status.available) {
+          setSelectedProvider('phi_silica');
+        }
+      } catch (err) {
+        logger.error('OpenAIIntegration', 'Failed to check Phi Silica availability', err);
+        setPhiSilicaStatus({ available: false, message: 'Failed to check availability' });
+      } finally {
+        setIsCheckingPhiSilica(false);
+      }
+    };
+    checkPhiSilica();
+  }, []);
 
   // Load API key from secure storage on mount
   useEffect(() => {
@@ -82,7 +121,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
   };
 
   const handleAnalyze = async () => {
-    if (!apiKey) {
+    if (selectedProvider === 'openai' && !apiKey) {
       setError('Please enter your OpenAI API key');
       return;
     }
@@ -105,34 +144,54 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
     setConversationHistory(prev => [...prev, userEntry]);
 
     try {
-      const result: any = await invoke('analyze_system_with_ai', {
-        apiKey,
-        prompt
-      });
+      let result: any;
+
+      if (selectedProvider === 'phi_silica') {
+        // Use local Phi Silica
+        result = await invoke('analyze_with_phi_silica', { prompt });
+        // Phi Silica returns just a string, wrap it
+        if (typeof result === 'string') {
+          result = {
+            analysis: result,
+            diagnostics_run: ['comp_system', 'os_info', 'processor', 'physical_memory'],
+            findings: [],
+            recommendations: [],
+            provider: 'phi_silica'
+          };
+        }
+      } else {
+        // Use OpenAI
+        result = await invoke('analyze_system_with_ai', {
+          apiKey,
+          prompt
+        });
+      }
 
       const response: OpenAIResponse = {
-        analysis: result.analysis || '',
+        analysis: result.analysis || result || '',
         diagnostics_run: result.diagnostics_run || [],
         findings: result.findings || [],
-        recommendations: result.recommendations || []
+        recommendations: result.recommendations || [],
+        provider: result.provider || selectedProvider
       };
 
       setResponse(response);
-      
-      // Add assistant response to history  
+
+      // Add assistant response to history
       const assistantEntry: ConversationEntry = {
         role: 'assistant',
-        content: response.analysis,
+        content: typeof response.analysis === 'string' ? response.analysis : JSON.stringify(response.analysis),
         timestamp: new Date(),
-        diagnosticsRun: response.diagnostics_run
+        diagnosticsRun: response.diagnostics_run,
+        provider: response.provider
       };
       setConversationHistory(prev => [...prev, assistantEntry]);
-      
+
       // Clear the prompt for next message
       setPrompt('');
     } catch (err) {
-      logger.error('OpenAIIntegration', 'OpenAI analysis error', err);
-      setError(err instanceof Error ? err.message : 'Analysis failed');
+      logger.error('OpenAIIntegration', 'AI analysis error', err);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsAnalyzing(false);
     }
@@ -165,17 +224,19 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
     }
   };
 
+  const canAnalyze = prompt.trim() && (selectedProvider === 'phi_silica' || apiKey);
+
   return (
     <div style={{ width: '100%', maxWidth: '100%' }}>
       {/* Header */}
-      <div className="glass-card" style={{ 
+      <div className="glass-card" style={{
         padding: 20,
         marginBottom: 24,
         background: 'linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(236, 72, 153, 0.1))',
         border: '1px solid rgba(139, 92, 246, 0.3)',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
-          <div className="category-icon" style={{ 
+          <div className="category-icon" style={{
             background: 'linear-gradient(135deg, #8b5cf6, #ec4899)',
             width: 48,
             height: 48,
@@ -195,8 +256,8 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
 
       {/* Current Session Context */}
       {sessionId && (
-        <div className="glass-card" style={{ 
-          padding: 16, 
+        <div className="glass-card" style={{
+          padding: 16,
           marginBottom: 24,
           background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.1), rgba(59, 130, 246, 0.1))',
           border: '1px solid rgba(34, 197, 94, 0.3)',
@@ -225,57 +286,129 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
         </div>
       )}
 
-      {/* API Key Input */}
-      <div className="glass-card" style={{ padding: 20, marginBottom: 24 }}>
-        <div style={{ marginBottom: 16 }}>
-          <Text size={300} weight="semibold" style={{ color: '#f1f5f9', display: 'block', marginBottom: 8 }}>
-            OpenAI API Key
-          </Text>
-          <div style={{ display: 'flex', gap: 12 }}>
-            <Input
-              type={showApiKey ? 'text' : 'password'}
-              value={apiKey}
-              onChange={(e) => handleApiKeyChange(e.target.value)}
-              placeholder="sk-..."
-              style={{
-                flex: 1,
-                background: 'rgba(30, 41, 59, 0.5)',
-                borderColor: 'rgba(139, 92, 246, 0.3)',
-                color: '#f1f5f9',
-              }}
-            />
-            <Button
-              appearance="secondary"
-              onClick={() => setShowApiKey(!showApiKey)}
-              style={{
-                background: 'rgba(139, 92, 246, 0.1)',
-                border: '1px solid rgba(139, 92, 246, 0.3)',
-                color: '#a78bfa',
-              }}
-            >
-              <i className={showApiKey ? "fas fa-eye-slash" : "fas fa-eye"} />
-            </Button>
+      {/* AI Provider Selection - Only show if Phi Silica is available */}
+      {!isCheckingPhiSilica && phiSilicaStatus?.available && (
+        <div className="glass-card" style={{
+          padding: 20,
+          marginBottom: 24,
+          background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.1), rgba(139, 92, 246, 0.1))',
+          border: '1px solid rgba(6, 182, 212, 0.3)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+            <BrainCircuitRegular fontSize={24} style={{ color: '#06b6d4' }} />
+            <div>
+              <Text size={300} weight="semibold" style={{ color: '#f1f5f9', display: 'block' }}>
+                AI Provider
+              </Text>
+              <Text size={200} style={{ color: '#94a3b8' }}>
+                Choose between local on-device AI or cloud-based analysis
+              </Text>
+            </div>
           </div>
-          <Text size={200} style={{ color: '#64748b', marginTop: 8, display: 'block' }}>
-            Enter your OpenAI API key to enable AI analysis. Get one at{' '}
-            <a 
-              href="https://platform.openai.com/api-keys" 
-              target="_blank" 
-              rel="noopener noreferrer"
-              style={{ color: '#60a5fa', textDecoration: 'underline' }}
-            >
-              platform.openai.com
-            </a>
-          </Text>
+
+          <RadioGroup
+            value={selectedProvider}
+            onChange={(_, data) => setSelectedProvider(data.value as AiProvider)}
+            layout="horizontal"
+          >
+            <Tooltip content="Run AI locally on your NPU - no API key needed, private, and free!" relationship="description">
+              <Radio
+                value="phi_silica"
+                label={
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ color: '#f1f5f9' }}>Phi Silica (Local NPU)</span>
+                    <Badge
+                      appearance="filled"
+                      style={{
+                        background: 'linear-gradient(135deg, #06b6d4, #8b5cf6)',
+                        color: 'white',
+                        fontSize: 10
+                      }}
+                    >
+                      Copilot+ PC
+                    </Badge>
+                  </div>
+                }
+              />
+            </Tooltip>
+            <Tooltip content="Use OpenAI's GPT-4 for more powerful analysis - requires API key" relationship="description">
+              <Radio
+                value="openai"
+                label={<span style={{ color: '#f1f5f9' }}>OpenAI (Cloud)</span>}
+              />
+            </Tooltip>
+          </RadioGroup>
+
+          {selectedProvider === 'phi_silica' && (
+            <div style={{
+              marginTop: 12,
+              padding: 12,
+              background: 'rgba(6, 182, 212, 0.1)',
+              borderRadius: 8,
+              border: '1px solid rgba(6, 182, 212, 0.2)'
+            }}>
+              <Text size={200} style={{ color: '#67e8f9' }}>
+                <i className="fas fa-microchip" style={{ marginRight: 8 }}></i>
+                Running on your device's NPU - your data stays private and no API key is needed!
+              </Text>
+            </div>
+          )}
         </div>
-      </div>
+      )}
+
+      {/* API Key Input - Only show for OpenAI */}
+      {selectedProvider === 'openai' && (
+        <div className="glass-card" style={{ padding: 20, marginBottom: 24 }}>
+          <div style={{ marginBottom: 16 }}>
+            <Text size={300} weight="semibold" style={{ color: '#f1f5f9', display: 'block', marginBottom: 8 }}>
+              OpenAI API Key
+            </Text>
+            <div style={{ display: 'flex', gap: 12 }}>
+              <Input
+                type={showApiKey ? 'text' : 'password'}
+                value={apiKey}
+                onChange={(e) => handleApiKeyChange(e.target.value)}
+                placeholder="sk-..."
+                style={{
+                  flex: 1,
+                  background: 'rgba(30, 41, 59, 0.5)',
+                  borderColor: 'rgba(139, 92, 246, 0.3)',
+                  color: '#f1f5f9',
+                }}
+              />
+              <Button
+                appearance="secondary"
+                onClick={() => setShowApiKey(!showApiKey)}
+                style={{
+                  background: 'rgba(139, 92, 246, 0.1)',
+                  border: '1px solid rgba(139, 92, 246, 0.3)',
+                  color: '#a78bfa',
+                }}
+              >
+                <i className={showApiKey ? "fas fa-eye-slash" : "fas fa-eye"} />
+              </Button>
+            </div>
+            <Text size={200} style={{ color: '#64748b', marginTop: 8, display: 'block' }}>
+              Enter your OpenAI API key to enable AI analysis. Get one at{' '}
+              <a
+                href="https://platform.openai.com/api-keys"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: '#60a5fa', textDecoration: 'underline' }}
+              >
+                platform.openai.com
+              </a>
+            </Text>
+          </div>
+        </div>
+      )}
 
       {/* Analysis Input */}
       <div className="glass-card" style={{ padding: 24, marginBottom: 24, width: '100%' }}>
         <Text size={300} weight="semibold" style={{ color: '#f1f5f9', display: 'block', marginBottom: 16 }}>
           What would you like to analyze?
         </Text>
-        
+
         <Textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
@@ -311,12 +444,14 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
           appearance="primary"
           icon={<SendRegular />}
           onClick={handleAnalyze}
-          disabled={isAnalyzing || !prompt.trim() || !apiKey}
+          disabled={isAnalyzing || !canAnalyze}
           size="large"
           style={{
-            background: isAnalyzing 
-              ? 'rgba(148, 163, 184, 0.3)' 
-              : 'linear-gradient(135deg, #8b5cf6, #ec4899)',
+            background: isAnalyzing
+              ? 'rgba(148, 163, 184, 0.3)'
+              : selectedProvider === 'phi_silica'
+                ? 'linear-gradient(135deg, #06b6d4, #8b5cf6)'
+                : 'linear-gradient(135deg, #8b5cf6, #ec4899)',
             border: 'none',
             color: 'white',
             width: '100%',
@@ -325,30 +460,38 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
           {isAnalyzing ? (
             <>
               <Spinner size="tiny" style={{ marginRight: 8 }} />
-              Analyzing your system...
+              {selectedProvider === 'phi_silica' ? 'Analyzing on NPU...' : 'Analyzing with OpenAI...'}
             </>
           ) : (
-            'Analyze System'
+            <>
+              {selectedProvider === 'phi_silica' ? 'Analyze with Phi Silica' : 'Analyze with OpenAI'}
+            </>
           )}
         </Button>
       </div>
 
       {/* Analysis in Progress Indicator */}
       {isAnalyzing && (
-        <div className="glass-card" style={{ 
-          padding: 16, 
+        <div className="glass-card" style={{
+          padding: 16,
           marginBottom: 24,
-          background: 'linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(139, 92, 246, 0.1))',
-          border: '1px solid rgba(59, 130, 246, 0.3)',
+          background: selectedProvider === 'phi_silica'
+            ? 'linear-gradient(135deg, rgba(6, 182, 212, 0.1), rgba(139, 92, 246, 0.1))'
+            : 'linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(139, 92, 246, 0.1))',
+          border: `1px solid ${selectedProvider === 'phi_silica' ? 'rgba(6, 182, 212, 0.3)' : 'rgba(59, 130, 246, 0.3)'}`,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <Spinner size="small" />
             <div>
-              <Text size={300} weight="semibold" style={{ color: '#60a5fa', display: 'block' }}>
-                AI is analyzing your system...
+              <Text size={300} weight="semibold" style={{ color: selectedProvider === 'phi_silica' ? '#22d3ee' : '#60a5fa', display: 'block' }}>
+                {selectedProvider === 'phi_silica'
+                  ? 'Phi Silica is analyzing your system locally...'
+                  : 'OpenAI is analyzing your system...'}
               </Text>
               <Text size={200} style={{ color: '#94a3b8' }}>
-                Running diagnostics and gathering system information. This may take 10-30 seconds.
+                {selectedProvider === 'phi_silica'
+                  ? 'Running on your NPU - your data stays on this device.'
+                  : 'Running diagnostics and gathering system information. This may take 10-30 seconds.'}
               </Text>
             </div>
           </div>
@@ -357,8 +500,8 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
 
       {/* Conversation History */}
       {conversationHistory.length > 0 && (
-        <div className="glass-card" style={{ 
-          padding: 20, 
+        <div className="glass-card" style={{
+          padding: 20,
           marginBottom: 24,
           maxHeight: 400,
           overflowY: 'auto'
@@ -367,7 +510,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
             <Text size={300} weight="semibold" style={{ color: '#f1f5f9' }}>
               Conversation History
             </Text>
-            <Button 
+            <Button
               size="small"
               appearance="subtle"
               onClick={() => setConversationHistory([])}
@@ -381,19 +524,42 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
               <div key={index} style={{
                 padding: 12,
                 borderRadius: 8,
-                background: entry.role === 'user' 
-                  ? 'rgba(139, 92, 246, 0.1)' 
-                  : 'rgba(16, 185, 129, 0.1)',
-                border: `1px solid ${entry.role === 'user' 
-                  ? 'rgba(139, 92, 246, 0.3)' 
-                  : 'rgba(16, 185, 129, 0.3)'}`
+                background: entry.role === 'user'
+                  ? 'rgba(139, 92, 246, 0.1)'
+                  : entry.provider === 'phi_silica'
+                    ? 'rgba(6, 182, 212, 0.1)'
+                    : 'rgba(16, 185, 129, 0.1)',
+                border: `1px solid ${entry.role === 'user'
+                  ? 'rgba(139, 92, 246, 0.3)'
+                  : entry.provider === 'phi_silica'
+                    ? 'rgba(6, 182, 212, 0.3)'
+                    : 'rgba(16, 185, 129, 0.3)'}`
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <Text size={200} weight="semibold" style={{ 
-                    color: entry.role === 'user' ? '#a78bfa' : '#34d399' 
-                  }}>
-                    {entry.role === 'user' ? 'You' : 'Assistant'}
-                  </Text>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Text size={200} weight="semibold" style={{
+                      color: entry.role === 'user'
+                        ? '#a78bfa'
+                        : entry.provider === 'phi_silica'
+                          ? '#22d3ee'
+                          : '#34d399'
+                    }}>
+                      {entry.role === 'user' ? 'You' : entry.provider === 'phi_silica' ? 'Phi Silica' : 'OpenAI'}
+                    </Text>
+                    {entry.role === 'assistant' && entry.provider === 'phi_silica' && (
+                      <Badge
+                        appearance="filled"
+                        size="small"
+                        style={{
+                          background: 'rgba(6, 182, 212, 0.2)',
+                          color: '#22d3ee',
+                          fontSize: 9
+                        }}
+                      >
+                        Local NPU
+                      </Badge>
+                    )}
+                  </div>
                   <Text size={100} style={{ color: '#64748b' }}>
                     {entry.timestamp.toLocaleTimeString()}
                   </Text>

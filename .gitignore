@@ -11,6 +11,15 @@ build/
 dist/
 out/
 
+# Local build scripts and artifacts
+build-cross.py
+build-msix-bundle.sh
+msix-build/
+
+# Release binaries (use GitHub Releases instead)
+release/
+releases/
+
 # Misc
 .DS_Store
 .DS_Store?
@@ -50,6 +59,7 @@ lerna-debug.log*
 src-tauri/target/
 src-tauri/gen/
 src-tauri/Cargo.lock
+src-tauri/.cargo/
 .tauri/
 
 # Security sensitive files
@@ -107,13 +117,6 @@ tempstats_app/
 *.rpm
 *.tar.gz
 
-# Allow versioned release artifacts in release directory only
-!release/
-!release/*.zip
-!release/*.exe
-!release/*.msi
-!release/*.sig
-!release/*.pem
 
 # Windows specific
 *.stackdump
@@ -159,8 +162,7 @@ auth_tokens.json
 
 # Development tools and artifacts
 .claude/
-.vscode/settings.json
-.vscode/launch.json
+.vscode/
 *.code-workspace
 .history/
 .devcontainer/

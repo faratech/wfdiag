@@ -538,11 +538,13 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
               <Text size={400} weight="semibold" style={{ color: '#f1f5f9' }}>NPU</Text>
             </div>
             <div style={{ marginBottom: 12 }}>
-              <Text size={200} style={{ color: '#94a3b8', marginBottom: 8 }}>
-                <i className="fas fa-microchip" style={{ marginRight: 6 }}></i>
-                {stats.npu_name}
-              </Text>
-              {stats.npu_utilization !== null && (
+              <div style={{ display: 'flex', alignItems: 'flex-start', marginBottom: 12 }}>
+                <i className="fas fa-microchip" style={{ marginRight: 8, marginTop: 2, color: '#94a3b8' }}></i>
+                <Text size={200} style={{ color: '#94a3b8', wordBreak: 'break-word' }}>
+                  {stats.npu_name}
+                </Text>
+              </div>
+              {stats.npu_utilization !== null ? (
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
                     <Text size={200} style={{ color: '#94a3b8' }}>Usage</Text>
@@ -561,11 +563,20 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
                     style={{ height: 8 }}
                   />
                 </div>
-              )}
-              {stats.npu_utilization === null && (
-                <Text size={200} style={{ color: '#64748b', fontStyle: 'italic' }}>
-                  Utilization monitoring not available
-                </Text>
+              ) : (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  padding: '8px 12px',
+                  background: 'rgba(100, 116, 139, 0.1)',
+                  borderRadius: 6,
+                  border: '1px solid rgba(100, 116, 139, 0.2)'
+                }}>
+                  <i className="fas fa-info-circle" style={{ marginRight: 8, color: '#64748b' }}></i>
+                  <Text size={200} style={{ color: '#64748b' }}>
+                    Usage metrics not available
+                  </Text>
+                </div>
               )}
             </div>
           </div>
