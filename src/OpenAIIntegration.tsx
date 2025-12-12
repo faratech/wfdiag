@@ -151,16 +151,25 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
       let result: any;
 
       if (selectedProvider === 'phi_silica') {
-        // Use local Phi Silica
+        // Use local Phi Silica - returns structured response with diagnostics_run
         result = await invoke('analyze_with_phi_silica', { prompt });
-        // Phi Silica returns just a string, wrap it
+        // Handle both old (string) and new (object) response formats
         if (typeof result === 'string') {
           result = {
             analysis: result,
-            diagnostics_run: ['comp_system', 'os_info', 'processor', 'physical_memory'],
+            diagnostics_run: [],
             findings: [],
             recommendations: [],
             provider: 'phi_silica'
+          };
+        } else {
+          // Structured response - ensure all fields exist
+          result = {
+            analysis: result.analysis || '',
+            diagnostics_run: result.diagnostics_run || [],
+            findings: result.findings || [],
+            recommendations: result.recommendations || [],
+            provider: result.provider || 'phi_silica'
           };
         }
       } else {
