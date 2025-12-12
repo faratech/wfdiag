@@ -110,7 +110,7 @@ impl WindowsForumProxy {
             instructions: Some(instructions),
             timeout: Some(60000),
             stream: Some(false),
-            model: Some("gpt-4.1".to_string()),
+            model: Some("gpt-5.2".to_string()),
             previous_response_id: None,
         };
 

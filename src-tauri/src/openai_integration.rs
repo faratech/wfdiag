@@ -167,7 +167,7 @@ Remember: Take action FIRST, explain SECOND. Never ask, just do.")
 
         // Create the request
         let request = CreateChatCompletionRequestArgs::default()
-            .model("gpt-5-nano")
+            .model("gpt-5.2")
             .messages(messages.clone())
             .tools(vec![diagnostic_tool, get_all_diagnostics_tool])
             .tool_choice("auto")
@@ -260,7 +260,7 @@ Remember: Take action FIRST, explain SECOND. Never ask, just do.")
                 
                 // Create final request to get analysis of diagnostic results
                 let final_request = CreateChatCompletionRequestArgs::default()
-                    .model("gpt-5-nano")
+                    .model("gpt-5.2")
                     .messages(messages)
                     .build()?;
                 
@@ -499,7 +499,7 @@ REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAG
     
     // Create request with tools
     let request = CreateChatCompletionRequestArgs::default()
-        .model("gpt-5-nano")
+        .model("gpt-5.2")
         .messages(messages.clone())
         .tools(vec![diagnostic_tool])
         .tool_choice("auto")
@@ -520,7 +520,7 @@ REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAG
             if error_msg.contains("401") || error_msg.contains("Unauthorized") {
                 return Err("Invalid API key. Please check your OpenAI API key is correct and starts with 'sk-'.".to_string());
             } else if error_msg.contains("404") {
-                return Err("Model not found. The model 'gpt-5' may not be available on your account.".to_string());
+                return Err("Model not found. The model 'gpt-5.2' may not be available on your account.".to_string());
             } else if error_msg.contains("429") {
                 return Err("Rate limit exceeded. Please wait a moment and try again.".to_string());
             } else if error_msg.contains("insufficient_quota") {
@@ -598,7 +598,7 @@ REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAG
             
             // Get final response with diagnostic results
             let final_request = CreateChatCompletionRequestArgs::default()
-                .model("gpt-5-nano")
+                .model("gpt-5.2")
                 .messages(messages)
                 .build()
                 .map_err(|e| format!("Failed to build final request: {}", e))?;

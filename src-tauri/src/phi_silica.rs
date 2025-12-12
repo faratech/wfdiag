@@ -35,6 +35,14 @@ pub struct PhiSilicaStatus {
     pub ready_state: Option<String>,
 }
 
+/// Response from Phi Silica analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhiSilicaAnalysisResponse {
+    pub analysis: String,
+    pub diagnostics_run: Vec<String>,
+    pub provider: String,
+}
+
 /// Get Windows build number
 #[cfg(windows)]
 fn get_windows_build() -> Option<u32> {
@@ -692,37 +700,400 @@ pub async fn check_phi_silica_updates() -> Result<String, String> {
     Err("Windows Update is only available on Windows".to_string())
 }
 
-/// Tauri command to analyze system with Phi Silica
+/// Build a compact list of available diagnostics for Phi Silica
+fn get_diagnostic_list_for_prompt() -> String {
+    let tasks = crate::diagnostics::get_all_tasks();
+    let mut list = String::new();
+
+    // Group by category, show ID=Name pairs
+    let mut by_category: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for task in tasks {
+        // Show ID with short description
+        let entry = format!("{} ({})", task.id, task.name);
+        by_category.entry(task.category.clone()).or_default().push(entry);
+    }
+
+    for (category, entries) in by_category {
+        list.push_str(&format!("[{}] {}\n", category, entries.join(", ")));
+    }
+    list
+}
+
+/// Truncate text to max characters
+fn truncate_output(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        text.to_string()
+    } else {
+        format!("{}... [truncated]", &text[..max_chars])
+    }
+}
+
+/// Parse diagnostic IDs from Phi Silica's JSON response
+fn parse_diagnostic_ids(response: &str) -> Vec<String> {
+    let all_tasks = crate::diagnostics::get_all_tasks();
+    let valid_ids: Vec<&str> = all_tasks.iter().map(|t| t.id.as_str()).collect();
+    let mut ids = Vec::new();
+
+    // Try to find JSON array in response
+    if let Some(start) = response.find('[') {
+        if let Some(end) = response[start..].find(']') {
+            let array_str = &response[start..start + end + 1];
+            // Parse as JSON array
+            if let Ok(arr) = serde_json::from_str::<Vec<String>>(array_str) {
+                // Validate each ID against our known tasks
+                for id in arr {
+                    let id_lower = id.to_lowercase();
+                    // Exact match
+                    if valid_ids.contains(&id.as_str()) {
+                        if !ids.contains(&id) {
+                            ids.push(id);
+                        }
+                    } else {
+                        // Try to find best match
+                        if let Some(matched) = find_best_match(&id_lower, &valid_ids) {
+                            if !ids.contains(&matched) {
+                                ids.push(matched);
+                            }
+                        }
+                    }
+                }
+                if !ids.is_empty() {
+                    return ids;
+                }
+            }
+            // Try parsing as Value and extract strings
+            if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(array_str) {
+                for item in arr {
+                    if let serde_json::Value::String(s) = item {
+                        let s_lower = s.to_lowercase();
+                        if valid_ids.contains(&s.as_str()) {
+                            if !ids.contains(&s) {
+                                ids.push(s);
+                            }
+                        } else if let Some(matched) = find_best_match(&s_lower, &valid_ids) {
+                            if !ids.contains(&matched) {
+                                ids.push(matched);
+                            }
+                        }
+                    }
+                }
+                if !ids.is_empty() {
+                    return ids;
+                }
+            }
+        }
+    }
+
+    // Fallback: look for known task IDs mentioned in the response
+    for task_id in &valid_ids {
+        if response.contains(&format!("\"{}\"", task_id)) ||
+           response.contains(&format!("'{}'", task_id)) ||
+           response.to_lowercase().contains(&format!(" {} ", task_id)) ||
+           response.to_lowercase().contains(&format!("[{}]", task_id)) {
+            if !ids.contains(&task_id.to_string()) {
+                ids.push(task_id.to_string());
+            }
+        }
+    }
+
+    ids
+}
+
+/// Find best matching task ID for a given string
+fn find_best_match(input: &str, valid_ids: &[&str]) -> Option<String> {
+    // Direct substring match
+    for &id in valid_ids {
+        if input.contains(id) || id.contains(input) {
+            return Some(id.to_string());
+        }
+    }
+
+    // Map common terms to actual task IDs
+    let mappings: &[(&str, &str)] = &[
+        // Security
+        ("security", "firewall_status"),
+        ("firewall", "firewall_status"),
+        ("logged_in", "dsregcmd"),
+        ("logged_in_users", "dsregcmd"),
+        ("users", "dsregcmd"),
+        ("user", "dsregcmd"),
+        ("login", "dsregcmd"),
+        // Hardware
+        ("hardware", "comp_system"),
+        ("computer", "comp_system"),
+        ("system_info", "comp_system"),
+        ("cpu", "processor"),
+        ("memory", "physical_memory"),
+        ("ram", "physical_memory"),
+        // Storage
+        ("disk", "logical_disk"),
+        ("disks", "logical_disk"),
+        ("storage", "logical_disk"),
+        ("partition", "disk_partition"),
+        // Network
+        ("network", "network_adapter"),
+        ("ip", "ipconfig"),
+        ("ipconfig", "ipconfig"),
+        // Drivers
+        ("drivers", "system_driver"),
+        ("driver", "system_driver"),
+        // Software
+        ("programs", "installed_programs"),
+        ("software", "installed_programs"),
+        ("apps", "store_apps"),
+        ("services", "services"),
+        // System
+        ("updates", "windows_update"),
+        ("update", "windows_update"),
+        ("startup", "startup_command"),
+        ("processes", "processes"),
+        ("performance", "performance"),
+        ("bsod", "minidump"),
+        ("crash", "minidump"),
+        // Logs
+        ("logs", "event_logs"),
+        ("events", "event_logs"),
+        ("event", "event_logs"),
+    ];
+
+    for (term, task_id) in mappings {
+        if input.contains(term) {
+            if valid_ids.contains(task_id) {
+                return Some(task_id.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+/// Maximum diagnostics to run (Phi Silica has limited context)
+const MAX_DIAGNOSTICS: usize = 6;
+/// Maximum characters per diagnostic output
+const MAX_OUTPUT_CHARS: usize = 2000;
+/// Maximum total context size
+const MAX_TOTAL_CONTEXT: usize = 12000;
+
+/// Suggest diagnostics based on keywords in the question
+fn suggest_diagnostics_for_question(question: &str) -> Vec<&'static str> {
+    let mut suggestions = Vec::new();
+
+    // Computer/system info questions
+    if question.contains("make") || question.contains("model") || question.contains("computer")
+        || question.contains("laptop") || question.contains("desktop") || question.contains("pc")
+        || question.contains("device") || question.contains("machine") {
+        suggestions.extend(["comp_system", "bios", "baseboard", "os_info"]);
+    }
+
+    // CPU questions
+    if question.contains("cpu") || question.contains("processor") || question.contains("core")
+        || question.contains("speed") || question.contains("ghz") {
+        suggestions.extend(["processor", "comp_system"]);
+    }
+
+    // Memory/RAM questions
+    if question.contains("memory") || question.contains("ram") || question.contains("gb") {
+        suggestions.extend(["physical_memory", "comp_system"]);
+    }
+
+    // Storage questions
+    if question.contains("disk") || question.contains("storage") || question.contains("drive")
+        || question.contains("ssd") || question.contains("hdd") || question.contains("space") {
+        suggestions.extend(["logical_disk", "disk_drive", "disk_partition"]);
+    }
+
+    // Network questions
+    if question.contains("network") || question.contains("wifi") || question.contains("ethernet")
+        || question.contains("ip") || question.contains("internet") || question.contains("adapter") {
+        suggestions.extend(["network_adapter", "ipconfig"]);
+    }
+
+    // Security questions
+    if question.contains("security") || question.contains("firewall") || question.contains("virus")
+        || question.contains("protect") || question.contains("safe") {
+        suggestions.extend(["firewall_status", "services", "startup_command"]);
+    }
+
+    // Performance questions
+    if question.contains("performance") || question.contains("slow") || question.contains("fast")
+        || question.contains("speed") || question.contains("optimize") {
+        suggestions.extend(["performance", "processes", "services"]);
+    }
+
+    // OS/Windows questions
+    if question.contains("windows") || question.contains("version") || question.contains("build")
+        || question.contains("update") || question.contains("os") {
+        suggestions.extend(["os_info", "systeminfo", "windows_update"]);
+    }
+
+    // Driver questions
+    if question.contains("driver") || question.contains("hardware") {
+        suggestions.extend(["system_driver", "drivers_list", "system_devices"]);
+    }
+
+    // Software questions
+    if question.contains("software") || question.contains("program") || question.contains("app")
+        || question.contains("install") {
+        suggestions.extend(["installed_programs", "store_apps"]);
+    }
+
+    // Remove duplicates
+    suggestions.sort();
+    suggestions.dedup();
+    suggestions
+}
+
+/// Tauri command to analyze system with Phi Silica using tool calling
 #[tauri::command]
-pub async fn analyze_with_phi_silica(prompt: String) -> Result<String, String> {
+pub async fn analyze_with_phi_silica(prompt: String) -> Result<PhiSilicaAnalysisResponse, String> {
     // Check availability first
     let status = is_phi_silica_available();
     if !status.available {
         return Err(status.message);
     }
 
-    // Build a system context with diagnostic information
-    let mut context = String::new();
-    context.push_str("You are a Windows system diagnostic assistant running locally on a Copilot+ PC.\n");
-    context.push_str("Analyze the following system information and provide specific, actionable recommendations.\n\n");
+    // Get list of available diagnostics (compact format)
+    let diagnostic_list = get_diagnostic_list_for_prompt();
 
-    // Run some basic diagnostics to include in context
-    let diagnostics = vec![
-        "comp_system",
-        "os_info",
-        "processor",
-        "physical_memory",
-    ];
+    // STEP 1: Ask Phi Silica which diagnostics to run (short prompt)
+    // First, check for common question patterns and suggest appropriate diagnostics
+    let prompt_lower = prompt.to_lowercase();
+    let suggested_ids = suggest_diagnostics_for_question(&prompt_lower);
 
-    for task_id in diagnostics {
-        if let Ok(result) = crate::diagnostics::run_diagnostic_task_sync(task_id) {
-            context.push_str(&format!("=== {} ===\n{}\n\n", task_id, result.output));
+    let planning_prompt = if !suggested_ids.is_empty() {
+        format!(
+r#"User question: "{}"
+
+Suggested diagnostics based on keywords: {:?}
+
+Available diagnostics:
+{}
+
+Select 3-6 diagnostics. Output ONLY a JSON array. Example: ["comp_system", "os_info"]"#,
+            prompt, suggested_ids, diagnostic_list
+        )
+    } else {
+        format!(
+r#"User question: "{}"
+
+Available diagnostics:
+{}
+
+Select 3-6 diagnostics to answer this question. Output ONLY a JSON array. Example: ["comp_system", "os_info"]"#,
+            prompt, diagnostic_list
+        )
+    };
+
+    log_phi_silica("Step 1: Asking Phi Silica which diagnostics to run...");
+    let planning_response = generate_response(&planning_prompt).await?;
+    log_phi_silica(&format!("Planning response: {}", planning_response));
+
+    // STEP 2: Parse the response to get diagnostic IDs
+    let mut diagnostic_ids = parse_diagnostic_ids(&planning_response);
+    log_phi_silica(&format!("Parsed diagnostic IDs: {:?}", diagnostic_ids));
+
+    if diagnostic_ids.is_empty() {
+        // Fallback to basic diagnostics if parsing failed
+        log_phi_silica("No diagnostics parsed, using defaults");
+        return run_with_default_diagnostics(&prompt).await;
+    }
+
+    // Limit number of diagnostics
+    if diagnostic_ids.len() > MAX_DIAGNOSTICS {
+        diagnostic_ids.truncate(MAX_DIAGNOSTICS);
+        log_phi_silica(&format!("Truncated to {} diagnostics", MAX_DIAGNOSTICS));
+    }
+
+    // STEP 3: Run the selected diagnostics
+    log_phi_silica(&format!("Running {} diagnostics...", diagnostic_ids.len()));
+    let mut diagnostic_results = String::new();
+    let mut diagnostics_run = Vec::new();
+
+    for task_id in &diagnostic_ids {
+        // Check if we're approaching context limit
+        if diagnostic_results.len() > MAX_TOTAL_CONTEXT {
+            log_phi_silica("Context limit reached, stopping diagnostic collection");
+            break;
+        }
+
+        match crate::diagnostics::run_diagnostic_task_sync(task_id) {
+            Ok(result) => {
+                // Truncate individual outputs
+                let truncated = truncate_output(&result.output, MAX_OUTPUT_CHARS);
+                diagnostic_results.push_str(&format!("[{}]\n{}\n\n", task_id, truncated));
+                diagnostics_run.push(task_id.clone());
+            }
+            Err(e) => {
+                log_phi_silica(&format!("Failed to run {}: {}", task_id, e));
+            }
         }
     }
 
-    // Append user prompt
-    context.push_str(&format!("User question: {}\n\nProvide a helpful response:", prompt));
+    log_phi_silica(&format!("Ran {} diagnostics, {} chars", diagnostics_run.len(), diagnostic_results.len()));
 
-    // Generate response
-    generate_response(&context).await
+    // STEP 4: Send results back to Phi Silica for analysis (compact prompt)
+    let analysis_prompt = format!(
+r#"USER'S QUESTION: {}
+
+SYSTEM DATA:
+{}
+
+INSTRUCTIONS: Answer the user's question above using ONLY the system data provided. Do NOT make up information. Do NOT change or rephrase the question. Be direct and specific."#,
+        prompt,
+        diagnostic_results
+    );
+
+    log_phi_silica(&format!("Analysis prompt size: {} chars", analysis_prompt.len()));
+    log_phi_silica("Step 4: Getting final analysis from Phi Silica...");
+    let final_response = generate_response(&analysis_prompt).await?;
+    log_phi_silica("Analysis complete");
+
+    Ok(PhiSilicaAnalysisResponse {
+        analysis: final_response,
+        diagnostics_run,
+        provider: "phi_silica".to_string(),
+    })
+}
+
+/// Fallback function using default diagnostics
+async fn run_with_default_diagnostics(prompt: &str) -> Result<PhiSilicaAnalysisResponse, String> {
+    // Use suggested diagnostics if available, otherwise use defaults
+    let prompt_lower = prompt.to_lowercase();
+    let suggested = suggest_diagnostics_for_question(&prompt_lower);
+
+    let default_diagnostics: Vec<&str> = if !suggested.is_empty() {
+        suggested.into_iter().take(MAX_DIAGNOSTICS).collect()
+    } else {
+        vec!["comp_system", "os_info", "processor", "physical_memory", "logical_disk", "network_adapter"]
+    };
+
+    let mut diagnostic_results = String::new();
+    let mut diagnostics_run = Vec::new();
+
+    for task_id in &default_diagnostics {
+        if let Ok(result) = crate::diagnostics::run_diagnostic_task_sync(task_id) {
+            let truncated = truncate_output(&result.output, MAX_OUTPUT_CHARS);
+            diagnostic_results.push_str(&format!("[{}]\n{}\n\n", task_id, truncated));
+            diagnostics_run.push(task_id.to_string());
+        }
+    }
+
+    let analysis_prompt = format!(
+r#"USER'S QUESTION: {}
+
+SYSTEM DATA:
+{}
+
+INSTRUCTIONS: Answer the user's question above using ONLY the system data provided. Do NOT make up information. Do NOT change or rephrase the question. Be direct and specific."#,
+        prompt,
+        diagnostic_results
+    );
+
+    let response = generate_response(&analysis_prompt).await?;
+
+    Ok(PhiSilicaAnalysisResponse {
+        analysis: response,
+        diagnostics_run,
+        provider: "phi_silica".to_string(),
+    })
 }
