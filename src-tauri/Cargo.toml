@@ -11,7 +11,6 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.5", features = [] }
-windows-bindgen = "0.65"
 
 [dependencies]
 tauri = { version = "2.9", features = [] }
@@ -77,6 +76,14 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     # DXCore for NPU detection
     "Win32_Graphics_DXCore",
+    # WinRT for Phi Silica detection
+    "Win32_System_WinRT",
+    # Library loader for dynamic DLL loading (Phi Silica)
+    "Win32_System_LibraryLoader",
+    # Foundation for async operations
+    "Foundation",
+    # ApplicationModel for Limited Access Features (LAF)
+    "ApplicationModel",
 ] }
 
 [features]

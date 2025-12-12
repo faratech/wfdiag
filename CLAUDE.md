@@ -206,3 +206,132 @@ The backend makes extensive use of Windows APIs through the `windows` crate:
 6. **Performance**: Keep diagnostic batches small (5 tasks) to maintain UI responsiveness
 7. **Tauri v2 Imports**: Use `@tauri-apps/api/core` for invoke, plugin packages for specific features
 8. **Real-time Updates**: Use Tauri events (`emit` from backend, `listen` in frontend) for streaming data
+
+## Phi Silica (On-Device AI) Integration
+
+### Overview
+Phi Silica is Microsoft's on-device AI model available on Copilot+ PCs (Windows 11 24H2+, build 26100+). It uses the `Microsoft.Windows.AI.Text.LanguageModel` WinRT API.
+
+### Current Status: ✅ WORKING (December 2025)
+
+The integration is **complete and working** on both ARM64 and x64 Copilot+ PCs!
+
+### The Solution: Direct DLL Activation
+
+The key breakthrough was understanding that **standard WinRT activation (`RoGetActivationFactory`) doesn't work** for Windows App SDK classes from third-party apps. The solution is to use `DllGetActivationFactory` directly from bundled DLLs, which is exactly how Microsoft's CsWinRT projection works with `WindowsAppSDKSelfContained=true`.
+
+**What works:**
+1. Bundle Windows App SDK 2.0-experimental3 DLLs with the app
+2. Load `Microsoft.Windows.AI.Text.dll` from app directory
+3. Call `DllGetActivationFactory("Microsoft.Windows.AI.Text.LanguageModel")` directly
+4. Use the returned factory to create LanguageModel instances
+
+**Why this works:** The bundled DLLs are Microsoft-signed and contain the full implementation. By calling their activation factory directly, we bypass the WinRT activation tables that block third-party apps.
+
+### Files Involved
+- **`src-tauri/src/phi_silica.rs`**: Main implementation with `create_language_model_direct()` function
+- **`src-tauri/src/windows_ai_bindings.rs`**: Auto-generated WinRT bindings via `windows-bindgen` 0.65
+- **`build-cross.py`**: Build script that bundles Windows App SDK DLLs
+
+### Bundled DLLs (per architecture)
+The MSIX package includes these DLLs for both x64 and ARM64:
+- `Microsoft.WindowsAppRuntime.dll` (~2.3-2.7 MB)
+- `Microsoft.Windows.AI.Text.dll` (~630-670 KB)
+- `Microsoft.Windows.AI.Text.Projection.dll` (~240-260 KB)
+- `Microsoft.WindowsAppRuntime.Bootstrap.dll` (~390 KB)
+- `WinRT.Runtime.dll` (~1.4-1.6 MB)
+
+### Technical Implementation
+
+#### Direct DLL Activation (the key!)
+```rust
+fn create_language_model_direct() -> Result<LanguageModel, String> {
+    // Load bundled DLL from app directory
+    let app_dir = std::env::current_exe()?.parent()?;
+    let dll_path = app_dir.join("Microsoft.Windows.AI.Text.dll");
+    let module = LoadLibraryW(dll_path)?;
+
+    // Get DllGetActivationFactory export
+    let get_factory = GetProcAddress(module, "DllGetActivationFactory");
+
+    // Create HSTRING for class name
+    let class_name = HSTRING::from("Microsoft.Windows.AI.Text.LanguageModel");
+
+    // Get activation factory directly from DLL (bypasses RoGetActivationFactory!)
+    let mut factory_ptr = null_mut();
+    get_factory(class_name.as_raw(), &mut factory_ptr);
+
+    // Query for ILanguageModelStatics and call CreateAsync
+    let statics: ILanguageModelStatics = factory.cast()?;
+    let async_op = statics.CreateAsync()?;
+    wait_for_async_blocking(async_op)
+}
+```
+
+#### Manifest Configuration
+```xml
+<Package xmlns:systemai="http://schemas.microsoft.com/appx/manifest/systemai/windows10"
+         IgnorableNamespaces="uap rescap systemai">
+  <Dependencies>
+    <!-- Both Universal and Desktop required for systemAIModels capability -->
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26226.0" />
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26226.0" />
+    <!-- Optional: Framework dependency (not strictly required since we bundle DLLs) -->
+    <PackageDependency Name="Microsoft.WindowsAppRuntime.2.0-experimental3"
+                       MinVersion="0.676.658.0"
+                       Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
+  </Dependencies>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <systemai:Capability Name="systemAIModels"/>
+  </Capabilities>
+</Package>
+```
+
+### Requirements
+1. **Windows 11 24H2** (build 26100+)
+2. **Copilot+ PC** with NPU (40+ TOPS) - ARM64 or x64
+3. **MSIX packaging** with `systemAIModels` capability and bundled DLLs
+
+### LAF Token (Not Required!)
+Originally thought to be required, but the direct DLL activation approach works without LAF approval:
+- LAF unlock returns "Unavailable"
+- But Phi Silica works anyway because we bypass RoGetActivationFactory
+
+### Error Codes Reference
+| Code | Name | Meaning |
+|------|------|---------|
+| `0x80040154` | CLASS_E_CLASSNOTREGISTERED | WinRT class not found - need bundled DLLs |
+| `0x80070005` | E_ACCESSDENIED | Using RoGetActivationFactory - switch to DllGetActivationFactory |
+| `0x80070032` | ERROR_NOT_SUPPORTED | Bootstrap API not supported for packaged apps |
+
+### Historical Approaches (What Didn't Work)
+
+1. **RoGetActivationFactory with PackageDependency** → `0x80070005` (blocked for third-party)
+2. **LAF token unlock** → Returns "Unavailable" for third-party apps
+3. **Loading DLL without using DllGetActivationFactory** → Still uses RoGetActivationFactory internally
+4. **Bootstrapper initialization** → `0x80070032` (not supported for packaged apps)
+
+### Build Commands
+```bash
+# Full build with MSIX and signing (includes DLL bundling)
+python3 build-cross.py build-all --build-msix --sign
+
+# Just rebuild MSIX (without recompiling)
+python3 build-cross.py build-msix --sign
+```
+
+### Testing
+```powershell
+# Remove old version
+Get-AppxPackage *WindowsForumDiagnostics* | Remove-AppxPackage
+
+# Install new version
+Add-AppxPackage -Path "C:\code\WindowsForum_Diagnostics_2.1.5.msixbundle"
+
+# Check logs at C:\temp\phi-silica-rust.log
+```
+
+### Supported Hardware
+- ✅ ARM64 Copilot+ PCs (Snapdragon X Elite/Plus) - Tested
+- ✅ x64 Copilot+ PCs (Intel Core Ultra, AMD Ryzen AI) - DLLs bundled

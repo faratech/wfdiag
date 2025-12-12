@@ -12,10 +12,10 @@ mod issue_detector;
 mod issue_fixer;
 mod encrypted_storage;
 
-// Phi Silica bindings and wrapper (generated at build time)
-#[cfg(windows)]
-mod phi_silica_bindings;
+// Phi Silica wrapper (uses windows-bindgen generated bindings)
 mod phi_silica;
+#[cfg(windows)]
+mod windows_ai_bindings;
 
 use crate::diagnostics::{DiagnosticTask, TaskResult};
 use crate::issue_detector::{Issue, IssueSeverity};
@@ -880,6 +880,7 @@ pub fn run() {
             openai_integration::analyze_system_with_ai,
             openai_integration::get_ai_provider_status,
             phi_silica::check_phi_silica_available,
+            phi_silica::ensure_phi_silica,
             phi_silica::analyze_with_phi_silica,
             phi_silica::check_phi_silica_updates,
             detect_issues,

@@ -54,6 +54,7 @@ interface PhiSilicaStatus {
   message: string;
   error_code?: string;
   windows_build?: number;
+  ready_state?: string;
 }
 
 type AiProvider = 'openai' | 'phi_silica';
@@ -304,6 +305,11 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
                 <Text size={200} style={{ color: '#94a3b8', display: 'block' }}>
                   <strong>On-device AI (Phi Silica)</strong>: {phiSilicaStatus.message}
                 </Text>
+                {phiSilicaStatus.ready_state && (
+                  <Text size={100} style={{ color: '#64748b', display: 'block', marginTop: 4 }}>
+                    State: {phiSilicaStatus.ready_state}
+                  </Text>
+                )}
                 {phiSilicaStatus.error_code && (
                   <Text size={100} style={{ color: '#64748b', display: 'block', marginTop: 4, fontFamily: 'monospace' }}>
                     Error: {phiSilicaStatus.error_code}
