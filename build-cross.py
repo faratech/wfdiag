@@ -457,7 +457,7 @@ def build_msix(version: str) -> bool:
         # Copy icons
         shutil.copy2(icons_dir / "icon.png", target_dir / "Logo.png")
         shutil.copy2(icons_dir / "192x192.png", target_dir / "Square150x150Logo.png")
-        shutil.copy2(icons_dir / "128x128.png", target_dir / "Square44x44Logo.png")
+        shutil.copy2(icons_dir / "44x44.png", target_dir / "Square44x44Logo.png")
 
         # Copy Windows App SDK AI DLLs if available
         ai_sdk_dir = SRC_TAURI / "resources" / "ai-sdk" / target_name
