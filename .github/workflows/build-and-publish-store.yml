@@ -344,92 +344,10 @@ jobs:
           path: msix-build/*.msixbundle
 
   # =============================================================================
-  # Sign the MSIX Bundle (runs always, skips signing if no certificate)
-  # =============================================================================
-  sign-bundle:
-    needs: [build-x64, create-msix-bundle]
-    runs-on: windows-latest
-    outputs:
-      signed_bundle_path: ${{ steps.sign.outputs.signed_bundle_path }}
-      was_signed: ${{ steps.sign.outputs.was_signed }}
-    steps:
-      - name: Download unsigned bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: msixbundle-unsigned
-          path: bundle
-
-      - name: Sign bundle
-        id: sign
-        shell: pwsh
-        env:
-          CERT_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
-          CERT_BASE64_ALT: ${{ secrets.WINDOWS_CERTIFICATE }}
-          CERT_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
-          CERT_PASSWORD_ALT: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          $version = "${{ needs.build-x64.outputs.version }}"
-          $bundlePath = "bundle/${{ env.PROJECT_NAME }}_${version}.msixbundle"
-
-          # Check for certificate
-          $certBase64 = $env:CERT_BASE64
-          if (-not $certBase64) { $certBase64 = $env:CERT_BASE64_ALT }
-
-          if (-not $certBase64) {
-            Write-Host "No certificate configured - skipping signing"
-            New-Item -ItemType Directory -Force -Path "signed"
-            Copy-Item $bundlePath "signed/${{ env.PROJECT_NAME }}_${version}.msixbundle"
-            echo "signed_bundle_path=signed/${{ env.PROJECT_NAME }}_${version}.msixbundle" >> $env:GITHUB_OUTPUT
-            echo "was_signed=false" >> $env:GITHUB_OUTPUT
-            exit 0
-          }
-
-          # Decode certificate
-          $certBytes = [Convert]::FromBase64String($certBase64)
-          $certPath = "certificate.pfx"
-          [IO.File]::WriteAllBytes($certPath, $certBytes)
-
-          # Find SignTool
-          $sdkPath = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*" -Directory |
-                     Sort-Object Name -Descending |
-                     Select-Object -First 1
-          $signTool = Join-Path $sdkPath.FullName "x64\signtool.exe"
-
-          Write-Host "Signing bundle with certificate..."
-
-          # Get password
-          $password = $env:CERT_PASSWORD
-          if (-not $password) { $password = $env:CERT_PASSWORD_ALT }
-
-          # Sign
-          & $signTool sign /fd SHA256 /f $certPath /p $password /tr http://timestamp.digicert.com /td SHA256 $bundlePath
-          if ($LASTEXITCODE -ne 0) { throw "Failed to sign bundle" }
-
-          # Clean up certificate
-          Remove-Item $certPath -Force
-
-          # Verify signature
-          Write-Host "Verifying signature..."
-          & $signTool verify /pa $bundlePath
-
-          $signedPath = "signed/${{ env.PROJECT_NAME }}_${version}.msixbundle"
-          New-Item -ItemType Directory -Force -Path "signed"
-          Move-Item $bundlePath $signedPath
-
-          echo "signed_bundle_path=$signedPath" >> $env:GITHUB_OUTPUT
-          echo "was_signed=true" >> $env:GITHUB_OUTPUT
-
-      - name: Upload signed bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: msixbundle-signed
-          path: signed/*.msixbundle
-
-  # =============================================================================
   # Publish to Microsoft Store
   # =============================================================================
   publish-to-store:
-    needs: [build-x64, sign-bundle]
+    needs: [build-x64, create-msix-bundle]
     runs-on: windows-latest
     if: needs.build-x64.outputs.publish_to_store == 'true'
     steps:
@@ -449,7 +367,7 @@ jobs:
       - name: Download signed bundle
         uses: actions/download-artifact@v4
         with:
-          name: msixbundle-signed
+          name: msixbundle-unsigned
           path: bundle
 
       - name: Find bundle file
@@ -476,8 +394,7 @@ jobs:
   # =============================================================================
   attest-artifacts:
     needs: [build-x64, build-arm64, create-msix-bundle]
-    # Run even if sign-bundle was skipped (no certificates)
-    if: always() && needs.build-x64.result == 'success' && needs.build-arm64.result == 'success' && needs.create-msix-bundle.result == 'success'
+    if: needs.build-x64.result == 'success' && needs.build-arm64.result == 'success' && needs.create-msix-bundle.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -502,14 +419,7 @@ jobs:
         with:
           subject-path: artifacts/exe-arm64/wfdiag-tauri.exe
 
-      - name: Attest signed bundle
-        if: ${{ hashFiles('artifacts/msixbundle-signed/*.msixbundle') != '' }}
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: artifacts/msixbundle-signed/*.msixbundle
-
-      - name: Attest unsigned bundle (fallback)
-        if: ${{ hashFiles('artifacts/msixbundle-signed/*.msixbundle') == '' }}
+      - name: Attest MSIX bundle
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: artifacts/msixbundle-unsigned/*.msixbundle
@@ -520,21 +430,11 @@ jobs:
   create-release:
     needs: [build-x64, create-msix-bundle, attest-artifacts]
     runs-on: ubuntu-latest
-    # Run if builds succeeded and release was requested (sign-bundle may have been skipped)
-    if: always() && needs.build-x64.result == 'success' && needs.create-msix-bundle.result == 'success' && needs.build-x64.outputs.create_release == 'true'
+    if: needs.build-x64.result == 'success' && needs.create-msix-bundle.result == 'success' && needs.build-x64.outputs.create_release == 'true'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download signed bundle
-        id: download-signed
-        uses: actions/download-artifact@v4
-        with:
-          name: msixbundle-signed
-          path: release
-        continue-on-error: true
-
-      - name: Download unsigned bundle (fallback)
-        if: steps.download-signed.outcome != 'success'
+      - name: Download MSIX bundle
         uses: actions/download-artifact@v4
         with:
           name: msixbundle-unsigned
