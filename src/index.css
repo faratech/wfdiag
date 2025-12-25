@@ -59,12 +59,6 @@ body {
   transition: all 0.2s ease;
 }
 
-/* Remove hover effects for non-interactive cards */
-.fui-Card:not([role="button"]):hover {
-  transform: none;
-  box-shadow: none;
-}
-
 /* Smooth animations */
 details {
   transition: all 0.2s ease;
@@ -80,12 +74,30 @@ details[open] > summary {
 }
 
 /* Responsive layout */
-@media (max-width: 768px) {
+@media (max-width: 1440px) {
+  .view-container {
+    padding: 20px;
+  }
+}
+
+@media (max-width: 1024px) {
   .view-container {
     padding: 16px;
   }
-  
+
+  .header {
+    padding: 10px 20px;
+    min-height: 48px;
+  }
+}
+
+@media (max-width: 768px) {
+  .view-container {
+    padding: 12px;
+  }
+
   .header {
     padding: 8px 16px;
+    min-height: 44px;
   }
 }

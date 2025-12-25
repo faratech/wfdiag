@@ -8,6 +8,8 @@ mod openai_integration;
 mod results_storage;
 mod timestamp;
 mod windows_native;
+#[cfg(windows)]
+mod wmi_native;
 mod security;
 mod issue_detector;
 mod issue_fixer;
@@ -25,10 +27,84 @@ use native_monitor::{NetworkConnection, SystemMonitor};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::path::PathBuf;
 use tauri::Emitter;
 use tauri::State;
 use tokio::sync::Mutex;
 use results_storage::{ScanStorage, ScanRecord, ScanSummary, ComparisonResult};
+
+/// Application settings that persist across sessions
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    #[serde(default)]
+    pub auto_save: bool,
+    #[serde(default)]
+    pub scan_on_startup: bool,
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent_tasks: u32,
+    #[serde(default = "default_export_format")]
+    pub export_format: String,
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    #[serde(default = "default_true")]
+    pub show_notifications: bool,
+    #[serde(default)]
+    pub custom_export_path: Option<String>,
+    #[serde(default = "default_true")]
+    pub retain_history: bool,
+    #[serde(default = "default_history_limit")]
+    pub history_limit: u32,
+}
+
+fn default_max_concurrent() -> u32 { 5 }
+fn default_export_format() -> String { "text".to_string() }
+fn default_theme() -> String { "dark".to_string() }
+fn default_true() -> bool { true }
+fn default_history_limit() -> u32 { 30 }
+
+/// Get the settings file path
+fn get_settings_path() -> Result<PathBuf, String> {
+    let app_data = dirs::config_dir()
+        .ok_or_else(|| "Could not find config directory".to_string())?;
+    let settings_dir = app_data.join("com.windowsforum.diagnostics");
+
+    // Create directory if it doesn't exist
+    if !settings_dir.exists() {
+        std::fs::create_dir_all(&settings_dir)
+            .map_err(|e| format!("Failed to create settings directory: {}", e))?;
+    }
+
+    Ok(settings_dir.join("settings.json"))
+}
+
+#[tauri::command]
+async fn save_settings(settings: AppSettings) -> Result<(), String> {
+    let path = get_settings_path()?;
+    let json = serde_json::to_string_pretty(&settings)
+        .map_err(|e| format!("Failed to serialize settings: {}", e))?;
+    std::fs::write(&path, json)
+        .map_err(|e| format!("Failed to write settings file: {}", e))?;
+    println!("Settings saved to {:?}", path);
+    Ok(())
+}
+
+#[tauri::command]
+async fn load_settings() -> Result<AppSettings, String> {
+    let path = get_settings_path()?;
+
+    if !path.exists() {
+        println!("No settings file found, returning defaults");
+        return Ok(AppSettings::default());
+    }
+
+    let json = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read settings file: {}", e))?;
+    let settings: AppSettings = serde_json::from_str(&json)
+        .map_err(|e| format!("Failed to parse settings: {}", e))?;
+    println!("Settings loaded from {:?}", path);
+    Ok(settings)
+}
 
 // Helper function to format JSON values into readable text
 fn format_json_value(value: &serde_json::Value, indent_level: usize) -> String {
@@ -510,11 +586,89 @@ async fn export_results(
 
                 Ok(text)
             }
+            "html" => {
+                let mut html = String::new();
+                html.push_str("<!DOCTYPE html>\n<html>\n<head>\n");
+                html.push_str("<meta charset=\"UTF-8\">\n");
+                html.push_str("<title>WindowsForum Diagnostic Report</title>\n");
+                html.push_str("<style>\n");
+                html.push_str("body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #1a1a2e; color: #eee; }\n");
+                html.push_str("h1 { color: #60a5fa; border-bottom: 2px solid #3b82f6; padding-bottom: 10px; }\n");
+                html.push_str("h2 { color: #93c5fd; margin-top: 30px; }\n");
+                html.push_str(".task { background: #16213e; border-radius: 8px; padding: 15px; margin: 10px 0; border-left: 4px solid #3b82f6; }\n");
+                html.push_str(".task.error { border-left-color: #ef4444; }\n");
+                html.push_str(".task-name { font-weight: bold; color: #60a5fa; margin-bottom: 8px; }\n");
+                html.push_str(".output { white-space: pre-wrap; font-family: 'Consolas', 'Monaco', monospace; font-size: 13px; background: #0f0f1a; padding: 10px; border-radius: 4px; overflow-x: auto; }\n");
+                html.push_str(".error-msg { color: #f87171; }\n");
+                html.push_str(".meta { color: #9ca3af; font-size: 12px; margin-top: 20px; }\n");
+                html.push_str("</style>\n</head>\n<body>\n");
+                html.push_str("<h1>WindowsForum Diagnostic Report</h1>\n");
+                // Format date using JavaScript in the HTML
+                html.push_str("<p class=\"meta\">Generated: <span id=\"gendate\"></span></p>\n");
+                html.push_str("<script>document.getElementById('gendate').textContent = new Date().toLocaleString();</script>\n");
+
+                // Group results by category
+                let mut results_by_category: std::collections::HashMap<
+                    String,
+                    Vec<(&String, &diagnostics::TaskResult)>,
+                > = std::collections::HashMap::new();
+
+                for (task_id, result) in &session.results {
+                    if let Some(task) = task_map.get(task_id) {
+                        results_by_category
+                            .entry(task.category.clone())
+                            .or_default()
+                            .push((task_id, result));
+                    }
+                }
+
+                let mut categories: Vec<_> = results_by_category.keys().cloned().collect();
+                categories.sort();
+
+                for category in categories {
+                    html.push_str(&format!("<h2>{}</h2>\n", html_escape(&category)));
+
+                    if let Some(results) = results_by_category.get(&category) {
+                        for (task_id, result) in results {
+                            if let Some(task) = task_map.get(*task_id) {
+                                let class = if result.success { "task" } else { "task error" };
+                                html.push_str(&format!("<div class=\"{}\">\n", class));
+                                html.push_str(&format!("<div class=\"task-name\">{}</div>\n", html_escape(&task.name)));
+
+                                if result.success {
+                                    html.push_str("<div class=\"output\">");
+                                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result.output) {
+                                        html.push_str(&html_escape(&format_json_value(&parsed, 0)));
+                                    } else {
+                                        html.push_str(&html_escape(&result.output));
+                                    }
+                                    html.push_str("</div>\n");
+                                } else if let Some(error) = &result.error {
+                                    html.push_str(&format!("<div class=\"error-msg\">Error: {}</div>\n", html_escape(error)));
+                                }
+
+                                html.push_str("</div>\n");
+                            }
+                        }
+                    }
+                }
+
+                html.push_str("<p class=\"meta\">Generated using WindowsForum Diagnostics Tool</p>\n");
+                html.push_str("</body>\n</html>");
+                Ok(html)
+            }
             _ => Err("Unsupported format".to_string()),
         }
     } else {
         Err("No active session".to_string())
     }
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[tauri::command]
@@ -787,8 +941,10 @@ async fn detect_issues(
 async fn open_url(url: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &url])
+        // Use PowerShell's Start-Process which handles URLs with special characters better
+        // This avoids issues with & and other chars in mailto: URLs
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &format!("Start-Process '{}'", url.replace("'", "''"))])
             .spawn()
             .map_err(|e| format!("Failed to open URL: {}", e))?;
     }
@@ -830,26 +986,14 @@ pub fn run() {
     };
 
     tauri::Builder::default()
-        .setup(|app| {
-            // Handle deep links for OAuth callbacks
-            #[cfg(desktop)]
-            {
-                let _handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    // Listen for deep link URLs
-                    tauri::async_runtime::block_on(async move {
-                        // This will be handled by the plugin system
-                    });
-                });
-            }
-            Ok(())
-        })
         .manage(app_state)
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
+            save_settings,
+            load_settings,
             store_api_key,
             load_api_key,
             clear_api_key,

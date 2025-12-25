@@ -677,20 +677,19 @@ fn get_memory_info() -> (u64, u64, u64, u64, u64) {
 
 /// Detect all disk types once and cache them
 fn detect_all_disk_types() -> HashMap<char, String> {
-    use std::collections::HashMap;
-    use wmi::WMIConnection;
+    use crate::wmi_native::WmiConnection;
 
     let mut types = HashMap::new();
 
-    if let Ok(wmi_con) = WMIConnection::new() {
+    // Use Storage namespace for MSFT_PhysicalDisk
+    if let Ok(wmi_con) = WmiConnection::with_namespace("root\\Microsoft\\Windows\\Storage") {
         // Query physical disks to get their media types
-        if let Ok(results) =
-            wmi_con.raw_query::<HashMap<String, wmi::Variant>>("SELECT * FROM MSFT_PhysicalDisk")
-        {
+        if let Ok(results) = wmi_con.query("SELECT MediaType, DeviceID FROM MSFT_PhysicalDisk") {
             for disk in &results {
-                if let (Some(wmi::Variant::UI2(media_type)), Some(wmi::Variant::String(device_id))) =
-                    (disk.get("MediaType"), disk.get("DeviceID"))
-                {
+                if let (Some(media_type), Some(device_id)) = (
+                    disk.get("MediaType").and_then(|v| v.as_u64()),
+                    disk.get("DeviceID").and_then(|v| v.as_str()),
+                ) {
                     let disk_type = match media_type {
                         3 => "HDD",
                         4 => "SSD",
@@ -699,16 +698,17 @@ fn detect_all_disk_types() -> HashMap<char, String> {
                     };
 
                     // Get partitions for this disk
-                    let part_query =
-                        format!("SELECT DriveLetter FROM MSFT_Partition WHERE DiskNumber = {}", device_id);
-                    if let Ok(partitions) =
-                        wmi_con.raw_query::<HashMap<String, wmi::Variant>>(&part_query)
-                    {
+                    let part_query = format!(
+                        "SELECT DriveLetter FROM MSFT_Partition WHERE DiskNumber = {}",
+                        device_id
+                    );
+                    if let Ok(partitions) = wmi_con.query(&part_query) {
                         for part in &partitions {
-                            if let Some(wmi::Variant::String(letter)) = part.get("DriveLetter")
-                                && let Some(c) = letter.chars().next() {
-                                    types.insert(c, disk_type.to_string());
-                                }
+                            if let Some(letter) = part.get("DriveLetter").and_then(|v| v.as_str())
+                                && let Some(c) = letter.chars().next()
+                            {
+                                types.insert(c, disk_type.to_string());
+                            }
                         }
                     }
                 }
@@ -1064,11 +1064,10 @@ pub async fn get_network_connections() -> Vec<NetworkConnection> {
 // ============================================================================
 
 fn get_npu_utilization() -> Option<f32> {
-    use std::collections::HashMap;
-    use wmi::WMIConnection;
+    use crate::wmi_native::WmiConnection;
 
-    let wmi_con = WMIConnection::new().ok()?;
-    let npu_luid = NPU_LUID.get_or_init(|| discover_npu_luid(&wmi_con));
+    let wmi_con = WmiConnection::new().ok()?;
+    let npu_luid = NPU_LUID.get_or_init(|| discover_npu_luid());
 
     if let Some(luid) = npu_luid {
         let query = format!(
@@ -1076,16 +1075,13 @@ fn get_npu_utilization() -> Option<f32> {
             luid
         );
 
-        if let Ok(results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(&query) {
+        if let Ok(results) = wmi_con.query(&query) {
             let mut total_util: u64 = 0;
             let mut count = 0;
 
             for counter in &results {
-                if let Some(wmi::Variant::UI8(util)) = counter.get("UtilizationPercentage") {
+                if let Some(util) = counter.get("UtilizationPercentage").and_then(|v| v.as_u64()) {
                     total_util += util;
-                    count += 1;
-                } else if let Some(wmi::Variant::UI4(util)) = counter.get("UtilizationPercentage") {
-                    total_util += *util as u64;
                     count += 1;
                 }
             }
@@ -1099,28 +1095,31 @@ fn get_npu_utilization() -> Option<f32> {
     None
 }
 
-fn discover_npu_luid(wmi_con: &wmi::WMIConnection) -> Option<String> {
-    use std::collections::HashMap;
+fn discover_npu_luid() -> Option<String> {
+    use crate::wmi_native::WmiConnection;
     use std::collections::HashSet;
 
-    if let Ok(results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+    let wmi_con = WmiConnection::new().ok()?;
+
+    if let Ok(results) = wmi_con.query(
         "SELECT Name FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine",
     ) {
         let mut luid_engines: HashMap<String, HashSet<String>> = HashMap::new();
 
         for counter in &results {
-            if let Some(wmi::Variant::String(name)) = counter.get("Name")
+            if let Some(name) = counter.get("Name").and_then(|v| v.as_str())
                 && let Some(luid_start) = name.find("luid_")
-                    && let Some(phys_start) = name.find("_phys_") {
-                        let luid = &name[luid_start..phys_start];
-                        if let Some(engtype_start) = name.find("_engtype_") {
-                            let engtype = &name[engtype_start + 9..];
-                            luid_engines
-                                .entry(luid.to_string())
-                                .or_default()
-                                .insert(engtype.to_string());
-                        }
-                    }
+                && let Some(phys_start) = name.find("_phys_")
+            {
+                let luid = &name[luid_start..phys_start];
+                if let Some(engtype_start) = name.find("_engtype_") {
+                    let engtype = &name[engtype_start + 9..];
+                    luid_engines
+                        .entry(luid.to_string())
+                        .or_default()
+                        .insert(engtype.to_string());
+                }
+            }
         }
 
         for (luid, engine_types) in &luid_engines {
@@ -1188,11 +1187,10 @@ fn detect_npu_dxcore() -> Option<(String, u32)> {
 }
 
 fn detect_npu_wmi_fallback() -> (bool, Option<String>, Option<f32>) {
-    use std::collections::HashMap;
-    use wmi::WMIConnection;
+    use crate::wmi_native::WmiConnection;
 
-    if let Ok(wmi_con) = WMIConnection::new() {
-        if let Ok(results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+    if let Ok(wmi_con) = WmiConnection::new() {
+        if let Ok(results) = wmi_con.query(
             "SELECT Name, DeviceID, Description FROM Win32_PnPEntity WHERE \
              Name LIKE '%NPU%' OR \
              Name LIKE '%Neural%' OR \
@@ -1200,40 +1198,43 @@ fn detect_npu_wmi_fallback() -> (bool, Option<String>, Option<f32>) {
              Name LIKE '%Hexagon%' OR \
              Description LIKE '%Neural Processing%' OR \
              DeviceID LIKE '%NPU%'",
-        )
-            && let Some(device) = results.first()
-                && let Some(wmi::Variant::String(name)) = device.get("Name") {
-                    return (true, Some(name.clone()), None);
+        ) {
+            if let Some(device) = results.first()
+                && let Some(name) = device.get("Name").and_then(|v| v.as_str())
+            {
+                return (true, Some(name.to_string()), None);
+            }
+        }
+
+        if let Ok(cpu_results) = wmi_con.query("SELECT Name FROM Win32_Processor") {
+            if let Some(cpu) = cpu_results.first()
+                && let Some(name) = cpu.get("Name").and_then(|v| v.as_str())
+            {
+                let name_lower = name.to_lowercase();
+
+                if name_lower.contains("core ultra")
+                    || name_lower.contains("meteor lake")
+                    || name_lower.contains("arrow lake")
+                    || name_lower.contains("lunar lake")
+                {
+                    return (true, Some(format!("{} (Intel NPU)", name)), None);
                 }
 
-        if let Ok(cpu_results) =
-            wmi_con.raw_query::<HashMap<String, wmi::Variant>>("SELECT Name FROM Win32_Processor")
-            && let Some(cpu) = cpu_results.first()
-                && let Some(wmi::Variant::String(name)) = cpu.get("Name") {
-                    let name_lower = name.to_lowercase();
-
-                    if name_lower.contains("core ultra")
-                        || name_lower.contains("meteor lake")
-                        || name_lower.contains("arrow lake")
-                        || name_lower.contains("lunar lake")
-                    {
-                        return (true, Some(format!("{} (Intel NPU)", name)), None);
-                    }
-
-                    if name_lower.contains("ryzen ai")
-                        || name_lower.contains("ryzen 8000")
-                        || name_lower.contains("ryzen 9000")
-                    {
-                        return (true, Some(format!("{} (AMD XDNA NPU)", name)), None);
-                    }
-
-                    if name_lower.contains("snapdragon")
-                        || name_lower.contains("x elite")
-                        || name_lower.contains("x plus")
-                    {
-                        return (true, Some(format!("{} (Qualcomm Hexagon NPU)", name)), None);
-                    }
+                if name_lower.contains("ryzen ai")
+                    || name_lower.contains("ryzen 8000")
+                    || name_lower.contains("ryzen 9000")
+                {
+                    return (true, Some(format!("{} (AMD XDNA NPU)", name)), None);
                 }
+
+                if name_lower.contains("snapdragon")
+                    || name_lower.contains("x elite")
+                    || name_lower.contains("x plus")
+                {
+                    return (true, Some(format!("{} (Qualcomm Hexagon NPU)", name)), None);
+                }
+            }
+        }
     }
 
     (false, None, None)

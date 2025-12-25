@@ -1,9 +1,8 @@
 use anyhow::Result;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::fs;
-use wmi::WMIConnection;
+use crate::wmi_native::WmiConnection;
 use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 // Performance counter imports removed - not used in current implementation
 use winreg::enums::*;
@@ -19,102 +18,71 @@ impl NativeDiagnostics {
 
     pub fn run_wmi_query(&self, class_name: &str, namespace: Option<&str>) -> Result<Value> {
         let wmi_con = if let Some(ns) = namespace {
-            WMIConnection::with_namespace_path(ns)?
+            WmiConnection::with_namespace(ns)?
         } else {
-            WMIConnection::new()?
+            WmiConnection::new()?
         };
-        let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(format!("SELECT * FROM {}", class_name))?;
-        
-        let mut json_results = Vec::new();
-        for result in results {
-            let mut json_obj = serde_json::Map::new();
-            for (key, value) in result {
-                json_obj.insert(key, self.variant_to_json(value));
-            }
-            json_results.push(Value::Object(json_obj));
-        }
-        
+        let results = wmi_con.query_class(class_name)?;
+
+        let json_results: Vec<Value> = results
+            .into_iter()
+            .map(|r| {
+                let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                Value::Object(obj)
+            })
+            .collect();
+
         Ok(Value::Array(json_results))
     }
 
-    fn variant_to_json(&self, variant: wmi::Variant) -> Value {
-        match variant {
-            wmi::Variant::String(s) => json!(s),
-            wmi::Variant::I4(i) => json!(i),
-            wmi::Variant::I8(i) => json!(i),
-            wmi::Variant::UI4(u) => json!(u),
-            wmi::Variant::UI8(u) => json!(u),
-            wmi::Variant::Bool(b) => json!(b),
-            wmi::Variant::Array(arr) => {
-                let json_arr: Vec<Value> = arr.into_iter().map(|v| self.variant_to_json(v)).collect();
-                json!(json_arr)
-            }
-            _ => json!(null),
-        }
-    }
-
     pub fn get_native_disk_space(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new()?;
-        let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_LogicalDisk WHERE DriveType=3")?;
-        
-        let mut drives = Vec::new();
-        for result in results {
-            let mut drive_info = serde_json::Map::new();
-            
-            // Include all WMI data
-            for (key, value) in result {
-                drive_info.insert(key.clone(), self.variant_to_json(value));
-            }
-            
-            drives.push(Value::Object(drive_info));
-        }
-        
+        let wmi_con = WmiConnection::new()?;
+        let results = wmi_con.query("SELECT * FROM Win32_LogicalDisk WHERE DriveType=3")?;
+
+        let drives: Vec<Value> = results
+            .into_iter()
+            .map(|r| {
+                let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                Value::Object(obj)
+            })
+            .collect();
+
         Ok(Value::Array(drives))
     }
 
     pub fn get_native_network_adapters(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new()?;
-        let config_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled=TRUE")?;
-        let adapter_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_NetworkAdapter")?;
-        
+        let wmi_con = WmiConnection::new()?;
+        let config_results = wmi_con.query("SELECT * FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled=TRUE")?;
+        let adapter_results = wmi_con.query("SELECT * FROM Win32_NetworkAdapter")?;
+
         let mut adapters = Vec::new();
-        
+
         for config in config_results {
-            let mut adapter_info = serde_json::Map::new();
-            
+            let mut adapter_info: serde_json::Map<String, Value> = config.clone().into_iter().collect();
+
             // Get the index to match with adapter
-            let index = config.get("Index").and_then(|v| {
-                if let wmi::Variant::UI4(i) = v {
-                    Some(*i)
-                } else {
-                    None
-                }
-            });
-            
-            // Add all configuration data
-            for (key, value) in &config {
-                adapter_info.insert(key.clone(), self.variant_to_json(value.clone()));
-            }
-            
+            let index = config.get("Index").and_then(|v| v.as_u64()).map(|u| u as u32);
+
             // Find matching adapter info
             if let Some(idx) = index {
                 for adapter in &adapter_results {
-                    if let Some(wmi::Variant::UI4(adapter_idx)) = adapter.get("DeviceID")
-                        && *adapter_idx == idx {
+                    if let Some(adapter_idx) = adapter.get("DeviceID").and_then(|v| v.as_u64()).map(|u| u as u32) {
+                        if adapter_idx == idx {
                             // Add adapter-specific info
                             for (key, value) in adapter {
                                 if !adapter_info.contains_key(key) {
-                                    adapter_info.insert(key.clone(), self.variant_to_json(value.clone()));
+                                    adapter_info.insert(key.clone(), value.clone());
                                 }
                             }
                             break;
                         }
+                    }
                 }
             }
-            
+
             adapters.push(Value::Object(adapter_info));
         }
-        
+
         Ok(Value::Array(adapters))
     }
 
@@ -140,21 +108,21 @@ impl NativeDiagnostics {
 
     pub fn get_native_system_info(&self) -> Result<Value> {
         // Get OS info from WMI
-        let wmi_con = WMIConnection::new()?;
-        let os_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_OperatingSystem")?;
-        let comp_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT * FROM Win32_ComputerSystem")?;
-        
+        let wmi_con = WmiConnection::new()?;
+        let os_results = wmi_con.query("SELECT * FROM Win32_OperatingSystem")?;
+        let comp_results = wmi_con.query("SELECT * FROM Win32_ComputerSystem")?;
+
         let mut info = json!({});
-        
+
         // Add OS information
         if let Some(os) = os_results.first() {
             let mut os_info = json!({});
             for (key, value) in os {
-                os_info[key] = self.variant_to_json(value.clone());
+                os_info[key] = value.clone();
             }
-            
+
             // Parse Windows version details
-            if let Some(wmi::Variant::String(caption)) = os.get("Caption") {
+            if let Some(caption) = os.get("Caption").and_then(|v| v.as_str()) {
                 let windows_version = if caption.contains("Windows 11") {
                     "Windows 11"
                 } else if caption.contains("Windows 10") {
@@ -176,15 +144,15 @@ impl NativeDiagnostics {
                 };
                 os_info["windows_version"] = json!(windows_version);
             }
-            
+
             info["os_version"] = os_info;
         }
-        
+
         // Add Computer System information
         if let Some(comp) = comp_results.first() {
             let mut comp_info = json!({});
             for (key, value) in comp {
-                comp_info[key] = self.variant_to_json(value.clone());
+                comp_info[key] = value.clone();
             }
             info["computer_system"] = comp_info;
         }
@@ -230,19 +198,16 @@ impl NativeDiagnostics {
     }
 
     pub fn get_drivers(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new()?;
+        let wmi_con = WmiConnection::new()?;
         let mut drivers = Vec::new();
-        
+
         // Get PnP signed drivers (main source on modern Windows)
-        match wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+        match wmi_con.query(
             "SELECT Name, DeviceName, DriverVersion, DriverDate, DriverProviderName, DeviceClass, IsSigned FROM Win32_PnPSignedDriver"
         ) {
             Ok(pnp_results) => {
                 for result in pnp_results {
-                    let mut driver_info = serde_json::Map::new();
-                    for (key, value) in result {
-                        driver_info.insert(key, self.variant_to_json(value));
-                    }
+                    let driver_info: serde_json::Map<String, Value> = result.into_iter().collect();
                     drivers.push(Value::Object(driver_info));
                 }
             }
@@ -250,18 +215,15 @@ impl NativeDiagnostics {
                 eprintln!("Failed to query Win32_PnPSignedDriver: {}", e);
             }
         }
-        
+
         // Try to get legacy VxD drivers (might not exist on modern systems)
-        match wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+        match wmi_con.query(
             "SELECT Name, DriverVersion, DriverDate, DeviceName FROM Win32_DriverVXD"
         ) {
             Ok(vxd_results) => {
                 for result in vxd_results {
-                    let mut driver_info = serde_json::Map::new();
+                    let mut driver_info: serde_json::Map<String, Value> = result.into_iter().collect();
                     driver_info.insert("Type".to_string(), json!("VxD"));
-                    for (key, value) in result {
-                        driver_info.insert(key, self.variant_to_json(value));
-                    }
                     drivers.push(Value::Object(driver_info));
                 }
             }
@@ -269,31 +231,28 @@ impl NativeDiagnostics {
                 // VxD drivers not available on this system - this is normal for modern Windows
             }
         }
-        
+
         // If no drivers found, return error
         if drivers.is_empty() {
             return Err(anyhow::anyhow!("No drivers found or WMI query failed"));
         }
-        
+
         Ok(Value::Array(drivers))
     }
 
     pub fn get_event_logs(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new()?;
-        
+        let wmi_con = WmiConnection::new()?;
+
         let mut all_events = Vec::new();
-        
+
         // Query System events
-        match wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+        match wmi_con.query(
             "SELECT TimeGenerated, Type, SourceName, EventCode, Message FROM Win32_NTLogEvent WHERE Logfile='System' AND Type='Error'"
         ) {
             Ok(results) => {
                 for result in results.into_iter().take(50) {
-                    let mut event_info = serde_json::Map::new();
+                    let mut event_info: serde_json::Map<String, Value> = result.into_iter().collect();
                     event_info.insert("LogFile".to_string(), json!("System"));
-                    for (key, value) in result {
-                        event_info.insert(key, self.variant_to_json(value));
-                    }
                     all_events.push(Value::Object(event_info));
                 }
             }
@@ -301,18 +260,15 @@ impl NativeDiagnostics {
                 eprintln!("Failed to query System events: {}", e);
             }
         }
-        
+
         // Query Application events
-        match wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+        match wmi_con.query(
             "SELECT TimeGenerated, Type, SourceName, EventCode, Message FROM Win32_NTLogEvent WHERE Logfile='Application' AND Type='Error'"
         ) {
             Ok(results) => {
                 for result in results.into_iter().take(50) {
-                    let mut event_info = serde_json::Map::new();
+                    let mut event_info: serde_json::Map<String, Value> = result.into_iter().collect();
                     event_info.insert("LogFile".to_string(), json!("Application"));
-                    for (key, value) in result {
-                        event_info.insert(key, self.variant_to_json(value));
-                    }
                     all_events.push(Value::Object(event_info));
                 }
             }
@@ -320,7 +276,7 @@ impl NativeDiagnostics {
                 eprintln!("Failed to query Application events: {}", e);
             }
         }
-        
+
         Ok(Value::Array(all_events))
     }
 
@@ -369,12 +325,12 @@ impl NativeDiagnostics {
     }
     
     fn get_directx_info_via_wmi(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new()?;
+        let wmi_con = WmiConnection::new()?;
         let mut info = json!({
             "source": "WMI",
             "description": "DirectX information gathered from Windows Management Instrumentation"
         });
-        
+
         // Try to determine DirectX version from registry
         {
             let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
@@ -387,34 +343,28 @@ impl NativeDiagnostics {
                 }
             }
         }
-        
+
         // Get video controller info
-        if let Ok(video_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
-            "SELECT * FROM Win32_VideoController"
-        ) {
-            let mut video_info = Vec::new();
-            for result in video_results {
-                let mut controller = json!({});
-                for (key, value) in result {
-                    controller[key] = self.variant_to_json(value);
-                }
-                video_info.push(controller);
-            }
+        if let Ok(video_results) = wmi_con.query("SELECT * FROM Win32_VideoController") {
+            let video_info: Vec<Value> = video_results
+                .into_iter()
+                .map(|r| {
+                    let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                    Value::Object(obj)
+                })
+                .collect();
             info["video_controllers"] = json!(video_info);
         }
-        
+
         // Get sound device info
-        if let Ok(sound_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
-            "SELECT * FROM Win32_SoundDevice"
-        ) {
-            let mut sound_info = Vec::new();
-            for result in sound_results {
-                let mut device = json!({});
-                for (key, value) in result {
-                    device[key] = self.variant_to_json(value);
-                }
-                sound_info.push(device);
-            }
+        if let Ok(sound_results) = wmi_con.query("SELECT * FROM Win32_SoundDevice") {
+            let sound_info: Vec<Value> = sound_results
+                .into_iter()
+                .map(|r| {
+                    let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                    Value::Object(obj)
+                })
+                .collect();
             info["sound_devices"] = json!(sound_info);
         }
 
@@ -424,17 +374,17 @@ impl NativeDiagnostics {
     pub fn run_chkdsk(&self) -> Result<Value> {
         // First try to run chkdsk in read-only mode using secure execution
         let output = Self::execute_secure_command("chkdsk", &["C:"])?;
-        
+
         if output.status.success() {
             let output_str = String::from_utf8_lossy(&output.stdout);
-            
+
             // Parse chkdsk output
             let mut check_info = json!({
                 "raw_output": output_str.to_string(),
                 "status": "Unknown",
                 "errors_found": false
             });
-            
+
             // Check for common chkdsk responses
             if output_str.contains("Windows has scanned the file system and found no problems") {
                 check_info["status"] = json!("Healthy");
@@ -448,44 +398,38 @@ impl NativeDiagnostics {
                 check_info["status"] = json!("Scan Completed");
                 check_info["message"] = json!("Scan completed successfully");
             }
-            
+
             // Also get disk info from WMI
-            let wmi_con = WMIConnection::new()?;
-            if let Ok(results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
-                "SELECT * FROM Win32_DiskDrive"
-            ) {
-                let mut disk_info = Vec::new();
-                for result in results {
-                    let mut info = serde_json::Map::new();
-                    for (key, value) in result {
-                        info.insert(key, self.variant_to_json(value));
-                    }
-                    disk_info.push(Value::Object(info));
-                }
+            let wmi_con = WmiConnection::new()?;
+            if let Ok(results) = wmi_con.query("SELECT * FROM Win32_DiskDrive") {
+                let disk_info: Vec<Value> = results
+                    .into_iter()
+                    .map(|r| {
+                        let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                        Value::Object(obj)
+                    })
+                    .collect();
                 check_info["disk_drives"] = json!(disk_info);
             }
-            
+
             Ok(check_info)
         } else {
             let error_str = String::from_utf8_lossy(&output.stderr);
-            
+
             // Check if it's an elevation error
             if error_str.contains("requires elevated") || error_str.contains("Access is denied") {
                 // If we can't run chkdsk, at least get disk info
-                let wmi_con = WMIConnection::new()?;
-                let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(
-                    "SELECT * FROM Win32_DiskDrive"
-                )?;
-                
-                let mut disk_info = Vec::new();
-                for result in results {
-                    let mut info = serde_json::Map::new();
-                    for (key, value) in result {
-                        info.insert(key, self.variant_to_json(value));
-                    }
-                    disk_info.push(Value::Object(info));
-                }
-                
+                let wmi_con = WmiConnection::new()?;
+                let results = wmi_con.query("SELECT * FROM Win32_DiskDrive")?;
+
+                let disk_info: Vec<Value> = results
+                    .into_iter()
+                    .map(|r| {
+                        let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                        Value::Object(obj)
+                    })
+                    .collect();
+
                 Ok(json!({
                     "note": "Full chkdsk scan requires admin privileges. Showing disk status from WMI.",
                     "suggestion": "Run as administrator for full disk scan",
@@ -603,17 +547,14 @@ impl NativeDiagnostics {
 
     pub fn run_dsregcmd(&self) -> Result<Value> {
         // Check domain join status via WMI
-        let wmi_con = WMIConnection::new()?;
-        
-        let cs_results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(
+        let wmi_con = WmiConnection::new()?;
+
+        let cs_results = wmi_con.query(
             "SELECT Domain, DomainRole, PartOfDomain FROM Win32_ComputerSystem"
         )?;
-        
-        if let Some(result) = cs_results.first() {
-            let mut info = serde_json::Map::new();
-            for (key, value) in result {
-                info.insert(key.clone(), self.variant_to_json(value.clone()));
-            }
+
+        if let Some(result) = cs_results.into_iter().next() {
+            let info: serde_json::Map<String, Value> = result.into_iter().collect();
             Ok(Value::Object(info))
         } else {
             Ok(json!({
@@ -623,13 +564,13 @@ impl NativeDiagnostics {
     }
 
     pub fn get_disk_fragmentation(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new()?;
-        let disks: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query("SELECT Name FROM Win32_LogicalDisk WHERE DriveType=3")?;
-        
+        let wmi_con = WmiConnection::new()?;
+        let disks = wmi_con.query("SELECT Name FROM Win32_LogicalDisk WHERE DriveType=3")?;
+
         let mut fragmentation_results = Vec::new();
-        
+
         for disk in disks {
-            if let Some(wmi::Variant::String(drive_letter)) = disk.get("Name") {
+            if let Some(drive_letter) = disk.get("Name").and_then(|v| v.as_str()) {
                 let mut result_info = json!({
                     "drive": drive_letter,
                     "fragmentation_percent": null,
@@ -661,7 +602,7 @@ impl NativeDiagnostics {
                 fragmentation_results.push(result_info);
             }
         }
-        
+
         Ok(json!(fragmentation_results))
     }
 
@@ -678,20 +619,19 @@ impl NativeDiagnostics {
     }
 
     pub fn get_native_services(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new()?;
-        let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(
+        let wmi_con = WmiConnection::new()?;
+        let results = wmi_con.query(
             "SELECT Name, DisplayName, State, StartMode, PathName FROM Win32_Service"
         )?;
-        
-        let mut services = Vec::new();
-        for result in results {
-            let mut service_info = serde_json::Map::new();
-            for (key, value) in result {
-                service_info.insert(key, self.variant_to_json(value));
-            }
-            services.push(Value::Object(service_info));
-        }
-        
+
+        let services: Vec<Value> = results
+            .into_iter()
+            .map(|r| {
+                let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                Value::Object(obj)
+            })
+            .collect();
+
         Ok(Value::Array(services))
     }
 
@@ -1020,45 +960,39 @@ impl NativeDiagnostics {
     }
 
     pub fn get_performance_data(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new()?;
+        let wmi_con = WmiConnection::new()?;
         let mut perf_data = json!({});
-        
+
         // Get CPU performance data
-        if let Ok(cpu_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+        if let Ok(cpu_results) = wmi_con.query(
             "SELECT * FROM Win32_PerfFormattedData_PerfOS_Processor WHERE Name='_Total'"
-        )
-            && let Some(result) = cpu_results.first() {
-                let mut cpu_info = json!({});
-                for (key, value) in result {
-                    cpu_info[key] = self.variant_to_json(value.clone());
-                }
-                perf_data["cpu_performance"] = cpu_info;
+        ) {
+            if let Some(result) = cpu_results.into_iter().next() {
+                let cpu_info: serde_json::Map<String, Value> = result.into_iter().collect();
+                perf_data["cpu_performance"] = Value::Object(cpu_info);
             }
-        
+        }
+
         // Get memory performance data
-        if let Ok(mem_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+        if let Ok(mem_results) = wmi_con.query(
             "SELECT * FROM Win32_PerfFormattedData_PerfOS_Memory"
-        )
-            && let Some(result) = mem_results.first() {
-                let mut mem_info = json!({});
-                for (key, value) in result {
-                    mem_info[key] = self.variant_to_json(value.clone());
-                }
-                perf_data["memory_performance"] = mem_info;
+        ) {
+            if let Some(result) = mem_results.into_iter().next() {
+                let mem_info: serde_json::Map<String, Value> = result.into_iter().collect();
+                perf_data["memory_performance"] = Value::Object(mem_info);
             }
-        
+        }
+
         // Get disk performance data
-        if let Ok(disk_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
+        if let Ok(disk_results) = wmi_con.query(
             "SELECT * FROM Win32_PerfFormattedData_PerfDisk_PhysicalDisk WHERE Name='_Total'"
-        )
-            && let Some(result) = disk_results.first() {
-                let mut disk_info = json!({});
-                for (key, value) in result {
-                    disk_info[key] = self.variant_to_json(value.clone());
-                }
-                perf_data["disk_performance"] = disk_info;
+        ) {
+            if let Some(result) = disk_results.into_iter().next() {
+                let disk_info: serde_json::Map<String, Value> = result.into_iter().collect();
+                perf_data["disk_performance"] = Value::Object(disk_info);
             }
-        
+        }
+
         Ok(perf_data)
     }
 
@@ -1087,37 +1021,34 @@ impl NativeDiagnostics {
     }
 
     pub fn get_windows_update_history(&self) -> Result<Value> {
-        let wmi_con = WMIConnection::new()?;
+        let wmi_con = WmiConnection::new()?;
         let mut update_info = json!({});
-        
+
         // Get installed hotfixes
-        if let Ok(hotfix_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
-            "SELECT * FROM Win32_QuickFixEngineering"
-        ) {
-            let mut hotfixes = Vec::new();
-            for result in hotfix_results {
-                let mut hotfix = json!({});
-                for (key, value) in result {
-                    hotfix[key] = self.variant_to_json(value);
-                }
-                hotfixes.push(hotfix);
-            }
+        if let Ok(hotfix_results) = wmi_con.query("SELECT * FROM Win32_QuickFixEngineering") {
+            let hotfixes: Vec<Value> = hotfix_results
+                .into_iter()
+                .map(|r| {
+                    let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                    Value::Object(obj)
+                })
+                .collect();
             update_info["installed_updates"] = json!(hotfixes);
         }
-        
+
         // Try to get Windows Update history via PowerShell as fallback
         let executor = crate::security::SecureCommandExecutor::new();
         let ps_output = executor.execute_powershell_script(
             "Get-HotFix | Select-Object Description, HotFixID, InstalledOn, InstalledBy | ConvertTo-Json"
         )?;
-        
+
         if ps_output.status.success() {
             let json_str = String::from_utf8_lossy(&ps_output.stdout);
             if let Ok(value) = serde_json::from_str::<Value>(&json_str) {
                 update_info["hotfix_details"] = value;
             }
         }
-        
+
         Ok(update_info)
     }
 

@@ -28,7 +28,6 @@ import {
   ChevronDown20Regular,
   Search20Regular,
   Flash20Regular,
-  Bug20Regular,
   CheckmarkCircle20Regular
 } from '@fluentui/react-icons'
 
@@ -90,10 +89,6 @@ export interface CommandBarProps {
   // Status
   scanStatus?: 'idle' | 'scanning' | 'complete' | 'error'
   resultCount?: number
-
-  // Debug
-  debugMode?: boolean
-  onToggleDebug?: () => void
 }
 
 export const CommandBar: React.FC<CommandBarProps> = ({
@@ -111,8 +106,6 @@ export const CommandBar: React.FC<CommandBarProps> = ({
   onCompareScans,
   scanStatus = 'idle',
   resultCount = 0,
-  debugMode = false,
-  onToggleDebug
 }) => {
   const styles = useStyles()
 
@@ -295,19 +288,6 @@ export const CommandBar: React.FC<CommandBarProps> = ({
         </Menu>
 
         <ToolbarDivider />
-
-        {/* Debug Mode */}
-        {onToggleDebug && (
-          <Tooltip content="Toggle debug mode" relationship="description">
-            <ToolbarButton
-              appearance="subtle"
-              icon={<Bug20Regular />}
-              onClick={onToggleDebug}
-              aria-label="Toggle debug mode"
-              style={{ opacity: debugMode ? 1 : 0.6 }}
-            />
-          </Tooltip>
-        )}
 
         {/* Clear */}
         <Tooltip content="Clear results" relationship="description">

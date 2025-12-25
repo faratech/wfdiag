@@ -37,47 +37,6 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Custom scrollbar - Enterprise styling for Webkit browsers (Chrome, Edge, Safari) */
-::-webkit-scrollbar {
-  width: 12px !important;
-  height: 12px !important;
-}
-
-::-webkit-scrollbar-track {
-  background: rgba(26, 31, 46, 0.4) !important;
-  border-radius: 6px !important;
-  border: 1px solid rgba(99, 115, 255, 0.08) !important;
-  margin: 4px !important;
-}
-
-::-webkit-scrollbar-thumb {
-  background: rgba(99, 115, 255, 0.3) !important;
-  border-radius: 6px !important;
-  border: 1px solid rgba(99, 115, 255, 0.2) !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1) !important;
-  min-height: 40px !important;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(99, 115, 255, 0.5) !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15), 0 0 8px rgba(99, 115, 255, 0.3) !important;
-}
-
-::-webkit-scrollbar-thumb:active {
-  background: rgba(91, 110, 255, 0.6) !important;
-}
-
-/* Always show scrollbar corner */
-::-webkit-scrollbar-corner {
-  background: rgba(26, 31, 46, 0.4) !important;
-}
-
-/* Force scrollbar visibility globally */
-* {
-  scrollbar-width: auto;
-  scrollbar-color: rgba(99, 115, 255, 0.4) rgba(26, 31, 46, 0.4);
-}
-
 /* Prevent double scrollbars */
 html {
   overflow: hidden;
@@ -94,19 +53,6 @@ body {
 #root {
   height: 100vh;
   overflow: hidden;
-}
-
-/* Only main content should scroll */
-main {
-  scrollbar-width: auto;
-  scrollbar-color: rgba(99, 115, 255, 0.4) rgba(26, 31, 46, 0.4);
-}
-
-.scrollable-container {
-  overflow-y: auto;
-  overflow-x: hidden;
-  scrollbar-width: auto;
-  scrollbar-color: rgba(99, 115, 255, 0.4) rgba(26, 31, 46, 0.4);
 }
 
 /* Glass morphism effect */
@@ -165,175 +111,6 @@ main {
     transform: scale(1);
     opacity: 1;
   }
-}
-
-/* Tab styles */
-.custom-tab {
-  position: relative;
-  padding: 12px 24px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  transition: all 0.3s ease;
-}
-
-.custom-tab:hover {
-  color: var(--text-primary);
-}
-
-.custom-tab.active {
-  color: var(--primary-color);
-}
-
-.custom-tab.active::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: var(--primary-color);
-  border-radius: 2px;
-  animation: slideIn 0.3s ease;
-}
-
-@keyframes slideIn {
-  from {
-    transform: scaleX(0);
-  }
-  to {
-    transform: scaleX(1);
-  }
-}
-
-/* Button styles */
-.modern-button {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 20px;
-  border-radius: 8px;
-  font-weight: 600;
-  border: 1px solid transparent;
-  cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-  overflow: hidden;
-}
-
-.modern-button::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
-  transition: left 0.5s;
-}
-
-.modern-button:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-}
-
-.modern-button:hover::before {
-  left: 100%;
-}
-
-.modern-button.primary {
-  background: linear-gradient(135deg, var(--primary-color) 0%, var(--gradient-mid) 100%);
-  border: 1px solid rgba(107, 127, 255, 0.2);
-  color: white;
-  box-shadow:
-    0 0 0 1px rgba(107, 127, 255, 0.1),
-    0 2px 8px rgba(91, 110, 255, 0.25),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1);
-}
-
-.modern-button.primary:hover {
-  background: linear-gradient(135deg, var(--primary-hover) 0%, var(--gradient-end) 100%);
-  box-shadow:
-    0 0 0 1px rgba(107, 127, 255, 0.15),
-    0 4px 16px rgba(91, 110, 255, 0.4),
-    inset 0 1px 0 rgba(255, 255, 255, 0.15);
-}
-
-.modern-button.success {
-  background: linear-gradient(135deg, var(--success-color) 0%, #14e0a3 100%);
-  border: 1px solid rgba(16, 185, 129, 0.2);
-  color: white;
-  box-shadow:
-    0 0 0 1px rgba(16, 185, 129, 0.1),
-    0 2px 8px rgba(16, 185, 129, 0.25),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1);
-}
-
-.modern-button.warning {
-  background: linear-gradient(135deg, var(--warning-color) 0%, #fbbf24 100%);
-  border: 1px solid rgba(245, 158, 11, 0.2);
-  color: white;
-  box-shadow:
-    0 0 0 1px rgba(245, 158, 11, 0.1),
-    0 2px 8px rgba(245, 158, 11, 0.25),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1);
-}
-
-.modern-button.danger {
-  background: linear-gradient(135deg, var(--danger-color) 0%, #f87171 100%);
-  border: 1px solid rgba(239, 68, 68, 0.2);
-  color: white;
-  box-shadow:
-    0 0 0 1px rgba(239, 68, 68, 0.1),
-    0 2px 8px rgba(239, 68, 68, 0.25),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1);
-}
-
-/* Progress bar styles */
-.modern-progress {
-  position: relative;
-  height: 10px;
-  background: var(--card-bg);
-  border-radius: 8px;
-  overflow: hidden;
-  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
-  border: 1px solid rgba(99, 115, 255, 0.08);
-}
-
-.modern-progress-bar {
-  position: relative;
-  height: 100%;
-  background: linear-gradient(90deg, var(--gradient-start) 0%, var(--gradient-mid) 50%, var(--gradient-end) 100%);
-  border-radius: 8px;
-  transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-  box-shadow:
-    0 0 16px rgba(91, 110, 255, 0.5),
-    inset 0 1px 0 rgba(255, 255, 255, 0.2);
-}
-
-.modern-progress-bar::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 50%;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.2) 0%, transparent 100%);
-  border-radius: 8px 8px 0 0;
-}
-
-.modern-progress-bar::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.3) 50%, transparent 100%);
-  animation: shimmer 2s ease-in-out infinite;
 }
 
 /* Status badges */
@@ -720,4 +497,118 @@ main {
   line-height: 1.6;
   max-width: 400px;
   margin: 0 auto;
+}
+
+/* Light mode adaptations for glass effects */
+@media (prefers-color-scheme: light) {
+  :root {
+    --dark-bg: #FAFBFF;
+    --card-bg: #FFFFFF;
+    --card-elevated: #F5F7FA;
+    --card-hover: #EEF1F5;
+    --text-primary: #1A1F2E;
+    --text-secondary: #2D3342;
+    --text-muted: #6B7280;
+    --border-color: rgba(91, 110, 255, 0.15);
+  }
+
+  .glass-card {
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.95), rgba(245, 247, 250, 0.90));
+    border: 1px solid rgba(91, 110, 255, 0.12);
+    box-shadow:
+      0 0 0 1px rgba(91, 110, 255, 0.05),
+      0 2px 8px rgba(0, 0, 0, 0.06),
+      0 4px 16px rgba(0, 0, 0, 0.04),
+      inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  }
+
+  .glass-card:hover {
+    border: 1px solid rgba(91, 110, 255, 0.20);
+    box-shadow:
+      0 0 0 1px rgba(91, 110, 255, 0.10),
+      0 4px 12px rgba(0, 0, 0, 0.08),
+      0 8px 24px rgba(0, 0, 0, 0.06),
+      inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  }
+
+  .category-card {
+    background: linear-gradient(145deg, #FFFFFF, rgba(245, 247, 250, 0.8));
+  }
+
+  .category-card:hover {
+    background: linear-gradient(145deg, #F5F7FA, rgba(238, 241, 245, 0.9));
+  }
+
+  .status-badge.success {
+    background: rgba(16, 185, 129, 0.12);
+    color: #059669;
+    border: 1px solid rgba(16, 185, 129, 0.20);
+  }
+
+  .status-badge.warning {
+    background: rgba(245, 158, 11, 0.12);
+    color: #D97706;
+    border: 1px solid rgba(245, 158, 11, 0.20);
+  }
+
+  .status-badge.danger {
+    background: rgba(239, 68, 68, 0.12);
+    color: #DC2626;
+    border: 1px solid rgba(239, 68, 68, 0.20);
+  }
+
+  .status-badge.info {
+    background: rgba(59, 130, 246, 0.12);
+    color: #2563EB;
+    border: 1px solid rgba(59, 130, 246, 0.20);
+  }
+
+  .result-section {
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.8), rgba(245, 247, 250, 0.7));
+  }
+
+  .result-section:hover {
+    background: linear-gradient(135deg, rgba(245, 247, 250, 0.9), rgba(238, 241, 245, 0.8));
+  }
+
+  .collapsible-header {
+    background: linear-gradient(135deg, rgba(91, 110, 255, 0.06), rgba(107, 127, 255, 0.10));
+  }
+
+  .collapsible-header:hover {
+    background: linear-gradient(135deg, rgba(91, 110, 255, 0.10), rgba(107, 127, 255, 0.14));
+  }
+
+  .collapsible-content {
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.6), rgba(245, 247, 250, 0.5));
+  }
+
+  .info-box {
+    background: linear-gradient(135deg, rgba(91, 110, 255, 0.06), rgba(107, 127, 255, 0.10));
+    border: 1px solid rgba(91, 110, 255, 0.15);
+  }
+}
+
+/* Accessibility: Respect reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .icon-spin,
+  .icon-pulse,
+  .scan-animation::before {
+    animation: none;
+  }
+
+  .glass-card:hover,
+  .category-card:hover,
+  .result-section:hover {
+    transform: none;
+  }
 }

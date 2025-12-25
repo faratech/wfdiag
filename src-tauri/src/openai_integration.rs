@@ -33,16 +33,12 @@ const PHI_SILICA_MODEL: &str = "phi-silica";  // Model name used by WindowsCopil
 
 /// Check if Phi Silica (WindowsCopilotRuntimeServer) is available
 async fn check_phi_silica_available() -> bool {
-    // Try to connect to the local Phi Silica server
-    match reqwest::Client::new()
-        .get(format!("{}/models", PHI_SILICA_BASE_URL))
-        .timeout(std::time::Duration::from_secs(2))
-        .send()
-        .await
-    {
-        Ok(response) => response.status().is_success(),
-        Err(_) => false,
-    }
+    // Try to connect to the local Phi Silica server via TCP
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let addr = "127.0.0.1:5001";
+    TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_secs(2)).is_ok()
 }
 
 /// Response for AI provider availability check

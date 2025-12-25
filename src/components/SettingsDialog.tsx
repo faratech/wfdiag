@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import {
   Dialog,
   DialogTrigger,
@@ -19,8 +20,7 @@ import {
   Divider,
   RadioGroup,
   Radio,
-  SpinButton,
-  Checkbox
+  SpinButton
 } from '@fluentui/react-components'
 import {
   Settings20Regular,
@@ -82,7 +82,6 @@ export interface SettingsData {
   exportFormat?: 'json' | 'text' | 'html'
   theme?: 'dark' | 'light' | 'auto'
   showNotifications?: boolean
-  debugMode?: boolean
   customExportPath?: string
   retainHistory?: boolean
   historyLimit?: number
@@ -111,7 +110,6 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
     exportFormat: 'text',
     theme: 'dark',
     showNotifications: true,
-    debugMode: false,
     retainHistory: true,
     historyLimit: 30,
     ...initialSettings
@@ -221,12 +219,34 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
               label="Custom Export Path"
               hint="Leave empty to use default Downloads folder"
             >
-              <Input
-                value={settings.customExportPath || ''}
-                onChange={(_, data) => updateSetting('customExportPath', data.value)}
-                placeholder="C:\Users\...\Documents"
-                contentBefore={<Folder20Regular />}
-              />
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <Input
+                  style={{ flex: 1 }}
+                  value={settings.customExportPath || ''}
+                  onChange={(_, data) => updateSetting('customExportPath', data.value)}
+                  placeholder="C:\Users\...\Documents"
+                  contentBefore={<Folder20Regular />}
+                />
+                <Button
+                  appearance="secondary"
+                  onClick={async () => {
+                    try {
+                      const selected = await openDialog({
+                        directory: true,
+                        multiple: false,
+                        title: 'Select Export Folder'
+                      })
+                      if (selected && typeof selected === 'string') {
+                        updateSetting('customExportPath', selected)
+                      }
+                    } catch (error) {
+                      console.error('Failed to open folder picker:', error)
+                    }
+                  }}
+                >
+                  Browse
+                </Button>
+              </div>
             </Field>
           </div>
 
@@ -296,21 +316,6 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
             )}
           </div>
 
-          <Divider />
-
-          {/* Advanced */}
-          <div className={styles.section}>
-            <Label className={styles.sectionTitle}>Advanced</Label>
-
-            <Checkbox
-              checked={settings.debugMode}
-              onChange={(_, data) => updateSetting('debugMode', data.checked === true)}
-              label="Enable Debug Mode"
-            />
-            <Caption1 className={styles.hint} style={{ marginLeft: '28px', marginTop: '-8px' }}>
-              Shows additional diagnostic information and verbose logging
-            </Caption1>
-          </div>
         </DialogContent>
         <DialogActions>
           <DialogTrigger disableButtonEnhancement>
