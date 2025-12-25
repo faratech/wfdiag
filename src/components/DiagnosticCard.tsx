@@ -361,24 +361,237 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
     )
   }
 
+  const renderProcessorSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return null
+    const cpu = data[0]
+    return (
+      <div className={styles.summaryGrid}>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Name</span>
+          <span className={styles.summaryValue}>{cpu.Name}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Cores</span>
+          <span className={styles.summaryValue}>{cpu.NumberOfCores}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Logical Processors</span>
+          <span className={styles.summaryValue}>{cpu.NumberOfLogicalProcessors}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Clock Speed</span>
+          <span className={styles.summaryValue}>{cpu.MaxClockSpeed ? `${(cpu.MaxClockSpeed / 1000).toFixed(2)} GHz` : 'N/A'}</span>
+        </div>
+      </div>
+    )
+  }
+
+  const renderMemorySummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return null
+    
+    // Calculate total capacity
+    let totalCapacity = 0
+    data.forEach((dimm: any) => {
+      if (dimm.Capacity) {
+        totalCapacity += parseInt(dimm.Capacity)
+      }
+    })
+    
+    return (
+      <div className={styles.summaryContainer}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalL, marginBottom: tokens.spacingVerticalM }}>
+          <div style={{ textAlign: 'center' }}>
+            <Text size={600} block weight="bold">{(totalCapacity / 1024 / 1024 / 1024).toFixed(0)} GB</Text>
+            <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>Total RAM</Text>
+          </div>
+          <div style={{ flex: 1 }}>
+            <Text block weight="semibold" style={{ marginBottom: tokens.spacingVerticalS }}>Installed Modules</Text>
+            {data.map((dimm: any, i: number) => (
+              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', borderBottom: `1px solid ${tokens.colorNeutralStroke2}`, padding: tokens.spacingVerticalXS }}>
+                <Text>{dimm.Manufacturer || 'Unknown'} {dimm.PartNumber}</Text>
+                <Text>{(parseInt(dimm.Capacity) / 1024 / 1024 / 1024).toFixed(0)} GB @ {dimm.Speed} MHz</Text>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const renderGraphicsSummary = (data: any) => {
+    if (!data?.video_controllers) return null
+    
+    return (
+      <div className={styles.summaryContainer}>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>DirectX Version</span>
+          <span className={styles.summaryValue}>{data.directx_version || 'Unknown'}</span>
+        </div>
+        
+        {Array.isArray(data.video_controllers) && data.video_controllers.map((gpu: any, i: number) => (
+          <div key={i} style={{ padding: tokens.spacingHorizontalS, borderLeft: `2px solid ${tokens.colorBrandStroke1}`, backgroundColor: tokens.colorNeutralBackgroundAlpha }}>
+            <Text weight="semibold" block>{gpu.Name}</Text>
+            <div className={styles.summaryGrid} style={{ marginTop: tokens.spacingVerticalS }}>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>Driver Version</span>
+                <span className={styles.summaryValue}>{gpu.DriverVersion}</span>
+              </div>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>VRAM</span>
+                <span className={styles.summaryValue}>{gpu.AdapterRAM ? `${(parseInt(gpu.AdapterRAM) / 1024 / 1024 / 1024).toFixed(1)} GB` : 'N/A'}</span>
+              </div>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>Resolution</span>
+                <span className={styles.summaryValue}>{gpu.CurrentHorizontalResolution}x{gpu.CurrentVerticalResolution} @ {gpu.CurrentRefreshRate}Hz</span>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  const renderEventLogSummary = (data: any) => {
+    if (!Array.isArray(data)) return null
+    
+    // Count errors by source
+    const errorsBySource: Record<string, number> = {}
+    data.forEach((event: any) => {
+      const source = event.SourceName || 'Unknown'
+      errorsBySource[source] = (errorsBySource[source] || 0) + 1
+    })
+    
+    const topSources = Object.entries(errorsBySource)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 5)
+      
+    return (
+      <div className={styles.summaryContainer}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalM }}>
+          <Badge appearance="filled" color="danger">{data.length}</Badge>
+          <Text weight="semibold">Recent Critical/Error Events</Text>
+        </div>
+        
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 100px', gap: tokens.spacingHorizontalM, marginTop: tokens.spacingVerticalS }}>
+          <Text weight="semibold" style={{ color: tokens.colorNeutralForeground3 }}>Source</Text>
+          <Text weight="semibold" style={{ color: tokens.colorNeutralForeground3 }}>Count</Text>
+          
+          {topSources.map(([source, count], i) => (
+            <React.Fragment key={i}>
+              <Text>{source}</Text>
+              <Text>{count}</Text>
+            </React.Fragment>
+          ))}
+        </div>
+        
+        <Text size={200} style={{ color: tokens.colorNeutralForeground3, marginTop: tokens.spacingVerticalS }}>
+          Review raw data for specific event IDs and messages.
+        </Text>
+      </div>
+    )
+  }
+
+  const renderServicesSummary = (data: any) => {
+    if (!Array.isArray(data)) return null
+    
+    const running = data.filter((s: any) => s.State === 'Running').length
+    const stopped = data.filter((s: any) => s.State === 'Stopped').length
+    
+    // Find stopped services that are set to auto start
+    const stoppedAuto = data.filter((s: any) => s.State === 'Stopped' && s.StartMode === 'Auto').slice(0, 5)
+    
+    return (
+      <div className={styles.summaryContainer}>
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Running</span>
+            <span className={styles.summaryValue} style={{ color: tokens.colorPaletteGreenForeground1 }}>{running}</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Stopped</span>
+            <span className={styles.summaryValue} style={{ color: tokens.colorNeutralForeground3 }}>{stopped}</span>
+          </div>
+        </div>
+        
+        {stoppedAuto.length > 0 && (
+          <div style={{ marginTop: tokens.spacingVerticalM }}>
+            <Text weight="semibold" style={{ color: tokens.colorPaletteYellowForeground1 }}>Warning: Stopped Automatic Services</Text>
+            <ul style={{ marginTop: tokens.spacingVerticalXS, paddingLeft: tokens.spacingHorizontalL }}>
+              {stoppedAuto.map((s: any, i: number) => (
+                <li key={i}><Text>{s.DisplayName || s.Name}</Text></li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const renderWindowsUpdateSummary = (data: any) => {
+    if (!data?.installed_updates && !data?.hotfix_details) return null
+    
+    const updates = data.installed_updates || (Array.isArray(data.hotfix_details) ? data.hotfix_details : [data.hotfix_details])
+    if (!Array.isArray(updates)) return null
+    
+    const recent = updates.slice(0, 5)
+    
+    return (
+      <div className={styles.summaryContainer}>
+        <Text weight="semibold">Most Recent Updates</Text>
+        {recent.map((update: any, i: number) => (
+          <div key={i} className={styles.summaryItem} style={{ borderBottom: `1px solid ${tokens.colorNeutralStroke2}`, paddingBottom: tokens.spacingVerticalXS }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span className={styles.summaryValue}>{update.HotFixID}</span>
+              <span className={styles.summaryLabel}>{update.InstalledOn}</span>
+            </div>
+            <span className={styles.summaryLabel}>{update.Description}</span>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  const renderProcessesSummary = (data: any) => {
+    if (!Array.isArray(data)) return null
+    
+    const topMemory = [...data].sort((a, b) => parseInt(b.WorkingSetSize || 0) - parseInt(a.WorkingSetSize || 0)).slice(0, 5)
+    
+    return (
+      <div className={styles.summaryContainer}>
+        <Text weight="semibold">Top Memory Consumers</Text>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 100px', gap: tokens.spacingHorizontalM }}>
+          {topMemory.map((proc: any, i: number) => (
+            <React.Fragment key={i}>
+              <Text>{proc.Name}</Text>
+              <Text>{proc.WorkingSetSize ? `${(parseInt(proc.WorkingSetSize) / 1024 / 1024).toFixed(0)} MB` : 'N/A'}</Text>
+            </React.Fragment>
+          ))}
+        </div>
+        <div style={{ marginTop: tokens.spacingVerticalM }}>
+           <Text>Total Processes: {data.length}</Text>
+        </div>
+      </div>
+    )
+  }
+
   const renderSummary = () => {
     if (!parsedData) return <Text>No data available.</Text>
 
-    if (title.includes('Logical Disks') || category === 'Storage') {
-      return renderDiskSummary(parsedData)
-    }
-    if (title.includes('Battery') && parsedData.battery_summary) {
-      return renderBatterySummary(parsedData)
-    }
-    if (title.includes('System Information') && parsedData.os_version) {
-      return renderSystemInfoSummary(parsedData)
-    }
-    if (title.includes('Network') || title.includes('IP Configuration')) {
-      return renderNetworkSummary(parsedData)
-    }
+    // Match by exact task ID or title content
+    if (title.includes('Logical Disks') || category === 'Storage') return renderDiskSummary(parsedData)
+    if (title.includes('Battery') && parsedData.battery_summary) return renderBatterySummary(parsedData)
+    if (title.includes('System Information') && parsedData.os_version) return renderSystemInfoSummary(parsedData)
+    if (title.includes('Network') || title.includes('IP Configuration')) return renderNetworkSummary(parsedData)
+    if (title.includes('Processor')) return renderProcessorSummary(parsedData)
+    if (title.includes('Physical Memory')) return renderMemorySummary(parsedData)
+    if (title.includes('DirectX') || title.includes('Graphics')) return renderGraphicsSummary(parsedData)
+    if (title.includes('Event Logs')) return renderEventLogSummary(parsedData)
+    if (title.includes('Services')) return renderServicesSummary(parsedData)
+    if (title.includes('Windows Update')) return renderWindowsUpdateSummary(parsedData)
+    if (title.includes('Running Processes')) return renderProcessesSummary(parsedData)
     
     // Default fallback for simple objects (key-value pairs)
-    if (typeof parsedData === 'object' && !Array.isArray(parsedData) && Object.keys(parsedData).length < 8) {
+    if (typeof parsedData === 'object' && !Array.isArray(parsedData) && Object.keys(parsedData).length < 15) {
        return (
          <div className={styles.summaryGrid}>
            {Object.entries(parsedData).map(([k, v]) => {
@@ -409,7 +622,11 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
 
     if (typeof data === 'boolean') {
       return (
-        <Badge appearance="tint" color={data ? 'success' : 'subtle'} size="small">
+        <Badge
+          appearance="tint"
+          color={data ? 'success' : 'subtle'}
+          size="small"
+        >
           {data ? 'True' : 'False'}
         </Badge>
       )
