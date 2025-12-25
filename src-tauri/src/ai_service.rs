@@ -215,9 +215,11 @@ fn generate_cache_key(request: &AIRequest, session_id: &str) -> String {
 }
 
 /// Analyze with the appropriate provider
+/// If api_key is provided, it will be used for OpenAI calls directly
 pub async fn analyze(
     request: AIRequest,
     session_id: &str,
+    api_key: Option<String>,
 ) -> Result<AIResponse, String> {
     // Check cache first
     let cache_key = generate_cache_key(&request, session_id);
@@ -225,16 +227,32 @@ pub async fn analyze(
         if let Some(cached) = cache.get(&cache_key) {
             return Ok(AIResponse {
                 interpretation: cached.clone(),
-                provider_used: AIProvider::None, // Will be filled by caller
+                provider_used: AIProvider::OpenAI, // Assume OpenAI for cached results
                 cached: true,
                 error: None,
             });
         }
     }
 
-    // Determine provider
+    // Determine provider - if api_key is provided, we can use OpenAI
     let pref = get_user_preference();
-    let provider = determine_active_provider(pref).await;
+    let provider = if api_key.is_some() {
+        // If API key is provided from frontend, use OpenAI
+        match pref {
+            AIProviderPreference::PhiSilica => {
+                // User prefers Phi Silica, check if available
+                let (phi_available, _, _) = check_phi_silica_available();
+                if phi_available {
+                    AIProvider::PhiSilica
+                } else {
+                    AIProvider::OpenAI
+                }
+            }
+            _ => AIProvider::OpenAI, // Use OpenAI with provided key
+        }
+    } else {
+        determine_active_provider(pref).await
+    };
 
     // Generate prompt based on context type
     let prompt = match request.context_type {
@@ -264,13 +282,13 @@ pub async fn analyze(
     // Call the appropriate provider
     let result = match provider {
         AIProvider::OpenAI => {
-            analyze_with_openai(&prompt).await
+            analyze_with_openai(&prompt, api_key).await
         }
         AIProvider::PhiSilica => {
             analyze_with_phi_silica(&prompt).await
         }
         AIProvider::None => {
-            Err("No AI provider available. Configure OpenAI API key or use a Copilot+ PC.".to_string())
+            Err("No AI provider available. Configure OpenAI API key in Settings or use a Copilot+ PC.".to_string())
         }
     };
 
@@ -290,7 +308,8 @@ pub async fn analyze(
 }
 
 /// Analyze using OpenAI
-async fn analyze_with_openai(prompt: &str) -> Result<String, String> {
+/// If api_key is provided, uses it directly; otherwise loads from DPAPI storage
+async fn analyze_with_openai(prompt: &str, api_key: Option<String>) -> Result<String, String> {
     use async_openai::{
         types::{
             ChatCompletionRequestSystemMessageArgs,
@@ -301,9 +320,13 @@ async fn analyze_with_openai(prompt: &str) -> Result<String, String> {
         config::OpenAIConfig,
     };
 
-    let api_key = crate::load_api_key_internal()
-        .await
-        .ok_or("OpenAI API key not configured")?;
+    // Use provided key or load from storage
+    let api_key = match api_key {
+        Some(key) if !key.is_empty() => key,
+        _ => crate::load_api_key_internal()
+            .await
+            .ok_or("OpenAI API key not configured. Please enter your API key in Settings.")?,
+    };
 
     let config = OpenAIConfig::new().with_api_key(api_key);
     let client = Client::with_config(config);
@@ -373,6 +396,7 @@ pub async fn ai_analyze_diagnostic(
     task_name: String,
     diagnostic_output: String,
     session_id: String,
+    api_key: Option<String>,
 ) -> Result<AIResponse, String> {
     let request = AIRequest {
         context_type: ContextType::DiagnosticInterpretation,
@@ -382,7 +406,7 @@ pub async fn ai_analyze_diagnostic(
         section_name: None,
     };
 
-    analyze(request, &session_id).await
+    analyze(request, &session_id, api_key).await
 }
 
 /// Analyze a section (Hardware, System, Storage, Network)
@@ -391,6 +415,7 @@ pub async fn ai_analyze_section(
     section_name: String,
     section_data: String,
     session_id: String,
+    api_key: Option<String>,
 ) -> Result<AIResponse, String> {
     let request = AIRequest {
         context_type: ContextType::SectionSummary,
@@ -400,7 +425,7 @@ pub async fn ai_analyze_section(
         section_name: Some(section_name),
     };
 
-    analyze(request, &session_id).await
+    analyze(request, &session_id, api_key).await
 }
 
 /// Explain health scores
@@ -408,6 +433,7 @@ pub async fn ai_analyze_section(
 pub async fn ai_explain_health(
     metrics_data: String,
     session_id: String,
+    api_key: Option<String>,
 ) -> Result<AIResponse, String> {
     let request = AIRequest {
         context_type: ContextType::HealthScoreExplanation,
@@ -417,7 +443,7 @@ pub async fn ai_explain_health(
         section_name: None,
     };
 
-    analyze(request, &session_id).await
+    analyze(request, &session_id, api_key).await
 }
 
 /// Set AI provider preference

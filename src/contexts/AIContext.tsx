@@ -92,9 +92,13 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   const aiEnabled = settings.aiEnabled ?? true
   const preferredProvider: AIProviderPreference = (settings.preferredAIProvider as AIProviderPreference) ?? 'auto'
 
-  // Derived state
-  const isAIAvailable = aiStatus?.active_provider !== 'none'
-  const activeProvider = aiStatus?.active_provider ?? 'none'
+  // Derived state - AI is available if backend reports provider OR if we have an API key
+  const backendAvailable = aiStatus?.active_provider !== 'none'
+  const hasSettingsApiKey = !!settings.openAiApiKey
+  const isAIAvailable = backendAvailable || hasSettingsApiKey
+  const activeProvider: AIProvider = backendAvailable
+    ? (aiStatus?.active_provider ?? 'none')
+    : (hasSettingsApiKey ? 'openai' : 'none')
 
   // Load AI status
   const refreshStatus = useCallback(async () => {
@@ -162,13 +166,17 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     console.warn('setPreferredProvider is deprecated - use Settings dialog to change AI settings')
   }, [])
 
+  // Check if we have an API key from settings
+  const hasApiKey = !!settings.openAiApiKey
+
   // Analysis functions
   const analyzeDiagnostic = useCallback(async (
     taskId: string,
     taskName: string,
     output: string
   ): Promise<string> => {
-    if (!aiEnabled || !isAIAvailable) {
+    // Allow if AI is enabled and either backend says available OR we have an API key
+    if (!aiEnabled || (!isAIAvailable && !hasApiKey)) {
       return ''
     }
 
@@ -190,7 +198,8 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         taskId,
         taskName,
         diagnosticOutput: output,
-        sessionId
+        sessionId,
+        apiKey: settings.openAiApiKey || null
       })
 
       const interpretation = response.interpretation
@@ -203,13 +212,13 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     } finally {
       setIsAnalyzing(prev => ({ ...prev, [cacheKey]: false }))
     }
-  }, [aiEnabled, isAIAvailable, interpretations, sessionId])
+  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey])
 
   const analyzeSection = useCallback(async (
     sectionName: string,
     sectionData: string
   ): Promise<string> => {
-    if (!aiEnabled || !isAIAvailable) {
+    if (!aiEnabled || (!isAIAvailable && !hasApiKey)) {
       return ''
     }
 
@@ -228,7 +237,8 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       const response = await invoke<AIResponse>('ai_analyze_section', {
         sectionName,
         sectionData,
-        sessionId
+        sessionId,
+        apiKey: settings.openAiApiKey || null
       })
 
       const interpretation = response.interpretation
@@ -241,10 +251,10 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     } finally {
       setIsAnalyzing(prev => ({ ...prev, [cacheKey]: false }))
     }
-  }, [aiEnabled, isAIAvailable, interpretations, sessionId])
+  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey])
 
   const explainHealth = useCallback(async (metricsData: string): Promise<string> => {
-    if (!aiEnabled || !isAIAvailable) {
+    if (!aiEnabled || (!isAIAvailable && !hasApiKey)) {
       return ''
     }
 
@@ -262,7 +272,8 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     try {
       const response = await invoke<AIResponse>('ai_explain_health', {
         metricsData,
-        sessionId
+        sessionId,
+        apiKey: settings.openAiApiKey || null
       })
 
       const interpretation = response.interpretation
@@ -275,7 +286,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     } finally {
       setIsAnalyzing(prev => ({ ...prev, [cacheKey]: false }))
     }
-  }, [aiEnabled, isAIAvailable, interpretations, sessionId])
+  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey])
 
   // Cache management
   const clearCache = useCallback(async (targetSessionId?: string) => {
