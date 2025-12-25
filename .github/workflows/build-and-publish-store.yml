@@ -357,69 +357,22 @@ jobs:
           name: msixbundle-unsigned
           path: bundle
 
-      - name: Find bundle file
-        id: find-bundle
-        shell: pwsh
-        run: |
-          $bundle = Get-ChildItem "bundle/*.msixbundle" | Select-Object -First 1
-          Write-Host "Found bundle: $($bundle.FullName)"
-          echo "bundle_file=$($bundle.FullName)" >> $env:GITHUB_OUTPUT
-          echo "bundle_name=$($bundle.Name)" >> $env:GITHUB_OUTPUT
-
-      - name: Upload bundle to Azure Blob Storage
-        id: upload-blob
-        shell: pwsh
-        env:
-          AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
-        run: |
-          # Install Azure CLI module if needed
-          az storage blob upload `
-            --container-name packages `
-            --file "${{ steps.find-bundle.outputs.bundle_file }}" `
-            --name "${{ steps.find-bundle.outputs.bundle_name }}" `
-            --overwrite
-
-          # Generate SAS URL valid for 1 hour
-          $expiry = (Get-Date).AddHours(1).ToString("yyyy-MM-ddTHH:mm:ssZ")
-          $sasUrl = az storage blob generate-sas `
-            --container-name packages `
-            --name "${{ steps.find-bundle.outputs.bundle_name }}" `
-            --permissions r `
-            --expiry $expiry `
-            --full-uri `
-            --output tsv
-
-          echo "package_url=$sasUrl" >> $env:GITHUB_OUTPUT
-          Write-Host "Package uploaded to Azure Blob Storage"
+      - name: Setup Microsoft Store CLI
+        uses: microsoft/setup-msstore-cli@v1
 
       - name: Configure Store credentials
-        uses: microsoft/store-submission@v1
-        with:
-          command: configure
-          type: win32
-          seller-id: ${{ secrets.STORE_SELLER_ID }}
-          product-id: ${{ secrets.STORE_PRODUCT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-
-      - name: Update submission with package
-        uses: microsoft/store-submission@v1
-        with:
-          command: update
-          product-update: |
-            {
-              "packages": [{
-                "packageUrl": "${{ steps.upload-blob.outputs.package_url }}",
-                "languages": ["en"],
-                "architectures": ["X64", "Arm64"]
-              }]
-            }
+        shell: pwsh
+        run: |
+          msstore reconfigure `
+            --tenantId ${{ secrets.AZURE_TENANT_ID }} `
+            --sellerId ${{ secrets.STORE_SELLER_ID }} `
+            --clientId ${{ secrets.AZURE_CLIENT_ID }} `
+            --clientSecret ${{ secrets.AZURE_CLIENT_SECRET }}
 
       - name: Publish to Microsoft Store
-        uses: microsoft/store-submission@v1
-        with:
-          command: publish
+        shell: pwsh
+        run: |
+          msstore publish -i bundle -id 9NJ59RH053PV -v
 
   # =============================================================================
   # Generate Attestations for all artifacts
