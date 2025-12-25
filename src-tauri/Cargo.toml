@@ -9,6 +9,10 @@ edition = "2024"
 name = "wfdiag_tauri"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "debug_diagnostics"
+path = "src/bin/debug_diagnostics.rs"
+
 [build-dependencies]
 tauri-build = { version = "2.5", features = [] }
 
@@ -46,6 +50,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Threading",
     "Win32_System_SystemInformation",
     "Win32_System_Performance",
+    "Win32_System_TaskScheduler",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Storage_FileSystem",
@@ -61,7 +66,9 @@ windows = { version = "0.62", features = [
     "Win32_System_Variant",
     "Win32_System_Wmi",
     "Foundation",
+    "Foundation_Collections",
     "ApplicationModel",
+    "Management_Deployment",
 ] }
 
 [features]

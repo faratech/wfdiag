@@ -90,6 +90,11 @@ interface AppContextType {
   setGlobalSearchQuery: (query: string) => void
   globalSearchResults: SearchResult[]
   performGlobalSearch: (query: string) => void
+  // Search highlight state
+  highlightedTaskId: string | null
+  setHighlightedTaskId: (id: string | null) => void
+  searchHighlight: string
+  setSearchHighlight: (text: string) => void
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined)
@@ -158,6 +163,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   // Global search state
   const [globalSearchQuery, setGlobalSearchQuery] = useState('')
   const [globalSearchResults, setGlobalSearchResults] = useState<SearchResult[]>([])
+
+  // Search highlight state
+  const [highlightedTaskId, setHighlightedTaskId] = useState<string | null>(null)
+  const [searchHighlight, setSearchHighlight] = useState('')
 
   // Perform global search across diagnostics, issues, and history
   const performGlobalSearch = (query: string) => {
@@ -281,6 +290,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     setGlobalSearchQuery,
     globalSearchResults,
     performGlobalSearch,
+    highlightedTaskId,
+    setHighlightedTaskId,
+    searchHighlight,
+    setSearchHighlight,
   }
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>

@@ -69,7 +69,11 @@ export const DiagnosticsTab: React.FC = () => {
     globalSearchResults,
     performGlobalSearch,
     setSelectedTab,
-    scanStartTime
+    scanStartTime,
+    highlightedTaskId,
+    setHighlightedTaskId,
+    searchHighlight,
+    setSearchHighlight
   } = useAppContext()
 
   const {
@@ -165,6 +169,23 @@ export const DiagnosticsTab: React.FC = () => {
   const handleSearchResultSelect = (result: any) => {
     if (result.navigateTo) {
       setSelectedTab(result.navigateTo)
+    }
+    // Set highlight state for scroll and text highlighting
+    if (result.data?.taskId) {
+      setHighlightedTaskId(result.data.taskId)
+      setSearchHighlight(globalSearchQuery)
+      // Scroll to the element after a brief delay for render
+      setTimeout(() => {
+        const element = document.getElementById(`diagnostic-card-${result.data.taskId}`)
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          // Clear highlight after a few seconds
+          setTimeout(() => {
+            setHighlightedTaskId(null)
+            setSearchHighlight('')
+          }, 3000)
+        }
+      }, 100)
     }
   }
 
@@ -323,18 +344,21 @@ export const DiagnosticsTab: React.FC = () => {
 
                 <div className={styles.grid}>
                   {items.map(({ task, result }) => (
-                    <DiagnosticCard
-                      key={task.id}
-                      title={task.name}
-                      description={task.description}
-                      status={result.success ? 'verified' : 'action_required'}
-                      importance={task.category === group ? 'primary' : 'secondary'}
-                      executionTime={result.duration_ms}
-                      output={result.output}
-                      error={result.error}
-                      category={task.category}
-                      onCopyOutput={(text) => writeText(text)}
-                    />
+                    <div key={task.id} id={`diagnostic-card-${task.id}`}>
+                      <DiagnosticCard
+                        title={task.name}
+                        description={task.description}
+                        status={result.success ? 'verified' : 'action_required'}
+                        importance={task.category === group ? 'primary' : 'secondary'}
+                        executionTime={result.duration_ms}
+                        output={result.output}
+                        error={result.error}
+                        category={task.category}
+                        onCopyOutput={(text) => writeText(text)}
+                        isHighlighted={highlightedTaskId === task.id}
+                        highlightText={highlightedTaskId === task.id ? searchHighlight : ''}
+                      />
+                    </div>
                   ))}
                 </div>
               </div>

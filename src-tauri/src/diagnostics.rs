@@ -201,9 +201,9 @@ pub fn get_all_tasks() -> Vec<DiagnosticTask> {
         DiagnosticTask {
             id: "store_apps".to_string(),
             name: "Windows Store Apps".to_string(),
-            description: "Microsoft Store applications".to_string(),
+            description: "Microsoft Store applications (requires Administrator)".to_string(),
             category: "Software".to_string(),
-            admin_required: false,
+            admin_required: true,
         },
         DiagnosticTask {
             id: "services".to_string(),
@@ -354,13 +354,18 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             "dxdiag" => diagnostics.run_dxdiag(),
             "battery_report" => diagnostics.get_battery_report(),
             "minidump" => diagnostics.get_minidumps(),
-            "chkdsk" => diagnostics.run_chkdsk(),
+            "chkdsk" => diagnostics.get_disk_health(),
             "dism_health" => diagnostics.run_dism_health(),
             "ipconfig" => diagnostics.run_ipconfig(),
             "hosts_file" => diagnostics.read_hosts_file(),
             "dsregcmd" => diagnostics.run_dsregcmd(),
             "windows_update" => diagnostics.get_windows_update_history(),
             "firewall_status" => diagnostics.run_wmi_query("FirewallProduct", Some(r"root\SecurityCenter2")),
+            "store_apps" => diagnostics.get_store_apps(),
+            "performance" => diagnostics.get_performance_data(),
+            "scheduled_tasks" => diagnostics.get_scheduled_tasks(),
+            "disk_health" => diagnostics.get_disk_health(),
+            "driver_verifier" => diagnostics.get_driver_verifier(),
             _ => Err(anyhow::anyhow!("Not implemented in native diagnostics")),
         }
     }).await.unwrap_or_else(|_| Err(anyhow::anyhow!("Task panicked")));
@@ -374,20 +379,23 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
         },
         Err(e) => {
             // Log the native diagnostic error for debugging
-            eprintln!("Native diagnostic failed for {}: {:?}", task_id, e);
-            
-            // Fallback to command-based diagnostics
+            let error_msg = format!("{:?}", e);
+            eprintln!("Native diagnostic failed for {}: {}", task_id, error_msg);
+
+            // Fallback to command-based diagnostics (no PowerShell)
             match task_id {
                 "ipconfig" => run_command("ipconfig", &["/all"]),
-                "store_apps" => run_powershell("Get-AppxPackage | Select-Object Name, Version"),
-                "performance" => run_powershell("Get-Counter"),
                 "hosts_file" => read_hosts_file(),
                 "dsregcmd" => run_command("dsregcmd", &["/status"]),
-                "scheduled_tasks" => run_powershell("Get-ScheduledTask"),
-                "windows_update" => run_event_logs(),
-                "chkdsk" => run_powershell("Repair-Volume -DriveLetter C -Scan -Verbose"),
                 "dism_health" => run_command("dism", &["/online", "/cleanup-image", "/checkhealth"]),
                 "driver_verifier" => run_command("verifier", &["/querysettings"]),
+                // These now have native implementations, return detailed error
+                "store_apps" | "performance" | "scheduled_tasks" | "chkdsk" | "windows_update" => TaskResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Native diagnostic failed: {}", error_msg)),
+                    duration_ms: 0,
+                },
                 _ => TaskResult {
                     success: false,
                     output: String::new(),
