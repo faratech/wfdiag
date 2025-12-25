@@ -72,7 +72,7 @@ jobs:
         uses: microsoft/store-submission@v1
         with:
           command: configure
-          type: win32
+          type: msix
           seller-id: ${{ secrets.STORE_SELLER_ID }}
           product-id: ${{ secrets.STORE_PRODUCT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
