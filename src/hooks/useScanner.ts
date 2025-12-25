@@ -18,6 +18,7 @@ export const useScanner = () => {
     setCurrentTaskName,
     scanStartTime,
     setScanStartTime,
+    setScanEndTime,
     settings,
     searchQuery,
     setFilteredResults,
@@ -41,6 +42,7 @@ export const useScanner = () => {
     setCurrentProgress(0)
     setResults({})
     setScanStartTime(Date.now())
+    setScanEndTime(0) // Reset end time for new scan
 
     let unlisten: (() => void) | null = null
 
@@ -114,11 +116,13 @@ export const useScanner = () => {
           } catch (error) {
             logger.error('useScanner', 'Failed to auto-save scan', error)
           } finally {
+            setScanEndTime(Date.now())
             isRunningRef.current = false
             setIsRunning(false)
           }
         }, 500)
       } else {
+        setScanEndTime(Date.now())
         isRunningRef.current = false
         setIsRunning(false)
       }
@@ -130,6 +134,7 @@ export const useScanner = () => {
         unlisten()
       }
 
+      setScanEndTime(Date.now())
       isRunningRef.current = false
       setIsRunning(false)
       currentSessionRef.current = null
@@ -142,6 +147,7 @@ export const useScanner = () => {
     setIsRunning,
     setResults,
     setScanStartTime,
+    setScanEndTime,
     setSessionId,
     settings.autoSave,
     settings.maxConcurrentTasks

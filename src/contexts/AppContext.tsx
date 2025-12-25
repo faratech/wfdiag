@@ -70,6 +70,8 @@ interface AppContextType {
   setFilteredResults: (results: Record<string, TaskResult>) => void
   scanStartTime: number
   setScanStartTime: (time: number) => void
+  scanEndTime: number
+  setScanEndTime: (time: number) => void
   issues: Issue[]
   setIssues: (issues: Issue[]) => void
   fixingIssue: string | null
@@ -133,6 +135,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const [searchQuery, setSearchQuery] = useState('')
   const [filteredResults, setFilteredResults] = useState<Record<string, TaskResult>>({})
   const [scanStartTime, setScanStartTime] = useState<number>(0)
+  const [scanEndTime, setScanEndTime] = useState<number>(0)
   const [issues, setIssues] = useState<Issue[]>([])
   const [fixingIssue, setFixingIssue] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
@@ -272,6 +275,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     setFilteredResults,
     scanStartTime,
     setScanStartTime,
+    scanEndTime,
+    setScanEndTime,
     issues,
     setIssues,
     fixingIssue,
