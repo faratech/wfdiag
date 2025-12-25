@@ -1,3 +1,6 @@
+# Private documentation (not public)
+docs/
+
 # Dependencies
 node_modules/
 .pnpm-store/
