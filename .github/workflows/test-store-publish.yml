@@ -7,6 +7,9 @@ on:
         description: 'Run ID to download artifacts from (leave empty for latest)'
         required: false
 
+permissions:
+  contents: write
+
 jobs:
   test-publish:
     runs-on: windows-latest
@@ -32,34 +35,36 @@ jobs:
           echo "bundle_file=$($bundle.FullName)" >> $env:GITHUB_OUTPUT
           echo "bundle_name=$($bundle.Name)" >> $env:GITHUB_OUTPUT
 
-      - name: Upload bundle to Azure Blob Storage
-        id: upload-blob
-        shell: pwsh
-        env:
-          AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
-        run: |
-          if ([string]::IsNullOrEmpty($env:AZURE_STORAGE_CONNECTION_STRING)) {
-            Write-Host "::error::AZURE_STORAGE_CONNECTION_STRING secret not set"
-            exit 1
+          # Extract version from filename
+          if ($bundle.Name -match '_(\d+\.\d+\.\d+)\.msixbundle$') {
+            $version = $matches[1]
+            echo "version=$version" >> $env:GITHUB_OUTPUT
           }
 
-          az storage blob upload `
-            --container-name packages `
-            --file "${{ steps.find-bundle.outputs.bundle_file }}" `
-            --name "${{ steps.find-bundle.outputs.bundle_name }}" `
-            --overwrite
+      - name: Create draft release and upload
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ steps.find-bundle.outputs.version }}"
+          $tag = "store-test-$version-${{ github.run_id }}"
+          $bundlePath = "${{ steps.find-bundle.outputs.bundle_file }}"
 
-          $expiry = (Get-Date).AddHours(1).ToString("yyyy-MM-ddTHH:mm:ssZ")
-          $sasUrl = az storage blob generate-sas `
-            --container-name packages `
-            --name "${{ steps.find-bundle.outputs.bundle_name }}" `
-            --permissions r `
-            --expiry $expiry `
-            --full-uri `
-            --output tsv
+          # Create draft release
+          gh release create $tag `
+            --title "Store Test $version" `
+            --notes "Temporary release for store submission testing" `
+            --draft `
+            $bundlePath
 
-          echo "package_url=$sasUrl" >> $env:GITHUB_OUTPUT
-          Write-Host "Package uploaded. SAS URL generated."
+          # Get the asset download URL
+          $release = gh release view $tag --json assets | ConvertFrom-Json
+          $assetUrl = $release.assets[0].url
+
+          Write-Host "Package URL: $assetUrl"
+          echo "package_url=$assetUrl" >> $env:GITHUB_OUTPUT
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
 
       - name: Configure Store credentials
         uses: microsoft/store-submission@v1
@@ -79,7 +84,7 @@ jobs:
           product-update: |
             {
               "packages": [{
-                "packageUrl": "${{ steps.upload-blob.outputs.package_url }}",
+                "packageUrl": "${{ steps.release.outputs.package_url }}",
                 "languages": ["en"],
                 "architectures": ["X64", "Arm64"]
               }]
@@ -89,3 +94,15 @@ jobs:
         uses: microsoft/store-submission@v1
         with:
           command: publish
+
+      - name: Cleanup draft release
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.release.outputs.tag }}"
+          if ($tag) {
+            gh release delete $tag --yes 2>$null
+            git push --delete origin $tag 2>$null
+          }
