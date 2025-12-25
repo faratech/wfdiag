@@ -1,0 +1,57 @@
+name: Test Store Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run ID to download artifacts from (leave empty for latest)'
+        required: false
+
+jobs:
+  test-publish:
+    runs-on: windows-latest
+    steps:
+      - name: Check for Store credentials
+        shell: pwsh
+        run: |
+          $hasCreds = ("${{ secrets.AZURE_TENANT_ID }}" -ne "") -and `
+                      ("${{ secrets.AZURE_CLIENT_ID }}" -ne "") -and `
+                      ("${{ secrets.AZURE_CLIENT_SECRET }}" -ne "") -and `
+                      ("${{ secrets.STORE_PRODUCT_ID }}" -ne "")
+          if (-not $hasCreds) {
+            Write-Host "::error::Missing Microsoft Store credentials."
+            Write-Host "Required secrets: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, STORE_PRODUCT_ID"
+            exit 1
+          }
+          Write-Host "Store credentials configured"
+
+      - name: Download bundle from previous run
+        uses: actions/download-artifact@v4
+        with:
+          name: msixbundle-unsigned
+          path: bundle
+          run-id: ${{ github.event.inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Find bundle file
+        id: find-bundle
+        shell: pwsh
+        run: |
+          $bundle = Get-ChildItem "bundle/*.msixbundle" | Select-Object -First 1
+          if (-not $bundle) {
+            Write-Host "::error::No .msixbundle found in artifacts"
+            exit 1
+          }
+          Write-Host "Found bundle: $($bundle.FullName)"
+          echo "bundle_file=$($bundle.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Publish to Microsoft Store
+        uses: microsoft/store-submission@v1
+        with:
+          command: publish
+          productId: ${{ secrets.STORE_PRODUCT_ID }}
+          packagePath: ${{ steps.find-bundle.outputs.bundle_file }}
+          tenantId: ${{ secrets.AZURE_TENANT_ID }}
+          clientId: ${{ secrets.AZURE_CLIENT_ID }}
+          clientSecret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          skipPolling: false
