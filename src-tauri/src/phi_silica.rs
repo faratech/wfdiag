@@ -56,6 +56,7 @@ fn get_windows_build() -> Option<u32> {
 }
 
 /// Check if AI Dev Gallery is installed
+#[allow(dead_code)]
 #[cfg(windows)]
 fn check_ai_dev_gallery_installed() -> bool {
     use std::os::windows::process::CommandExt;
@@ -183,7 +184,7 @@ fn init_windows_app_sdk() -> Result<(), String> {
             (0x00010006, "1.6"),
         ];
 
-        for (major_minor, version_name) in versions {
+        for (major_minor, _version_name) in versions {
             let hr = init(major_minor, PCWSTR::null(), 0, 0);
             if hr.is_ok() {
                 BOOTSTRAPPER_INITIALIZED.store(true, Ordering::SeqCst);
@@ -301,7 +302,12 @@ fn create_language_model_direct() -> Result<crate::windows_ai_bindings::Language
 
     let proc = unsafe { GetProcAddress(module, windows::core::s!("DllGetActivationFactory")) };
     let get_factory: DllGetActivationFactoryFn = match proc {
-        Some(p) => unsafe { std::mem::transmute(p) },
+        Some(p) => unsafe {
+            std::mem::transmute::<
+                unsafe extern "system" fn() -> isize,
+                DllGetActivationFactoryFn
+            >(p)
+        },
         None => return Err("DllGetActivationFactory not found in DLL".to_string()),
     };
 
@@ -566,8 +572,8 @@ fn log_phi_silica(msg: &str) {
     let log_path = std::path::Path::new("C:\\temp\\phi-silica-rust.log");
     // Create dir if needed
     let _ = std::fs::create_dir_all("C:\\temp");
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
-        let _ = writeln!(file, "[{}] {}", chrono::Local::now().format("%H:%M:%S"), msg);
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+        let _ = writeln!(file, "[{}] {}", crate::timestamp::format_time(std::time::SystemTime::now()), msg);
     }
 }
 
@@ -735,8 +741,8 @@ fn parse_diagnostic_ids(response: &str) -> Vec<String> {
     let mut ids = Vec::new();
 
     // Try to find JSON array in response
-    if let Some(start) = response.find('[') {
-        if let Some(end) = response[start..].find(']') {
+    if let Some(start) = response.find('[')
+        && let Some(end) = response[start..].find(']') {
             let array_str = &response[start..start + end + 1];
             // Parse as JSON array
             if let Ok(arr) = serde_json::from_str::<Vec<String>>(array_str) {
@@ -750,11 +756,10 @@ fn parse_diagnostic_ids(response: &str) -> Vec<String> {
                         }
                     } else {
                         // Try to find best match
-                        if let Some(matched) = find_best_match(&id_lower, &valid_ids) {
-                            if !ids.contains(&matched) {
+                        if let Some(matched) = find_best_match(&id_lower, &valid_ids)
+                            && !ids.contains(&matched) {
                                 ids.push(matched);
                             }
-                        }
                     }
                 }
                 if !ids.is_empty() {
@@ -770,11 +775,10 @@ fn parse_diagnostic_ids(response: &str) -> Vec<String> {
                             if !ids.contains(&s) {
                                 ids.push(s);
                             }
-                        } else if let Some(matched) = find_best_match(&s_lower, &valid_ids) {
-                            if !ids.contains(&matched) {
+                        } else if let Some(matched) = find_best_match(&s_lower, &valid_ids)
+                            && !ids.contains(&matched) {
                                 ids.push(matched);
                             }
-                        }
                     }
                 }
                 if !ids.is_empty() {
@@ -782,18 +786,16 @@ fn parse_diagnostic_ids(response: &str) -> Vec<String> {
                 }
             }
         }
-    }
 
     // Fallback: look for known task IDs mentioned in the response
     for task_id in &valid_ids {
-        if response.contains(&format!("\"{}\"", task_id)) ||
+        if (response.contains(&format!("\"{}\"", task_id)) ||
            response.contains(&format!("'{}'", task_id)) ||
            response.to_lowercase().contains(&format!(" {} ", task_id)) ||
-           response.to_lowercase().contains(&format!("[{}]", task_id)) {
-            if !ids.contains(&task_id.to_string()) {
+           response.to_lowercase().contains(&format!("[{}]", task_id)))
+            && !ids.contains(&task_id.to_string()) {
                 ids.push(task_id.to_string());
             }
-        }
     }
 
     ids
@@ -857,11 +859,10 @@ fn find_best_match(input: &str, valid_ids: &[&str]) -> Option<String> {
     ];
 
     for (term, task_id) in mappings {
-        if input.contains(term) {
-            if valid_ids.contains(task_id) {
+        if input.contains(term)
+            && valid_ids.contains(task_id) {
                 return Some(task_id.to_string());
             }
-        }
     }
 
     None

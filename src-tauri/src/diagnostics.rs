@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use std::fs;
 use std::path::Path;
 use crate::native_diagnostics::NativeDiagnostics;
@@ -659,13 +658,7 @@ fn collect_minidumps() -> TaskResult {
                     if let Ok(metadata) = entry.metadata() {
                         let size = metadata.len();
                         let modified = metadata.modified()
-                            .map(|t| {
-                                let duration = t.duration_since(std::time::SystemTime::UNIX_EPOCH)
-                                    .unwrap_or_default();
-                                chrono::DateTime::<chrono::Local>::from(
-                                    std::time::SystemTime::UNIX_EPOCH + duration
-                                ).format("%Y-%m-%d %H:%M:%S").to_string()
-                            })
+                            .map(crate::timestamp::format_local_datetime)
                             .unwrap_or_else(|_| "Unknown".to_string());
                         
                         output.push_str(&format!(

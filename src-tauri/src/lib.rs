@@ -2,10 +2,11 @@
 
 mod architecture;
 mod diagnostics;
-mod monitoring;
+mod native_monitor;
 mod native_diagnostics;
 mod openai_integration;
 mod results_storage;
+mod timestamp;
 mod windows_native;
 mod security;
 mod issue_detector;
@@ -18,9 +19,9 @@ mod phi_silica;
 mod windows_ai_bindings;
 
 use crate::diagnostics::{DiagnosticTask, TaskResult};
-use crate::issue_detector::{Issue, IssueSeverity};
+use crate::issue_detector::Issue;
 use keyring::{Entry, Error as KeyringError};
-use monitoring::{NetworkConnection, SystemMonitor};
+use native_monitor::{NetworkConnection, SystemMonitor};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -354,7 +355,7 @@ async fn run_diagnostics_parallel(
         .into_iter()
         .map(|task_id| {
             let window_clone = window.clone();
-            let state_clone = state.inner().clone();
+            let state_clone = state.inner();
             let tasks_clone = tasks.clone();
 
             async move {
@@ -440,7 +441,7 @@ async fn get_session_results(
 #[tauri::command]
 async fn export_results(
     format: String,
-    include_raw: bool,
+    _include_raw: bool,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let current = state.current_session.lock().await;
@@ -469,7 +470,7 @@ async fn export_results(
                     if let Some(task) = task_map.get(task_id) {
                         results_by_category
                             .entry(task.category.clone())
-                            .or_insert_with(Vec::new)
+                            .or_default()
                             .push((task_id, result));
                     }
                 }
@@ -501,7 +502,7 @@ async fn export_results(
                                     text.push_str(&format!("  Error: {}\n", error));
                                 }
 
-                                text.push_str("\n");
+                                text.push('\n');
                             }
                         }
                     }
@@ -526,9 +527,7 @@ async fn save_results_to_file(path: String, content: String) -> Result<(), Strin
 
 #[tauri::command]
 async fn get_uptime() -> Result<serde_json::Value, String> {
-    use sysinfo::System;
-
-    let uptime_seconds = System::uptime();
+    let uptime_seconds = native_monitor::get_uptime_seconds();
     let days = uptime_seconds / 86400;
     let hours = (uptime_seconds % 86400) / 3600;
     let minutes = (uptime_seconds % 3600) / 60;
@@ -641,7 +640,7 @@ async fn stop_monitoring(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn get_current_stats(state: State<'_, AppState>) -> Result<monitoring::SystemStats, String> {
+async fn get_current_stats(state: State<'_, AppState>) -> Result<native_monitor::SystemStats, String> {
     let monitor_opt = state.system_monitor.lock().await;
 
     if let Some(monitor) = monitor_opt.as_ref() {
@@ -653,7 +652,7 @@ async fn get_current_stats(state: State<'_, AppState>) -> Result<monitoring::Sys
 
 #[tauri::command]
 async fn get_network_connections() -> Result<Vec<NetworkConnection>, String> {
-    Ok(monitoring::get_network_connections().await)
+    Ok(native_monitor::get_network_connections().await)
 }
 
 #[tauri::command]
@@ -673,7 +672,7 @@ async fn save_current_scan(
         // Use the session ID directly - no more ID mismatch!
         let scan_record = ScanRecord {
             id: session.session_id.clone(),
-            timestamp: chrono::Utc::now(),
+            timestamp: timestamp::Timestamp::now(),
             computer_name: system_info.computer_name,
             os_version: system_info.os_version,
             is_admin: system_info.is_admin,
@@ -789,7 +788,7 @@ async fn open_url(url: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("cmd")
-            .args(&["/C", "start", "", &url])
+            .args(["/C", "start", "", &url])
             .spawn()
             .map_err(|e| format!("Failed to open URL: {}", e))?;
     }
