@@ -408,6 +408,8 @@ jobs:
   create-release:
     needs: [build-x64, create-msix-bundle, attest-artifacts]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     if: needs.build-x64.result == 'success' && needs.create-msix-bundle.result == 'success' && needs.build-x64.outputs.create_release == 'true'
     steps:
       - uses: actions/checkout@v4
