@@ -250,6 +250,7 @@ jobs:
             Copy-Item "src-tauri/icons/icon.png" "$targetDir/Logo.png"
             Copy-Item "src-tauri/icons/192x192.png" "$targetDir/Square150x150Logo.png"
             Copy-Item "src-tauri/icons/44x44.png" "$targetDir/Square44x44Logo.png"
+            Copy-Item "src-tauri/icons/Wide310x150Logo.png" "$targetDir/Wide310x150Logo.png"
 
             # Copy Windows App SDK AI DLLs if they exist
             $aiSdkDir = "src-tauri/resources/ai-sdk/$arch"
@@ -297,6 +298,7 @@ jobs:
                                     BackgroundColor="transparent"
                                     Square150x150Logo="Square150x150Logo.png"
                                     Square44x44Logo="Square44x44Logo.png">
+                  <uap:DefaultTile Wide310x150Logo="Wide310x150Logo.png" />
                 </uap:VisualElements>
               </Application>
             </Applications>

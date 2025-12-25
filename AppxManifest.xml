@@ -18,7 +18,7 @@
   <Properties>
     <DisplayName>WindowsForum Diagnostics</DisplayName>
     <PublisherDisplayName>Mike Fara</PublisherDisplayName>
-    <Logo>assets\icon.png</Logo>
+    <Logo>Logo.png</Logo>
   </Properties>
 
   <Dependencies>
@@ -41,9 +41,9 @@
         DisplayName="WindowsForum Diagnostics"
         Description="Professional Windows System Diagnostic Tool"
         BackgroundColor="transparent"
-        Square150x150Logo="assets\icon.png"
-        Square44x44Logo="assets\icon.png">
-        <uap:DefaultTile Wide310x150Logo="assets\icon.png" />
+        Square150x150Logo="Square150x150Logo.png"
+        Square44x44Logo="Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Wide310x150Logo.png" />
       </uap:VisualElements>
     </Application>
   </Applications>

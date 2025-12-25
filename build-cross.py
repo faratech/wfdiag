@@ -390,6 +390,7 @@ def create_appx_manifest(target_name: str, version: str) -> str:
                           BackgroundColor="transparent"
                           Square150x150Logo="Square150x150Logo.png"
                           Square44x44Logo="Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Wide310x150Logo.png" />
       </uap:VisualElements>
     </Application>
   </Applications>
@@ -458,6 +459,7 @@ def build_msix(version: str) -> bool:
         shutil.copy2(icons_dir / "icon.png", target_dir / "Logo.png")
         shutil.copy2(icons_dir / "192x192.png", target_dir / "Square150x150Logo.png")
         shutil.copy2(icons_dir / "44x44.png", target_dir / "Square44x44Logo.png")
+        shutil.copy2(icons_dir / "Wide310x150Logo.png", target_dir / "Wide310x150Logo.png")
 
         # Copy Windows App SDK AI DLLs if available
         ai_sdk_dir = SRC_TAURI / "resources" / "ai-sdk" / target_name
