@@ -3,8 +3,8 @@ name: Windows Certificate Signing
 on:
   workflow_dispatch:
   push:
-    paths:
-      - 'releases/**'
+    tags:
+      - 'v*'
 
 permissions:
   contents: read
