@@ -417,16 +417,7 @@ impl NativeDiagnostics {
             }
             info["sound_devices"] = json!(sound_info);
         }
-        
-        // Try to get DirectX version from registry
-        {
-            let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-            if let Ok(dx_key) = hklm.open_subkey("SOFTWARE\\Microsoft\\DirectX")
-                && let Ok(version) = dx_key.get_value::<String, _>("Version") {
-                    info["directx_version"] = json!(version);
-                }
-        }
-        
+
         Ok(info)
     }
 
