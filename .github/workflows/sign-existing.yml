@@ -3,11 +3,8 @@ name: Sign Existing Binaries
 on:
   workflow_dispatch:
   push:
-    paths:
-      - 'releases/**'
-      - 'src-tauri/target/release/*.exe'
-      - 'src-tauri/target/release/bundle/**/*.msi'
-      - 'src-tauri/target/release/bundle/**/*.msix'
+    tags:
+      - 'v*'
 
 permissions:
   id-token: write   # Required for OIDC authentication with Sigstore

@@ -338,14 +338,14 @@ jobs:
           path: msix-build/*.msixbundle
 
   # =============================================================================
-  # Sign the MSIX Bundle
+  # Sign the MSIX Bundle (runs always, skips signing if no certificate)
   # =============================================================================
   sign-bundle:
     needs: [build-x64, create-msix-bundle]
     runs-on: windows-latest
-    if: ${{ secrets.CERTIFICATE_BASE64 != '' || secrets.WINDOWS_CERTIFICATE != '' }}
     outputs:
       signed_bundle_path: ${{ steps.sign.outputs.signed_bundle_path }}
+      was_signed: ${{ steps.sign.outputs.was_signed }}
     steps:
       - name: Download unsigned bundle
         uses: actions/download-artifact@v4
@@ -356,16 +356,29 @@ jobs:
       - name: Sign bundle
         id: sign
         shell: pwsh
+        env:
+          CERT_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
+          CERT_BASE64_ALT: ${{ secrets.WINDOWS_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+          CERT_PASSWORD_ALT: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
           $version = "${{ needs.build-x64.outputs.version }}"
           $bundlePath = "bundle/${{ env.PROJECT_NAME }}_${version}.msixbundle"
 
-          # Decode certificate
-          $certBase64 = "${{ secrets.CERTIFICATE_BASE64 }}"
+          # Check for certificate
+          $certBase64 = $env:CERT_BASE64
+          if (-not $certBase64) { $certBase64 = $env:CERT_BASE64_ALT }
+
           if (-not $certBase64) {
-            $certBase64 = "${{ secrets.WINDOWS_CERTIFICATE }}"
+            Write-Host "No certificate configured - skipping signing"
+            New-Item -ItemType Directory -Force -Path "signed"
+            Copy-Item $bundlePath "signed/${{ env.PROJECT_NAME }}_${version}.msixbundle"
+            echo "signed_bundle_path=signed/${{ env.PROJECT_NAME }}_${version}.msixbundle" >> $env:GITHUB_OUTPUT
+            echo "was_signed=false" >> $env:GITHUB_OUTPUT
+            exit 0
           }
 
+          # Decode certificate
           $certBytes = [Convert]::FromBase64String($certBase64)
           $certPath = "certificate.pfx"
           [IO.File]::WriteAllBytes($certPath, $certBytes)
@@ -379,10 +392,8 @@ jobs:
           Write-Host "Signing bundle with certificate..."
 
           # Get password
-          $password = "${{ secrets.CERTIFICATE_PASSWORD }}"
-          if (-not $password) {
-            $password = "${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}"
-          }
+          $password = $env:CERT_PASSWORD
+          if (-not $password) { $password = $env:CERT_PASSWORD_ALT }
 
           # Sign
           & $signTool sign /fd SHA256 /f $certPath /p $password /tr http://timestamp.digicert.com /td SHA256 $bundlePath
@@ -400,6 +411,7 @@ jobs:
           Move-Item $bundlePath $signedPath
 
           echo "signed_bundle_path=$signedPath" >> $env:GITHUB_OUTPUT
+          echo "was_signed=true" >> $env:GITHUB_OUTPUT
 
       - name: Upload signed bundle
         uses: actions/upload-artifact@v4
