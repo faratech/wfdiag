@@ -616,7 +616,9 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
                 }}>
                   <i className="fas fa-info-circle" style={{ marginRight: 8, color: 'var(--theme-foreground-3)' }}></i>
                   <Text size={200} style={{ color: 'var(--theme-foreground-3)' }}>
-                    Usage metrics not available
+                    {stats.npu_name?.toLowerCase().includes('qualcomm') || stats.npu_name?.toLowerCase().includes('hexagon')
+                      ? 'Qualcomm NPU metrics not exposed via Windows APIs'
+                      : 'Usage metrics not available'}
                   </Text>
                 </div>
               )}

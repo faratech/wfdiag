@@ -45,6 +45,18 @@ const useStyles = makeStyles({
     borderLeft: `4px solid ${tokens.colorPaletteYellowBorder2}`,
     backgroundColor: tokens.colorPaletteYellowBackground2,
   },
+  cardHighlighted: {
+    boxShadow: `0 0 0 3px ${tokens.colorBrandStroke1}, ${tokens.shadow16}`,
+    transform: 'scale(1.01)',
+    transition: 'all 0.3s ease',
+  },
+  highlightMark: {
+    backgroundColor: tokens.colorPaletteYellowBackground2,
+    color: tokens.colorNeutralForeground1,
+    padding: '0 2px',
+    borderRadius: '2px',
+    fontWeight: 600,
+  },
   header: {
     display: 'flex',
     alignItems: 'center',
@@ -71,6 +83,15 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
     color: tokens.colorNeutralForeground3,
     marginTop: '2px',
+  },
+  preview: {
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground2,
+    marginTop: '4px',
+    maxWidth: '400px',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
   },
   statusBadge: {
     marginRight: tokens.spacingHorizontalM,
@@ -179,6 +200,8 @@ export interface DiagnosticCardProps {
   error?: string
   category?: string
   onCopyOutput?: (output: string) => void
+  isHighlighted?: boolean
+  highlightText?: string
 }
 
 export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
@@ -190,10 +213,12 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
   output,
   error,
   category,
-  onCopyOutput
+  onCopyOutput,
+  isHighlighted = false,
+  highlightText = ''
 }) => {
   const styles = useStyles()
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(true)  // Expanded by default
   const [viewMode, setViewMode] = useState<'summary' | 'raw'>('summary')
 
   const isSuccess = status === 'verified'
@@ -201,10 +226,32 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
   const isWarning = status === 'monitor'
 
   const getCardStyle = () => {
-    if (isError) return `${styles.card} ${styles.cardError}`
-    if (isWarning) return `${styles.card} ${styles.cardWarning}`
-    if (importance === 'primary') return `${styles.card} ${styles.cardPrimary}`
-    return styles.card
+    const highlight = isHighlighted ? ` ${styles.cardHighlighted}` : ''
+    if (isError) return `${styles.card} ${styles.cardError}${highlight}`
+    if (isWarning) return `${styles.card} ${styles.cardWarning}${highlight}`
+    if (importance === 'primary') return `${styles.card} ${styles.cardPrimary}${highlight}`
+    return `${styles.card}${highlight}`
+  }
+
+  // Highlight matching text in a string
+  const highlightMatchingText = (text: string): React.ReactNode => {
+    if (!highlightText || !text) return text
+    const lowerText = text.toLowerCase()
+    const lowerHighlight = highlightText.toLowerCase()
+    const index = lowerText.indexOf(lowerHighlight)
+    if (index === -1) return text
+
+    const before = text.substring(0, index)
+    const match = text.substring(index, index + highlightText.length)
+    const after = text.substring(index + highlightText.length)
+
+    return (
+      <>
+        {before}
+        <mark className={styles.highlightMark}>{match}</mark>
+        {after}
+      </>
+    )
   }
 
   const getStatusIcon = () => {
@@ -239,23 +286,82 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
 
   const parsedData = getParsedOutput()
 
+  // Generate a brief one-line preview for the header
+  const getQuickSummary = (): string => {
+    if (error) return error.substring(0, 60) + (error.length > 60 ? '...' : '')
+    if (!parsedData) return 'No data'
+
+    try {
+      // Handle arrays - show count
+      if (Array.isArray(parsedData)) {
+        if (parsedData.length === 0) return 'No items found'
+        const firstItem = parsedData[0]
+        if (firstItem?.Name || firstItem?.Caption || firstItem?.DisplayName) {
+          return `${parsedData.length} items: ${firstItem.DisplayName || firstItem.Name || firstItem.Caption}`
+        }
+        return `${parsedData.length} items`
+      }
+
+      // Handle specific data patterns
+      if (parsedData.status) return parsedData.status
+      if (parsedData.message) return parsedData.message
+      if (parsedData.cpu_performance && parsedData.memory_performance) {
+        return `Memory: ${parsedData.memory_performance.UsedPercent || 0}% used, CPU: ${parsedData.cpu_performance.NumberOfLogicalProcessors || '?'} cores`
+      }
+      if (parsedData.count !== undefined && parsedData.tasks) {
+        return `${parsedData.count} scheduled tasks`
+      }
+      if (parsedData.apps) {
+        return `${parsedData.apps.length} Store apps`
+      }
+      if (parsedData.disks || parsedData.disk_drives) {
+        const disks = parsedData.disks || parsedData.disk_drives
+        return `${disks.length} disk(s) - ${disks[0]?.HealthStatusText || 'OK'}`
+      }
+
+      // Fallback: show first key-value or type
+      const keys = Object.keys(parsedData)
+      if (keys.length > 0 && keys.length < 5) {
+        const firstValue = parsedData[keys[0]]
+        if (typeof firstValue === 'string' || typeof firstValue === 'number') {
+          return `${keys[0]}: ${String(firstValue).substring(0, 40)}`
+        }
+      }
+      return `${keys.length} properties`
+    } catch {
+      return 'Data available'
+    }
+  }
+
   // Specialized Renderers
   const renderDiskSummary = (data: any) => {
-    if (!Array.isArray(data)) return null
+    // Handle both direct array (Logical Disks) and object wrapper (Disk Check)
+    const disks = Array.isArray(data) ? data : (Array.isArray(data?.disk_drives) ? data.disk_drives : null)
+    
+    if (!disks || disks.length === 0) return null
     
     return (
       <div className={styles.summaryContainer}>
-        {data.map((disk: any, i: number) => {
-          if (!disk.Size) return null
-          const size = parseInt(disk.Size)
-          const free = parseInt(disk.FreeSpace)
+        {disks.map((disk: any, i: number) => {
+          // Fallback for missing size info (common in some WMI queries or readers)
+          if (!disk.Size && !disk.TotalSize) {
+             return (
+                <div key={i} style={{ marginBottom: tokens.spacingVerticalS }}>
+                  <Text weight="semibold" block>{disk.DeviceID || disk.Model || 'Unknown Disk'}</Text>
+                  <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>{disk.InterfaceType || disk.MediaType || 'Storage Device'}</Text>
+                </div>
+             )
+          }
+
+          const size = parseInt(disk.Size || disk.TotalSize || '0')
+          const free = parseInt(disk.FreeSpace || '0')
           const used = size - free
-          const percentUsed = (used / size) * 100
+          const percentUsed = size > 0 ? (used / size) * 100 : 0
           
           return (
             <div key={i} style={{ marginBottom: tokens.spacingVerticalS }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                <Text weight="semibold">{disk.DeviceID} ({disk.FileSystem})</Text>
+                <Text weight="semibold">{disk.DeviceID} ({disk.FileSystem || 'Unknown'})</Text>
                 <Text>{(free / 1024 / 1024 / 1024).toFixed(1)} GB free of {(size / 1024 / 1024 / 1024).toFixed(1)} GB</Text>
               </div>
               <ProgressBar 
@@ -344,11 +450,11 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
             <div className={styles.summaryGrid} style={{ marginTop: tokens.spacingVerticalS }}>
               <div className={styles.summaryItem}>
                 <span className={styles.summaryLabel}>IPv4 Address</span>
-                <span className={styles.summaryValue}>{Array.isArray(adapter.IPAddress) ? adapter.IPAddress[0] : adapter.IPAddress}</span>
+                <span className={styles.summaryValue}>{Array.isArray(adapter.IPAddress) ? adapter.IPAddress[0] : (adapter.IPAddress || 'N/A')}</span>
               </div>
               <div className={styles.summaryItem}>
                 <span className={styles.summaryLabel}>MAC Address</span>
-                <span className={styles.summaryValue}>{adapter.MACAddress}</span>
+                <span className={styles.summaryValue}>{adapter.MACAddress || 'N/A'}</span>
               </div>
                <div className={styles.summaryItem}>
                 <span className={styles.summaryLabel}>DHCP Enabled</span>
@@ -372,11 +478,11 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
         </div>
         <div className={styles.summaryItem}>
           <span className={styles.summaryLabel}>Cores</span>
-          <span className={styles.summaryValue}>{cpu.NumberOfCores}</span>
+          <span className={styles.summaryValue}>{cpu.NumberOfCores || 'N/A'}</span>
         </div>
         <div className={styles.summaryItem}>
           <span className={styles.summaryLabel}>Logical Processors</span>
-          <span className={styles.summaryValue}>{cpu.NumberOfLogicalProcessors}</span>
+          <span className={styles.summaryValue}>{cpu.NumberOfLogicalProcessors || 'N/A'}</span>
         </div>
         <div className={styles.summaryItem}>
           <span className={styles.summaryLabel}>Clock Speed</span>
@@ -409,7 +515,7 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
             {data.map((dimm: any, i: number) => (
               <div key={i} style={{ display: 'flex', justifyContent: 'space-between', borderBottom: `1px solid ${tokens.colorNeutralStroke2}`, padding: tokens.spacingVerticalXS }}>
                 <Text>{dimm.Manufacturer || 'Unknown'} {dimm.PartNumber}</Text>
-                <Text>{(parseInt(dimm.Capacity) / 1024 / 1024 / 1024).toFixed(0)} GB @ {dimm.Speed} MHz</Text>
+                <Text>{dimm.Capacity ? `${(parseInt(dimm.Capacity) / 1024 / 1024 / 1024).toFixed(0)} GB` : 'N/A'} @ {dimm.Speed || '?'} MHz</Text>
               </div>
             ))}
           </div>
@@ -438,11 +544,20 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
               </div>
               <div className={styles.summaryItem}>
                 <span className={styles.summaryLabel}>VRAM</span>
-                <span className={styles.summaryValue}>{gpu.AdapterRAM ? `${(parseInt(gpu.AdapterRAM) / 1024 / 1024 / 1024).toFixed(1)} GB` : 'N/A'}</span>
+                <span className={styles.summaryValue}>
+                  {/* Handle 0 bytes as Shared/Integrated for SoC/iGPU */}
+                  {gpu.AdapterRAM && parseInt(gpu.AdapterRAM) > 0 
+                    ? `${(parseInt(gpu.AdapterRAM) / 1024 / 1024 / 1024).toFixed(1)} GB` 
+                    : 'Shared / Integrated'}
+                </span>
               </div>
               <div className={styles.summaryItem}>
                 <span className={styles.summaryLabel}>Resolution</span>
-                <span className={styles.summaryValue}>{gpu.CurrentHorizontalResolution}x{gpu.CurrentVerticalResolution} @ {gpu.CurrentRefreshRate}Hz</span>
+                <span className={styles.summaryValue}>
+                  {gpu.CurrentHorizontalResolution && gpu.CurrentVerticalResolution 
+                    ? `${gpu.CurrentHorizontalResolution}x${gpu.CurrentVerticalResolution} @ ${gpu.CurrentRefreshRate}Hz` 
+                    : 'N/A'}
+                </span>
               </div>
             </div>
           </div>
@@ -553,9 +668,9 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
 
   const renderProcessesSummary = (data: any) => {
     if (!Array.isArray(data)) return null
-    
+
     const topMemory = [...data].sort((a, b) => parseInt(b.WorkingSetSize || 0) - parseInt(a.WorkingSetSize || 0)).slice(0, 5)
-    
+
     return (
       <div className={styles.summaryContainer}>
         <Text weight="semibold">Top Memory Consumers</Text>
@@ -574,22 +689,956 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
     )
   }
 
+  const renderBiosSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return null
+    const bios = data[0]
+    return (
+      <div className={styles.summaryGrid}>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Manufacturer</span>
+          <span className={styles.summaryValue}>{bios.Manufacturer || 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Version</span>
+          <span className={styles.summaryValue}>{bios.SMBIOSBIOSVersion || bios.Version || 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Release Date</span>
+          <span className={styles.summaryValue}>{bios.ReleaseDate ? bios.ReleaseDate.substring(0, 8) : 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>SMBIOS Version</span>
+          <span className={styles.summaryValue}>{bios.SMBIOSMajorVersion ? `${bios.SMBIOSMajorVersion}.${bios.SMBIOSMinorVersion}` : 'N/A'}</span>
+        </div>
+      </div>
+    )
+  }
+
+  const renderMotherboardSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return null
+    const board = data[0]
+    return (
+      <div className={styles.summaryGrid}>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Manufacturer</span>
+          <span className={styles.summaryValue}>{board.Manufacturer || 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Product</span>
+          <span className={styles.summaryValue}>{board.Product || 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Serial Number</span>
+          <span className={styles.summaryValue}>{board.SerialNumber || 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Version</span>
+          <span className={styles.summaryValue}>{board.Version || 'N/A'}</span>
+        </div>
+      </div>
+    )
+  }
+
+  const renderDiskDrivesSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return null
+    return (
+      <div className={styles.summaryContainer}>
+        {data.map((disk: any, i: number) => (
+          <div key={i} style={{ padding: tokens.spacingHorizontalS, borderLeft: `2px solid ${tokens.colorBrandStroke1}`, backgroundColor: tokens.colorNeutralBackgroundAlpha, marginBottom: tokens.spacingVerticalS }}>
+            <Text weight="semibold" block>{disk.Model || disk.Caption || 'Unknown Disk'}</Text>
+            <div className={styles.summaryGrid} style={{ marginTop: tokens.spacingVerticalS }}>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>Size</span>
+                <span className={styles.summaryValue}>{disk.Size ? `${(parseInt(disk.Size) / 1024 / 1024 / 1024).toFixed(0)} GB` : 'N/A'}</span>
+              </div>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>Interface</span>
+                <span className={styles.summaryValue}>{disk.InterfaceType || 'N/A'}</span>
+              </div>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>Media Type</span>
+                <span className={styles.summaryValue}>{disk.MediaType || 'N/A'}</span>
+              </div>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>Partitions</span>
+                <span className={styles.summaryValue}>{disk.Partitions || 'N/A'}</span>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  const renderDiskPartitionsSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return null
+    return (
+      <div className={styles.summaryContainer}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 100px 100px 80px', gap: tokens.spacingHorizontalS, fontWeight: 600, marginBottom: tokens.spacingVerticalS, color: tokens.colorNeutralForeground3 }}>
+          <Text>Name</Text>
+          <Text>Size</Text>
+          <Text>Type</Text>
+          <Text>Boot</Text>
+        </div>
+        {data.slice(0, 10).map((part: any, i: number) => (
+          <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 100px 100px 80px', gap: tokens.spacingHorizontalS, padding: `${tokens.spacingVerticalXS} 0`, borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}>
+            <Text>{part.Name || part.DeviceID || 'Unknown'}</Text>
+            <Text>{part.Size ? `${(parseInt(part.Size) / 1024 / 1024 / 1024).toFixed(1)} GB` : 'N/A'}</Text>
+            <Text>{part.Type || 'N/A'}</Text>
+            <Badge appearance="tint" color={part.BootPartition ? 'success' : 'subtle'} size="small">{part.BootPartition ? 'Yes' : 'No'}</Badge>
+          </div>
+        ))}
+        {data.length > 10 && <Text size={200} style={{ marginTop: tokens.spacingVerticalS, color: tokens.colorNeutralForeground3 }}>...and {data.length - 10} more partitions</Text>}
+      </div>
+    )
+  }
+
+  const renderEnvironmentSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return null
+    const systemVars = data.filter((v: any) => v.SystemVariable === true || v.UserName === '<SYSTEM>')
+    const importantVars = ['PATH', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA', 'ProgramFiles', 'SystemRoot', 'ComSpec']
+    const highlighted = data.filter((v: any) => importantVars.some(iv => v.Name?.toUpperCase().includes(iv)))
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Total Variables</span>
+            <span className={styles.summaryValue}>{data.length}</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>System Variables</span>
+            <span className={styles.summaryValue}>{systemVars.length}</span>
+          </div>
+        </div>
+        {highlighted.length > 0 && (
+          <div style={{ marginTop: tokens.spacingVerticalM }}>
+            <Text weight="semibold" block style={{ marginBottom: tokens.spacingVerticalS }}>Key Variables</Text>
+            {highlighted.slice(0, 5).map((v: any, i: number) => (
+              <div key={i} style={{ display: 'flex', gap: tokens.spacingHorizontalM, padding: `${tokens.spacingVerticalXS} 0`, borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}>
+                <Text style={{ minWidth: 120, color: tokens.colorNeutralForeground3 }}>{v.Name}</Text>
+                <Text style={{ wordBreak: 'break-all' }}>{v.VariableValue?.substring(0, 100)}{v.VariableValue?.length > 100 ? '...' : ''}</Text>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const renderStartupSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return <Text>No startup commands found.</Text>
+    return (
+      <div className={styles.summaryContainer}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalM, marginBottom: tokens.spacingVerticalM }}>
+          <Badge appearance="filled" color="informative">{data.length}</Badge>
+          <Text weight="semibold">Startup Programs</Text>
+        </div>
+        {data.slice(0, 8).map((item: any, i: number) => (
+          <div key={i} style={{ padding: `${tokens.spacingVerticalXS} 0`, borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}>
+            <Text weight="semibold" block>{item.Name || item.Caption || 'Unknown'}</Text>
+            <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>{item.Command?.substring(0, 80)}{item.Command?.length > 80 ? '...' : ''}</Text>
+          </div>
+        ))}
+        {data.length > 8 && <Text size={200} style={{ marginTop: tokens.spacingVerticalS, color: tokens.colorNeutralForeground3 }}>...and {data.length - 8} more</Text>}
+      </div>
+    )
+  }
+
+  const renderInstalledProgramsSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return <Text>No installed programs found.</Text>
+    const sorted = [...data].sort((a, b) => (a.DisplayName || '').localeCompare(b.DisplayName || ''))
+    return (
+      <div className={styles.summaryContainer}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalM, marginBottom: tokens.spacingVerticalM }}>
+          <Badge appearance="filled" color="informative">{data.length}</Badge>
+          <Text weight="semibold">Installed Programs</Text>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 100px 120px', gap: tokens.spacingHorizontalS, fontWeight: 600, marginBottom: tokens.spacingVerticalS, color: tokens.colorNeutralForeground3 }}>
+          <Text>Name</Text>
+          <Text>Version</Text>
+          <Text>Publisher</Text>
+        </div>
+        {sorted.slice(0, 10).map((prog: any, i: number) => (
+          <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 100px 120px', gap: tokens.spacingHorizontalS, padding: `${tokens.spacingVerticalXS} 0`, borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}>
+            <Text style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{prog.DisplayName}</Text>
+            <Text size={200}>{prog.DisplayVersion || '-'}</Text>
+            <Text size={200} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{prog.Publisher || '-'}</Text>
+          </div>
+        ))}
+        {data.length > 10 && <Text size={200} style={{ marginTop: tokens.spacingVerticalS, color: tokens.colorNeutralForeground3 }}>...and {data.length - 10} more programs</Text>}
+      </div>
+    )
+  }
+
+  const renderDriverListSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return null
+    const signed = data.filter((d: any) => d.IsSigned === true)
+    const unsigned = data.filter((d: any) => d.IsSigned === false)
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Total Drivers</span>
+            <span className={styles.summaryValue}>{data.length}</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Signed</span>
+            <span className={styles.summaryValue} style={{ color: tokens.colorPaletteGreenForeground1 }}>{signed.length}</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Unsigned</span>
+            <span className={styles.summaryValue} style={{ color: unsigned.length > 0 ? tokens.colorPaletteYellowForeground1 : undefined }}>{unsigned.length}</span>
+          </div>
+        </div>
+        {unsigned.length > 0 && (
+          <div style={{ marginTop: tokens.spacingVerticalM }}>
+            <Text weight="semibold" style={{ color: tokens.colorPaletteYellowForeground1 }}>Unsigned Drivers</Text>
+            <ul style={{ marginTop: tokens.spacingVerticalXS, paddingLeft: tokens.spacingHorizontalL }}>
+              {unsigned.slice(0, 5).map((d: any, i: number) => (
+                <li key={i}><Text>{d.DeviceName || d.Name}</Text></li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const renderScheduledTasksSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return <Text>No scheduled tasks found.</Text>
+    const running = data.filter((t: any) => t.State === 'Running')
+    const ready = data.filter((t: any) => t.State === 'Ready')
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Total Tasks</span>
+            <span className={styles.summaryValue}>{data.length}</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Running</span>
+            <span className={styles.summaryValue} style={{ color: tokens.colorPaletteGreenForeground1 }}>{running.length}</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Ready</span>
+            <span className={styles.summaryValue}>{ready.length}</span>
+          </div>
+        </div>
+        <div style={{ marginTop: tokens.spacingVerticalM }}>
+          <Text weight="semibold" block style={{ marginBottom: tokens.spacingVerticalS }}>Recent Tasks</Text>
+          {data.slice(0, 6).map((task: any, i: number) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: `${tokens.spacingVerticalXS} 0`, borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}>
+              <Text style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{task.TaskName}</Text>
+              <Badge appearance="tint" color={task.State === 'Running' ? 'success' : task.State === 'Ready' ? 'informative' : 'subtle'} size="small">{task.State}</Badge>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  const renderDismHealthSummary = (data: any) => {
+    if (!data) return null
+    const isHealthy = data.status === 'Healthy'
+    const isRepairable = data.repairable === true
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalM, marginBottom: tokens.spacingVerticalM }}>
+          <Badge appearance="filled" color={isHealthy ? 'success' : isRepairable ? 'warning' : 'danger'} size="large">
+            {data.status || 'Unknown'}
+          </Badge>
+          <Text>{data.message || 'Windows image status'}</Text>
+        </div>
+        {data.error && (
+          <div style={{ padding: tokens.spacingHorizontalS, backgroundColor: tokens.colorPaletteYellowBackground2, borderRadius: tokens.borderRadiusSmall }}>
+            <Text>{data.error}</Text>
+            {data.suggestion && <Text size={200} block style={{ marginTop: tokens.spacingVerticalXS }}>{data.suggestion}</Text>}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const renderMinidumpsSummary = (data: any) => {
+    const dumps = data?.dumps || []
+    if (dumps.length === 0) {
+      return (
+        <div className={styles.summaryContainer}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalM }}>
+            <Badge appearance="filled" color="success">0</Badge>
+            <Text weight="semibold">No BSOD crashes detected</Text>
+          </div>
+          <Text size={200} style={{ color: tokens.colorNeutralForeground3, marginTop: tokens.spacingVerticalS }}>{data?.message || 'No minidump files found'}</Text>
+        </div>
+      )
+    }
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalM, marginBottom: tokens.spacingVerticalM }}>
+          <Badge appearance="filled" color="danger">{dumps.length}</Badge>
+          <Text weight="semibold">BSOD Crash Dumps Found</Text>
+        </div>
+        {dumps.slice(0, 5).map((dump: any, i: number) => (
+          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: `${tokens.spacingVerticalXS} 0`, borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}>
+            <Text>{dump.filename}</Text>
+            <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>{dump.size ? `${(dump.size / 1024).toFixed(0)} KB` : ''}</Text>
+          </div>
+        ))}
+        {data.can_copy && <Text size={200} style={{ marginTop: tokens.spacingVerticalS, color: tokens.colorNeutralForeground3 }}>Dumps can be copied to Desktop for analysis</Text>}
+      </div>
+    )
+  }
+
+  const renderHostsFileSummary = (data: any) => {
+    if (!data) return null
+    const entries = data.entries || []
+    const customEntries = entries.filter((e: any) => e.ip !== '127.0.0.1' && e.ip !== '::1')
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Total Entries</span>
+            <span className={styles.summaryValue}>{entries.length}</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Custom Entries</span>
+            <span className={styles.summaryValue}>{customEntries.length}</span>
+          </div>
+        </div>
+        {entries.length > 0 && (
+          <div style={{ marginTop: tokens.spacingVerticalM }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: tokens.spacingHorizontalM, fontWeight: 600, marginBottom: tokens.spacingVerticalS, color: tokens.colorNeutralForeground3 }}>
+              <Text>IP Address</Text>
+              <Text>Hostname</Text>
+            </div>
+            {entries.slice(0, 8).map((entry: any, i: number) => (
+              <div key={i} style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: tokens.spacingHorizontalM, padding: `${tokens.spacingVerticalXS} 0`, borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}>
+                <Text style={{ fontFamily: 'Consolas, monospace' }}>{entry.ip}</Text>
+                <Text>{entry.hostname}</Text>
+              </div>
+            ))}
+          </div>
+        )}
+        {data.error && <Text style={{ color: tokens.colorPaletteRedForeground1 }}>{data.error}</Text>}
+      </div>
+    )
+  }
+
+  const renderDomainSummary = (data: any) => {
+    if (!data) return null
+    const isJoined = data.PartOfDomain === true
+    const roleMap: Record<number, string> = {
+      0: 'Standalone Workstation',
+      1: 'Member Workstation',
+      2: 'Standalone Server',
+      3: 'Member Server',
+      4: 'Backup Domain Controller',
+      5: 'Primary Domain Controller'
+    }
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalM, marginBottom: tokens.spacingVerticalM }}>
+          <Badge appearance="filled" color={isJoined ? 'success' : 'informative'}>
+            {isJoined ? 'Domain Joined' : 'Workgroup'}
+          </Badge>
+        </div>
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Domain/Workgroup</span>
+            <span className={styles.summaryValue}>{data.Domain || 'N/A'}</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Role</span>
+            <span className={styles.summaryValue}>{roleMap[data.DomainRole] || `Role ${data.DomainRole}`}</span>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const renderFirewallSummary = (data: any) => {
+    if (!Array.isArray(data)) return <Text>Firewall information unavailable.</Text>
+    if (data.length === 0) return <Text>No firewall products detected via WMI SecurityCenter.</Text>
+
+    return (
+      <div className={styles.summaryContainer}>
+        {data.map((fw: any, i: number) => (
+          <div key={i} style={{ padding: tokens.spacingHorizontalS, borderLeft: `2px solid ${tokens.colorBrandStroke1}`, backgroundColor: tokens.colorNeutralBackgroundAlpha, marginBottom: tokens.spacingVerticalS }}>
+            <Text weight="semibold" block>{fw.displayName || 'Unknown Firewall'}</Text>
+            <div className={styles.summaryGrid} style={{ marginTop: tokens.spacingVerticalS }}>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>State</span>
+                <Badge appearance="tint" color={fw.productState ? 'success' : 'subtle'} size="small">
+                  {fw.productState ? 'Active' : 'Unknown'}
+                </Badge>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  const renderPerformanceSummary = (data: any) => {
+    if (!data) return null
+
+    return (
+      <div className={styles.summaryContainer}>
+        {data.cpu_performance && (
+          <div style={{ marginBottom: tokens.spacingVerticalM }}>
+            <Text weight="semibold" block style={{ marginBottom: tokens.spacingVerticalS }}>CPU</Text>
+            <div className={styles.summaryGrid}>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>Processor</span>
+                <span className={styles.summaryValue}>{data.cpu_performance.Name || 'N/A'}</span>
+              </div>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>Load</span>
+                <span className={styles.summaryValue}>{data.cpu_performance.LoadPercentage || data.cpu_performance.PercentProcessorTime || '0'}%</span>
+              </div>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>Cores</span>
+                <span className={styles.summaryValue}>{data.cpu_performance.NumberOfCores || 'N/A'}</span>
+              </div>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>Logical CPUs</span>
+                <span className={styles.summaryValue}>{data.cpu_performance.NumberOfLogicalProcessors || 'N/A'}</span>
+              </div>
+            </div>
+          </div>
+        )}
+        {data.memory_performance && (
+          <div style={{ marginBottom: tokens.spacingVerticalM }}>
+            <Text weight="semibold" block style={{ marginBottom: tokens.spacingVerticalS }}>Memory</Text>
+            <div className={styles.summaryGrid}>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>Used</span>
+                <span className={styles.summaryValue}>{data.memory_performance.UsedPercent || '0'}%</span>
+              </div>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>Available</span>
+                <span className={styles.summaryValue}>{data.memory_performance.AvailableMBytes ? `${data.memory_performance.AvailableMBytes} MB` : 'N/A'}</span>
+              </div>
+              <div className={styles.summaryItem}>
+                <span className={styles.summaryLabel}>Total</span>
+                <span className={styles.summaryValue}>{data.memory_performance.TotalMBytes ? `${(data.memory_performance.TotalMBytes / 1024).toFixed(1)} GB` : 'N/A'}</span>
+              </div>
+            </div>
+          </div>
+        )}
+        {data.disk_performance && (
+          <div>
+            <Text weight="semibold" block style={{ marginBottom: tokens.spacingVerticalS }}>Disk</Text>
+            {Array.isArray(data.disk_performance) ? (
+              data.disk_performance.map((disk: any, i: number) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: `${tokens.spacingVerticalXS} 0`, borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}>
+                  <Text>{disk.DeviceID}</Text>
+                  <Text>{disk.FreeSpace && disk.Size ? `${(parseInt(disk.FreeSpace) / 1024 / 1024 / 1024).toFixed(0)} GB free of ${(parseInt(disk.Size) / 1024 / 1024 / 1024).toFixed(0)} GB` : 'N/A'}</Text>
+                </div>
+              ))
+            ) : (
+              <div className={styles.summaryGrid}>
+                <div className={styles.summaryItem}>
+                  <span className={styles.summaryLabel}>Disk Time</span>
+                  <span className={styles.summaryValue}>{data.disk_performance.PercentDiskTime || '0'}%</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const renderComputerSystemSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return null
+    const sys = data[0]
+    return (
+      <div className={styles.summaryGrid}>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Computer Name</span>
+          <span className={styles.summaryValue}>{sys.Name || 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Manufacturer</span>
+          <span className={styles.summaryValue}>{sys.Manufacturer || 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Model</span>
+          <span className={styles.summaryValue}>{sys.Model || 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>System Type</span>
+          <span className={styles.summaryValue}>{sys.SystemType || 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Total Memory</span>
+          <span className={styles.summaryValue}>{sys.TotalPhysicalMemory ? `${(parseInt(sys.TotalPhysicalMemory) / 1024 / 1024 / 1024).toFixed(1)} GB` : 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Domain</span>
+          <span className={styles.summaryValue}>{sys.Domain || 'N/A'}</span>
+        </div>
+      </div>
+    )
+  }
+
+  const renderOsSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return null
+    const os = data[0]
+    return (
+      <div className={styles.summaryGrid}>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>OS Name</span>
+          <span className={styles.summaryValue}>{os.Caption || 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Version</span>
+          <span className={styles.summaryValue}>{os.Version || 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Build</span>
+          <span className={styles.summaryValue}>{os.BuildNumber || 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Architecture</span>
+          <span className={styles.summaryValue}>{os.OSArchitecture || 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Install Date</span>
+          <span className={styles.summaryValue}>{os.InstallDate ? os.InstallDate.substring(0, 8) : 'N/A'}</span>
+        </div>
+        <div className={styles.summaryItem}>
+          <span className={styles.summaryLabel}>Last Boot</span>
+          <span className={styles.summaryValue}>{os.LastBootUpTime ? os.LastBootUpTime.substring(0, 14) : 'N/A'}</span>
+        </div>
+      </div>
+    )
+  }
+
+  const renderPrintersSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return <Text>No printers found.</Text>
+    const defaultPrinter = data.find((p: any) => p.Default === true)
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Total Printers</span>
+            <span className={styles.summaryValue}>{data.length}</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Default Printer</span>
+            <span className={styles.summaryValue}>{defaultPrinter?.Name || 'None'}</span>
+          </div>
+        </div>
+        <div style={{ marginTop: tokens.spacingVerticalM }}>
+          {data.slice(0, 5).map((printer: any, i: number) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: `${tokens.spacingVerticalXS} 0`, borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}>
+              <Text>{printer.Name}</Text>
+              <div style={{ display: 'flex', gap: tokens.spacingHorizontalS }}>
+                {printer.Default && <Badge appearance="tint" color="brand" size="small">Default</Badge>}
+                <Badge appearance="tint" color={printer.WorkOffline ? 'warning' : 'success'} size="small">
+                  {printer.WorkOffline ? 'Offline' : 'Ready'}
+                </Badge>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  const renderStoreAppsSummary = (data: any) => {
+    if (!Array.isArray(data) && data?.raw_output) {
+      return <Text>Store apps data available in raw format.</Text>
+    }
+    if (!Array.isArray(data) || data.length === 0) return <Text>No Store apps found.</Text>
+
+    // Filter to show only interesting apps (not framework packages)
+    const userApps = data.filter((app: any) =>
+      !app.Name?.includes('Microsoft.NET') &&
+      !app.Name?.includes('Microsoft.VCLibs') &&
+      !app.Name?.includes('Microsoft.UI') &&
+      !app.Name?.includes('.Framework')
+    )
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Total Packages</span>
+            <span className={styles.summaryValue}>{data.length}</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>User Apps</span>
+            <span className={styles.summaryValue}>{userApps.length}</span>
+          </div>
+        </div>
+        <div style={{ marginTop: tokens.spacingVerticalM }}>
+          <Text weight="semibold" block style={{ marginBottom: tokens.spacingVerticalS }}>Installed Apps</Text>
+          {userApps.slice(0, 8).map((app: any, i: number) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: `${tokens.spacingVerticalXS} 0`, borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}>
+              <Text style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{app.Name}</Text>
+              <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>{app.Version}</Text>
+            </div>
+          ))}
+          {userApps.length > 8 && <Text size={200} style={{ marginTop: tokens.spacingVerticalS, color: tokens.colorNeutralForeground3 }}>...and {userApps.length - 8} more</Text>}
+        </div>
+      </div>
+    )
+  }
+
+  const renderChkdskSummary = (data: any) => {
+    if (!data) return null
+    const isHealthy = data.status === 'Healthy'
+    const hasErrors = data.errors_found === true
+    const disks = data.disks || data.disk_drives || []
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalM, marginBottom: tokens.spacingVerticalM }}>
+          <Badge appearance="filled" color={isHealthy ? 'success' : hasErrors ? 'danger' : 'warning'} size="large">
+            {data.status || 'Unknown'}
+          </Badge>
+          <Text>{data.message || 'Disk health status'}</Text>
+        </div>
+        {data.note && (
+          <div style={{ padding: tokens.spacingHorizontalS, backgroundColor: tokens.colorPaletteYellowBackground2, borderRadius: tokens.borderRadiusSmall, marginBottom: tokens.spacingVerticalM }}>
+            <Text size={200}>{data.note}</Text>
+          </div>
+        )}
+        {disks.length > 0 && (
+          <div style={{ marginTop: tokens.spacingVerticalM }}>
+            {disks.map((disk: any, i: number) => (
+              <div key={i} style={{ padding: tokens.spacingHorizontalS, borderLeft: `2px solid ${disk.HealthStatusText === 'Healthy' || disk.HealthStatusText === 'OK' ? tokens.colorPaletteGreenBorder2 : tokens.colorPaletteYellowBorder2}`, backgroundColor: tokens.colorNeutralBackgroundAlpha, marginBottom: tokens.spacingVerticalS }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <Text weight="semibold">{disk.FriendlyName || disk.Model || 'Disk'}</Text>
+                  <Badge appearance="tint" color={disk.HealthStatusText === 'Healthy' || disk.HealthStatusText === 'OK' ? 'success' : 'warning'} size="small">
+                    {disk.HealthStatusText || 'Unknown'}
+                  </Badge>
+                </div>
+                <div className={styles.summaryGrid} style={{ marginTop: tokens.spacingVerticalS }}>
+                  <div className={styles.summaryItem}>
+                    <span className={styles.summaryLabel}>Size</span>
+                    <span className={styles.summaryValue}>{disk.Size ? `${(parseInt(disk.Size) / 1024 / 1024 / 1024).toFixed(0)} GB` : 'N/A'}</span>
+                  </div>
+                  <div className={styles.summaryItem}>
+                    <span className={styles.summaryLabel}>Type</span>
+                    <span className={styles.summaryValue}>{disk.MediaTypeText || disk.MediaType || 'N/A'}</span>
+                  </div>
+                  <div className={styles.summaryItem}>
+                    <span className={styles.summaryLabel}>Bus</span>
+                    <span className={styles.summaryValue}>{disk.BusTypeText || disk.InterfaceType || 'N/A'}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const renderDriverVerifierSummary = (data: any) => {
+    if (!data) return null
+    const isEnabled = data.enabled === true
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalM, marginBottom: tokens.spacingVerticalM }}>
+          <Badge appearance="filled" color={isEnabled ? 'warning' : 'informative'}>
+            {isEnabled ? 'Active' : 'Inactive'}
+          </Badge>
+          <Text>{data.status || 'Driver Verifier status'}</Text>
+        </div>
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Verifier Flags</span>
+            <span className={styles.summaryValue}>{data.verifier_flags || '0x00000000'}</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Boot Mode</span>
+            <span className={styles.summaryValue}>{data.boot_mode || 'N/A'}</span>
+          </div>
+        </div>
+        {data.enabled_flags && data.enabled_flags.length > 0 && (
+          <div style={{ marginTop: tokens.spacingVerticalM }}>
+            <Text weight="semibold" block style={{ marginBottom: tokens.spacingVerticalS }}>Active Verification Flags</Text>
+            <ul style={{ paddingLeft: tokens.spacingHorizontalL, margin: 0 }}>
+              {data.enabled_flags.map((flag: string, i: number) => (
+                <li key={i}><Text size={200}>{flag}</Text></li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {data.verified_drivers && data.verified_drivers.length > 0 && (
+          <div style={{ marginTop: tokens.spacingVerticalM }}>
+            <Text weight="semibold" block style={{ marginBottom: tokens.spacingVerticalS }}>Verified Drivers</Text>
+            <ul style={{ paddingLeft: tokens.spacingHorizontalL, margin: 0 }}>
+              {data.verified_drivers.map((driver: string, i: number) => (
+                <li key={i}><Text>{driver}</Text></li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {!isEnabled && (
+          <Text size={200} style={{ marginTop: tokens.spacingVerticalM, color: tokens.colorNeutralForeground3 }}>
+            Driver Verifier is not monitoring any drivers. This is normal for most systems.
+          </Text>
+        )}
+        {data.error && <Text style={{ color: tokens.colorPaletteRedForeground1 }}>{data.error}</Text>}
+      </div>
+    )
+  }
+
+  const renderFragmentationSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return null
+
+    return (
+      <div className={styles.summaryContainer}>
+        {data.map((drive: any, i: number) => {
+          const percent = drive.fragmentation_percent
+          return (
+            <div key={i} style={{ marginBottom: tokens.spacingVerticalM }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                <Text weight="semibold">{drive.drive}</Text>
+                <Text>{percent !== null ? `${percent}% fragmented` : drive.status}</Text>
+              </div>
+              {percent !== null && (
+                <ProgressBar
+                  value={percent / 100}
+                  color={percent > 30 ? 'error' : percent > 15 ? 'warning' : 'brand'}
+                />
+              )}
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
+  const renderDmaChannelsSummary = (data: any) => {
+    if (!Array.isArray(data)) {
+      return <Text>No DMA channels configured. This is normal for modern systems using MSI/MSI-X.</Text>
+    }
+    if (data.length === 0) {
+      return <Text>No DMA channels in use. Modern systems typically use MSI/MSI-X interrupts instead.</Text>
+    }
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>DMA Channels</span>
+            <span className={styles.summaryValue}>{data.length}</span>
+          </div>
+        </div>
+        <div style={{ marginTop: tokens.spacingVerticalM }}>
+          {data.slice(0, 10).map((channel: any, i: number) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: `${tokens.spacingVerticalXS} 0`, borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}>
+              <Text>Channel {channel.DMAChannel ?? channel.Channel ?? i}</Text>
+              <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>{channel.Caption || channel.Name || 'In use'}</Text>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  const renderDeviceMemorySummary = (data: any) => {
+    if (!Array.isArray(data)) {
+      return <Text>Device memory information unavailable.</Text>
+    }
+    if (data.length === 0) {
+      return <Text>No device memory address ranges reported.</Text>
+    }
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Memory Ranges</span>
+            <span className={styles.summaryValue}>{data.length}</span>
+          </div>
+        </div>
+        <div style={{ marginTop: tokens.spacingVerticalM }}>
+          <Text weight="semibold" block style={{ marginBottom: tokens.spacingVerticalS }}>Allocated Ranges</Text>
+          {data.slice(0, 8).map((mem: any, i: number) => (
+            <div key={i} style={{ padding: `${tokens.spacingVerticalXS} 0`, borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}>
+              <Text style={{ fontFamily: 'Consolas, monospace' }}>{mem.StartingAddress || mem.Name || `Range ${i}`}</Text>
+              {mem.Caption && <Text size={200} block style={{ color: tokens.colorNeutralForeground3 }}>{mem.Caption}</Text>}
+            </div>
+          ))}
+          {data.length > 8 && <Text size={200} style={{ marginTop: tokens.spacingVerticalS, color: tokens.colorNeutralForeground3 }}>...and {data.length - 8} more ranges</Text>}
+        </div>
+      </div>
+    )
+  }
+
+  const renderIrqSummary = (data: any) => {
+    if (!Array.isArray(data)) {
+      return <Text>IRQ information unavailable.</Text>
+    }
+    if (data.length === 0) {
+      return <Text>No legacy IRQ resources in use. Modern devices use MSI/MSI-X interrupts.</Text>
+    }
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>IRQ Resources</span>
+            <span className={styles.summaryValue}>{data.length}</span>
+          </div>
+        </div>
+        <div style={{ marginTop: tokens.spacingVerticalM }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '60px 1fr', gap: tokens.spacingHorizontalS, fontWeight: 600, marginBottom: tokens.spacingVerticalS, color: tokens.colorNeutralForeground3 }}>
+            <Text>IRQ</Text>
+            <Text>Device</Text>
+          </div>
+          {data.slice(0, 12).map((irq: any, i: number) => (
+            <div key={i} style={{ display: 'grid', gridTemplateColumns: '60px 1fr', gap: tokens.spacingHorizontalS, padding: `${tokens.spacingVerticalXS} 0`, borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}>
+              <Text style={{ fontFamily: 'Consolas, monospace' }}>{irq.IRQNumber ?? irq.IRQ ?? '-'}</Text>
+              <Text size={200}>{irq.Caption || irq.Name || 'Unknown device'}</Text>
+            </div>
+          ))}
+          {data.length > 12 && <Text size={200} style={{ marginTop: tokens.spacingVerticalS, color: tokens.colorNeutralForeground3 }}>...and {data.length - 12} more</Text>}
+        </div>
+      </div>
+    )
+  }
+
+  const renderSystemDevicesSummary = (data: any) => {
+    if (!Array.isArray(data)) {
+      return <Text>System devices information unavailable.</Text>
+    }
+    if (data.length === 0) {
+      return <Text>No system devices reported.</Text>
+    }
+
+    // Group by type if possible
+    const devices = data.slice(0, 15)
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Total Devices</span>
+            <span className={styles.summaryValue}>{data.length}</span>
+          </div>
+        </div>
+        <div style={{ marginTop: tokens.spacingVerticalM }}>
+          {devices.map((device: any, i: number) => (
+            <div key={i} style={{ padding: `${tokens.spacingVerticalXS} 0`, borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}>
+              <Text>{device.Caption || device.Name || device.PartComponent || `Device ${i}`}</Text>
+              {device.Description && device.Description !== device.Caption && (
+                <Text size={200} block style={{ color: tokens.colorNeutralForeground3 }}>{device.Description}</Text>
+              )}
+            </div>
+          ))}
+          {data.length > 15 && <Text size={200} style={{ marginTop: tokens.spacingVerticalS, color: tokens.colorNeutralForeground3 }}>...and {data.length - 15} more devices</Text>}
+        </div>
+      </div>
+    )
+  }
+
+  const renderSystemDriversSummary = (data: any) => {
+    if (!Array.isArray(data) || data.length === 0) return null
+    const running = data.filter((d: any) => d.State === 'Running')
+    const stopped = data.filter((d: any) => d.State === 'Stopped')
+
+    return (
+      <div className={styles.summaryContainer}>
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Total Drivers</span>
+            <span className={styles.summaryValue}>{data.length}</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Running</span>
+            <span className={styles.summaryValue} style={{ color: tokens.colorPaletteGreenForeground1 }}>{running.length}</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryLabel}>Stopped</span>
+            <span className={styles.summaryValue}>{stopped.length}</span>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   const renderSummary = () => {
     if (!parsedData) return <Text>No data available.</Text>
 
-    // Match by exact task ID or title content
-    if (title.includes('Logical Disks') || category === 'Storage') return renderDiskSummary(parsedData)
-    if (title.includes('Battery') && parsedData.battery_summary) return renderBatterySummary(parsedData)
+    // Match by exact task title or content patterns
+    // System category
+    if (title.includes('Computer System')) return renderComputerSystemSummary(parsedData)
+    if (title.includes('Operating System')) return renderOsSummary(parsedData)
+    if (title.includes('BIOS')) return renderBiosSummary(parsedData)
+    if (title.includes('Motherboard')) return renderMotherboardSummary(parsedData)
     if (title.includes('System Information') && parsedData.os_version) return renderSystemInfoSummary(parsedData)
-    if (title.includes('Network') || title.includes('IP Configuration')) return renderNetworkSummary(parsedData)
+    if (title.includes('Environment Variables')) return renderEnvironmentSummary(parsedData)
+    if (title.includes('Startup Commands')) return renderStartupSummary(parsedData)
+    if (title.includes('Domain Registration')) return renderDomainSummary(parsedData)
+    if (title.includes('Scheduled Tasks')) return renderScheduledTasksSummary(parsedData)
+    if (title.includes('DISM Health')) return renderDismHealthSummary(parsedData)
+
+    // Hardware category
     if (title.includes('Processor')) return renderProcessorSummary(parsedData)
     if (title.includes('Physical Memory')) return renderMemorySummary(parsedData)
+    if (title.includes('Battery') && parsedData.battery_summary) return renderBatterySummary(parsedData)
+    if (title.includes('Printers')) return renderPrintersSummary(parsedData)
+    if (title.includes('DMA Channel')) return renderDmaChannelsSummary(parsedData)
+    if (title.includes('Device Memory') || title.includes('Memory Address')) return renderDeviceMemorySummary(parsedData)
+    if (title.includes('IRQ')) return renderIrqSummary(parsedData)
+    if (title.includes('System Devices')) return renderSystemDevicesSummary(parsedData)
+
+    // Storage category
+    if (title.includes('Disk Drives')) return renderDiskDrivesSummary(parsedData)
+    if (title.includes('Disk Partitions')) return renderDiskPartitionsSummary(parsedData)
+    if (title.includes('Logical Disks')) return renderDiskSummary(parsedData)
+    if (title.includes('Disk Fragmentation')) return renderFragmentationSummary(parsedData)
+    if (title.includes('Disk Check')) return renderChkdskSummary(parsedData)
+
+    // Network category
+    if (title.includes('Network') || title.includes('IP Configuration')) return renderNetworkSummary(parsedData)
+    if (title.includes('HOSTS File')) return renderHostsFileSummary(parsedData)
+    if (title.includes('Firewall')) return renderFirewallSummary(parsedData)
+
+    // Drivers category
+    if (title.includes('System Drivers')) return renderSystemDriversSummary(parsedData)
+    if (title.includes('Driver List')) return renderDriverListSummary(parsedData)
+    if (title.includes('Driver Verifier')) return renderDriverVerifierSummary(parsedData)
+
+    // Graphics category
     if (title.includes('DirectX') || title.includes('Graphics')) return renderGraphicsSummary(parsedData)
+
+    // Software category
+    if (title.includes('Installed Programs')) return renderInstalledProgramsSummary(parsedData)
+    if (title.includes('Store Apps')) return renderStoreAppsSummary(parsedData)
+
+    // Logs category
     if (title.includes('Event Logs')) return renderEventLogSummary(parsedData)
-    if (title.includes('Services')) return renderServicesSummary(parsedData)
     if (title.includes('Windows Update')) return renderWindowsUpdateSummary(parsedData)
+
+    // Debug category
+    if (title.includes('Minidump') || title.includes('BSOD')) return renderMinidumpsSummary(parsedData)
+
+    // Performance category
+    if (title.includes('Performance')) return renderPerformanceSummary(parsedData)
+
+    // System services/processes
+    if (title.includes('Services')) return renderServicesSummary(parsedData)
     if (title.includes('Running Processes')) return renderProcessesSummary(parsedData)
-    
+
     // Default fallback for simple objects (key-value pairs)
     if (typeof parsedData === 'object' && !Array.isArray(parsedData) && Object.keys(parsedData).length < 15) {
        return (
@@ -687,11 +1736,16 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
       <div className={styles.header} onClick={() => setExpanded(!expanded)}>
         <div className={styles.statusIcon}>{getStatusIcon()}</div>
         <div className={styles.titleContainer}>
-          <Text className={styles.title}>{title}</Text>
+          <Text className={styles.title}>{highlightText ? highlightMatchingText(title) : title}</Text>
           <Text className={styles.meta}>
             {importance !== 'primary' && `${category} • `}
             {executionTime ? `${executionTime}ms` : ''}
           </Text>
+          {!expanded && (
+            <Text className={styles.preview}>
+              {highlightText ? highlightMatchingText(getQuickSummary()) : getQuickSummary()}
+            </Text>
+          )}
         </div>
         <Badge appearance="outline" color={getStatusBadgeColor()} className={styles.statusBadge}>
           {getStatusText()}

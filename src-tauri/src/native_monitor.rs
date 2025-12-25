@@ -61,6 +61,7 @@ static NPU_LUID: OnceLock<Option<String>> = OnceLock::new();
 /// Total physical memory - never changes
 static TOTAL_MEMORY: OnceLock<u64> = OnceLock::new();
 
+
 // Reusable buffer for NtQuerySystemInformation (per-thread to avoid locks)
 thread_local! {
     static PROCESS_BUFFER: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::with_capacity(2 * 1024 * 1024));
@@ -263,9 +264,53 @@ pub struct SystemMonitor {
 
 impl SystemMonitor {
     pub fn new(app_handle: AppHandle) -> Self {
-        // Pre-initialize static caches in background
+        // Initialize fast caches synchronously (< 1ms)
+        CPU_COUNT.get_or_init(|| unsafe {
+            let mut sys_info = SYSTEM_INFO::default();
+            GetSystemInfo(&mut sys_info);
+            sys_info.dwNumberOfProcessors as usize
+        });
+        CPU_FREQUENCY.get_or_init(get_cpu_frequency_uncached);
+        TOTAL_MEMORY.get_or_init(|| {
+            let mut mem_status = MEMORYSTATUSEX {
+                dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+                ..Default::default()
+            };
+            unsafe {
+                if GlobalMemoryStatusEx(&mut mem_status).is_ok() {
+                    mem_status.ullTotalPhys
+                } else {
+                    0
+                }
+            }
+        });
+
+        // Initialize slow caches in background (disk types, NPU detection)
         std::thread::spawn(|| {
-            initialize_static_caches();
+            // These can take 1-5 seconds
+            DISK_TYPES.get_or_init(detect_all_disk_types);
+
+            // NPU detection - try DXCore first (fast), then WMI fallback (slow)
+            let npu_result = NPU_INFO.get_or_init(|| {
+                if let Some((name, _)) = detect_npu_dxcore() {
+                    (true, Some(name))
+                } else {
+                    let (available, name, _) = detect_npu_wmi_fallback();
+                    (available, name)
+                }
+            });
+
+            // If NPU was detected, also discover LUID for utilization queries
+            if npu_result.0 {
+                if let Ok(wmi_con) = crate::wmi_native::WmiConnection::new() {
+                    NPU_LUID.get_or_init(|| discover_npu_luid_with_wmi(&wmi_con));
+                }
+            } else {
+                // No NPU - set LUID to None so utilization queries can fast-path
+                NPU_LUID.get_or_init(|| None);
+            }
+
+            INIT_COMPLETE.store(true, std::sync::atomic::Ordering::Release);
         });
 
         Self {
@@ -384,7 +429,7 @@ pub fn initialize_static_caches() {
     // These run in background and UI shows defaults until ready
     DISK_TYPES.get_or_init(detect_all_disk_types);
 
-    NPU_INFO.get_or_init(|| {
+    let npu_result = NPU_INFO.get_or_init(|| {
         if let Some((name, _)) = detect_npu_dxcore() {
             (true, Some(name))
         } else {
@@ -392,6 +437,15 @@ pub fn initialize_static_caches() {
             (available, name)
         }
     });
+
+    // If NPU was detected, also discover LUID for utilization queries
+    if npu_result.0 {
+        if let Ok(wmi_con) = crate::wmi_native::WmiConnection::new() {
+            NPU_LUID.get_or_init(|| discover_npu_luid_with_wmi(&wmi_con));
+        }
+    } else {
+        NPU_LUID.get_or_init(|| None);
+    }
 
     // Signal that initialization is complete
     INIT_COMPLETE.store(true, std::sync::atomic::Ordering::Release);
@@ -1066,40 +1120,58 @@ pub async fn get_network_connections() -> Vec<NetworkConnection> {
 fn get_npu_utilization() -> Option<f32> {
     use crate::wmi_native::WmiConnection;
 
+    // Check if we have a cached NPU LUID first (fast path)
+    // Only create WMI connection if we have a LUID to query
+    let npu_luid = match NPU_LUID.get() {
+        Some(Some(luid)) => luid.clone(),
+        Some(None) => return None, // No NPU LUID was found during init
+        None => {
+            // LUID not yet initialized - try to discover it
+            let wmi_con = WmiConnection::new().ok()?;
+            let luid = NPU_LUID.get_or_init(|| discover_npu_luid_with_wmi(&wmi_con));
+            match luid {
+                Some(l) => l.clone(),
+                None => return None,
+            }
+        }
+    };
+
+    // Now query utilization with the known LUID
     let wmi_con = WmiConnection::new().ok()?;
-    let npu_luid = NPU_LUID.get_or_init(|| discover_npu_luid());
 
-    if let Some(luid) = npu_luid {
-        let query = format!(
-            "SELECT UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine WHERE Name LIKE '%{}%'",
-            luid
-        );
+    let query = format!(
+        "SELECT UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine WHERE Name LIKE '%{}%'",
+        npu_luid
+    );
 
-        if let Ok(results) = wmi_con.query(&query) {
-            let mut total_util: u64 = 0;
-            let mut count = 0;
+    if let Ok(results) = wmi_con.query(&query) {
+        let mut total_util: u64 = 0;
+        let mut count = 0;
 
-            for counter in &results {
-                if let Some(util) = counter.get("UtilizationPercentage").and_then(|v| v.as_u64()) {
-                    total_util += util;
+        for counter in &results {
+            if let Some(util) = counter.get("UtilizationPercentage") {
+                // WMI can return UtilizationPercentage as string or integer
+                let util_val = util
+                    .as_u64()
+                    .or_else(|| util.as_i64().map(|i| i as u64))
+                    .or_else(|| util.as_str().and_then(|s| s.parse::<u64>().ok()));
+                if let Some(u) = util_val {
+                    total_util += u;
                     count += 1;
                 }
             }
+        }
 
-            if count > 0 {
-                return Some((total_util as f32).min(100.0));
-            }
+        if count > 0 {
+            return Some((total_util as f32).min(100.0));
         }
     }
 
     None
 }
 
-fn discover_npu_luid() -> Option<String> {
-    use crate::wmi_native::WmiConnection;
+fn discover_npu_luid_with_wmi(wmi_con: &crate::wmi_native::WmiConnection) -> Option<String> {
     use std::collections::HashSet;
-
-    let wmi_con = WmiConnection::new().ok()?;
 
     if let Ok(results) = wmi_con.query(
         "SELECT Name FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine",
@@ -1122,12 +1194,14 @@ fn discover_npu_luid() -> Option<String> {
             }
         }
 
+        // First: find device with ONLY Compute engine (definitely NPU)
         for (luid, engine_types) in &luid_engines {
             if engine_types.len() == 1 && engine_types.contains("Compute") {
                 return Some(luid.clone());
             }
         }
 
+        // Second: find device without 3D but with Compute (likely NPU)
         for (luid, engine_types) in &luid_engines {
             if !engine_types.contains("3D") && engine_types.contains("Compute") {
                 return Some(luid.clone());
@@ -1142,47 +1216,116 @@ fn detect_npu_dxcore() -> Option<(String, u32)> {
     use windows::core::GUID;
     use windows::Win32::Graphics::DXCore::*;
 
-    const DXCORE_HARDWARE_TYPE_ATTRIBUTE_NPU: GUID = GUID::from_values(
-        0xb69eb219,
-        0x3ded,
-        0x4464,
-        [0x97, 0x9f, 0xa0, 0xb0, 0x33, 0x98, 0x87, 0x18],
+    // DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML - for ML-capable devices (NPUs and GPUs)
+    const DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML: GUID = GUID::from_values(
+        0xb71b0d41,
+        0x1088,
+        0x422f,
+        [0xa2, 0x7c, 0x02, 0x50, 0xb7, 0xd3, 0xa9, 0x88],
     );
+
+    // DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE - fallback for older Windows
+    const DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE: GUID = GUID::from_values(
+        0x248e2800,
+        0xa793,
+        0x4724,
+        [0xab, 0xaa, 0x23, 0xa6, 0xde, 0x1b, 0xe0, 0x90],
+    );
+
+    // DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS - to exclude GPUs
+    const DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS: GUID = GUID::from_values(
+        0x0c9ece4d,
+        0x2f6e,
+        0x4f01,
+        [0x8c, 0x96, 0xe8, 0x9e, 0x33, 0x1b, 0x47, 0xb1],
+    );
+
+    // Known non-NPU device names to filter out
+    const EXCLUDED_NAMES: &[&str] = &[
+        "umbus",
+        "enumerator",
+        "virtual",
+        "microsoft basic",
+        "remote desktop",
+    ];
+
+    // Known NPU identifiers
+    const NPU_IDENTIFIERS: &[&str] = &[
+        "npu",
+        "neural",
+        "hexagon",
+        "ai accelerator",
+        "ai boost",
+        "xdna",
+        "myriad",
+    ];
 
     unsafe {
         let factory: IDXCoreAdapterFactory = DXCoreCreateAdapterFactory().ok()?;
-        let attributes = [DXCORE_HARDWARE_TYPE_ATTRIBUTE_NPU];
-        let adapter_list: IDXCoreAdapterList = factory.CreateAdapterList(&attributes).ok()?;
+
+        // Try GENERIC_ML first, then CORE_COMPUTE as fallback
+        let adapter_list: IDXCoreAdapterList = factory
+            .CreateAdapterList(&[DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML])
+            .or_else(|_| factory.CreateAdapterList(&[DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE]))
+            .ok()?;
 
         let adapter_count = adapter_list.GetAdapterCount();
         if adapter_count == 0 {
             return None;
         }
 
-        let adapter: IDXCoreAdapter = adapter_list.GetAdapter(0).ok()?;
+        // Iterate through all adapters to find actual NPUs
+        for i in 0..adapter_count {
+            let adapter: IDXCoreAdapter = match adapter_list.GetAdapter(i) {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
 
-        let desc_size = adapter.GetPropertySize(DriverDescription).ok()?;
-        if desc_size == 0 {
-            return Some(("NPU Detected".to_string(), adapter_count));
+            // Check if this is an NPU (has CORE_COMPUTE but NOT GRAPHICS)
+            let has_compute = adapter.IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE);
+            let has_graphics = adapter.IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS);
+
+            // Get driver description
+            let desc_size = match adapter.GetPropertySize(DriverDescription) {
+                Ok(s) if s > 0 => s,
+                _ => continue,
+            };
+
+            let mut desc_buffer: Vec<u8> = vec![0; desc_size];
+            if adapter
+                .GetProperty(DriverDescription, desc_size, desc_buffer.as_mut_ptr() as *mut _)
+                .is_err()
+            {
+                continue;
+            }
+
+            let name = String::from_utf8_lossy(&desc_buffer)
+                .trim_end_matches('\0')
+                .to_string();
+
+            if name.is_empty() {
+                continue;
+            }
+
+            let name_lower = name.to_lowercase();
+
+            // Filter out known non-NPU devices
+            if EXCLUDED_NAMES.iter().any(|ex| name_lower.contains(ex)) {
+                continue;
+            }
+
+            // Check if it's an NPU by:
+            // 1. Has CORE_COMPUTE but NOT GRAPHICS (definite NPU)
+            // 2. OR name contains NPU identifiers
+            let is_npu_by_caps = has_compute && !has_graphics;
+            let is_npu_by_name = NPU_IDENTIFIERS.iter().any(|id| name_lower.contains(id));
+
+            if is_npu_by_caps || is_npu_by_name {
+                return Some((name, 1));
+            }
         }
 
-        let mut desc_buffer: Vec<u8> = vec![0; desc_size];
-        if adapter
-            .GetProperty(DriverDescription, desc_size, desc_buffer.as_mut_ptr() as *mut _)
-            .is_err()
-        {
-            return Some(("NPU Detected".to_string(), adapter_count));
-        }
-
-        let name = String::from_utf8_lossy(&desc_buffer)
-            .trim_end_matches('\0')
-            .to_string();
-
-        if name.is_empty() {
-            Some(("NPU Detected".to_string(), adapter_count))
-        } else {
-            Some((name, adapter_count))
-        }
+        None
     }
 }
 

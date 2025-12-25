@@ -372,74 +372,128 @@ impl NativeDiagnostics {
     }
 
     pub fn run_chkdsk(&self) -> Result<Value> {
-        // First try to run chkdsk in read-only mode using secure execution
-        let output = Self::execute_secure_command("chkdsk", &["C:"])?;
+        // Use native disk health check via Storage Management WMI - much faster than chkdsk
+        self.get_disk_health()
+    }
 
-        if output.status.success() {
-            let output_str = String::from_utf8_lossy(&output.stdout);
+    /// Get disk health using Windows Storage Management API (MSFT_PhysicalDisk)
+    /// This is much faster than running chkdsk and provides SMART-like health data
+    pub fn get_disk_health(&self) -> Result<Value> {
+        let mut health_info = json!({
+            "status": "Healthy",
+            "message": "All disks operating normally",
+            "errors_found": false,
+            "disks": []
+        });
 
-            // Parse chkdsk output
-            let mut check_info = json!({
-                "raw_output": output_str.to_string(),
-                "status": "Unknown",
-                "errors_found": false
-            });
+        let mut all_healthy = true;
+        let mut disks_data = Vec::new();
 
-            // Check for common chkdsk responses
-            if output_str.contains("Windows has scanned the file system and found no problems") {
-                check_info["status"] = json!("Healthy");
-                check_info["message"] = json!("No file system errors found");
-                check_info["errors_found"] = json!(false);
-            } else if output_str.contains("found problems") || output_str.contains("errors found") {
-                check_info["status"] = json!("Errors Found");
-                check_info["message"] = json!("File system errors detected");
-                check_info["errors_found"] = json!(true);
-            } else if output_str.contains("scan completed successfully") {
-                check_info["status"] = json!("Scan Completed");
-                check_info["message"] = json!("Scan completed successfully");
+        // Try Storage Management namespace for detailed health (MSFT_PhysicalDisk)
+        if let Ok(wmi_storage) = WmiConnection::with_namespace(r"root\Microsoft\Windows\Storage") {
+            if let Ok(physical_disks) = wmi_storage.query("SELECT * FROM MSFT_PhysicalDisk") {
+                for disk in physical_disks {
+                    let mut disk_info: serde_json::Map<String, Value> = disk.into_iter().collect();
+
+                    // Parse health status (0=Healthy, 1=Warning, 2=Unhealthy)
+                    let health_status = disk_info.get("HealthStatus")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+
+                    let operational_status = disk_info.get("OperationalStatus")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+
+                    let health_str = match health_status {
+                        0 => "Healthy",
+                        1 => { all_healthy = false; "Warning" },
+                        2 => { all_healthy = false; "Unhealthy" },
+                        _ => "Unknown"
+                    };
+
+                    disk_info.insert("HealthStatusText".to_string(), json!(health_str));
+
+                    // Media type (0=Unspecified, 3=HDD, 4=SSD, 5=SCM)
+                    let media_type = disk_info.get("MediaType")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let media_str = match media_type {
+                        3 => "HDD",
+                        4 => "SSD",
+                        5 => "SCM",
+                        _ => "Unknown"
+                    };
+                    disk_info.insert("MediaTypeText".to_string(), json!(media_str));
+
+                    // Bus type
+                    let bus_type = disk_info.get("BusType")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let bus_str = match bus_type {
+                        1 => "SCSI",
+                        2 => "ATAPI",
+                        3 => "ATA",
+                        4 => "1394",
+                        5 => "SSA",
+                        6 => "Fibre",
+                        7 => "USB",
+                        8 => "RAID",
+                        9 => "iSCSI",
+                        10 => "SAS",
+                        11 => "SATA",
+                        12 => "SD",
+                        13 => "MMC",
+                        15 => "File Backed Virtual",
+                        16 => "Storage Spaces",
+                        17 => "NVMe",
+                        _ => "Unknown"
+                    };
+                    disk_info.insert("BusTypeText".to_string(), json!(bus_str));
+
+                    disks_data.push(Value::Object(disk_info));
+                }
             }
 
-            // Also get disk info from WMI
-            let wmi_con = WmiConnection::new()?;
-            if let Ok(results) = wmi_con.query("SELECT * FROM Win32_DiskDrive") {
-                let disk_info: Vec<Value> = results
-                    .into_iter()
-                    .map(|r| {
-                        let obj: serde_json::Map<String, Value> = r.into_iter().collect();
-                        Value::Object(obj)
-                    })
-                    .collect();
-                check_info["disk_drives"] = json!(disk_info);
-            }
-
-            Ok(check_info)
-        } else {
-            let error_str = String::from_utf8_lossy(&output.stderr);
-
-            // Check if it's an elevation error
-            if error_str.contains("requires elevated") || error_str.contains("Access is denied") {
-                // If we can't run chkdsk, at least get disk info
-                let wmi_con = WmiConnection::new()?;
-                let results = wmi_con.query("SELECT * FROM Win32_DiskDrive")?;
-
-                let disk_info: Vec<Value> = results
-                    .into_iter()
-                    .map(|r| {
-                        let obj: serde_json::Map<String, Value> = r.into_iter().collect();
-                        Value::Object(obj)
-                    })
-                    .collect();
-
-                Ok(json!({
-                    "note": "Full chkdsk scan requires admin privileges. Showing disk status from WMI.",
-                    "suggestion": "Run as administrator for full disk scan",
-                    "disk_drives": disk_info,
-                    "raw_error": error_str.to_string()
-                }))
-            } else {
-                Err(anyhow::anyhow!("Chkdsk failed: {}", error_str))
+            // Also get reliability counters if available
+            if let Ok(reliability) = wmi_storage.query("SELECT * FROM MSFT_StorageReliabilityCounter") {
+                health_info["reliability_counters"] = json!(reliability.into_iter().map(|r| {
+                    let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                    Value::Object(obj)
+                }).collect::<Vec<_>>());
             }
         }
+
+        // Fallback to Win32_DiskDrive if Storage namespace failed
+        if disks_data.is_empty() {
+            let wmi_con = WmiConnection::new()?;
+            if let Ok(results) = wmi_con.query("SELECT Model, Size, InterfaceType, MediaType, Status, Partitions FROM Win32_DiskDrive") {
+                for disk in results {
+                    let mut disk_info: serde_json::Map<String, Value> = disk.into_iter().collect();
+
+                    // Check disk status
+                    let status = disk_info.get("Status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("OK");
+
+                    if status != "OK" {
+                        all_healthy = false;
+                    }
+
+                    disk_info.insert("HealthStatusText".to_string(), json!(status));
+                    disks_data.push(Value::Object(disk_info));
+                }
+            }
+        }
+
+        health_info["disks"] = json!(disks_data);
+
+        if !all_healthy {
+            health_info["status"] = json!("Warning");
+            health_info["message"] = json!("One or more disks may have issues");
+            health_info["errors_found"] = json!(true);
+        }
+
+        Ok(health_info)
     }
 
     pub fn run_dism_health(&self) -> Result<Value> {
@@ -607,15 +661,33 @@ impl NativeDiagnostics {
     }
 
     fn parse_defrag_output(&self, output: &str) -> Option<u32> {
-        // Look for a line like "Total fragmented space = 15 %"
-        // Or "Current fragmentation = 15 %"
-        output.lines()
-            .find(|line| line.contains("fragmented space =") || line.contains("Current fragmentation ="))
-            .and_then(|line| {
-                line.split('%').next()
-                    .and_then(|part| part.split('=').next_back())
-                    .and_then(|num_str| num_str.trim().parse::<u32>().ok())
-            })
+        // Look for patterns like:
+        // "Total fragmented space = 20%"
+        // "Total fragmented space = 20 %"
+        // "Current fragmentation = 15%"
+        for line in output.lines() {
+            let line_lower = line.to_lowercase();
+            if line_lower.contains("fragmented space") || line_lower.contains("fragmentation") {
+                // Extract number before % sign
+                if let Some(percent_pos) = line.find('%') {
+                    // Look backwards from % to find the number
+                    let before_percent = &line[..percent_pos];
+                    // Find the last number in the string
+                    let num_str: String = before_percent
+                        .chars()
+                        .rev()
+                        .take_while(|c| c.is_ascii_digit() || c.is_whitespace())
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect();
+                    if let Ok(num) = num_str.trim().parse::<u32>() {
+                        return Some(num);
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub fn get_native_services(&self) -> Result<Value> {
@@ -815,9 +887,29 @@ impl NativeDiagnostics {
         }
 
         let mut dumps = Vec::new();
+        let start_time = std::time::Instant::now();
+        let search_timeout = std::time::Duration::from_secs(5);
 
         if let Ok(entries) = fs::read_dir(minidump_path) {
+            let mut all_entries = Vec::new();
+            
+            // Collect entries first to sort them
             for entry in entries.filter_map(Result::ok) {
+                if start_time.elapsed() > search_timeout {
+                    break;
+                }
+                all_entries.push(entry);
+            }
+
+            // Sort by modification time (newest first)
+            all_entries.sort_by(|a, b| {
+                let a_time = a.metadata().ok().and_then(|m| m.modified().ok()).unwrap_or(std::time::UNIX_EPOCH);
+                let b_time = b.metadata().ok().and_then(|m| m.modified().ok()).unwrap_or(std::time::UNIX_EPOCH);
+                b_time.cmp(&a_time)
+            });
+
+            // Process only the 10 most recent files
+            for entry in all_entries.into_iter().take(10) {
                 if let Ok(metadata) = entry.metadata()
                     && entry.path().extension().and_then(|s| s.to_str()) == Some("dmp") {
                         dumps.push(json!({
@@ -935,61 +1027,161 @@ impl NativeDiagnostics {
     }
 
     pub fn get_store_apps(&self) -> Result<Value> {
-        // Use PowerShell to get Windows Store apps
-        let executor = crate::security::SecureCommandExecutor::new();
-        let output = executor.execute_powershell_script(
-            "Get-AppxPackage | Select-Object Name, Version, PackageFullName, InstallLocation, Publisher | ConvertTo-Json"
-        )?;
-        
-        if output.status.success() {
-            let json_str = String::from_utf8_lossy(&output.stdout);
-            match serde_json::from_str(&json_str) {
-                Ok(value) => Ok(value),
-                Err(_) => {
-                    // If JSON parsing fails, return raw output
-                    Ok(json!({
-                        "raw_output": json_str.to_string(),
-                        "error": "Failed to parse PowerShell output as JSON"
-                    }))
+        // Use Windows PackageManager API to enumerate installed packages
+        use windows::Management::Deployment::PackageManager;
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+        use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+
+        // Initialize COM and WinRT on this thread (required for Tokio worker threads)
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let _ = RoInitialize(RO_INIT_MULTITHREADED);
+        }
+
+        let mut apps = Vec::new();
+
+        // Create PackageManager and enumerate packages
+        let package_manager = PackageManager::new()
+            .map_err(|e| anyhow::anyhow!("Failed to create PackageManager: {} (0x{:08X})", e, e.code().0))?;
+
+        // Get packages for current user (empty string = current user)
+        let packages = package_manager.FindPackages()
+            .map_err(|e| anyhow::anyhow!("Failed to enumerate packages: {}", e))?;
+
+        for package in packages {
+            // Skip framework packages
+            if let Ok(is_framework) = package.IsFramework() {
+                if is_framework {
+                    continue;
                 }
             }
-        } else {
-            Err(anyhow::anyhow!("Failed to get store apps: {}", 
-                String::from_utf8_lossy(&output.stderr)))
+
+            let mut app_info = serde_json::Map::new();
+
+            // Get package ID info
+            if let Ok(id) = package.Id() {
+                if let Ok(name) = id.Name() {
+                    let name_str = name.to_string();
+                    // Skip system framework packages
+                    if name_str.contains("Microsoft.NET") ||
+                       name_str.contains("Microsoft.VCLibs") ||
+                       name_str.contains("Microsoft.UI.Xaml") {
+                        continue;
+                    }
+                    app_info.insert("Name".to_string(), json!(name_str));
+                }
+                if let Ok(version) = id.Version() {
+                    app_info.insert("Version".to_string(), json!(format!("{}.{}.{}.{}",
+                        version.Major, version.Minor, version.Build, version.Revision)));
+                }
+                if let Ok(publisher) = id.Publisher() {
+                    app_info.insert("Publisher".to_string(), json!(publisher.to_string()));
+                }
+                if let Ok(full_name) = id.FullName() {
+                    app_info.insert("PackageFullName".to_string(), json!(full_name.to_string()));
+                }
+                // Architecture is available via ProcessorArchitecture which requires additional features
+                // Skip for now as it's not critical
+            }
+
+            // Get display name if available
+            if let Ok(display_name) = package.DisplayName() {
+                app_info.insert("DisplayName".to_string(), json!(display_name.to_string()));
+            }
+
+            if app_info.contains_key("Name") {
+                apps.push(Value::Object(app_info));
+            }
         }
+
+        if apps.is_empty() {
+            return Err(anyhow::anyhow!("No store apps found"));
+        }
+
+        Ok(json!(apps))
     }
 
     pub fn get_performance_data(&self) -> Result<Value> {
-        let wmi_con = WmiConnection::new()?;
+        use windows::Win32::System::SystemInformation::{
+            GlobalMemoryStatusEx, GetSystemInfo, MEMORYSTATUSEX, SYSTEM_INFO,
+        };
+
         let mut perf_data = json!({});
 
-        // Get CPU performance data
-        if let Ok(cpu_results) = wmi_con.query(
-            "SELECT * FROM Win32_PerfFormattedData_PerfOS_Processor WHERE Name='_Total'"
-        ) {
-            if let Some(result) = cpu_results.into_iter().next() {
-                let cpu_info: serde_json::Map<String, Value> = result.into_iter().collect();
-                perf_data["cpu_performance"] = Value::Object(cpu_info);
+        // Get memory info using GlobalMemoryStatusEx (native Windows API)
+        unsafe {
+            let mut mem_status = MEMORYSTATUSEX {
+                dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+                ..Default::default()
+            };
+
+            if GlobalMemoryStatusEx(&mut mem_status).is_ok() {
+                let total_mb = mem_status.ullTotalPhys / 1024 / 1024;
+                let avail_mb = mem_status.ullAvailPhys / 1024 / 1024;
+                let used_percent = mem_status.dwMemoryLoad;
+
+                perf_data["memory_performance"] = json!({
+                    "TotalMBytes": total_mb,
+                    "AvailableMBytes": avail_mb,
+                    "UsedPercent": used_percent,
+                    "TotalVirtualMBytes": mem_status.ullTotalVirtual / 1024 / 1024,
+                    "AvailableVirtualMBytes": mem_status.ullAvailVirtual / 1024 / 1024,
+                    "TotalPageFileMBytes": mem_status.ullTotalPageFile / 1024 / 1024,
+                    "AvailablePageFileMBytes": mem_status.ullAvailPageFile / 1024 / 1024,
+                });
             }
+
+            // Get system info for CPU
+            let mut sys_info = SYSTEM_INFO::default();
+            GetSystemInfo(&mut sys_info);
+
+            perf_data["cpu_performance"] = json!({
+                "NumberOfLogicalProcessors": sys_info.dwNumberOfProcessors,
+                "ProcessorArchitecture": match sys_info.Anonymous.Anonymous.wProcessorArchitecture.0 {
+                    0 => "x86",
+                    5 => "ARM",
+                    6 => "IA64",
+                    9 => "x64",
+                    12 => "ARM64",
+                    _ => "Unknown"
+                },
+                "ProcessorLevel": sys_info.wProcessorLevel,
+                "PageSize": sys_info.dwPageSize,
+            });
         }
 
-        // Get memory performance data
-        if let Ok(mem_results) = wmi_con.query(
-            "SELECT * FROM Win32_PerfFormattedData_PerfOS_Memory"
-        ) {
-            if let Some(result) = mem_results.into_iter().next() {
-                let mem_info: serde_json::Map<String, Value> = result.into_iter().collect();
-                perf_data["memory_performance"] = Value::Object(mem_info);
+        // Get CPU name and load from WMI (fallback for detailed info)
+        if let Ok(wmi_con) = WmiConnection::new() {
+            if let Ok(cpu_results) = wmi_con.query(
+                "SELECT Name, LoadPercentage, NumberOfCores, MaxClockSpeed FROM Win32_Processor"
+            ) {
+                if let Some(result) = cpu_results.into_iter().next() {
+                    let cpu_info: serde_json::Map<String, Value> = result.into_iter().collect();
+                    // Merge with existing cpu_performance
+                    if let Some(existing) = perf_data.get_mut("cpu_performance") {
+                        if let Some(obj) = existing.as_object_mut() {
+                            for (k, v) in cpu_info {
+                                obj.insert(k, v);
+                            }
+                        }
+                    }
+                }
             }
-        }
 
-        // Get disk performance data
-        if let Ok(disk_results) = wmi_con.query(
-            "SELECT * FROM Win32_PerfFormattedData_PerfDisk_PhysicalDisk WHERE Name='_Total'"
-        ) {
-            if let Some(result) = disk_results.into_iter().next() {
-                let disk_info: serde_json::Map<String, Value> = result.into_iter().collect();
-                perf_data["disk_performance"] = Value::Object(disk_info);
+            // Get disk info from WMI
+            if let Ok(disk_results) = wmi_con.query(
+                "SELECT DeviceID, Size, FreeSpace FROM Win32_LogicalDisk WHERE DriveType=3"
+            ) {
+                let disks: Vec<Value> = disk_results
+                    .into_iter()
+                    .map(|r| {
+                        let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                        Value::Object(obj)
+                    })
+                    .collect();
+                if !disks.is_empty() {
+                    perf_data["disk_performance"] = json!(disks);
+                }
             }
         }
 
@@ -997,35 +1189,129 @@ impl NativeDiagnostics {
     }
 
     pub fn get_scheduled_tasks(&self) -> Result<Value> {
-        // Use PowerShell to get scheduled tasks
-        let executor = crate::security::SecureCommandExecutor::new();
-        let output = executor.execute_powershell_script(
-            "Get-ScheduledTask | Where-Object {$_.State -ne 'Disabled'} | Select-Object TaskName, State, TaskPath, Description, Author, Date | ConvertTo-Json"
-        )?;
-        
-        if output.status.success() {
-            let json_str = String::from_utf8_lossy(&output.stdout);
-            match serde_json::from_str(&json_str) {
-                Ok(value) => Ok(value),
-                Err(_) => {
-                    Ok(json!({
-                        "raw_output": json_str.to_string(),
-                        "error": "Failed to parse PowerShell output as JSON"
-                    }))
+        use windows::core::BSTR;
+        use windows::Win32::System::TaskScheduler::{
+            ITaskService, TaskScheduler, ITaskFolder, IRegisteredTaskCollection,
+            TASK_STATE_DISABLED, TASK_STATE_QUEUED, TASK_STATE_READY, TASK_STATE_RUNNING,
+        };
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+        };
+        use windows::Win32::System::Variant::VARIANT;
+
+        let mut tasks = Vec::new();
+
+        unsafe {
+            // Initialize COM
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+            // Create TaskScheduler instance
+            let task_service: ITaskService = CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| anyhow::anyhow!("Failed to create TaskScheduler: {}", e))?;
+
+            // Connect to the task service (local, current user)
+            let empty_var = VARIANT::default();
+            task_service.Connect(
+                &empty_var,
+                &empty_var,
+                &empty_var,
+                &empty_var,
+            ).map_err(|e| anyhow::anyhow!("Failed to connect to TaskScheduler: {}", e))?;
+
+            // Get root folder
+            let root_folder: ITaskFolder = task_service.GetFolder(&BSTR::from("\\"))
+                .map_err(|e| anyhow::anyhow!("Failed to get root folder: {}", e))?;
+
+            // Recursive function to enumerate tasks
+            fn enumerate_folder(folder: &ITaskFolder, tasks: &mut Vec<Value>, depth: u32) {
+                if depth > 3 { return; } // Limit recursion depth
+
+                unsafe {
+                    // Get tasks in this folder
+                    if let Ok(task_collection) = folder.GetTasks(0) {
+                        if let Ok(count) = task_collection.Count() {
+                            for i in 1..=count {
+                                let idx = VARIANT::from(i);
+                                if let Ok(task) = task_collection.get_Item(&idx) {
+                                    let mut task_info = serde_json::Map::new();
+
+                                    if let Ok(name) = task.Name() {
+                                        task_info.insert("TaskName".to_string(), json!(name.to_string()));
+                                    }
+                                    if let Ok(path) = task.Path() {
+                                        task_info.insert("TaskPath".to_string(), json!(path.to_string()));
+                                    }
+                                    if let Ok(state) = task.State() {
+                                        let state_str = match state {
+                                            TASK_STATE_DISABLED => "Disabled",
+                                            TASK_STATE_QUEUED => "Queued",
+                                            TASK_STATE_READY => "Ready",
+                                            TASK_STATE_RUNNING => "Running",
+                                            _ => "Unknown",
+                                        };
+                                        task_info.insert("State".to_string(), json!(state_str));
+                                    }
+                                    if let Ok(enabled) = task.Enabled() {
+                                        task_info.insert("Enabled".to_string(), json!(enabled.as_bool()));
+                                    }
+                                    if let Ok(last_run) = task.LastRunTime() {
+                                        task_info.insert("LastRunTime".to_string(), json!(last_run));
+                                    }
+                                    if let Ok(next_run) = task.NextRunTime() {
+                                        task_info.insert("NextRunTime".to_string(), json!(next_run));
+                                    }
+
+                                    if task_info.contains_key("TaskName") {
+                                        tasks.push(Value::Object(task_info));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Enumerate subfolders
+                    if let Ok(folders) = folder.GetFolders(0) {
+                        if let Ok(count) = folders.Count() {
+                            for i in 1..=count {
+                                let idx = VARIANT::from(i);
+                                if let Ok(subfolder) = folders.get_Item(&idx) {
+                                    enumerate_folder(&subfolder, tasks, depth + 1);
+                                }
+                            }
+                        }
+                    }
                 }
             }
-        } else {
-            Err(anyhow::anyhow!("Failed to get scheduled tasks: {}", 
-                String::from_utf8_lossy(&output.stderr)))
+
+            enumerate_folder(&root_folder, &mut tasks, 0);
         }
+
+        // Filter and limit
+        let filtered: Vec<Value> = tasks.into_iter()
+            .filter(|t| {
+                // Exclude disabled tasks and some noisy system tasks
+                if let Some(state) = t.get("State").and_then(|s| s.as_str()) {
+                    state != "Disabled"
+                } else {
+                    true
+                }
+            })
+            .take(200)
+            .collect();
+
+        if filtered.is_empty() {
+            return Err(anyhow::anyhow!("No scheduled tasks found"));
+        }
+
+        Ok(json!(filtered))
     }
 
     pub fn get_windows_update_history(&self) -> Result<Value> {
         let wmi_con = WmiConnection::new()?;
         let mut update_info = json!({});
 
-        // Get installed hotfixes
-        if let Ok(hotfix_results) = wmi_con.query("SELECT * FROM Win32_QuickFixEngineering") {
+        // Get installed hotfixes via WMI (native, no PowerShell)
+        if let Ok(hotfix_results) = wmi_con.query("SELECT HotFixID, Description, InstalledOn, InstalledBy, Caption FROM Win32_QuickFixEngineering") {
             let hotfixes: Vec<Value> = hotfix_results
                 .into_iter()
                 .map(|r| {
@@ -1034,18 +1320,23 @@ impl NativeDiagnostics {
                 })
                 .collect();
             update_info["installed_updates"] = json!(hotfixes);
+            // Also provide as hotfix_details for frontend compatibility
+            update_info["hotfix_details"] = json!(hotfixes);
         }
 
-        // Try to get Windows Update history via PowerShell as fallback
-        let executor = crate::security::SecureCommandExecutor::new();
-        let ps_output = executor.execute_powershell_script(
-            "Get-HotFix | Select-Object Description, HotFixID, InstalledOn, InstalledBy | ConvertTo-Json"
-        )?;
-
-        if ps_output.status.success() {
-            let json_str = String::from_utf8_lossy(&ps_output.stdout);
-            if let Ok(value) = serde_json::from_str::<Value>(&json_str) {
-                update_info["hotfix_details"] = value;
+        // Try to get update history from Windows Update namespace
+        if let Ok(wmi_update) = WmiConnection::with_namespace(r"root\CCM\SoftwareUpdates\UpdatesStore") {
+            if let Ok(updates) = wmi_update.query("SELECT * FROM CCM_UpdateStatus") {
+                let update_history: Vec<Value> = updates
+                    .into_iter()
+                    .map(|r| {
+                        let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                        Value::Object(obj)
+                    })
+                    .collect();
+                if !update_history.is_empty() {
+                    update_info["update_history"] = json!(update_history);
+                }
             }
         }
 
@@ -1055,47 +1346,70 @@ impl NativeDiagnostics {
     pub fn get_driver_verifier(&self) -> Result<Value> {
         // Run verifier command to get current settings
         let output = Self::execute_secure_command("verifier", &["/querysettings"])?;
-        
+
         if output.status.success() {
             let output_str = String::from_utf8_lossy(&output.stdout);
-            
-            // Parse verifier output
-            let mut verifier_info = json!({
-                "raw_output": output_str.to_string(),
-                "enabled": false,
-                "drivers": []
-            });
-            
-            // Check if verifier is enabled
-            if output_str.contains("No drivers are currently verified") {
-                verifier_info["enabled"] = json!(false);
-                verifier_info["status"] = json!("Driver Verifier is not active");
-            } else if output_str.contains("The following drivers are being verified") {
-                verifier_info["enabled"] = json!(true);
-                verifier_info["status"] = json!("Driver Verifier is active");
-                
-                // Extract verified drivers if any
-                let lines: Vec<&str> = output_str.lines().collect();
-                let mut drivers = Vec::new();
-                let mut in_driver_list = false;
-                
-                for line in lines {
-                    if line.contains("The following drivers are being verified") {
-                        in_driver_list = true;
-                        continue;
-                    }
-                    if in_driver_list && !line.trim().is_empty() && !line.contains(":") {
-                        drivers.push(line.trim().to_string());
+
+            // Parse verifier flags
+            let mut verifier_flags: u32 = 0;
+            let mut enabled_flags = Vec::new();
+            let mut verified_drivers = Vec::new();
+            let mut boot_mode = String::new();
+
+            for line in output_str.lines() {
+                let line = line.trim();
+
+                // Parse "Verifier Flags: 0x00000000"
+                if line.starts_with("Verifier Flags:") {
+                    if let Some(hex) = line.split("0x").nth(1) {
+                        if let Ok(val) = u32::from_str_radix(hex.trim(), 16) {
+                            verifier_flags = val;
+                        }
                     }
                 }
-                
-                verifier_info["verified_drivers"] = json!(drivers);
+
+                // Parse enabled flags marked with [X]
+                if line.starts_with("[X]") {
+                    if let Some(flag_desc) = line.strip_prefix("[X]").map(|s| s.trim()) {
+                        enabled_flags.push(flag_desc.to_string());
+                    }
+                }
+
+                // Parse boot mode
+                if line.starts_with("Boot Mode:") {
+                    boot_mode = line.replace("Boot Mode:", "").trim().to_string();
+                }
+
+                // Parse verified drivers section
+                if line.starts_with("Verified Drivers:") {
+                    let drivers_part = line.replace("Verified Drivers:", "").trim().to_string();
+                    if drivers_part != "None" && !drivers_part.is_empty() {
+                        verified_drivers.push(drivers_part);
+                    }
+                }
             }
-            
-            Ok(verifier_info)
+
+            let is_enabled = verifier_flags != 0 || !enabled_flags.is_empty();
+            let has_drivers = !verified_drivers.is_empty();
+
+            Ok(json!({
+                "enabled": is_enabled,
+                "status": if is_enabled {
+                    if has_drivers { "Active - Monitoring drivers" } else { "Active - No drivers specified" }
+                } else {
+                    "Inactive"
+                },
+                "verifier_flags": format!("0x{:08X}", verifier_flags),
+                "enabled_flags": enabled_flags,
+                "verified_drivers": verified_drivers,
+                "boot_mode": boot_mode,
+                "raw_output": output_str.to_string()
+            }))
         } else {
             // Verifier might require admin privileges
             Ok(json!({
+                "enabled": false,
+                "status": "Unable to query",
                 "error": "Failed to query driver verifier settings. Administrator privileges may be required.",
                 "raw_error": String::from_utf8_lossy(&output.stderr).to_string()
             }))
