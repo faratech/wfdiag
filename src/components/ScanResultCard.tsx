@@ -21,8 +21,9 @@ import {
 const useStyles = makeStyles({
   card: {
     marginBottom: tokens.spacingVerticalM,
-    backgroundColor: 'rgba(30, 41, 59, 0.3)',
-    ...shorthands.border('1px', 'solid', 'rgba(255, 255, 255, 0.05)'),
+    background: 'var(--theme-card-gradient)',
+    ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke1),
+    boxShadow: tokens.shadow2,
   },
   header: {
     display: 'flex',
@@ -30,8 +31,10 @@ const useStyles = makeStyles({
     justifyContent: 'space-between',
     ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalL),
     cursor: 'pointer',
+    transitionProperty: 'background',
+    transitionDuration: '0.15s',
     ':hover': {
-      backgroundColor: 'rgba(30, 41, 59, 0.5)',
+      background: 'var(--theme-card-gradient-hover)',
     }
   },
   titleSection: {
@@ -47,7 +50,7 @@ const useStyles = makeStyles({
   },
   content: {
     ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalL),
-    backgroundColor: 'rgba(15, 23, 42, 0.5)',
+    backgroundColor: tokens.colorNeutralBackground3,
   },
   dataGrid: {
     display: 'grid',
@@ -66,8 +69,8 @@ const useStyles = makeStyles({
   },
   errorMessage: {
     ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalL),
-    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-    ...shorthands.border('1px', 'solid', 'rgba(239, 68, 68, 0.3)'),
+    backgroundColor: tokens.colorPaletteRedBackground2,
+    ...shorthands.border('1px', 'solid', tokens.colorPaletteRedBorder2),
     ...shorthands.borderRadius(tokens.borderRadiusSmall),
     marginTop: tokens.spacingVerticalM,
   },
@@ -75,7 +78,7 @@ const useStyles = makeStyles({
     fontFamily: 'Consolas, "Courier New", monospace',
     fontSize: tokens.fontSizeBase200,
     ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalM),
-    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+    backgroundColor: tokens.colorNeutralBackground4,
     ...shorthands.borderRadius(tokens.borderRadiusSmall),
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-word',
@@ -207,8 +210,8 @@ export const ScanResultCard: React.FC<ScanResultCardProps> = ({
       >
         <div className={styles.titleSection}>
           {success ?
-            <CheckmarkCircle16Regular primaryFill="#10B981" /> :
-            <ErrorCircle16Regular primaryFill="#EF4444" />
+            <CheckmarkCircle16Regular primaryFill={tokens.colorPaletteGreenForeground1} /> :
+            <ErrorCircle16Regular primaryFill={tokens.colorPaletteRedForeground1} />
           }
           <div>
             <Subtitle2>{taskName}</Subtitle2>
@@ -244,7 +247,7 @@ export const ScanResultCard: React.FC<ScanResultCardProps> = ({
         <div className={styles.content}>
           {error ? (
             <div className={styles.errorMessage}>
-              <Caption1 style={{ color: '#EF4444' }}>
+              <Caption1 style={{ color: tokens.colorPaletteRedForeground1 }}>
                 <ErrorCircle16Regular style={{ marginRight: tokens.spacingHorizontalXS }} />
                 Error: {error}
               </Caption1>

@@ -1,118 +1,55 @@
-import React from 'react'
+import React, { useMemo, useState } from 'react'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { ComparisonView } from '../ComparisonView'
 import {
   CommandBar,
   QuickActionPanel,
   StatusCard,
-  ScanResultCard,
+  PageHeader,
+  HealthModel,
+  SystemSummary,
+  SectionHeader,
+  InsightPanel,
+  DiagnosticCard
 } from '../components'
 import { useAppContext } from '../contexts/AppContext'
 import { useDiagnostics } from '../hooks/useDiagnostics'
 import { useScanner } from '../hooks/useScanner'
 import {
-  Card,
-  Title3,
-  Caption1,
-  Text,
-  Divider,
-  tokens,
-  Badge,
-  Body1,
-  SearchBox,
   makeStyles,
+  tokens,
   shorthands
 } from '@fluentui/react-components'
 import {
-  CheckmarkCircle20Regular,
-  Warning20Regular,
-  Info20Regular,
+  Stethoscope20Regular,
+  Desktop24Regular,
+  Database24Regular,
+  NetworkAdapter16Regular,
+  Shield24Regular,
+  HeartPulse24Regular
 } from '@fluentui/react-icons'
 
 const useStyles = makeStyles({
   diagnosticsContainer: {
-    maxWidth: '1400px',
+    maxWidth: '1200px',
     margin: '0 auto',
     display: 'flex',
     flexDirection: 'column',
     height: '100%',
+    paddingBottom: tokens.spacingVerticalXL,
   },
-  resultsContainer: {
-    display: 'flex',
-    ...shorthands.gap(tokens.spacingHorizontalL),
-    flex: 1,
-    minHeight: 0, // Allow flex shrinking
-    '@media (max-width: 1024px)': {
-      flexDirection: 'column',
-      ...shorthands.gap(tokens.spacingVerticalL),
-    },
-  },
-  sidebar: {
-    width: '280px',
-    flexShrink: 0,
-    position: 'sticky',
-    top: tokens.spacingVerticalL,
-    alignSelf: 'flex-start',
-    maxHeight: 'calc(100vh - 200px)',
-    overflowY: 'auto',
-    '@media (max-width: 1024px)': {
-      width: '100%',
-      position: 'static',
-      maxHeight: 'none',
-    },
-  },
-  mainContent: {
-    flex: 1,
-    minWidth: 0, // Allow flex shrinking
-    overflowY: 'auto',
-    paddingRight: tokens.spacingHorizontalM,
-    '@media (max-width: 1024px)': {
-      paddingRight: 0,
-    },
-  },
-  categoryNav: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalL),
-    ...shorthands.borderRadius(tokens.borderRadiusMedium),
-    marginBottom: tokens.spacingVerticalS,
-    textDecoration: 'none',
-    background: 'rgba(30, 41, 59, 0.3)',
-    transition: 'all 0.2s',
-    ':hover': {
-      background: 'rgba(59, 130, 246, 0.1)',
-    }
-  },
-  healthScore: {
+  contentContainer: {
     display: 'flex',
     flexDirection: 'column',
-    alignItems: 'center',
-    marginBottom: tokens.spacingVerticalXL,
-    ...shorthands.gap(tokens.spacingVerticalM),
+    ...shorthands.gap(tokens.spacingVerticalL),
   },
-  healthCircle: {
-    width: '80px',
-    height: '80px',
-    borderRadius: '50%',
-    position: 'relative',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    background: `conic-gradient(
-      from 0deg,
-      ${tokens.colorPaletteGreenBackground1} 0deg,
-      ${tokens.colorPaletteGreenBackground1} var(--score-angle),
-      ${tokens.colorNeutralBackground3} var(--score-angle)
-    )`,
-    '&::before': {
-      content: '""',
-      position: 'absolute',
-      width: '60px',
-      height: '60px',
-      borderRadius: '50%',
-      backgroundColor: tokens.colorNeutralBackground2,
-    }
+  section: {
+    marginBottom: tokens.spacingVerticalXL,
+  },
+  grid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fill, minmax(400px, 1fr))',
+    gap: tokens.spacingHorizontalL,
   }
 })
 
@@ -127,14 +64,15 @@ export const DiagnosticsTab: React.FC = () => {
     currentTaskName,
     showComparison,
     setShowComparison,
-    searchQuery,
-    setSearchQuery,
-    filteredResults,
-    scanStartTime,
+    globalSearchQuery,
+    setGlobalSearchQuery,
+    globalSearchResults,
+    performGlobalSearch,
+    setSelectedTab,
+    scanStartTime
   } = useAppContext()
 
   const {
-    getHealthScore,
     copyToClipboard,
     exportResults,
     shareToWindowsForum,
@@ -150,25 +88,91 @@ export const DiagnosticsTab: React.FC = () => {
     clearResults,
   } = useScanner()
 
-  const healthScore = getHealthScore()
-  const hasResults = Object.keys(results).length > 0
-  const resultsByCategory = availableTasks.reduce((acc, task) => {
-    if ((searchQuery ? filteredResults : results)[task.id]) {
-      if (!acc[task.category]) acc[task.category] = []
-      acc[task.category].push({
-        task,
-        result: (searchQuery ? filteredResults : results)[task.id]
-      })
-    }
-    return acc
-  }, {} as Record<string, Array<{ task: any; result: any }>>)
+  const [activeMetric, setActiveMetric] = useState<string | null>(null)
 
-  const stats = hasResults ? {
-    totalTasks: Object.keys(results).length,
-    successfulTasks: Object.values(results).filter(r => r.success).length,
-    failedTasks: Object.values(results).filter(r => !r.success).length,
-    duration: Date.now() - scanStartTime
-  } : undefined
+  // Calculate stats and organize results
+  const analysis = useMemo(() => {
+    const hasResults = Object.keys(results).length > 0
+    if (!hasResults) return null
+
+    const categories = {
+      System: ['System', 'Drivers', 'Software', 'Logs'],
+      Hardware: ['Hardware'],
+      Storage: ['Storage'],
+      Network: ['Network']
+    }
+
+    const groupedResults: Record<string, any[]> = {
+      System: [],
+      Hardware: [],
+      Storage: [],
+      Network: []
+    }
+
+    let faultCount = 0
+    let warningCount = 0
+    let duration = Date.now() - scanStartTime
+
+    // Group results
+    Object.entries(results).forEach(([taskId, result]) => {
+      const task = availableTasks.find(t => t.id === taskId)
+      if (!task) return
+
+      if (!result.success) faultCount++
+      
+      // Determine high-level group
+      let group = 'System'
+      if (categories.Hardware.includes(task.category)) group = 'Hardware'
+      else if (categories.Storage.includes(task.category)) group = 'Storage'
+      else if (categories.Network.includes(task.category)) group = 'Network'
+      
+      groupedResults[group].push({ task, result })
+    })
+
+    // Calculate scores
+    const calculateScore = (group: string) => {
+      const groupItems = groupedResults[group]
+      if (groupItems.length === 0) return 100
+      const passed = groupItems.filter(i => i.result.success).length
+      return Math.round((passed / groupItems.length) * 100)
+    }
+
+    const scores = {
+      System: calculateScore('System'),
+      Hardware: calculateScore('Hardware'),
+      Storage: calculateScore('Storage'),
+      Network: calculateScore('Network'),
+      Integrity: calculateScore('System') // Reuse system for now
+    }
+
+    return {
+      groupedResults,
+      scores,
+      stats: {
+        totalTasks: Object.keys(results).length,
+        faultCount,
+        warningCount,
+        duration
+      }
+    }
+  }, [results, availableTasks, scanStartTime])
+
+  const handleSearchChange = (value: string) => {
+    setGlobalSearchQuery(value)
+    performGlobalSearch(value)
+  }
+
+  const handleSearchResultSelect = (result: any) => {
+    if (result.navigateTo) {
+      setSelectedTab(result.navigateTo)
+    }
+  }
+
+  const getRiskLevel = (score: number) => {
+    if (score >= 90) return 'Low'
+    if (score >= 70) return 'Monitor'
+    return 'Elevated'
+  }
 
   if (showComparison) {
     return (
@@ -178,181 +182,177 @@ export const DiagnosticsTab: React.FC = () => {
     )
   }
 
+  const hasResults = !!analysis
+  const isComplete = hasResults && !isRunning
+
   return (
     <div className={styles.diagnosticsContainer}>
-      {/* Command Bar */}
-      {(hasResults || isRunning) && (
-        <CommandBar
-          onQuickScan={runQuickScan}
-          onFullScan={runFullScan}
-          onStopScan={isRunning ? stopScan : undefined}
-          isScanning={isRunning}
-          onExport={hasResults ? exportResults : undefined}
-          onCopyToClipboard={hasResults ? copyToClipboard : undefined}
-          onShareToForum={hasResults ? shareToWindowsForum : undefined}
-          onEmailReport={hasResults ? emailReport : undefined}
-          onGenerateSupportPackage={hasResults ? generateSupportPackage : undefined}
-          onToggleFilter={() => {}}
-          onClearResults={hasResults ? clearResults : undefined}
-          onCompareScans={() => setShowComparison(true)}
-          scanStatus={isRunning ? 'scanning' : hasResults ? 'complete' : 'idle'}
-          resultCount={Object.keys(results).length}
-        />
-      )}
+      <PageHeader
+        title="System Analysis"
+        description="Comprehensive diagnostic engine"
+        icon={<Stethoscope20Regular />}
+        showSearch
+        searchValue={globalSearchQuery}
+        onSearchChange={handleSearchChange}
+        searchResults={globalSearchResults}
+        onSearchResultSelect={handleSearchResultSelect}
+        onNavigate={setSelectedTab}
+        searchPlaceholder="Search system components..."
+      />
 
-      {/* Quick Action Panel - Welcome Screen or Progress */}
+      {/* Action Bar / Status */}
+      <CommandBar
+        onQuickScan={runQuickScan}
+        onFullScan={runFullScan}
+        onStopScan={isRunning ? stopScan : undefined}
+        isScanning={isRunning}
+        onExport={hasResults ? exportResults : undefined}
+        onCopyToClipboard={hasResults ? copyToClipboard : undefined}
+        onShareToForum={hasResults ? shareToWindowsForum : undefined}
+        onEmailReport={hasResults ? emailReport : undefined}
+        onGenerateSupportPackage={hasResults ? generateSupportPackage : undefined}
+        onToggleFilter={() => {}}
+        onClearResults={hasResults ? clearResults : undefined}
+        onCompareScans={() => setShowComparison(true)}
+        scanStatus={isRunning ? 'scanning' : hasResults ? 'complete' : 'idle'}
+        resultCount={Object.keys(results).length}
+      />
+
+      {/* Progress or Empty State */}
       {(!hasResults || isRunning) && (
-        <QuickActionPanel
-          onQuickScan={runQuickScan}
-          onFullScan={runFullScan}
-          onCompare={() => setShowComparison(true)}
-          onExport={exportResults}
-          onCopyToClipboard={copyToClipboard}
-          isScanning={isRunning}
-          scanProgress={currentProgress}
-          currentTask={currentTaskName}
-          hasResults={hasResults}
-          stats={stats}
-        />
-      )}
-
-      {/* Admin Warning */}
-      {!isRunning && !hasResults && systemInfo && !systemInfo.is_admin && (
-        <StatusCard
-          status="warning"
-          title="Limited Access"
-          description="Running without administrator privileges"
-          details={[
-            `${availableTasks.filter(task => !task.admin_required || systemInfo?.is_admin).length} of ${availableTasks.length} diagnostic tasks available`,
-            '5 admin-only tasks hidden (disk check, DISM health, battery report, driver verifier, crash dumps)'
-          ]}
-          actions={[
-            {
-              label: 'Restart as Administrator',
-              onClick: restartAsAdmin,
-              primary: true
-            }
-          ]}
-        />
-      )}
-
-      {/* Search Bar */}
-      {hasResults && !isRunning && (
-        <Card style={{ marginBottom: tokens.spacingVerticalL }}>
-          <SearchBox
-            placeholder="Search in results (task names, errors, output)..."
-            value={searchQuery}
-            onChange={(_, data) => setSearchQuery(data?.value || '')}
-            style={{ width: '100%' }}
+        <div style={{ marginTop: tokens.spacingVerticalL }}>
+          <QuickActionPanel
+            onQuickScan={runQuickScan}
+            onFullScan={runFullScan}
+            onCompare={() => setShowComparison(true)}
+            onExport={exportResults}
+            onCopyToClipboard={copyToClipboard}
+            isScanning={isRunning}
+            scanProgress={currentProgress}
+            currentTask={currentTaskName}
+            hasResults={hasResults}
           />
-          {searchQuery && (
-            <Caption1 style={{
-              marginTop: tokens.spacingVerticalS,
-              color: tokens.colorNeutralForeground3
-            }}>
-              {Object.keys(filteredResults).length} of {Object.keys(results).length} results
-            </Caption1>
-          )}
-        </Card>
+        </div>
       )}
 
-      {/* Results Display */}
-      {hasResults && !isRunning && !showComparison && (
-        <div className={styles.resultsContainer}>
-          {/* Left Sidebar */}
-          <Card className={styles.sidebar}>
-            <div className={styles.healthScore}>
-              <Title3>Health Score</Title3>
-              <div
-                className={styles.healthCircle}
-                style={{ '--score-angle': `${(healthScore || 0) * 3.6}deg` } as React.CSSProperties}
-              >
-                <Text
-                  size={600}
-                  weight="bold"
-                  style={{ zIndex: 1 }}
-                >
-                  {healthScore}%
-                </Text>
-              </div>
-              {healthScore !== null && (
-                <Badge
-                  appearance="filled"
-                  color={healthScore >= 90 ? 'success' : healthScore >= 70 ? 'warning' : 'danger'}
-                  size="medium"
-                >
-                  {healthScore >= 90 ? 'Excellent' : healthScore >= 70 ? 'Good' : 'Needs Attention'}
-                </Badge>
-              )}
-            </div>
+      {/* Analysis Results */}
+      {isComplete && analysis && (
+        <div className={styles.contentContainer}>
+          <SystemSummary
+            taskCount={analysis.stats.totalTasks}
+            durationMs={analysis.stats.duration}
+            faultCount={analysis.stats.faultCount}
+            warningCount={analysis.stats.warningCount}
+            completed={true}
+          />
 
-            <Divider />
+          <HealthModel
+            activeMetricId={activeMetric}
+            onMetricClick={(id) => {
+              setActiveMetric(activeMetric === id ? null : id)
+              const el = document.getElementById(`section-${id}`)
+              if (el) el.scrollIntoView({ behavior: 'smooth' })
+            }}
+            metrics={[
+              { 
+                id: 'cpu', 
+                label: 'Hardware', 
+                score: analysis.scores.Hardware, 
+                risk: getRiskLevel(analysis.scores.Hardware),
+                icon: <Desktop24Regular />
+              },
+              { 
+                id: 'memory', 
+                label: 'System', 
+                score: analysis.scores.System, 
+                risk: getRiskLevel(analysis.scores.System),
+                icon: <HeartPulse24Regular />
+              },
+              { 
+                id: 'storage', 
+                label: 'Storage', 
+                score: analysis.scores.Storage, 
+                risk: getRiskLevel(analysis.scores.Storage),
+                icon: <Database24Regular />
+              },
+              { 
+                id: 'network', 
+                label: 'Network', 
+                score: analysis.scores.Network, 
+                risk: getRiskLevel(analysis.scores.Network),
+                icon: <NetworkAdapter16Regular />
+              },
+              { 
+                id: 'integrity', 
+                label: 'Integrity', 
+                score: analysis.scores.Integrity, 
+                risk: getRiskLevel(analysis.scores.Integrity),
+                icon: <Shield24Regular />
+              },
+            ]}
+          />
 
-            {/* Category Navigation */}
-            <div style={{ marginTop: tokens.spacingVerticalL }}>
-              <Caption1 style={{ color: tokens.colorNeutralForeground3, fontWeight: 600 }}>
-                CATEGORIES
-              </Caption1>
-              {Object.entries(resultsByCategory).map(([category, items]) => {
-                const getCategoryIcon = (cat: string) => {
-                  switch(cat) {
-                    case 'System': return <Info20Regular />
-                    case 'Hardware': return <CheckmarkCircle20Regular />
-                    case 'Network': return <Warning20Regular />
-                    default: return <Info20Regular />
+          {/* Sections */}
+          {Object.entries(analysis.groupedResults).map(([group, items]) => {
+            if (items.length === 0) return null
+            
+            // Map group to metric ID for scrolling
+            let metricId = 'system'
+            if (group === 'Hardware') metricId = 'cpu'
+            if (group === 'Storage') metricId = 'storage'
+            if (group === 'Network') metricId = 'network'
+
+            const successCount = items.filter(i => i.result.success).length
+            const isPerfect = successCount === items.length
+
+            return (
+              <div key={group} id={`section-${metricId}`} className={styles.section}>
+                <SectionHeader
+                  title={group}
+                  count={items.length}
+                  successCount={successCount}
+                />
+
+                <InsightPanel
+                  title={`${group} Analysis`}
+                  content={isPerfect 
+                    ? `All ${group.toLowerCase()} tests passed successfully. Configuration matches recommended baselines for optimal performance.`
+                    : `${items.length - successCount} issues detected in ${group.toLowerCase()} configuration. Review specific findings below for resolution steps.`
                   }
-                }
+                />
 
-                return (
-                  <a
-                    key={category}
-                    href={`#category-${category}`}
-                    className={styles.categoryNav}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS }}>
-                      {getCategoryIcon(category)}
-                      <Body1 style={{ color: tokens.colorNeutralForeground1 }}>{category}</Body1>
-                    </div>
-                    <Caption1 style={{ color: tokens.colorNeutralForeground2 }}>
-                      {items.filter(i => i.result.success).length}/{items.length}
-                    </Caption1>
-                  </a>
-                )
-              })}
-            </div>
-          </Card>
-
-          {/* Main Results Area */}
-          <div className={styles.mainContent}>
-            {Object.entries(resultsByCategory).map(([category, items]) => (
-              <Card
-                key={category}
-                id={`category-${category}`}
-                style={{ marginBottom: tokens.spacingVerticalL }}
-              >
-                <Title3>{category}</Title3>
-                <Caption1 style={{ color: tokens.colorNeutralForeground3 }}>
-                  {items.filter(i => i.result.success).length} of {items.length} tests passed
-                </Caption1>
-
-                <div style={{ marginTop: tokens.spacingVerticalL }}>
+                <div className={styles.grid}>
                   {items.map(({ task, result }) => (
-                    <ScanResultCard
+                    <DiagnosticCard
                       key={task.id}
-                      taskName={task.name}
-                      taskDescription={task.description}
-                      success={result.success}
-                      duration={result.duration_ms}
+                      title={task.name}
+                      description={task.description}
+                      status={result.success ? 'verified' : 'action_required'}
+                      importance={task.category === group ? 'primary' : 'secondary'}
+                      executionTime={result.duration_ms}
                       output={result.output}
                       error={result.error}
                       category={task.category}
-                      onCopyOutput={(output) => writeText(output)}
+                      onCopyOutput={(text) => writeText(text)}
                     />
                   ))}
                 </div>
-              </Card>
-            ))}
-          </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Admin Warning Footer if needed */}
+      {isComplete && !systemInfo?.is_admin && (
+        <div style={{ marginTop: tokens.spacingVerticalXL }}>
+          <StatusCard
+            status="warning"
+            title="Administrator Access Required for Deep Analysis"
+            description="Some advanced diagnostics were skipped due to permission restrictions."
+            details={['Storage health checks', 'Crash dump analysis', 'System file verification']}
+            actions={[{ label: 'Restart as Administrator', onClick: restartAsAdmin, primary: true }]}
+          />
         </div>
       )}
     </div>

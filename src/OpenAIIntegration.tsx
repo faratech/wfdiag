@@ -10,6 +10,9 @@ import {
   RadioGroup,
   Radio,
   Tooltip,
+  makeStyles,
+  shorthands,
+  tokens,
 } from '@fluentui/react-components';
 import {
   SendRegular,
@@ -17,10 +20,22 @@ import {
   ErrorCircleFilled,
   WarningFilled,
   BrainCircuitRegular,
+  Sparkle20Regular,
 } from '@fluentui/react-icons';
+import { PageHeader } from './components';
 import { invoke } from '@tauri-apps/api/core';
 import * as logger from './utils/logger';
 import './styles.css';
+
+const useStyles = makeStyles({
+  container: {
+    width: '100%',
+    maxWidth: '100%',
+    display: 'flex',
+    flexDirection: 'column',
+    ...shorthands.gap(tokens.spacingVerticalL),
+  },
+});
 
 interface OpenAIIntegrationProps {
   sessionId: string;
@@ -60,6 +75,7 @@ interface PhiSilicaStatus {
 type AiProvider = 'openai' | 'phi_silica';
 
 export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId }) => {
+  const styles = useStyles();
   const [apiKey, setApiKey] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
   const [prompt, setPrompt] = useState('');
@@ -240,32 +256,13 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
   const canAnalyze = prompt.trim() && (selectedProvider === 'phi_silica' || apiKey);
 
   return (
-    <div style={{ width: '100%', maxWidth: '100%' }}>
-      {/* Header */}
-      <div className="glass-card" style={{
-        padding: 20,
-        marginBottom: 24,
-        background: 'linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(236, 72, 153, 0.1))',
-        border: '1px solid rgba(139, 92, 246, 0.3)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
-          <div className="category-icon" style={{
-            background: 'linear-gradient(135deg, #8b5cf6, #ec4899)',
-            width: 48,
-            height: 48,
-          }}>
-            <i className="fas fa-brain" style={{ fontSize: 24 }}></i>
-          </div>
-          <div style={{ flex: 1 }}>
-            <Text size={500} weight="bold" style={{ color: '#f1f5f9', display: 'block' }}>
-              AI-Powered System Analysis
-            </Text>
-            <Text size={300} style={{ color: '#94a3b8' }}>
-              Get intelligent insights about your system issues
-            </Text>
-          </div>
-        </div>
-      </div>
+    <div className={styles.container}>
+      {/* Page Header */}
+      <PageHeader
+        title="AI Analysis"
+        description="Get intelligent insights about your system using AI"
+        icon={<Sparkle20Regular />}
+      />
 
       {/* Current Session Context */}
       {sessionId && (
@@ -291,7 +288,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
               <Text size={300} weight="semibold" style={{ color: '#22c55e', display: 'block' }}>
                 Connected to Diagnostic Session
               </Text>
-              <Text size={200} style={{ color: '#94a3b8' }}>
+              <Text size={200} style={{ color: 'var(--theme-foreground-2)' }}>
                 Session ID: {sessionId}
               </Text>
             </div>
@@ -309,18 +306,18 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1 }}>
-              <BrainCircuitRegular fontSize={20} style={{ color: '#94a3b8' }} />
+              <BrainCircuitRegular fontSize={20} style={{ color: 'var(--theme-foreground-2)' }} />
               <div>
-                <Text size={200} style={{ color: '#94a3b8', display: 'block' }}>
+                <Text size={200} style={{ color: 'var(--theme-foreground-2)', display: 'block' }}>
                   <strong>On-device AI (Phi Silica)</strong>: {phiSilicaStatus.message}
                 </Text>
                 {phiSilicaStatus.ready_state && (
-                  <Text size={100} style={{ color: '#64748b', display: 'block', marginTop: 4 }}>
+                  <Text size={100} style={{ color: 'var(--theme-foreground-3)', display: 'block', marginTop: 4 }}>
                     State: {phiSilicaStatus.ready_state}
                   </Text>
                 )}
                 {phiSilicaStatus.error_code && (
-                  <Text size={100} style={{ color: '#64748b', display: 'block', marginTop: 4, fontFamily: 'monospace' }}>
+                  <Text size={100} style={{ color: 'var(--theme-foreground-3)', display: 'block', marginTop: 4, fontFamily: 'monospace' }}>
                     Error: {phiSilicaStatus.error_code}
                   </Text>
                 )}
@@ -360,10 +357,10 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
             <BrainCircuitRegular fontSize={24} style={{ color: '#06b6d4' }} />
             <div>
-              <Text size={300} weight="semibold" style={{ color: '#f1f5f9', display: 'block' }}>
+              <Text size={300} weight="semibold" style={{ color: 'var(--theme-foreground)', display: 'block' }}>
                 AI Provider
               </Text>
-              <Text size={200} style={{ color: '#94a3b8' }}>
+              <Text size={200} style={{ color: 'var(--theme-foreground-2)' }}>
                 Choose between local on-device AI or cloud-based analysis
               </Text>
             </div>
@@ -379,7 +376,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
                 value="phi_silica"
                 label={
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ color: '#f1f5f9' }}>Phi Silica (Local NPU)</span>
+                    <span style={{ color: 'var(--theme-foreground)' }}>Phi Silica (Local NPU)</span>
                     <Badge
                       appearance="filled"
                       style={{
@@ -397,7 +394,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
             <Tooltip content="Use OpenAI's GPT-4 for more powerful analysis - requires API key" relationship="description">
               <Radio
                 value="openai"
-                label={<span style={{ color: '#f1f5f9' }}>OpenAI (Cloud)</span>}
+                label={<span style={{ color: 'var(--theme-foreground)' }}>OpenAI (Cloud)</span>}
               />
             </Tooltip>
           </RadioGroup>
@@ -423,7 +420,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
       {selectedProvider === 'openai' && (
         <div className="glass-card" style={{ padding: 20, marginBottom: 24 }}>
           <div style={{ marginBottom: 16 }}>
-            <Text size={300} weight="semibold" style={{ color: '#f1f5f9', display: 'block', marginBottom: 8 }}>
+            <Text size={300} weight="semibold" style={{ color: 'var(--theme-foreground)', display: 'block', marginBottom: 8 }}>
               OpenAI API Key
             </Text>
             <div style={{ display: 'flex', gap: 12 }}>
@@ -436,7 +433,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
                   flex: 1,
                   background: 'rgba(30, 41, 59, 0.5)',
                   borderColor: 'rgba(139, 92, 246, 0.3)',
-                  color: '#f1f5f9',
+                  color: 'var(--theme-foreground)',
                 }}
               />
               <Button
@@ -451,7 +448,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
                 <i className={showApiKey ? "fas fa-eye-slash" : "fas fa-eye"} />
               </Button>
             </div>
-            <Text size={200} style={{ color: '#64748b', marginTop: 8, display: 'block' }}>
+            <Text size={200} style={{ color: 'var(--theme-foreground-3)', marginTop: 8, display: 'block' }}>
               Enter your OpenAI API key to enable AI analysis. Get one at{' '}
               <a
                 href="https://platform.openai.com/api-keys"
@@ -468,7 +465,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
 
       {/* Analysis Input */}
       <div className="glass-card" style={{ padding: 24, marginBottom: 24, width: '100%' }}>
-        <Text size={300} weight="semibold" style={{ color: '#f1f5f9', display: 'block', marginBottom: 16 }}>
+        <Text size={300} weight="semibold" style={{ color: 'var(--theme-foreground)', display: 'block', marginBottom: 16 }}>
           What would you like to analyze?
         </Text>
 
@@ -481,7 +478,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
             minHeight: 120,
             background: 'rgba(30, 41, 59, 0.5)',
             borderColor: 'rgba(139, 92, 246, 0.3)',
-            color: '#f1f5f9',
+            color: 'var(--theme-foreground)',
             marginBottom: 16,
           }}
           disabled={isAnalyzing}
@@ -551,7 +548,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
                   ? 'Phi Silica is analyzing your system locally...'
                   : 'OpenAI is analyzing your system...'}
               </Text>
-              <Text size={200} style={{ color: '#94a3b8' }}>
+              <Text size={200} style={{ color: 'var(--theme-foreground-2)' }}>
                 {selectedProvider === 'phi_silica'
                   ? 'Running on your NPU - your data stays on this device.'
                   : 'Running diagnostics and gathering system information. This may take 10-30 seconds.'}
@@ -570,7 +567,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
           overflowY: 'auto'
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <Text size={300} weight="semibold" style={{ color: '#f1f5f9' }}>
+            <Text size={300} weight="semibold" style={{ color: 'var(--theme-foreground)' }}>
               Conversation History
             </Text>
             <Button
@@ -623,16 +620,16 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
                       </Badge>
                     )}
                   </div>
-                  <Text size={100} style={{ color: '#64748b' }}>
+                  <Text size={100} style={{ color: 'var(--theme-foreground-3)' }}>
                     {entry.timestamp.toLocaleTimeString()}
                   </Text>
                 </div>
-                <Text size={200} style={{ color: '#e2e8f0', whiteSpace: 'pre-wrap' }}>
+                <Text size={200} style={{ color: 'var(--theme-foreground)', whiteSpace: 'pre-wrap' }}>
                   {entry.content}
                 </Text>
                 {entry.diagnosticsRun && entry.diagnosticsRun.length > 0 && (
                   <div style={{ marginTop: 8 }}>
-                    <Text size={100} style={{ color: '#94a3b8' }}>
+                    <Text size={100} style={{ color: 'var(--theme-foreground-2)' }}>
                       Diagnostics run: {entry.diagnosticsRun.join(', ')}
                     </Text>
                   </div>
@@ -649,7 +646,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
           {/* Key Findings */}
           {response.findings && response.findings.length > 0 && (
             <div className="glass-card" style={{ padding: 20, marginBottom: 24 }}>
-              <Text size={400} weight="semibold" style={{ color: '#f1f5f9', display: 'block', marginBottom: 16 }}>
+              <Text size={400} weight="semibold" style={{ color: 'var(--theme-foreground)', display: 'block', marginBottom: 16 }}>
                 <i className="fas fa-search" style={{ marginRight: 8, color: '#ec4899' }}></i>
                 Key Findings
               </Text>
@@ -677,11 +674,11 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
                       {finding.category}
                     </Badge>
                   </div>
-                  <Text size={300} weight="semibold" style={{ color: '#f1f5f9', display: 'block', marginBottom: 4 }}>
+                  <Text size={300} weight="semibold" style={{ color: 'var(--theme-foreground)', display: 'block', marginBottom: 4 }}>
                     {finding.description}
                   </Text>
                   {finding.details && (
-                    <Text size={200} style={{ color: '#94a3b8' }}>
+                    <Text size={200} style={{ color: 'var(--theme-foreground-2)' }}>
                       {finding.details}
                     </Text>
                   )}
@@ -693,7 +690,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
           {/* Recommendations */}
           {response.recommendations && response.recommendations.length > 0 && (
             <div className="glass-card" style={{ padding: 20, marginBottom: 24 }}>
-              <Text size={400} weight="semibold" style={{ color: '#f1f5f9', display: 'block', marginBottom: 16 }}>
+              <Text size={400} weight="semibold" style={{ color: 'var(--theme-foreground)', display: 'block', marginBottom: 16 }}>
                 <i className="fas fa-lightbulb" style={{ marginRight: 8, color: '#fbbf24' }}></i>
                 Recommendations
               </Text>
@@ -708,7 +705,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
                     borderLeft: '3px solid #10b981',
                   }}
                 >
-                  <Text size={300} style={{ color: '#e2e8f0' }}>
+                  <Text size={300} style={{ color: 'var(--theme-foreground)' }}>
                     <i className="fas fa-chevron-right" style={{ marginRight: 8, color: '#10b981' }}></i>
                     {rec}
                   </Text>
@@ -720,7 +717,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
           {/* Diagnostics Performed */}
           {response.diagnostics_run && response.diagnostics_run.length > 0 && (
             <div className="glass-card" style={{ padding: 20 }}>
-              <Text size={400} weight="semibold" style={{ color: '#f1f5f9', display: 'block', marginBottom: 16 }}>
+              <Text size={400} weight="semibold" style={{ color: 'var(--theme-foreground)', display: 'block', marginBottom: 16 }}>
                 <i className="fas fa-tasks" style={{ marginRight: 8, color: '#3b82f6' }}></i>
                 Diagnostics Performed
               </Text>

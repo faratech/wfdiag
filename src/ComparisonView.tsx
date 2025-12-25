@@ -13,6 +13,9 @@ import {
   DialogBody,
   DialogActions,
   DialogContent,
+  makeStyles,
+  shorthands,
+  tokens,
 } from '@fluentui/react-components'
 import {
   ArrowLeftRegular,
@@ -20,7 +23,9 @@ import {
   CheckmarkCircleRegular,
   ErrorCircleRegular,
   WarningRegular,
+  History20Regular,
 } from '@fluentui/react-icons'
+import { PageHeader, EmptyState } from './components'
 import { useScanHistory } from './hooks/useScanHistory'
 import { useComparison, ComparisonFilter } from './hooks/useComparison'
 import { useJsonDiff } from './hooks/useJsonDiff'
@@ -28,11 +33,39 @@ import { useToast } from './contexts/ToastContext'
 import * as logger from './utils/logger'
 import './styles.css'
 
+const useStyles = makeStyles({
+  container: {
+    maxWidth: '1000px',
+    margin: '0 auto',
+    display: 'flex',
+    flexDirection: 'column',
+    ...shorthands.gap(tokens.spacingVerticalL),
+  },
+  summaryGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(4, 1fr)',
+    ...shorthands.gap(tokens.spacingHorizontalM),
+  },
+  summaryCard: {
+    ...shorthands.padding(tokens.spacingVerticalM),
+    textAlign: 'center',
+  },
+  filterButtons: {
+    display: 'flex',
+    ...shorthands.gap(tokens.spacingHorizontalM),
+  },
+  changesList: {
+    maxHeight: '600px',
+    overflowY: 'auto',
+  },
+})
+
 interface ComparisonViewProps {
   onClose: () => void
 }
 
 export const ComparisonView: React.FC<ComparisonViewProps> = ({ onClose }) => {
+  const styles = useStyles()
   const { scans, loading: scansLoading, error: scansError, refreshScans } = useScanHistory()
   const { comparison, loading: compareLoading, error: compareError, compareScans, clearComparison, getFilteredChanges } = useComparison()
   const { findJsonDifferences, formatDifference } = useJsonDiff()
@@ -106,18 +139,29 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({ onClose }) => {
     return 'No change'
   }
 
+  const backAction = (
+    <Button
+      appearance="subtle"
+      onClick={onClose}
+      icon={<ArrowLeftRegular />}
+    >
+      Back
+    </Button>
+  )
+
   // Loading state
   if (scansLoading) {
     return (
-      <div style={{ 
-        maxWidth: 1000, 
-        margin: '0 auto', 
-        padding: 24,
-        textAlign: 'center' 
-      }}>
-        <div className="glass-card" style={{ padding: 48 }}>
+      <div className={styles.container}>
+        <PageHeader
+          title="Scan Comparison"
+          description="Loading scan history..."
+          icon={<History20Regular />}
+          actions={backAction}
+        />
+        <div className="glass-card" style={{ padding: 48, textAlign: 'center' }}>
           <i className="fas fa-spinner fa-spin" style={{ fontSize: 32, color: '#3b82f6', marginBottom: 16 }}></i>
-          <Text size={400} style={{ color: '#f1f5f9' }}>Loading scan history...</Text>
+          <Text size={400} style={{ color: 'var(--theme-foreground)' }}>Loading scan history...</Text>
         </div>
       </div>
     )
@@ -126,37 +170,23 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({ onClose }) => {
   // Error state
   if (scansError) {
     return (
-      <div style={{ maxWidth: 1000, margin: '0 auto', padding: 24 }}>
-        <div className="glass-card" style={{ padding: 24 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-            <Button
-              appearance="subtle"
-              onClick={onClose}
-              icon={<ArrowLeftRegular />}
-            >
-              Back
-            </Button>
-            <Text size={500} weight="semibold" style={{ color: '#f1f5f9' }}>
-              Scan Comparison
-            </Text>
-          </div>
-
-          <div style={{
-            background: 'rgba(239, 68, 68, 0.1)',
-            border: '1px solid rgba(239, 68, 68, 0.3)',
-            borderRadius: 8,
-            padding: 16,
-            color: '#ef4444'
-          }}>
-            <ErrorCircleRegular style={{ marginRight: 8 }} />
-            {scansError}
-          </div>
-
-          <div style={{ marginTop: 16, textAlign: 'center' }}>
-            <Button onClick={refreshScans}>
-              Retry
-            </Button>
-          </div>
+      <div className={styles.container}>
+        <PageHeader
+          title="Scan Comparison"
+          description="Compare diagnostic results between scans"
+          icon={<History20Regular />}
+          actions={backAction}
+        />
+        <div className="glass-card">
+          <EmptyState
+            title="Error Loading Scans"
+            description={scansError}
+            variant="error"
+            primaryAction={{
+              label: 'Retry',
+              onClick: refreshScans,
+            }}
+          />
         </div>
       </div>
     )
@@ -165,187 +195,173 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({ onClose }) => {
   // Empty state
   if (scans.length === 0) {
     return (
-      <div style={{ maxWidth: 1000, margin: '0 auto', padding: 24 }}>
-        <div className="glass-card" style={{ padding: 24 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
-            <Button
-              appearance="subtle"
-              onClick={onClose}
-              icon={<ArrowLeftRegular />}
-            >
-              Back
-            </Button>
-            <Text size={500} weight="semibold" style={{ color: '#f1f5f9' }}>
-              Scan Comparison
-            </Text>
-          </div>
-
-          <div style={{ textAlign: 'center', padding: 48 }}>
-            <ArrowSyncRegular style={{ fontSize: 48, color: '#94a3b8', marginBottom: 16 }} />
-            <Text size={600} weight="bold" style={{ color: '#f1f5f9', display: 'block', marginBottom: 12 }}>
-              No Scans Available
-            </Text>
-            <Text size={300} style={{ color: '#94a3b8', marginBottom: 24 }}>
-              Run some diagnostic scans first to compare results
-            </Text>
-            <Button onClick={onClose}>
-              Back to Diagnostics
-            </Button>
-          </div>
+      <div className={styles.container}>
+        <PageHeader
+          title="Scan Comparison"
+          description="Compare diagnostic results between scans"
+          icon={<History20Regular />}
+          actions={backAction}
+        />
+        <div className="glass-card">
+          <EmptyState
+            title="No Scans Available"
+            description="Run some diagnostic scans first to compare results"
+            icon={<ArrowSyncRegular style={{ width: 40, height: 40 }} />}
+            primaryAction={{
+              label: 'Back to Diagnostics',
+              onClick: onClose,
+            }}
+          />
         </div>
       </div>
     )
   }
 
-  return (
-    <div style={{ maxWidth: 1000, margin: '0 auto', padding: 24 }}>
-      {/* Header */}
-      <div className="glass-card" style={{ padding: 24, marginBottom: 24 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <Button
-              appearance="subtle"
-              onClick={onClose}
-              icon={<ArrowLeftRegular />}
-            >
-              Back
+  const clearHistoryDialog = !comparison && scans.length > 0 ? (
+    <Dialog open={showClearDialog} onOpenChange={(_, data) => setShowClearDialog(data.open)}>
+      <DialogTrigger disableButtonEnhancement>
+        <Button
+          appearance="subtle"
+          style={{
+            color: tokens.colorPaletteRedForeground1,
+          }}
+        >
+          Clear History
+        </Button>
+      </DialogTrigger>
+      <DialogSurface>
+        <DialogBody>
+          <DialogTitle>Clear Scan History?</DialogTitle>
+          <DialogContent>
+            <Text>
+              Are you sure you want to clear all scan history? This action cannot be undone.
+            </Text>
+          </DialogContent>
+          <DialogActions>
+            <DialogTrigger disableButtonEnhancement>
+              <Button appearance="secondary">Cancel</Button>
+            </DialogTrigger>
+            <Button appearance="primary" onClick={handleClearHistory}>
+              Clear History
             </Button>
-            <Text size={500} weight="semibold" style={{ color: '#f1f5f9' }}>
-              Scan Comparison
-            </Text>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  ) : null
+
+  return (
+    <div className={styles.container}>
+      {/* Page Header */}
+      <PageHeader
+        title="Scan Comparison"
+        description="Compare diagnostic results between scans"
+        icon={<History20Regular />}
+        actions={
+          <div style={{ display: 'flex', gap: tokens.spacingHorizontalM }}>
+            {backAction}
+            {clearHistoryDialog}
           </div>
-          {!comparison && scans.length > 0 && (
-            <Dialog open={showClearDialog} onOpenChange={(_, data) => setShowClearDialog(data.open)}>
-              <DialogTrigger disableButtonEnhancement>
-                <Button
-                  appearance="subtle"
-                  style={{
-                    color: '#ef4444',
-                    borderColor: 'rgba(239, 68, 68, 0.3)'
-                  }}
-                >
-                  Clear History
-                </Button>
-              </DialogTrigger>
-              <DialogSurface>
-                <DialogBody>
-                  <DialogTitle>Clear Scan History?</DialogTitle>
-                  <DialogContent>
-                    <Text>
-                      Are you sure you want to clear all scan history? This action cannot be undone.
-                    </Text>
-                  </DialogContent>
-                  <DialogActions>
-                    <DialogTrigger disableButtonEnhancement>
-                      <Button appearance="secondary">Cancel</Button>
-                    </DialogTrigger>
-                    <Button appearance="primary" onClick={handleClearHistory}>
-                      Clear History
-                    </Button>
-                  </DialogActions>
-                </DialogBody>
-              </DialogSurface>
-            </Dialog>
-          )}
-        </div>
+        }
+      />
 
-        {!comparison && (
-          <>
-            <Text size={300} style={{ color: '#94a3b8', marginBottom: 24, display: 'block' }}>
-              Select two scans to compare their diagnostic results and identify changes
-            </Text>
+      {/* Scan Selection */}
+      {!comparison && (
+        <div className="glass-card" style={{ padding: 24 }}>
+          <Text size={300} style={{ color: tokens.colorNeutralForeground3, marginBottom: 24, display: 'block' }}>
+            Select two scans to compare their diagnostic results and identify changes
+          </Text>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 24 }}>
-              <div>
-                <Text size={300} weight="semibold" style={{ color: '#f1f5f9', display: 'block', marginBottom: 8 }}>
-                  Current Scan
-                </Text>
-                <Dropdown
-                  placeholder="Select current scan"
-                  value={selectedCurrent}
-                  selectedOptions={selectedCurrent ? [selectedCurrent] : []}
-                  onOptionSelect={(_, data) => {
-                    if (data.optionValue) {
-                      setSelectedCurrent(data.optionValue)
-                    }
-                  }}
-                  style={{ width: '100%' }}
-                >
-                  {scans.map(scan => (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 24 }}>
+            <div>
+              <Text size={300} weight="semibold" style={{ color: tokens.colorNeutralForeground1, display: 'block', marginBottom: 8 }}>
+                Current Scan
+              </Text>
+              <Dropdown
+                placeholder="Select current scan"
+                value={selectedCurrent}
+                selectedOptions={selectedCurrent ? [selectedCurrent] : []}
+                onOptionSelect={(_, data) => {
+                  if (data.optionValue) {
+                    setSelectedCurrent(data.optionValue)
+                  }
+                }}
+                style={{ width: '100%' }}
+              >
+                {scans.map(scan => (
+                  <Option key={scan.id} value={scan.id} text={formatTimestamp(scan.timestamp)}>
+                    <div>
+                      <Text size={300} weight="semibold" style={{ display: 'block' }}>
+                        {formatTimestamp(scan.timestamp)}
+                      </Text>
+                      <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
+                        {scan.task_count} tasks • {formatDuration(scan.duration_ms)} • {scan.success_count} passed
+                      </Text>
+                    </div>
+                  </Option>
+                ))}
+              </Dropdown>
+            </div>
+
+            <div>
+              <Text size={300} weight="semibold" style={{ color: tokens.colorNeutralForeground1, display: 'block', marginBottom: 8 }}>
+                Previous Scan
+              </Text>
+              <Dropdown
+                placeholder="Select previous scan"
+                value={selectedPrevious}
+                selectedOptions={selectedPrevious ? [selectedPrevious] : []}
+                onOptionSelect={(_, data) => {
+                  if (data.optionValue) {
+                    setSelectedPrevious(data.optionValue)
+                  }
+                }}
+                style={{ width: '100%' }}
+              >
+                {scans
+                  .filter(scan => scan.id !== selectedCurrent)
+                  .map(scan => (
                     <Option key={scan.id} value={scan.id} text={formatTimestamp(scan.timestamp)}>
                       <div>
                         <Text size={300} weight="semibold" style={{ display: 'block' }}>
                           {formatTimestamp(scan.timestamp)}
                         </Text>
-                        <Text size={200} style={{ color: '#94a3b8' }}>
+                        <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
                           {scan.task_count} tasks • {formatDuration(scan.duration_ms)} • {scan.success_count} passed
                         </Text>
                       </div>
                     </Option>
                   ))}
-                </Dropdown>
-              </div>
-
-              <div>
-                <Text size={300} weight="semibold" style={{ color: '#f1f5f9', display: 'block', marginBottom: 8 }}>
-                  Previous Scan
-                </Text>
-                <Dropdown
-                  placeholder="Select previous scan"
-                  value={selectedPrevious}
-                  selectedOptions={selectedPrevious ? [selectedPrevious] : []}
-                  onOptionSelect={(_, data) => {
-                    if (data.optionValue) {
-                      setSelectedPrevious(data.optionValue)
-                    }
-                  }}
-                  style={{ width: '100%' }}
-                >
-                  {scans
-                    .filter(scan => scan.id !== selectedCurrent)
-                    .map(scan => (
-                      <Option key={scan.id} value={scan.id} text={formatTimestamp(scan.timestamp)}>
-                        <div>
-                          <Text size={300} weight="semibold" style={{ display: 'block' }}>
-                            {formatTimestamp(scan.timestamp)}
-                          </Text>
-                          <Text size={200} style={{ color: '#94a3b8' }}>
-                            {scan.task_count} tasks • {formatDuration(scan.duration_ms)} • {scan.success_count} passed
-                          </Text>
-                        </div>
-                      </Option>
-                    ))}
-                </Dropdown>
-              </div>
+              </Dropdown>
             </div>
+          </div>
 
-            <div style={{ textAlign: 'center' }}>
-              <Button
-                appearance="primary"
-                onClick={handleCompare}
-                disabled={!selectedCurrent || !selectedPrevious || compareLoading}
-                icon={<ArrowSyncRegular />}
-              >
-                {compareLoading ? 'Comparing...' : 'Compare Scans'}
-              </Button>
+          <div style={{ textAlign: 'center' }}>
+            <Button
+              appearance="primary"
+              onClick={handleCompare}
+              disabled={!selectedCurrent || !selectedPrevious || compareLoading}
+              icon={<ArrowSyncRegular />}
+            >
+              {compareLoading ? 'Comparing...' : 'Compare Scans'}
+            </Button>
+          </div>
+
+          {compareError && (
+            <div style={{
+              marginTop: 16,
+              background: 'rgba(239, 68, 68, 0.1)',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              borderRadius: 8,
+              padding: 16,
+              color: '#ef4444'
+            }}>
+              <ErrorCircleRegular style={{ marginRight: 8 }} />
+              {compareError}
             </div>
-
-            {compareError && (
-              <div style={{
-                marginTop: 16,
-                background: 'rgba(239, 68, 68, 0.1)',
-                border: '1px solid rgba(239, 68, 68, 0.3)',
-                borderRadius: 8,
-                padding: 16,
-                color: '#ef4444'
-              }}>
-                <ErrorCircleRegular style={{ marginRight: 8 }} />
-                {compareError}
-              </div>
-            )}
-          </>
-        )}
-      </div>
+          )}
+        </div>
+      )}
 
       {/* Comparison Results */}
       {comparison && (

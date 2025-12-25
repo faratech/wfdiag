@@ -33,6 +33,15 @@ export interface Issue {
   detected: boolean
 }
 
+// Global search result type
+export interface SearchResult {
+  type: 'diagnostic' | 'issue' | 'history' | 'setting'
+  title: string
+  description?: string
+  navigateTo?: TabValue
+  data?: any
+}
+
 interface AppContextType {
   // State
   selectedTab: TabValue
@@ -73,6 +82,14 @@ interface AppContextType {
   setSettings: (settings: SettingsData) => void
   saveSettings: (settings: SettingsData) => Promise<void>
   settingsLoaded: boolean
+  // NavRail state
+  navRailCollapsed: boolean
+  setNavRailCollapsed: (collapsed: boolean) => void
+  // Global search state
+  globalSearchQuery: string
+  setGlobalSearchQuery: (query: string) => void
+  globalSearchResults: SearchResult[]
+  performGlobalSearch: (query: string) => void
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined)
@@ -126,6 +143,70 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     historyLimit: 30,
   })
   const [settingsLoaded, setSettingsLoaded] = useState(false)
+
+  // NavRail state - initialize from localStorage
+  const [navRailCollapsed, setNavRailCollapsedInternal] = useState(() => {
+    const saved = localStorage.getItem('navRailCollapsed')
+    return saved ? JSON.parse(saved) : false
+  })
+
+  const setNavRailCollapsed = (collapsed: boolean) => {
+    setNavRailCollapsedInternal(collapsed)
+    localStorage.setItem('navRailCollapsed', JSON.stringify(collapsed))
+  }
+
+  // Global search state
+  const [globalSearchQuery, setGlobalSearchQuery] = useState('')
+  const [globalSearchResults, setGlobalSearchResults] = useState<SearchResult[]>([])
+
+  // Perform global search across diagnostics, issues, and history
+  const performGlobalSearch = (query: string) => {
+    if (!query.trim()) {
+      setGlobalSearchResults([])
+      return
+    }
+
+    const lowerQuery = query.toLowerCase()
+    const searchResults: SearchResult[] = []
+
+    // Search in diagnostic results
+    Object.entries(results).forEach(([taskId, result]) => {
+      const task = availableTasks.find(t => t.id === taskId)
+      if (task) {
+        const matchesName = task.name.toLowerCase().includes(lowerQuery)
+        const matchesDesc = task.description.toLowerCase().includes(lowerQuery)
+        const matchesOutput = typeof result.output === 'string' && result.output.toLowerCase().includes(lowerQuery)
+
+        if (matchesName || matchesDesc || matchesOutput) {
+          searchResults.push({
+            type: 'diagnostic',
+            title: task.name,
+            description: task.description,
+            navigateTo: 'diagnostics',
+            data: { taskId, result },
+          })
+        }
+      }
+    })
+
+    // Search in issues
+    issues.forEach((issue) => {
+      const matchesTitle = issue.title.toLowerCase().includes(lowerQuery)
+      const matchesDesc = issue.description.toLowerCase().includes(lowerQuery)
+
+      if (matchesTitle || matchesDesc) {
+        searchResults.push({
+          type: 'issue',
+          title: issue.title,
+          description: issue.description,
+          navigateTo: 'issues',
+          data: issue,
+        })
+      }
+    })
+
+    setGlobalSearchResults(searchResults.slice(0, 10)) // Limit to 10 results
+  }
 
   // Load settings from backend on startup
   useEffect(() => {
@@ -194,6 +275,12 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     setSettings,
     saveSettings,
     settingsLoaded,
+    navRailCollapsed,
+    setNavRailCollapsed,
+    globalSearchQuery,
+    setGlobalSearchQuery,
+    globalSearchResults,
+    performGlobalSearch,
   }
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>

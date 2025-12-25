@@ -18,9 +18,8 @@ import {
 
 const useStyles = makeStyles({
   container: {
-    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+    background: 'var(--theme-sidebar-gradient)',
     borderBottom: `1px solid ${tokens.colorNeutralStroke1}`,
-    backdropFilter: 'blur(10px)',
     position: 'sticky',
     top: '72px', // Height of NavigationHeader
     zIndex: 999,
@@ -41,7 +40,7 @@ const useStyles = makeStyles({
 
     ':hover': {
       color: tokens.colorNeutralForeground1,
-      backgroundColor: 'rgba(59, 130, 246, 0.1)',
+      backgroundColor: tokens.colorSubtleBackgroundHover,
     },
 
     '&[data-selected="true"]': {

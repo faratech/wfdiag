@@ -1,12 +1,11 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import { SystemMonitoring } from './SystemMonitoring'
 import { OpenAIIntegration } from './OpenAIIntegration'
 import { ComparisonView } from './ComparisonView'
 import { DiagnosticsTab } from './tabs/DiagnosticsTab'
 import { IssuesTab } from './tabs/IssuesTab'
 import {
-  NavigationHeader,
-  TabNavigation,
+  NavRail,
   SettingsDialog,
   AboutDialog,
   type SettingsData
@@ -16,28 +15,54 @@ import { ToastProvider } from './contexts/ToastContext'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { useDiagnostics } from './hooks/useDiagnostics'
 import { useScanner } from './hooks/useScanner'
+import {
+  NAV_RAIL_WIDTH_COLLAPSED,
+  NAV_RAIL_WIDTH_EXPANDED,
+  NAV_RAIL_BREAKPOINT,
+} from './theme'
 import './styles.css'
 import {
   makeStyles,
   tokens,
+  shorthands,
 } from '@fluentui/react-components'
 
 const useStyles = makeStyles({
-  mainContainer: {
+  appContainer: {
+    display: 'flex',
     minHeight: '100vh',
     background: tokens.colorNeutralBackground1,
     color: tokens.colorNeutralForeground1,
-    height: '100vh',
-    position: 'relative',
-    overflow: 'hidden',
+  },
+  mainArea: {
+    flex: 1,
     display: 'flex',
     flexDirection: 'column',
+    height: '100vh',
+    overflow: 'hidden',
+    transitionProperty: 'margin-left',
+    transitionDuration: tokens.durationNormal,
+    transitionTimingFunction: tokens.curveEasyEase,
+  },
+  mainAreaCollapsed: {
+    marginLeft: `${NAV_RAIL_WIDTH_COLLAPSED}px`,
+  },
+  mainAreaExpanded: {
+    marginLeft: `${NAV_RAIL_WIDTH_EXPANDED}px`,
+    [`@media (max-width: ${NAV_RAIL_BREAKPOINT}px)`]: {
+      marginLeft: `${NAV_RAIL_WIDTH_COLLAPSED}px`,
+    },
   },
   contentArea: {
-    padding: tokens.spacingVerticalXXL,
-    height: 'calc(100vh - 180px)', // Account for header + tabs (180px)
+    flex: 1,
+    ...shorthands.padding(tokens.spacingVerticalL, tokens.spacingHorizontalXL),
     overflowY: 'auto',
     overflowX: 'hidden',
+  },
+  contentWrapper: {
+    maxWidth: '1400px',
+    margin: '0 auto',
+    width: '100%',
   },
 })
 
@@ -57,10 +82,24 @@ const AppContent: React.FC = () => {
     saveSettings,
     issues,
     sessionId,
+    navRailCollapsed,
+    setNavRailCollapsed,
   } = useAppContext()
 
-  const { exportResults, restartAsAdmin, detectIssues } = useDiagnostics()
+  const { detectIssues } = useDiagnostics()
   const { runQuickScan, isRunning } = useScanner()
+
+  // Track window width for responsive behavior
+  const [isSmallScreen, setIsSmallScreen] = useState(false)
+
+  useEffect(() => {
+    const handleResize = () => {
+      setIsSmallScreen(window.innerWidth < NAV_RAIL_BREAKPOINT)
+    }
+    handleResize()
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
 
   // Detect issues when session changes
   useEffect(() => {
@@ -90,50 +129,48 @@ const AppContent: React.FC = () => {
     }
   }
 
-  return (
-    <div className={styles.mainContainer}>
-      {/* Navigation Header */}
-      <NavigationHeader
-        computerName={systemInfo?.computer_name}
-        osVersion={systemInfo?.os_version}
-        isAdmin={systemInfo?.is_admin}
-        onRestartAsAdmin={restartAsAdmin}
-        onOpenSettings={() => setShowSettings(true)}
-        onOpenAbout={() => setShowAbout(true)}
-        onExportDiagnostics={exportResults}
-        version="2.1.6"
-      />
+  // Determine if nav rail should appear collapsed
+  const effectiveCollapsed = isSmallScreen || navRailCollapsed
 
-      {/* Tab Navigation */}
-      <TabNavigation
-        selectedTab={selectedTab}
-        onTabSelect={setSelectedTab}
+  return (
+    <div className={styles.appContainer}>
+      {/* NavRail - Vertical Navigation */}
+      <NavRail
+        selectedItem={selectedTab}
+        onItemSelect={setSelectedTab}
+        collapsed={navRailCollapsed}
+        onToggleCollapse={() => setNavRailCollapsed(!navRailCollapsed)}
         issueCount={issues.filter(i => i.detected).length}
         isMonitoringActive={isMonitoringActive}
         hasAIKey={!!settings.openAiApiKey}
+        onOpenSettings={() => setShowSettings(true)}
+        onOpenAbout={() => setShowAbout(true)}
+        systemInfo={systemInfo}
       />
 
       {/* Main Content Area */}
-      <main className={styles.contentArea}>
-        <div style={{ maxWidth: selectedTab === 'ai' ? '1400px' : '1200px', margin: '0 auto' }}>
-          {selectedTab === 'diagnostics' && <DiagnosticsTab />}
-          {selectedTab === 'monitoring' && (
-            <SystemMonitoring
-              isActive={isMonitoringActive}
-              onToggle={setIsMonitoringActive}
-            />
-          )}
-          {selectedTab === 'ai' && (
-            <OpenAIIntegration
-              sessionId={sessionId || ''}
-            />
-          )}
-          {selectedTab === 'issues' && <IssuesTab />}
-          {selectedTab === 'history' && (
-            <ComparisonView
-              onClose={() => setSelectedTab('diagnostics')}
-            />
-          )}
+      <main className={`${styles.mainArea} ${effectiveCollapsed ? styles.mainAreaCollapsed : styles.mainAreaExpanded}`}>
+        <div className={styles.contentArea}>
+          <div className={styles.contentWrapper}>
+            {selectedTab === 'diagnostics' && <DiagnosticsTab />}
+            {selectedTab === 'monitoring' && (
+              <SystemMonitoring
+                isActive={isMonitoringActive}
+                onToggle={setIsMonitoringActive}
+              />
+            )}
+            {selectedTab === 'ai' && (
+              <OpenAIIntegration
+                sessionId={sessionId || ''}
+              />
+            )}
+            {selectedTab === 'issues' && <IssuesTab />}
+            {selectedTab === 'history' && (
+              <ComparisonView
+                onClose={() => setSelectedTab('diagnostics')}
+              />
+            )}
+          </div>
         </div>
       </main>
 
