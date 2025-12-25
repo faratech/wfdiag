@@ -96,7 +96,10 @@ jobs:
           key: x64
 
       - name: Install dependencies
-        run: npm install
+        shell: pwsh
+        run: |
+          if (Test-Path package-lock.json) { Remove-Item package-lock.json }
+          npm install
 
       - name: Build frontend
         run: npm run build
@@ -162,7 +165,10 @@ jobs:
           }
 
       - name: Install dependencies
-        run: npm install
+        shell: pwsh
+        run: |
+          if (Test-Path package-lock.json) { Remove-Item package-lock.json }
+          npm install
 
       - name: Build frontend
         run: npm run build
