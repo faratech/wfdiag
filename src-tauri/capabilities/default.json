@@ -32,9 +32,6 @@
     "clipboard-manager:default",
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text",
-    "process:default",
-    "process:allow-exit",
-    "process:allow-restart",
     "shell:default",
     "shell:allow-open",
     {
