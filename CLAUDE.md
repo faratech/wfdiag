@@ -86,7 +86,6 @@ This is a Tauri v2 application with a clear separation between frontend and back
 - Single-page application in `App.tsx` handling all UI logic
 - Real-time monitoring component in `SystemMonitoring.tsx`
 - OpenAI integration component in `OpenAIIntegration.tsx`
-- OAuth authentication components in `OAuthLogin.tsx` and `LoginDialog.tsx`
 - Uses Vite for fast development and optimized production builds
 
 ### Backend (src-tauri/)
@@ -96,24 +95,19 @@ This is a Tauri v2 application with a clear separation between frontend and back
 - **main.rs**: Entry point that calls the run function from lib.rs
 - **diagnostics.rs**: Core diagnostic task definitions and execution logic
 - **native_diagnostics.rs**: Windows-specific diagnostic implementations
+- **wmi_native.rs**: Native WMI wrapper using Windows COM APIs (IWbemLocator, IWbemServices)
 - **windows_native.rs**: Direct Windows API bindings and wrappers
 - **architecture.rs**: CPU architecture detection (x64, ARM64) and emulation detection
 - **monitoring.rs**: Real-time system monitoring with CPU, memory, disk, and network stats
 - **openai_integration.rs**: OpenAI Responses API integration for AI-powered system analysis
-- **oauth.rs**: OAuth2 authentication implementation for WindowsForum
-- **auth.rs**: Authentication state management and token handling
-- **windowsforum_proxy.rs**: Proxy service for WindowsForum authentication
 - **results_storage.rs**: Scan results storage and comparison system
 
 ### Key Dependencies (Latest Versions)
 - Tauri: v2.9 (Tauri framework)
 - sysinfo: v0.37 (system information)
-- windows: v0.62 (Windows API bindings)
-- wmi: v0.18 (Windows Management Instrumentation)
-- reqwest: v0.12 (HTTP client for OpenAI and OAuth)
+- windows: v0.62 (Windows API bindings with native WMI support via Win32::System::Wmi)
 - winreg: v0.55 (Windows Registry access)
 - async-openai: v0.30 (OpenAI API client)
-- warp: v0.4 (Web server for OAuth callback)
 - tokio: v1.48 (Async runtime)
 
 ### Key Architectural Decisions
@@ -124,8 +118,6 @@ This is a Tauri v2 application with a clear separation between frontend and back
 5. **Error Handling**: Comprehensive error handling with fallbacks for each diagnostic
 6. **State Management**: Frontend uses React hooks, backend uses Rust's ownership model
 7. **Real-time Monitoring**: Uses Tauri events to stream system stats from backend to frontend
-8. **OAuth2 Authentication**: Implements OAuth2 flow with WindowsForum for secure user authentication
-9. **Local Callback Server**: Uses Warp to handle OAuth callbacks on localhost:3000
 
 ## Tauri v2 Specific Configuration
 
@@ -177,11 +169,6 @@ All backend functionality is exposed through these Tauri commands in `lib.rs`:
 - `get_network_connections`: Get active network connections
 - `analyze_with_openai`: Legacy OpenAI analysis
 - `analyze_system_with_ai`: OpenAI Responses API with function calling
-- `start_oauth_flow`: Initiate WindowsForum OAuth2 authentication
-- `complete_oauth`: Complete OAuth2 flow with authorization code
-- `refresh_oauth_token`: Refresh expired OAuth2 tokens
-- `get_auth_status`: Check current authentication status
-- `logout`: Clear authentication tokens
 - `list_scan_history`: List all saved diagnostic scan summaries
 - `load_scan`: Load a specific scan by ID with full results
 - `compare_scans`: Compare two scans and find differences

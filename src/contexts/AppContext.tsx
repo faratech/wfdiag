@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useState, ReactNode } from 'react'
+import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { type TabValue, type SettingsData } from '../components'
 
 export interface SystemInfo {
@@ -70,8 +71,8 @@ interface AppContextType {
   setShowAbout: (show: boolean) => void
   settings: SettingsData
   setSettings: (settings: SettingsData) => void
-  showDebug: boolean
-  setShowDebug: (show: boolean) => void
+  saveSettings: (settings: SettingsData) => Promise<void>
+  settingsLoaded: boolean
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined)
@@ -120,8 +121,39 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     maxConcurrentTasks: 5,
     exportFormat: 'text',
     theme: 'dark',
+    showNotifications: true,
+    retainHistory: true,
+    historyLimit: 30,
   })
-  const [showDebug, setShowDebug] = useState(false)
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
+
+  // Load settings from backend on startup
+  useEffect(() => {
+    const loadSettingsFromBackend = async () => {
+      try {
+        const savedSettings = await invoke<SettingsData>('load_settings')
+        setSettings(prev => ({ ...prev, ...savedSettings }))
+        console.log('Settings loaded from backend:', savedSettings)
+      } catch (error) {
+        console.error('Failed to load settings:', error)
+      } finally {
+        setSettingsLoaded(true)
+      }
+    }
+    loadSettingsFromBackend()
+  }, [])
+
+  // Save settings to backend
+  const saveSettings = async (newSettings: SettingsData) => {
+    try {
+      await invoke('save_settings', { settings: newSettings })
+      setSettings(newSettings)
+      console.log('Settings saved to backend:', newSettings)
+    } catch (error) {
+      console.error('Failed to save settings:', error)
+      throw error
+    }
+  }
 
   const value: AppContextType = {
     selectedTab,
@@ -160,8 +192,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     setShowAbout,
     settings,
     setSettings,
-    showDebug,
-    setShowDebug,
+    saveSettings,
+    settingsLoaded,
   }
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>

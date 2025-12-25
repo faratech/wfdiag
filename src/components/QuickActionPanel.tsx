@@ -90,14 +90,24 @@ const useStyles = makeStyles({
   scanButtons: {
     display: 'flex',
     justifyContent: 'center',
+    flexWrap: 'wrap',
     ...shorthands.gap(tokens.spacingHorizontalL),
     ...shorthands.margin(tokens.spacingVerticalXL, '0'),
+    '@media (max-width: 640px)': {
+      flexDirection: 'column',
+      alignItems: 'stretch',
+      ...shorthands.gap(tokens.spacingVerticalM),
+    },
   },
 
   scanButton: {
-    minWidth: '200px',
+    minWidth: '180px',
     height: '48px',
     fontSize: tokens.fontSizeBase400,
+    '@media (max-width: 640px)': {
+      minWidth: 'unset',
+      width: '100%',
+    },
   },
 
   featureGrid: {
@@ -159,12 +169,25 @@ const useStyles = makeStyles({
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
+    flexWrap: 'wrap',
+    ...shorthands.gap(tokens.spacingVerticalM),
     marginBottom: tokens.spacingVerticalXL,
+    '@media (max-width: 640px)': {
+      flexDirection: 'column',
+      alignItems: 'stretch',
+    },
   },
 
   resultsActions: {
     display: 'flex',
+    flexWrap: 'wrap',
     ...shorthands.gap(tokens.spacingHorizontalS),
+    '@media (max-width: 640px)': {
+      justifyContent: 'stretch',
+      '& > button': {
+        flex: 1,
+      },
+    },
   },
 
   statsGrid: {
@@ -172,6 +195,12 @@ const useStyles = makeStyles({
     gridTemplateColumns: 'repeat(4, 1fr)',
     ...shorthands.gap(tokens.spacingHorizontalM),
     marginBottom: tokens.spacingVerticalL,
+    '@media (max-width: 768px)': {
+      gridTemplateColumns: 'repeat(2, 1fr)',
+    },
+    '@media (max-width: 480px)': {
+      gridTemplateColumns: '1fr',
+    },
   },
 
   statCard: {

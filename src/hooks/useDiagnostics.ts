@@ -2,7 +2,6 @@ import { useEffect, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
-import { writeTextFile } from '@tauri-apps/plugin-fs'
 import { useAppContext, type SystemInfo, type DiagnosticTask, type Issue } from '../contexts/AppContext'
 import { useToast } from '../contexts/ToastContext'
 import * as logger from '../utils/logger'
@@ -81,7 +80,10 @@ ${content}
   }, [sessionId, systemInfo])
 
   const exportResults = useCallback(async () => {
-    if (!sessionId) return
+    if (!sessionId) {
+      showError('No Results', 'Please run a scan first before exporting.')
+      return
+    }
 
     try {
       const content = await invoke<string>('export_results', {
@@ -108,24 +110,18 @@ ${content}`
       })
 
       if (filePath) {
-        try {
-          await writeTextFile(filePath, fullReport)
-        } catch (writeError) {
-          logger.error('useDiagnostics', 'Failed to write file', writeError)
-          try {
-            await invoke('save_results_to_file', {
-              path: filePath,
-              content: fullReport
-            })
-          } catch (backendError) {
-            logger.error('useDiagnostics', 'Backend save also failed', backendError)
-          }
-        }
+        // Use backend to write files (no fs:scope restrictions)
+        await invoke('save_results_to_file', {
+          path: filePath,
+          content: fullReport
+        })
+        showSuccess('Export Complete', `Results saved to ${filePath}`)
       }
     } catch (error) {
       logger.error('useDiagnostics', 'Failed to export results', error)
+      showError('Export Failed', 'Failed to save the file. Please try a different location.')
     }
-  }, [sessionId, systemInfo, settings.exportFormat])
+  }, [sessionId, systemInfo, settings.exportFormat, showSuccess, showError])
 
   const shareToWindowsForum = useCallback(async () => {
     if (!sessionId) return
@@ -166,7 +162,10 @@ ${content}
   }, [sessionId, systemInfo, showSuccess, showError])
 
   const emailReport = useCallback(async () => {
-    if (!sessionId) return
+    if (!sessionId) {
+      showError('No Results', 'Please run a scan first before emailing a report.')
+      return
+    }
 
     try {
       const content = await invoke<string>('export_results', {
@@ -174,17 +173,27 @@ ${content}
         includeRaw: false
       })
 
-      const subject = `Diagnostic Report - ${systemInfo?.computer_name} - ${new Date().toLocaleDateString()}`
-      const body = encodeURIComponent(`WindowsForum Diagnostic Report
+      // Copy full report to clipboard first (mailto has length limits)
+      const fullReport = `WindowsForum Diagnostic Report
 
 Generated: ${new Date().toLocaleString()}
 Computer: ${systemInfo?.computer_name}
 OS: ${systemInfo?.os_version}
 
-${content}`)
+${content}`
 
-      const mailtoLink = `mailto:?subject=${encodeURIComponent(subject)}&body=${body}`
+      await writeText(fullReport)
+
+      // Create a short mailto link - body will be pasted by user
+      const subject = `Diagnostic Report - ${systemInfo?.computer_name} - ${new Date().toLocaleDateString()}`
+      const mailtoLink = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent('[Report copied to clipboard - paste here with Ctrl+V]')}`
+
       await invoke('open_url', { url: mailtoLink })
+
+      showSuccess(
+        'Email Ready!',
+        'The diagnostic report has been copied to your clipboard. Paste it into the email body with Ctrl+V.'
+      )
     } catch (error) {
       logger.error('useDiagnostics', 'Failed to email report', error)
       showError(
@@ -192,12 +201,17 @@ ${content}`)
         'Failed to prepare email. Please try exporting the report instead.'
       )
     }
-  }, [sessionId, systemInfo, showError])
+  }, [sessionId, systemInfo, showError, showSuccess])
 
   const generateSupportPackage = useCallback(async () => {
-    if (!sessionId) return
+    if (!sessionId) {
+      showError('No Results', 'Please run a scan first before generating a support package.')
+      return
+    }
 
     try {
+      logger.info('useDiagnostics', 'Starting support package generation...')
+
       const jsonContent = await invoke<string>('export_results', {
         format: 'json',
         includeRaw: true
@@ -222,24 +236,40 @@ ${content}`)
       })
 
       if (jsonPath) {
-        await writeTextFile(jsonPath, jsonContent)
+        // Get base path by removing extension (handle paths with or without .json)
+        const basePath = jsonPath.endsWith('.json')
+          ? jsonPath.slice(0, -5)
+          : jsonPath
 
-        const textPath = jsonPath.replace('.json', '.txt')
-        await writeTextFile(textPath, textContent)
+        const actualJsonPath = `${basePath}.json`
+        const textPath = `${basePath}.txt`
+        const htmlPath = `${basePath}.html`
 
-        const htmlPath = jsonPath.replace('.json', '.html')
-        await writeTextFile(htmlPath, htmlContent)
+        // Use backend to write files (no fs:scope restrictions)
+        await invoke('save_results_to_file', { path: actualJsonPath, content: jsonContent })
+        await invoke('save_results_to_file', { path: textPath, content: textContent })
+        await invoke('save_results_to_file', { path: htmlPath, content: htmlContent })
 
         showSuccess(
           'Support Package Generated!',
-          `Files saved:\n• ${jsonPath}\n• ${textPath}\n• ${htmlPath}`
+          `Files saved:\n• ${actualJsonPath}\n• ${textPath}\n• ${htmlPath}`
         )
       }
-    } catch (error) {
+    } catch (error: unknown) {
       logger.error('useDiagnostics', 'Failed to generate support package', error)
+      let errorMsg = 'Unknown error'
+      if (error instanceof Error) {
+        errorMsg = error.message
+      } else if (typeof error === 'string') {
+        errorMsg = error
+      } else if (error && typeof error === 'object' && 'message' in error) {
+        errorMsg = String((error as { message: unknown }).message)
+      } else if (error) {
+        errorMsg = String(error)
+      }
       showError(
         'Failed to Generate Support Package',
-        'Please try exporting individual files.'
+        `Error: ${errorMsg}. Please try exporting individual files.`
       )
     }
   }, [sessionId, showSuccess, showError])

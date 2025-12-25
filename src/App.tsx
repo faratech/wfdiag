@@ -4,7 +4,6 @@ import { OpenAIIntegration } from './OpenAIIntegration'
 import { ComparisonView } from './ComparisonView'
 import { DiagnosticsTab } from './tabs/DiagnosticsTab'
 import { IssuesTab } from './tabs/IssuesTab'
-import { wfDarkTheme } from './theme'
 import {
   NavigationHeader,
   TabNavigation,
@@ -14,10 +13,11 @@ import {
 } from './components'
 import { AppProvider, useAppContext } from './contexts/AppContext'
 import { ToastProvider } from './contexts/ToastContext'
+import { ThemeProvider } from './contexts/ThemeContext'
 import { useDiagnostics } from './hooks/useDiagnostics'
+import { useScanner } from './hooks/useScanner'
 import './styles.css'
 import {
-  FluentProvider,
   makeStyles,
   tokens,
 } from '@fluentui/react-components'
@@ -54,22 +54,40 @@ const AppContent: React.FC = () => {
     showAbout,
     setShowAbout,
     settings,
-    setSettings,
+    saveSettings,
     issues,
     sessionId,
   } = useAppContext()
 
   const { exportResults, restartAsAdmin, detectIssues } = useDiagnostics()
+  const { runQuickScan, isRunning } = useScanner()
 
+  // Detect issues when session changes
   useEffect(() => {
     if (sessionId) {
       detectIssues()
     }
   }, [sessionId, detectIssues])
 
-  const handleSettingsSave = (newSettings: SettingsData) => {
-    setSettings(newSettings)
-    setShowSettings(false)
+  // Get available tasks from context
+  const { availableTasks } = useAppContext()
+
+  // Scan on startup if enabled - wait for tasks to load first
+  useEffect(() => {
+    if (settings.scanOnStartup && !isRunning && !sessionId && availableTasks.length > 0) {
+      console.log('Starting automatic scan on startup...', availableTasks.length, 'tasks available')
+      runQuickScan()
+    }
+  }, [settings.scanOnStartup, availableTasks.length]) // Run when settings load AND tasks are available
+
+  const handleSettingsSave = async (newSettings: SettingsData) => {
+    try {
+      await saveSettings(newSettings)
+      setShowSettings(false)
+    } catch (error) {
+      console.error('Failed to save settings:', error)
+      // Settings dialog will remain open if save fails
+    }
   }
 
   return (
@@ -136,15 +154,29 @@ const AppContent: React.FC = () => {
   )
 }
 
+// Wrapper that reads settings and applies theme
+const ThemedApp: React.FC = () => {
+  const { settings, settingsLoaded } = useAppContext()
+
+  // Wait for settings to load before rendering themed content
+  if (!settingsLoaded) {
+    return null // Or a loading spinner
+  }
+
+  return (
+    <ThemeProvider initialMode={(settings.theme as 'dark' | 'light' | 'auto') || 'dark'}>
+      <ToastProvider>
+        <AppContent />
+      </ToastProvider>
+    </ThemeProvider>
+  )
+}
+
 const App: React.FC = () => {
   return (
-    <FluentProvider theme={wfDarkTheme}>
-      <ToastProvider>
-        <AppProvider>
-          <AppContent />
-        </AppProvider>
-      </ToastProvider>
-    </FluentProvider>
+    <AppProvider>
+      <ThemedApp />
+    </AppProvider>
   )
 }
 

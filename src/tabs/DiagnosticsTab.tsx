@@ -33,24 +33,42 @@ const useStyles = makeStyles({
   diagnosticsContainer: {
     maxWidth: '1400px',
     margin: '0 auto',
+    display: 'flex',
+    flexDirection: 'column',
+    height: '100%',
   },
   resultsContainer: {
     display: 'flex',
     ...shorthands.gap(tokens.spacingHorizontalL),
-    height: 'calc(100vh - 250px)',
+    flex: 1,
+    minHeight: 0, // Allow flex shrinking
+    '@media (max-width: 1024px)': {
+      flexDirection: 'column',
+      ...shorthands.gap(tokens.spacingVerticalL),
+    },
   },
   sidebar: {
     width: '280px',
+    flexShrink: 0,
     position: 'sticky',
-    top: '20px',
-    height: 'fit-content',
-    maxHeight: 'calc(100vh - 300px)',
+    top: tokens.spacingVerticalL,
+    alignSelf: 'flex-start',
+    maxHeight: 'calc(100vh - 200px)',
     overflowY: 'auto',
+    '@media (max-width: 1024px)': {
+      width: '100%',
+      position: 'static',
+      maxHeight: 'none',
+    },
   },
   mainContent: {
     flex: 1,
+    minWidth: 0, // Allow flex shrinking
     overflowY: 'auto',
     paddingRight: tokens.spacingHorizontalM,
+    '@media (max-width: 1024px)': {
+      paddingRight: 0,
+    },
   },
   categoryNav: {
     display: 'flex',
@@ -113,8 +131,6 @@ export const DiagnosticsTab: React.FC = () => {
     setSearchQuery,
     filteredResults,
     scanStartTime,
-    showDebug,
-    setShowDebug,
   } = useAppContext()
 
   const {
@@ -181,8 +197,6 @@ export const DiagnosticsTab: React.FC = () => {
           onCompareScans={() => setShowComparison(true)}
           scanStatus={isRunning ? 'scanning' : hasResults ? 'complete' : 'idle'}
           resultCount={Object.keys(results).length}
-          debugMode={showDebug}
-          onToggleDebug={() => setShowDebug(!showDebug)}
         />
       )}
 

@@ -63,8 +63,35 @@ export const wfDarkTheme: Theme = {
   colorPaletteRedBackground3: '#EF4444', // Error
 }
 
-// Light theme (for future use)
-export const wfLightTheme: Theme = createLightTheme(wfDiagnosticsBrand)
+// Light theme with customized colors for glass effects
+export const wfLightTheme: Theme = {
+  ...createLightTheme(wfDiagnosticsBrand),
+  // Light mode backgrounds
+  colorNeutralBackground1: '#FAFBFF',
+  colorNeutralBackground2: '#FFFFFF',
+  colorNeutralBackground3: '#F5F7FA',
+  colorNeutralBackground4: '#EEF1F5',
+  colorNeutralBackground5: '#E5E9F0',
+  colorNeutralBackground6: '#DCE2EC',
+
+  // Light mode borders
+  colorNeutralStroke1: 'rgba(91, 110, 255, 0.15)',
+  colorNeutralStroke2: 'rgba(91, 110, 255, 0.08)',
+  colorNeutralStroke3: 'rgba(91, 110, 255, 0.25)',
+
+  // Light mode text
+  colorNeutralForeground1: '#1A1F2E',
+  colorNeutralForeground2: '#2D3342',
+  colorNeutralForeground3: '#6B7280',
+  colorNeutralForeground4: '#9CA3AF',
+
+  // Brand colors adjusted for light mode contrast
+  colorBrandForeground1: '#4A5DCC',
+  colorBrandForeground2: '#5B6EFF',
+  colorBrandBackground: '#5B6EFF',
+  colorBrandBackgroundHover: '#4A5DCC',
+  colorBrandBackgroundPressed: '#3D4DB3',
+}
 
 // Shared styles using Fluent UI's makeStyles
 export const useAppStyles = makeStyles({
