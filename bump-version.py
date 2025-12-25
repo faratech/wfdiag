@@ -165,32 +165,37 @@ def main():
     success_count = 0
     total_count = 0
 
-    # 1. package.json
+    # 1. version.json
+    total_count += 1
+    if update_json_file(script_dir / 'version.json', new_version, dry_run):
+        success_count += 1
+
+    # 2. package.json
     total_count += 1
     if update_json_file(script_dir / 'package.json', new_version, dry_run):
         success_count += 1
 
-    # 2. package-lock.json
+    # 3. package-lock.json
     total_count += 1
     if update_json_file(script_dir / 'package-lock.json', new_version, dry_run):
         success_count += 1
 
-    # 3. src-tauri/Cargo.toml
+    # 4. src-tauri/Cargo.toml
     total_count += 1
     if update_cargo_toml(script_dir / 'src-tauri' / 'Cargo.toml', new_version, dry_run):
         success_count += 1
 
-    # 4. src-tauri/tauri.conf.json
+    # 5. src-tauri/tauri.conf.json
     total_count += 1
     if update_json_file(script_dir / 'src-tauri' / 'tauri.conf.json', new_version, dry_run):
         success_count += 1
 
-    # 5. AppxManifest.xml
+    # 6. AppxManifest.xml
     total_count += 1
     if update_appx_manifest(script_dir / 'AppxManifest.xml', new_version, dry_run):
         success_count += 1
 
-    # 6. src/App.tsx - version="X.Y.Z"
+    # 7. src/App.tsx - version="X.Y.Z"
     total_count += 1
     if update_tsx_file(
         script_dir / 'src' / 'App.tsx',
@@ -200,7 +205,7 @@ def main():
     ):
         success_count += 1
 
-    # 7. src/components/AboutDialog.tsx - Version X.Y.Z
+    # 8. src/components/AboutDialog.tsx - Version X.Y.Z
     total_count += 1
     if update_tsx_file(
         script_dir / 'src' / 'components' / 'AboutDialog.tsx',
@@ -210,7 +215,7 @@ def main():
     ):
         success_count += 1
 
-    # 8. src/components/NavigationHeader.tsx - version = 'X.Y.Z'
+    # 9. src/components/NavigationHeader.tsx - version = 'X.Y.Z'
     total_count += 1
     if update_tsx_file(
         script_dir / 'src' / 'components' / 'NavigationHeader.tsx',
