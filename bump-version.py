@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 def update_json_file(file_path: Path, new_version: str, dry_run: bool) -> bool:
-    """Update version in a JSON file."""
+    """Update version in a JSON file (only the root version field)."""
     if not file_path.exists():
         print(f"  Warning: File not found: {file_path}")
         return False
@@ -26,17 +26,16 @@ def update_json_file(file_path: Path, new_version: str, dry_run: bool) -> bool:
             print(f"  Skipped (already {new_version}): {file_path}")
             return True
 
-        # Update version
-        data['version'] = new_version
-
         if dry_run:
             print(f"  [DRY RUN] Would update: {file_path} ({old_version} -> {new_version})")
         else:
-            # Preserve formatting - read original and do regex replace
+            # Only replace the first occurrence (root level version)
+            # Use count=1 to avoid replacing versions in dependencies
             new_content = re.sub(
                 r'("version"\s*:\s*)"[^"]+"',
                 f'\\1"{new_version}"',
-                content
+                content,
+                count=1  # Only replace the first match (root version)
             )
             file_path.write_text(new_content, encoding='utf-8')
             print(f"  Updated: {file_path} ({old_version} -> {new_version})")
