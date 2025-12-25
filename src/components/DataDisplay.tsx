@@ -31,7 +31,7 @@ const useStyles = makeStyles({
     position: 'relative',
 
     '&:hover': {
-      backgroundColor: 'rgba(148, 163, 184, 0.03)',
+      backgroundColor: tokens.colorSubtleBackgroundHover,
     },
 
     '&::after': {
@@ -41,7 +41,8 @@ const useStyles = makeStyles({
       left: tokens.spacingHorizontalM,
       right: tokens.spacingHorizontalM,
       height: '1px',
-      background: 'linear-gradient(90deg, transparent, rgba(148, 163, 184, 0.05), transparent)',
+      backgroundColor: tokens.colorNeutralStroke2,
+      opacity: 0.5,
     }
   },
 
@@ -76,22 +77,20 @@ const useStyles = makeStyles({
   metricCard: {
     ...shorthands.padding(tokens.spacingVerticalM),
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
-    background: 'linear-gradient(135deg, rgba(17, 24, 39, 0.5), rgba(31, 41, 55, 0.3))',
-    ...shorthands.border('1px', 'solid', 'rgba(148, 163, 184, 0.06)'),
+    background: 'var(--theme-card-gradient)',
+    ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke2),
     transition: 'all 0.2s ease',
 
     '&:hover': {
       transform: 'translateY(-2px)',
-      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.1)',
+      boxShadow: tokens.shadow8,
     }
   },
 
   metricValue: {
     fontSize: tokens.fontSizeHero700,
     fontWeight: tokens.fontWeightBold,
-    background: 'linear-gradient(135deg, #60A5FA, #3B82F6)',
-    WebkitBackgroundClip: 'text',
-    WebkitTextFillColor: 'transparent',
+    color: tokens.colorBrandForeground1,
     marginBottom: tokens.spacingVerticalXS,
   },
 
@@ -110,11 +109,11 @@ const useStyles = makeStyles({
   },
 
   trendUp: {
-    color: '#10B981',
+    color: tokens.colorPaletteGreenForeground1,
   },
 
   trendDown: {
-    color: '#EF4444',
+    color: tokens.colorPaletteRedForeground1,
   },
 
   trendNeutral: {
@@ -150,9 +149,10 @@ const useStyles = makeStyles({
   codeBlock: {
     fontFamily: 'Consolas, "Courier New", monospace',
     fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground1,
     ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
-    backgroundColor: 'rgba(0, 0, 0, 0.4)',
-    ...shorthands.border('1px', 'solid', 'rgba(148, 163, 184, 0.1)'),
+    backgroundColor: tokens.colorNeutralBackground4,
+    ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke2),
     ...shorthands.borderRadius(tokens.borderRadiusSmall),
     ...shorthands.overflow('auto'),
     maxHeight: '200px',
@@ -165,8 +165,8 @@ const useStyles = makeStyles({
       left: 0,
       right: 0,
       height: '2px',
-      background: 'linear-gradient(90deg, #3B82F6, #8B5CF6, #3B82F6)',
-      opacity: 0.3,
+      background: 'var(--theme-accent-gradient)',
+      opacity: 0.5,
     }
   }
 })
@@ -184,13 +184,13 @@ export const DataRow: React.FC<DataRowProps> = ({ label, value, status, icon }) 
   const getStatusIcon = () => {
     switch (status) {
       case 'success':
-        return <CheckmarkCircle12Regular style={{ color: '#10B981' }} />
+        return <CheckmarkCircle12Regular primaryFill={tokens.colorPaletteGreenForeground1} />
       case 'error':
-        return <ErrorCircle12Regular style={{ color: '#EF4444' }} />
+        return <ErrorCircle12Regular primaryFill={tokens.colorPaletteRedForeground1} />
       case 'warning':
-        return <Warning12Regular style={{ color: '#F59E0B' }} />
+        return <Warning12Regular primaryFill={tokens.colorPaletteYellowForeground1} />
       case 'info':
-        return <Info12Regular style={{ color: '#3B82F6' }} />
+        return <Info12Regular primaryFill={tokens.colorPaletteBlueForeground2} />
       default:
         return null
     }
@@ -282,13 +282,13 @@ export const DataList: React.FC<DataListProps> = ({ items }) => {
   const getStatusIcon = (status?: string) => {
     switch (status) {
       case 'success':
-        return <CheckmarkCircle12Regular style={{ color: '#10B981' }} />
+        return <CheckmarkCircle12Regular primaryFill={tokens.colorPaletteGreenForeground1} />
       case 'error':
-        return <ErrorCircle12Regular style={{ color: '#EF4444' }} />
+        return <ErrorCircle12Regular primaryFill={tokens.colorPaletteRedForeground1} />
       case 'warning':
-        return <Warning12Regular style={{ color: '#F59E0B' }} />
+        return <Warning12Regular primaryFill={tokens.colorPaletteYellowForeground1} />
       case 'info':
-        return <Info12Regular style={{ color: '#3B82F6' }} />
+        return <Info12Regular primaryFill={tokens.colorPaletteBlueForeground2} />
       default:
         return null
     }

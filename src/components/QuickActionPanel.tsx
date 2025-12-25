@@ -32,35 +32,24 @@ const useStyles = makeStyles({
   },
 
   welcomeCard: {
-    background: 'radial-gradient(ellipse at top, rgba(59, 130, 246, 0.15), transparent 70%)',
-    ...shorthands.border('1px', 'solid', 'rgba(59, 130, 246, 0.1)'),
+    background: 'var(--theme-card-gradient)',
+    ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke1),
     ...shorthands.padding(tokens.spacingVerticalXXXL),
     textAlign: 'center',
+    boxShadow: tokens.shadow8,
     position: 'relative',
     ...shorthands.overflow('hidden'),
-    boxShadow: 'inset 0 1px 0 rgba(148, 163, 184, 0.1)',
-
+    // Hero gradient overlay
     '&::before': {
       content: '""',
       position: 'absolute',
       top: 0,
-      left: '-100%',
-      width: '200%',
-      height: '2px',
-      background: 'linear-gradient(90deg, transparent, #3B82F6, transparent)',
-      animation: 'scan 3s linear infinite',
-    },
-
-    '&::after': {
-      content: '""',
-      position: 'absolute',
-      bottom: 0,
       left: 0,
       right: 0,
-      height: '100px',
-      background: 'linear-gradient(180deg, transparent, rgba(5, 8, 16, 0.8))',
+      bottom: 0,
+      background: 'var(--theme-hero-gradient)',
       pointerEvents: 'none',
-    }
+    },
   },
 
   iconContainer: {
@@ -68,23 +57,13 @@ const useStyles = makeStyles({
     height: '72px',
     ...shorthands.margin('0', 'auto', tokens.spacingVerticalXL),
     ...shorthands.borderRadius('50%'),
-    background: 'conic-gradient(from 180deg, #3B82F6, #60A5FA, #3B82F6)',
+    background: 'var(--theme-accent-gradient)',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    boxShadow: '0 10px 30px rgba(59, 130, 246, 0.3), inset 0 -3px 6px rgba(0, 0, 0, 0.2)',
+    boxShadow: '0 8px 24px rgba(51, 95, 227, 0.35)',
     position: 'relative',
-    animation: 'float 6s ease-in-out infinite',
-
-    '&::before': {
-      content: '""',
-      position: 'absolute',
-      width: '84px',
-      height: '84px',
-      ...shorthands.borderRadius('50%'),
-      ...shorthands.border('2px', 'solid', 'rgba(59, 130, 246, 0.2)'),
-      animation: 'pulse 2s ease-in-out infinite',
-    }
+    zIndex: 1,
   },
 
   scanButtons: {
@@ -119,33 +98,20 @@ const useStyles = makeStyles({
 
   featureCard: {
     ...shorthands.padding(tokens.spacingVerticalXL),
-    background: 'linear-gradient(135deg, rgba(17, 24, 39, 0.6), rgba(31, 41, 55, 0.4))',
-    ...shorthands.border('1px', 'solid', 'rgba(148, 163, 184, 0.08)'),
+    background: 'var(--theme-card-gradient)',
+    ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke1),
     ...shorthands.borderRadius(tokens.borderRadiusLarge),
-    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+    boxShadow: tokens.shadow4,
+    transitionProperty: 'background, box-shadow, transform',
+    transitionDuration: tokens.durationNormal,
+    transitionTimingFunction: tokens.curveEasyEase,
     position: 'relative',
-    ...shorthands.overflow('hidden'),
-
-    '&::before': {
-      content: '""',
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      width: '100%',
-      height: '1px',
-      background: 'linear-gradient(90deg, transparent, rgba(59, 130, 246, 0.3), transparent)',
-      opacity: 0,
-      transition: 'opacity 0.3s ease',
-    },
+    zIndex: 1,
 
     ':hover': {
-      background: 'linear-gradient(135deg, rgba(31, 41, 55, 0.8), rgba(55, 65, 81, 0.6))',
-      transform: 'translateY(-4px) scale(1.02)',
-      boxShadow: '0 12px 24px rgba(0, 0, 0, 0.3)',
-
-      '&::before': {
-        opacity: 1,
-      }
+      background: 'var(--theme-card-gradient-hover)',
+      transform: 'translateY(-4px)',
+      boxShadow: tokens.shadow16,
     }
   },
 
@@ -205,8 +171,10 @@ const useStyles = makeStyles({
 
   statCard: {
     ...shorthands.padding(tokens.spacingVerticalM),
-    backgroundColor: 'rgba(30, 41, 59, 0.3)',
+    background: 'var(--theme-card-gradient)',
+    ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke1),
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
+    boxShadow: tokens.shadow2,
     textAlign: 'center',
   }
 })

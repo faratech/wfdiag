@@ -1,39 +1,14 @@
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-
-html {
-  height: 100%;
-  width: 100%;
-  overflow: hidden;
-}
-
-body, #root {
-  height: 100%;
-  width: 100%;
-  overflow: hidden;
-}
-
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
+/* Layout containers - use theme CSS custom properties from ThemeContext */
 .app-container {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: var(--colorNeutralBackground1);
+  background: var(--theme-background);
 }
 
 .header {
-  background: var(--colorNeutralBackground2);
-  border-bottom: 1px solid var(--colorNeutralStroke1);
+  background: var(--theme-sidebar-gradient);
+  border-bottom: 1px solid var(--theme-stroke);
   padding: 12px 24px;
   display: flex;
   align-items: center;
@@ -54,23 +29,18 @@ body {
   overflow-x: hidden;
 }
 
-/* Clean card styles */
+/* Fluent component transitions */
 .fui-Card {
-  transition: all 0.2s ease;
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
 }
 
-/* Smooth animations */
-details {
-  transition: all 0.2s ease;
+.fui-Tab {
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
+/* Details/summary elements */
 details[open] > summary {
   margin-bottom: 8px;
-}
-
-/* Clean tab transitions */
-.fui-Tab {
-  transition: all 0.2s ease;
 }
 
 /* Responsive layout */

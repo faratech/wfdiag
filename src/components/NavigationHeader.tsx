@@ -29,13 +29,12 @@ const useStyles = makeStyles({
     alignItems: 'center',
     justifyContent: 'space-between',
     ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalXXL),
-    background: 'linear-gradient(180deg, rgba(5, 8, 16, 0.98) 0%, rgba(10, 15, 28, 0.95) 100%)',
-    backdropFilter: 'blur(24px) saturate(150%)',
-    borderBottom: `1px solid rgba(148, 163, 184, 0.1)`,
+    background: 'var(--theme-sidebar-gradient)',
+    borderBottom: `1px solid ${tokens.colorNeutralStroke1}`,
     position: 'sticky',
     top: 0,
     zIndex: 1000,
-    boxShadow: '0 1px 3px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.24)',
+    boxShadow: tokens.shadow4,
   },
 
   brandSection: {
@@ -48,22 +47,12 @@ const useStyles = makeStyles({
     width: '36px',
     height: '36px',
     ...shorthands.borderRadius(tokens.borderRadiusCircular),
-    background: 'linear-gradient(135deg, #3B82F6 0%, #2563EB 100%)',
+    backgroundColor: tokens.colorBrandBackground,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    boxShadow: '0 0 20px rgba(59, 130, 246, 0.2)',
+    boxShadow: tokens.shadow4,
     position: 'relative',
-
-    '&::after': {
-      content: '""',
-      position: 'absolute',
-      width: '42px',
-      height: '42px',
-      ...shorthands.borderRadius(tokens.borderRadiusCircular),
-      ...shorthands.border('1px', 'solid', 'rgba(59, 130, 246, 0.2)'),
-      animation: 'pulse 3s infinite',
-    }
   },
 
   titleSection: {
@@ -94,14 +83,14 @@ const useStyles = makeStyles({
     alignItems: 'center',
     ...shorthands.gap(tokens.spacingHorizontalM),
     ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalL),
-    background: 'linear-gradient(135deg, rgba(17, 24, 39, 0.6), rgba(31, 41, 55, 0.4))',
+    backgroundColor: tokens.colorNeutralBackground3,
     ...shorthands.borderRadius(tokens.borderRadiusLarge),
-    ...shorthands.border('1px', 'solid', 'rgba(148, 163, 184, 0.08)'),
-    transition: 'all 0.2s ease',
+    ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke2),
+    transitionProperty: 'background-color',
+    transitionDuration: tokens.durationNormal,
 
-    '&:hover': {
-      background: 'linear-gradient(135deg, rgba(31, 41, 55, 0.7), rgba(55, 65, 81, 0.5))',
-      transform: 'translateX(-2px)',
+    ':hover': {
+      backgroundColor: tokens.colorNeutralBackground3Hover,
     }
   },
 

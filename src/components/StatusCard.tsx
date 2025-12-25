@@ -23,9 +23,9 @@ import {
 const useStyles = makeStyles({
   card: {
     ...shorthands.padding(tokens.spacingVerticalL),
-    background: 'rgba(30, 41, 59, 0.6)',
-    backdropFilter: 'blur(10px)',
-    ...shorthands.border('1px', 'solid', 'rgba(255, 255, 255, 0.1)'),
+    background: 'var(--theme-card-gradient)',
+    ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke1),
+    boxShadow: tokens.shadow4,
   },
   header: {
     display: 'flex',
@@ -52,9 +52,9 @@ const useStyles = makeStyles({
   infoSection: {
     marginTop: tokens.spacingVerticalL,
     ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalL),
-    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+    backgroundColor: tokens.colorNeutralBackground3,
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
-    ...shorthands.border('1px', 'solid', 'rgba(59, 130, 246, 0.3)'),
+    ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke2),
   }
 })
 
@@ -87,14 +87,14 @@ export const StatusCard: React.FC<StatusCardProps> = ({
   const getStatusIcon = () => {
     switch (status) {
       case 'success':
-        return <CheckmarkCircle20Regular primaryFill="#10B981" />
+        return <CheckmarkCircle20Regular primaryFill={tokens.colorPaletteGreenForeground1} />
       case 'warning':
-        return <Warning20Regular primaryFill="#F59E0B" />
+        return <Warning20Regular primaryFill={tokens.colorPaletteYellowForeground1} />
       case 'error':
-        return <ErrorCircle20Regular primaryFill="#EF4444" />
+        return <ErrorCircle20Regular primaryFill={tokens.colorPaletteRedForeground1} />
       case 'info':
       default:
-        return <Info20Regular primaryFill="#3B82F6" />
+        return <Info20Regular primaryFill={tokens.colorPaletteBlueForeground2} />
     }
   }
 
@@ -161,7 +161,7 @@ export const StatusCard: React.FC<StatusCardProps> = ({
               </Text>
             }
           >
-            <Caption1 style={{ color: '#60A5FA' }}>
+            <Caption1 style={{ color: tokens.colorBrandForeground1 }}>
               <Info20Regular style={{ marginRight: tokens.spacingHorizontalXS }} />
               Additional Information
             </Caption1>
