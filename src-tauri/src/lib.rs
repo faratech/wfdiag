@@ -348,7 +348,7 @@ async fn run_diagnostics_parallel(
     use futures::stream::{self, StreamExt};
 
     let max_concurrent = max_concurrent.unwrap_or(5); // Default to 5 concurrent tasks
-    let tasks = diagnostics::get_all_tasks();
+    let tasks = std::sync::Arc::new(diagnostics::get_all_tasks());
 
     // Create futures for each diagnostic task
     let futures: Vec<_> = task_ids
@@ -356,11 +356,11 @@ async fn run_diagnostics_parallel(
         .map(|task_id| {
             let window_clone = window.clone();
             let state_clone = state.inner();
-            let tasks_clone = tasks.clone();
+            let tasks_ref = tasks.clone(); // Arc clone is cheap
 
             async move {
                 // Find task details
-                let task = tasks_clone
+                let task = tasks_ref
                     .iter()
                     .find(|t| t.id == task_id)
                     .ok_or_else(|| format!("Task not found: {}", task_id))?;
