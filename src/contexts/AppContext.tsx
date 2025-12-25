@@ -89,7 +89,7 @@ interface AppProviderProps {
 }
 
 export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
-  const [selectedTab, setSelectedTab] = useState<TabValue>('diagnostics')
+  const [selectedTab, setSelectedTabInternal] = useState<TabValue>('diagnostics')
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null)
   const [availableTasks, setAvailableTasks] = useState<DiagnosticTask[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
@@ -98,6 +98,14 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const [currentProgress, setCurrentProgress] = useState(0)
   const [currentTaskName, setCurrentTaskName] = useState('')
   const [isMonitoringActive, setIsMonitoringActive] = useState(false)
+
+  // Wrapper to stop monitoring when leaving the monitoring tab
+  const setSelectedTab = (tab: TabValue) => {
+    if (selectedTab === 'monitoring' && tab !== 'monitoring' && isMonitoringActive) {
+      setIsMonitoringActive(false)
+    }
+    setSelectedTabInternal(tab)
+  }
   const [showComparison, setShowComparison] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [filteredResults, setFilteredResults] = useState<Record<string, TaskResult>>({})

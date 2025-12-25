@@ -137,11 +137,43 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
   const [showNetworkConnections, setShowNetworkConnections] = useState(false);
   const unlistenRef = useRef<(() => void) | null>(null);
 
+  // Clear all monitoring data
+  const clearMonitoringData = () => {
+    setStats(null);
+    setCpuHistory([]);
+    setMemoryHistory([]);
+    setNetworkUploadHistory([]);
+    setNetworkDownloadHistory([]);
+    setTimeLabels([]);
+    setNetworkConnections([]);
+    setShowNetworkConnections(false);
+  };
+
+  // Stop monitoring and clear data when page becomes hidden
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden && isActive) {
+        logger.info('SystemMonitoring', 'Page hidden, stopping monitoring');
+        onToggle(false);
+        clearMonitoringData();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [isActive, onToggle]);
+
   // Auto-start monitoring when component mounts
   useEffect(() => {
     if (!isActive) {
       onToggle(true);
     }
+    // Clear data when component unmounts (tab switch)
+    return () => {
+      clearMonitoringData();
+    };
   }, []);
 
   useEffect(() => {
