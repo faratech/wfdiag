@@ -1,0 +1,450 @@
+//! Unified AI Service Layer
+//!
+//! This module provides a unified interface for AI analysis that abstracts
+//! OpenAI and Phi Silica providers. It handles provider detection, routing,
+//! caching, and rate limiting.
+
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+
+use crate::ai_cache::AICache;
+use crate::ai_prompts;
+use crate::openai_integration::OPENAI_MODEL;
+
+/// AI Provider enumeration
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AIProvider {
+    #[default]
+    None,
+    OpenAI,
+    PhiSilica,
+}
+
+impl std::fmt::Display for AIProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AIProvider::None => write!(f, "none"),
+            AIProvider::OpenAI => write!(f, "openai"),
+            AIProvider::PhiSilica => write!(f, "phi_silica"),
+        }
+    }
+}
+
+/// User preference for AI provider
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AIProviderPreference {
+    #[default]
+    Auto,
+    OpenAI,
+    PhiSilica,
+}
+
+/// Context type for different AI analysis scenarios
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextType {
+    /// Single diagnostic card interpretation
+    DiagnosticInterpretation,
+    /// Section summary (Hardware, System, Storage, Network)
+    SectionSummary,
+    /// Health score explanation
+    HealthScoreExplanation,
+    /// Issue prioritization and analysis
+    IssuePrioritization,
+    /// General chat/analysis
+    GeneralAnalysis,
+}
+
+/// AI analysis request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AIRequest {
+    pub context_type: ContextType,
+    pub context_id: String,
+    pub data: String,
+    pub task_name: Option<String>,
+    pub section_name: Option<String>,
+}
+
+/// AI analysis response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AIResponse {
+    pub interpretation: String,
+    pub provider_used: AIProvider,
+    pub cached: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Full status of AI providers
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AIProviderStatus {
+    pub preferred_provider: AIProvider,
+    pub openai_available: bool,
+    pub openai_api_key_set: bool,
+    pub phi_silica_available: bool,
+    pub phi_silica_ready: bool,
+    pub phi_silica_message: Option<String>,
+    pub active_provider: AIProvider,
+}
+
+/// Global AI service state
+static AI_SERVICE_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static AI_CACHE: OnceLock<std::sync::Mutex<AICache>> = OnceLock::new();
+static USER_PREFERENCE: OnceLock<std::sync::Mutex<AIProviderPreference>> = OnceLock::new();
+
+/// Initialize the AI service (call once at startup)
+pub fn init_ai_service() {
+    if AI_SERVICE_INITIALIZED.swap(true, Ordering::SeqCst) {
+        return; // Already initialized
+    }
+
+    // Initialize cache
+    AI_CACHE.get_or_init(|| std::sync::Mutex::new(AICache::new(100)));
+
+    // Initialize user preference
+    USER_PREFERENCE.get_or_init(|| std::sync::Mutex::new(AIProviderPreference::Auto));
+}
+
+/// Get the AI cache
+fn get_cache() -> &'static std::sync::Mutex<AICache> {
+    AI_CACHE.get_or_init(|| std::sync::Mutex::new(AICache::new(100)))
+}
+
+/// Get current user preference
+pub fn get_user_preference() -> AIProviderPreference {
+    USER_PREFERENCE
+        .get_or_init(|| std::sync::Mutex::new(AIProviderPreference::Auto))
+        .lock()
+        .map(|p| *p)
+        .unwrap_or(AIProviderPreference::Auto)
+}
+
+/// Set user preference
+pub fn set_user_preference(pref: AIProviderPreference) {
+    if let Some(mutex) = USER_PREFERENCE.get() {
+        if let Ok(mut p) = mutex.lock() {
+            *p = pref;
+        }
+    }
+}
+
+/// Check if OpenAI is available (API key is set)
+pub async fn check_openai_available() -> bool {
+    crate::load_api_key_internal().await.is_some()
+}
+
+/// Check if Phi Silica is available
+pub fn check_phi_silica_available() -> (bool, bool, Option<String>) {
+    let status = crate::phi_silica::is_phi_silica_available();
+    (
+        status.available,
+        status.ready_state.as_deref() == Some("Ready"),
+        Some(status.message),
+    )
+}
+
+/// Determine the active provider based on preference and availability
+pub async fn determine_active_provider(pref: AIProviderPreference) -> AIProvider {
+    match pref {
+        AIProviderPreference::OpenAI => {
+            if check_openai_available().await {
+                AIProvider::OpenAI
+            } else {
+                AIProvider::None
+            }
+        }
+        AIProviderPreference::PhiSilica => {
+            let (available, _, _) = check_phi_silica_available();
+            if available {
+                AIProvider::PhiSilica
+            } else {
+                AIProvider::None
+            }
+        }
+        AIProviderPreference::Auto => {
+            // Prefer Phi Silica (local/free), fall back to OpenAI
+            let (phi_available, _, _) = check_phi_silica_available();
+            if phi_available {
+                AIProvider::PhiSilica
+            } else if check_openai_available().await {
+                AIProvider::OpenAI
+            } else {
+                AIProvider::None
+            }
+        }
+    }
+}
+
+/// Get current AI provider status
+pub async fn get_ai_status() -> AIProviderStatus {
+    let pref = get_user_preference();
+    let openai_available = check_openai_available().await;
+    let (phi_available, phi_ready, phi_message) = check_phi_silica_available();
+    let active = determine_active_provider(pref).await;
+
+    AIProviderStatus {
+        preferred_provider: active,
+        openai_available,
+        openai_api_key_set: openai_available,
+        phi_silica_available: phi_available,
+        phi_silica_ready: phi_ready,
+        phi_silica_message: phi_message,
+        active_provider: active,
+    }
+}
+
+/// Generate cache key for a request
+fn generate_cache_key(request: &AIRequest, session_id: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    request.data.hash(&mut hasher);
+    let content_hash = hasher.finish();
+
+    format!(
+        "{}:{}:{}:{:x}",
+        session_id,
+        format!("{:?}", request.context_type),
+        request.context_id,
+        content_hash
+    )
+}
+
+/// Analyze with the appropriate provider
+pub async fn analyze(
+    request: AIRequest,
+    session_id: &str,
+) -> Result<AIResponse, String> {
+    // Check cache first
+    let cache_key = generate_cache_key(&request, session_id);
+    if let Ok(cache) = get_cache().lock() {
+        if let Some(cached) = cache.get(&cache_key) {
+            return Ok(AIResponse {
+                interpretation: cached.clone(),
+                provider_used: AIProvider::None, // Will be filled by caller
+                cached: true,
+                error: None,
+            });
+        }
+    }
+
+    // Determine provider
+    let pref = get_user_preference();
+    let provider = determine_active_provider(pref).await;
+
+    // Generate prompt based on context type
+    let prompt = match request.context_type {
+        ContextType::DiagnosticInterpretation => {
+            ai_prompts::diagnostic_interpretation_prompt(
+                request.task_name.as_deref().unwrap_or("Unknown"),
+                &request.data,
+            )
+        }
+        ContextType::SectionSummary => {
+            ai_prompts::section_summary_prompt(
+                request.section_name.as_deref().unwrap_or("System"),
+                &request.data,
+            )
+        }
+        ContextType::HealthScoreExplanation => {
+            ai_prompts::health_explanation_prompt(&request.data)
+        }
+        ContextType::IssuePrioritization => {
+            ai_prompts::issue_prioritization_prompt(&request.data)
+        }
+        ContextType::GeneralAnalysis => {
+            request.data.clone()
+        }
+    };
+
+    // Call the appropriate provider
+    let result = match provider {
+        AIProvider::OpenAI => {
+            analyze_with_openai(&prompt).await
+        }
+        AIProvider::PhiSilica => {
+            analyze_with_phi_silica(&prompt).await
+        }
+        AIProvider::None => {
+            Err("No AI provider available. Configure OpenAI API key or use a Copilot+ PC.".to_string())
+        }
+    };
+
+    // Cache successful results
+    if let Ok(ref interpretation) = result {
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.insert(cache_key, interpretation.clone());
+        }
+    }
+
+    result.map(|interpretation| AIResponse {
+        interpretation,
+        provider_used: provider,
+        cached: false,
+        error: None,
+    })
+}
+
+/// Analyze using OpenAI
+async fn analyze_with_openai(prompt: &str) -> Result<String, String> {
+    use async_openai::{
+        types::{
+            ChatCompletionRequestSystemMessageArgs,
+            ChatCompletionRequestUserMessageArgs,
+            CreateChatCompletionRequestArgs,
+        },
+        Client,
+        config::OpenAIConfig,
+    };
+
+    let api_key = crate::load_api_key_internal()
+        .await
+        .ok_or("OpenAI API key not configured")?;
+
+    let config = OpenAIConfig::new().with_api_key(api_key);
+    let client = Client::with_config(config);
+
+    let request = CreateChatCompletionRequestArgs::default()
+        .model(OPENAI_MODEL)
+        .messages([
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content(SYSTEM_PROMPT)
+                .build()
+                .map_err(|e| e.to_string())?
+                .into(),
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(prompt)
+                .build()
+                .map_err(|e| e.to_string())?
+                .into(),
+        ])
+        .max_tokens(500u32)
+        .temperature(0.3)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client
+        .chat()
+        .create(request)
+        .await
+        .map_err(|e| format!("OpenAI API error: {}", e))?;
+
+    response
+        .choices
+        .first()
+        .and_then(|c| c.message.content.clone())
+        .ok_or_else(|| "No response from OpenAI".to_string())
+}
+
+/// Analyze using Phi Silica
+async fn analyze_with_phi_silica(prompt: &str) -> Result<String, String> {
+    crate::phi_silica::generate_response(prompt).await
+}
+
+/// Clear AI cache for a session or all
+pub fn clear_cache(session_id: Option<&str>) {
+    if let Ok(mut cache) = get_cache().lock() {
+        if let Some(sid) = session_id {
+            cache.clear_session(sid);
+        } else {
+            cache.clear_all();
+        }
+    }
+}
+
+// ============================================================================
+// Tauri Commands
+// ============================================================================
+
+/// Get AI provider status
+#[tauri::command]
+pub async fn ai_get_status() -> Result<AIProviderStatus, String> {
+    Ok(get_ai_status().await)
+}
+
+/// Analyze a single diagnostic
+#[tauri::command]
+pub async fn ai_analyze_diagnostic(
+    task_id: String,
+    task_name: String,
+    diagnostic_output: String,
+    session_id: String,
+) -> Result<AIResponse, String> {
+    let request = AIRequest {
+        context_type: ContextType::DiagnosticInterpretation,
+        context_id: task_id,
+        data: diagnostic_output,
+        task_name: Some(task_name),
+        section_name: None,
+    };
+
+    analyze(request, &session_id).await
+}
+
+/// Analyze a section (Hardware, System, Storage, Network)
+#[tauri::command]
+pub async fn ai_analyze_section(
+    section_name: String,
+    section_data: String,
+    session_id: String,
+) -> Result<AIResponse, String> {
+    let request = AIRequest {
+        context_type: ContextType::SectionSummary,
+        context_id: section_name.clone(),
+        data: section_data,
+        task_name: None,
+        section_name: Some(section_name),
+    };
+
+    analyze(request, &session_id).await
+}
+
+/// Explain health scores
+#[tauri::command]
+pub async fn ai_explain_health(
+    metrics_data: String,
+    session_id: String,
+) -> Result<AIResponse, String> {
+    let request = AIRequest {
+        context_type: ContextType::HealthScoreExplanation,
+        context_id: "health".to_string(),
+        data: metrics_data,
+        task_name: None,
+        section_name: None,
+    };
+
+    analyze(request, &session_id).await
+}
+
+/// Set AI provider preference
+#[tauri::command]
+pub async fn ai_set_preference(preference: String) -> Result<(), String> {
+    let pref = match preference.to_lowercase().as_str() {
+        "openai" => AIProviderPreference::OpenAI,
+        "phi_silica" | "phisilica" => AIProviderPreference::PhiSilica,
+        _ => AIProviderPreference::Auto,
+    };
+    set_user_preference(pref);
+    Ok(())
+}
+
+/// Clear AI cache
+#[tauri::command]
+pub async fn ai_clear_cache(session_id: Option<String>) -> Result<(), String> {
+    clear_cache(session_id.as_deref());
+    Ok(())
+}
+
+/// System prompt for AI analysis
+const SYSTEM_PROMPT: &str = r#"You are a Windows system diagnostic expert. Analyze the provided data and give a clear, concise interpretation.
+
+Guidelines:
+- Be direct and specific
+- Focus on actionable insights
+- Mention any anomalies or concerns
+- Keep responses under 150 words
+- Use technical but accessible language"#;

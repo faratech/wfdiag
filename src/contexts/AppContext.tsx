@@ -149,6 +149,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     showNotifications: true,
     retainHistory: true,
     historyLimit: 30,
+    aiEnabled: true,
+    preferredAIProvider: 'auto',
   })
   const [settingsLoaded, setSettingsLoaded] = useState(false)
 
@@ -240,6 +242,26 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const saveSettings = async (newSettings: SettingsData) => {
     try {
       await invoke('save_settings', { settings: newSettings })
+
+      // Also store API key in keyring if provided (for AI service compatibility)
+      if (newSettings.openAiApiKey) {
+        try {
+          await invoke('store_api_key', { key: newSettings.openAiApiKey })
+          console.log('API key stored in keyring')
+        } catch (keyError) {
+          console.warn('Failed to store API key in keyring:', keyError)
+          // Don't throw - settings are still saved, just keyring failed
+        }
+      } else if (settings.openAiApiKey && !newSettings.openAiApiKey) {
+        // API key was cleared
+        try {
+          await invoke('clear_api_key')
+          console.log('API key cleared from keyring')
+        } catch (keyError) {
+          console.warn('Failed to clear API key from keyring:', keyError)
+        }
+      }
+
       setSettings(newSettings)
       console.log('Settings saved to backend:', newSettings)
     } catch (error) {

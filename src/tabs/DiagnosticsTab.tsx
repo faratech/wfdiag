@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useMemo, useState, useCallback } from 'react'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { ComparisonView } from '../ComparisonView'
 import {
@@ -15,6 +15,7 @@ import {
 import { useAppContext } from '../contexts/AppContext'
 import { useDiagnostics } from '../hooks/useDiagnostics'
 import { useScanner } from '../hooks/useScanner'
+import { useAI } from '../hooks/useAI'
 import {
   makeStyles,
   tokens,
@@ -94,6 +95,31 @@ export const DiagnosticsTab: React.FC = () => {
   } = useScanner()
 
   const [activeMetric, setActiveMetric] = useState<string | null>(null)
+
+  // AI integration for section summaries
+  const {
+    aiEnabled,
+    isAIAvailable,
+    activeProvider,
+    requestSectionInterpretation,
+    getCachedSectionInterpretation,
+    isSectionLoading,
+    getProviderDisplayName
+  } = useAI()
+
+  // Handle section AI analysis request
+  const handleSectionAnalysis = useCallback(async (sectionName: string, items: any[]) => {
+    // Format the section data for AI analysis
+    const sectionData = items.map(({ task, result }) => ({
+      task: task.name,
+      category: task.category,
+      success: result.success,
+      output: typeof result.output === 'string' ? result.output : JSON.stringify(result.output),
+      error: result.error
+    }))
+
+    await requestSectionInterpretation(sectionName, JSON.stringify(sectionData, null, 2))
+  }, [requestSectionInterpretation])
 
   // Calculate stats and organize results
   const analysis = useMemo(() => {
@@ -339,16 +365,23 @@ export const DiagnosticsTab: React.FC = () => {
 
                 <InsightPanel
                   title={`${group} Analysis`}
-                  content={isPerfect 
+                  content={isPerfect
                     ? `All ${group.toLowerCase()} tests passed successfully. Configuration matches recommended baselines for optimal performance.`
                     : `${items.length - successCount} issues detected in ${group.toLowerCase()} configuration. Review specific findings below for resolution steps.`
                   }
+                  aiEnabled={aiEnabled && isAIAvailable}
+                  aiContent={getCachedSectionInterpretation(group)}
+                  onRequestAI={() => handleSectionAnalysis(group, items)}
+                  isLoadingAI={isSectionLoading(group)}
+                  aiProviderName={getProviderDisplayName(activeProvider)}
+                  hasAIResult={!!getCachedSectionInterpretation(group)}
                 />
 
                 <div className={styles.grid}>
                   {items.map(({ task, result }) => (
                     <div key={task.id} id={`diagnostic-card-${task.id}`}>
                       <DiagnosticCard
+                        taskId={task.id}
                         title={task.name}
                         description={task.description}
                         status={result.success ? 'verified' : 'action_required'}

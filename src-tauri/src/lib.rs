@@ -14,11 +14,18 @@ mod security;
 mod issue_detector;
 mod issue_fixer;
 mod encrypted_storage;
+#[cfg(windows)]
+mod dpapi;
 
 // Phi Silica wrapper (uses windows-bindgen generated bindings)
 mod phi_silica;
 #[cfg(windows)]
 mod windows_ai_bindings;
+
+// Unified AI service layer
+mod ai_service;
+mod ai_cache;
+mod ai_prompts;
 
 use crate::diagnostics::{DiagnosticTask, TaskResult};
 use crate::issue_detector::Issue;
@@ -55,6 +62,14 @@ pub struct AppSettings {
     pub retain_history: bool,
     #[serde(default = "default_history_limit")]
     pub history_limit: u32,
+    // AI settings
+    #[serde(default = "default_true")]
+    pub ai_enabled: bool,
+    #[serde(default = "default_ai_provider")]
+    pub preferred_ai_provider: String,
+    // API key - stored in keyring, included in frontend response
+    #[serde(default)]
+    pub open_ai_api_key: Option<String>,
 }
 
 fn default_max_concurrent() -> u32 { 5 }
@@ -62,6 +77,7 @@ fn default_export_format() -> String { "text".to_string() }
 fn default_theme() -> String { "dark".to_string() }
 fn default_true() -> bool { true }
 fn default_history_limit() -> u32 { 30 }
+fn default_ai_provider() -> String { "auto".to_string() }
 
 /// Get the settings file path
 fn get_settings_path() -> Result<PathBuf, String> {
@@ -81,7 +97,45 @@ fn get_settings_path() -> Result<PathBuf, String> {
 #[tauri::command]
 async fn save_settings(settings: AppSettings) -> Result<(), String> {
     let path = get_settings_path()?;
-    let json = serde_json::to_string_pretty(&settings)
+
+    // If API key is provided, store it securely (separate from settings file)
+    if let Some(ref api_key) = settings.open_ai_api_key {
+        #[cfg(windows)]
+        {
+            if !api_key.is_empty() {
+                match dpapi::store_api_key(api_key) {
+                    Ok(_) => println!("API key stored with DPAPI"),
+                    Err(e) => println!("Warning: Failed to store API key with DPAPI: {}", e),
+                }
+            } else {
+                // Empty string means clear the key
+                let _ = dpapi::clear_api_key();
+                println!("API key cleared from DPAPI storage");
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            if !api_key.is_empty() {
+                if let Ok(entry) = Entry::new("wfdiag-tauri", "openai_api_key") {
+                    match entry.set_password(api_key) {
+                        Ok(_) => println!("API key stored in keyring"),
+                        Err(e) => println!("Warning: Failed to store API key in keyring: {}", e),
+                    }
+                }
+            } else {
+                if let Ok(entry) = Entry::new("wfdiag-tauri", "openai_api_key") {
+                    let _ = entry.delete_credential();
+                    println!("API key cleared from keyring");
+                }
+            }
+        }
+    }
+
+    // Create a copy without the API key for file storage (security: don't write key to file)
+    let mut settings_for_file = settings.clone();
+    settings_for_file.open_ai_api_key = None;
+
+    let json = serde_json::to_string_pretty(&settings_for_file)
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
     std::fs::write(&path, json)
         .map_err(|e| format!("Failed to write settings file: {}", e))?;
@@ -93,15 +147,21 @@ async fn save_settings(settings: AppSettings) -> Result<(), String> {
 async fn load_settings() -> Result<AppSettings, String> {
     let path = get_settings_path()?;
 
-    if !path.exists() {
+    let mut settings = if !path.exists() {
         println!("No settings file found, returning defaults");
-        return Ok(AppSettings::default());
+        AppSettings::default()
+    } else {
+        let json = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read settings file: {}", e))?;
+        serde_json::from_str(&json)
+            .map_err(|e| format!("Failed to parse settings: {}", e))?
+    };
+
+    // Load API key from keyring and include in response
+    if let Some(api_key) = load_api_key_internal().await {
+        settings.open_ai_api_key = Some(api_key);
     }
 
-    let json = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read settings file: {}", e))?;
-    let settings: AppSettings = serde_json::from_str(&json)
-        .map_err(|e| format!("Failed to parse settings: {}", e))?;
     println!("Settings loaded from {:?}", path);
     Ok(settings)
 }
@@ -188,32 +248,57 @@ struct AppState {
 
 #[tauri::command]
 async fn store_api_key(key: String) -> Result<(), String> {
-    let entry = Entry::new("wfdiag-tauri", "openai_api_key")
-        .map_err(|e| format!("Failed to access keyring entry: {e}"))?;
-    entry
-        .set_password(&key)
-        .map_err(|e| format!("Failed to store API key: {e}"))?;
-    Ok(())
+    #[cfg(windows)]
+    {
+        dpapi::store_api_key(&key)
+    }
+    #[cfg(not(windows))]
+    {
+        // Fallback to keyring on non-Windows
+        let entry = Entry::new("wfdiag-tauri", "openai_api_key")
+            .map_err(|e| format!("Failed to access keyring entry: {e}"))?;
+        entry
+            .set_password(&key)
+            .map_err(|e| format!("Failed to store API key: {e}"))?;
+        Ok(())
+    }
 }
 
 #[tauri::command]
 async fn load_api_key() -> Result<String, String> {
-    let entry = Entry::new("wfdiag-tauri", "openai_api_key")
-        .map_err(|e| format!("Failed to access keyring entry: {e}"))?;
-    match entry.get_password() {
-        Ok(pwd) => Ok(pwd),
-        Err(KeyringError::NoEntry) => Ok(String::new()),
-        Err(e) => Err(format!("Failed to load API key: {e}")),
+    load_api_key_internal().await.ok_or_else(|| "No API key set".to_string())
+}
+
+/// Internal function for loading API key (used by ai_service)
+pub(crate) async fn load_api_key_internal() -> Option<String> {
+    #[cfg(windows)]
+    {
+        dpapi::load_api_key().ok().flatten()
+    }
+    #[cfg(not(windows))]
+    {
+        let entry = Entry::new("wfdiag-tauri", "openai_api_key").ok()?;
+        match entry.get_password() {
+            Ok(pwd) if !pwd.is_empty() => Some(pwd),
+            _ => None,
+        }
     }
 }
 
 #[tauri::command]
 async fn clear_api_key() -> Result<(), String> {
-    let entry = Entry::new("wfdiag-tauri", "openai_api_key")
-        .map_err(|e| format!("Failed to access keyring entry: {e}"))?;
-    match entry.delete_credential() {
-        Ok(_) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(e) => Err(format!("Failed to clear API key: {e}")),
+    #[cfg(windows)]
+    {
+        dpapi::clear_api_key()
+    }
+    #[cfg(not(windows))]
+    {
+        let entry = Entry::new("wfdiag-tauri", "openai_api_key")
+            .map_err(|e| format!("Failed to access keyring entry: {e}"))?;
+        match entry.delete_credential() {
+            Ok(_) | Err(KeyringError::NoEntry) => Ok(()),
+            Err(e) => Err(format!("Failed to clear API key: {e}")),
+        }
     }
 }
 
@@ -1025,6 +1110,13 @@ pub fn run() {
             phi_silica::ensure_phi_silica,
             phi_silica::analyze_with_phi_silica,
             phi_silica::check_phi_silica_updates,
+            // Unified AI service commands
+            ai_service::ai_get_status,
+            ai_service::ai_analyze_diagnostic,
+            ai_service::ai_analyze_section,
+            ai_service::ai_explain_health,
+            ai_service::ai_set_preference,
+            ai_service::ai_clear_cache,
             detect_issues,
             copy_minidumps_to_desktop,
             open_url,

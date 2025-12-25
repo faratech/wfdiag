@@ -17,10 +17,10 @@ import {
   ChevronDown20Regular,
   ChevronRight20Regular,
   Copy16Regular,
-  Stethoscope20Regular,
   Code20Regular,
   SlideText20Regular
 } from '@fluentui/react-icons'
+import { AIInterpretationPanel } from './AIInterpretationPanel'
 
 const useStyles = makeStyles({
   card: {
@@ -191,6 +191,8 @@ const useStyles = makeStyles({
 })
 
 export interface DiagnosticCardProps {
+  /** Unique task ID for AI caching */
+  taskId?: string
   title: string
   description?: string
   status: 'verified' | 'monitor' | 'action_required'
@@ -205,6 +207,7 @@ export interface DiagnosticCardProps {
 }
 
 export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
+  taskId,
   title,
   description,
   status,
@@ -1784,18 +1787,12 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
             )}
           </div>
 
-          <div className={styles.aiInsight}>
-            <div className={styles.aiTitle}>
-              <Stethoscope20Regular />
-              AI Interpretation
-            </div>
-            <Text className={styles.description} style={{ marginBottom: 0 }}>
-              {isSuccess 
-                ? "This component is operating within normal parameters. No anomalies detected in current configuration."
-                : "This component reported an unexpected state. Review the output above for specific error codes."
-              }
-            </Text>
-          </div>
+          <AIInterpretationPanel
+            taskId={taskId ?? title.toLowerCase().replace(/\s+/g, '_')}
+            taskName={title}
+            output={formatRawOutput(output)}
+            isSuccess={isSuccess}
+          />
 
           {onCopyOutput && output && (
             <Button

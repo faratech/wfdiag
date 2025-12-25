@@ -3,7 +3,6 @@ import {
   Text,
   Button,
   Textarea,
-  Input,
   Spinner,
   Badge,
   MessageBar,
@@ -21,8 +20,10 @@ import {
   WarningFilled,
   BrainCircuitRegular,
   Sparkle20Regular,
+  Settings20Regular,
 } from '@fluentui/react-icons';
 import { PageHeader } from './components';
+import { useAppContext } from './contexts/AppContext';
 import { invoke } from '@tauri-apps/api/core';
 import * as logger from './utils/logger';
 import './styles.css';
@@ -76,8 +77,7 @@ type AiProvider = 'openai' | 'phi_silica';
 
 export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId }) => {
   const styles = useStyles();
-  const [apiKey, setApiKey] = useState('');
-  const [showApiKey, setShowApiKey] = useState(false);
+  const { settings, setShowSettings } = useAppContext();
   const [prompt, setPrompt] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [response, setResponse] = useState<OpenAIResponse | null>(null);
@@ -89,6 +89,9 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
   const [phiSilicaStatus, setPhiSilicaStatus] = useState<PhiSilicaStatus | null>(null);
   const [isCheckingPhiSilica, setIsCheckingPhiSilica] = useState(true);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
+
+  // Get API key from settings
+  const hasApiKey = !!settings.openAiApiKey;
 
   // Check Phi Silica availability on mount
   useEffect(() => {
@@ -111,38 +114,9 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
     checkPhiSilica();
   }, []);
 
-  // Load API key from secure storage on mount
-  useEffect(() => {
-    const loadStoredKey = async () => {
-      try {
-        const storedKey = await invoke('load_api_key') as string;
-        if (storedKey) {
-          setApiKey(storedKey);
-        }
-      } catch (err) {
-        logger.error('OpenAIIntegration', 'Failed to load stored API key', err);
-      }
-    };
-    loadStoredKey();
-  }, []);
-
-  // Save API key to secure storage whenever it changes
-  const handleApiKeyChange = async (value: string) => {
-    setApiKey(value);
-    try {
-      if (value) {
-        await invoke('store_api_key', { key: value });
-      } else {
-        await invoke('clear_api_key');
-      }
-    } catch (err) {
-      logger.error('OpenAIIntegration', 'Failed to store API key', err);
-    }
-  };
-
   const handleAnalyze = async () => {
-    if (selectedProvider === 'openai' && !apiKey) {
-      setError('Please enter your OpenAI API key');
+    if (selectedProvider === 'openai' && !hasApiKey) {
+      setError('Please configure your OpenAI API key in Settings');
       return;
     }
 
@@ -189,9 +163,9 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
           };
         }
       } else {
-        // Use OpenAI
+        // Use OpenAI - API key is loaded from keyring on the backend
         result = await invoke('analyze_system_with_ai', {
-          apiKey,
+          apiKey: settings.openAiApiKey || '',
           prompt
         });
       }
@@ -253,7 +227,7 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
     }
   };
 
-  const canAnalyze = prompt.trim() && (selectedProvider === 'phi_silica' || apiKey);
+  const canAnalyze = prompt.trim() && (selectedProvider === 'phi_silica' || hasApiKey);
 
   return (
     <div className={styles.container}>
@@ -416,49 +390,49 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
         </div>
       )}
 
-      {/* API Key Input - Only show for OpenAI */}
+      {/* API Key Status - Only show for OpenAI */}
       {selectedProvider === 'openai' && (
         <div className="glass-card" style={{ padding: 20, marginBottom: 24 }}>
-          <div style={{ marginBottom: 16 }}>
-            <Text size={300} weight="semibold" style={{ color: 'var(--theme-foreground)', display: 'block', marginBottom: 8 }}>
-              OpenAI API Key
-            </Text>
-            <div style={{ display: 'flex', gap: 12 }}>
-              <Input
-                type={showApiKey ? 'text' : 'password'}
-                value={apiKey}
-                onChange={(e) => handleApiKeyChange(e.target.value)}
-                placeholder="sk-..."
-                style={{
-                  flex: 1,
-                  background: 'rgba(30, 41, 59, 0.5)',
-                  borderColor: 'rgba(139, 92, 246, 0.3)',
-                  color: 'var(--theme-foreground)',
-                }}
-              />
-              <Button
-                appearance="secondary"
-                onClick={() => setShowApiKey(!showApiKey)}
-                style={{
-                  background: 'rgba(139, 92, 246, 0.1)',
-                  border: '1px solid rgba(139, 92, 246, 0.3)',
-                  color: '#a78bfa',
-                }}
-              >
-                <i className={showApiKey ? "fas fa-eye-slash" : "fas fa-eye"} />
-              </Button>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              {hasApiKey ? (
+                <>
+                  <CheckmarkCircleFilled style={{ color: '#22c55e', fontSize: 20 }} />
+                  <div>
+                    <Text size={300} weight="semibold" style={{ color: 'var(--theme-foreground)', display: 'block' }}>
+                      OpenAI API Key Configured
+                    </Text>
+                    <Text size={200} style={{ color: 'var(--theme-foreground-3)' }}>
+                      Ready to analyze with OpenAI
+                    </Text>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <WarningFilled style={{ color: '#f59e0b', fontSize: 20 }} />
+                  <div>
+                    <Text size={300} weight="semibold" style={{ color: 'var(--theme-foreground)', display: 'block' }}>
+                      OpenAI API Key Required
+                    </Text>
+                    <Text size={200} style={{ color: 'var(--theme-foreground-3)' }}>
+                      Configure your API key in Settings to use OpenAI analysis
+                    </Text>
+                  </div>
+                </>
+              )}
             </div>
-            <Text size={200} style={{ color: 'var(--theme-foreground-3)', marginTop: 8, display: 'block' }}>
-              Enter your OpenAI API key to enable AI analysis. Get one at{' '}
-              <a
-                href="https://platform.openai.com/api-keys"
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ color: '#60a5fa', textDecoration: 'underline' }}
-              >
-                platform.openai.com
-              </a>
-            </Text>
+            <Button
+              appearance="secondary"
+              icon={<Settings20Regular />}
+              onClick={() => setShowSettings(true)}
+              style={{
+                background: 'rgba(139, 92, 246, 0.1)',
+                border: '1px solid rgba(139, 92, 246, 0.3)',
+                color: '#a78bfa',
+              }}
+            >
+              Settings
+            </Button>
           </div>
         </div>
       )}
