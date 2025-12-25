@@ -16,20 +16,19 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 /// AI Provider options
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Default)]
 pub enum AiProvider {
+    #[default]
     OpenAI,
     PhiSilica,  // Local Phi Silica via WindowsCopilotRuntimeServer
 }
 
-impl Default for AiProvider {
-    fn default() -> Self {
-        AiProvider::OpenAI
-    }
-}
-
 /// Phi Silica local server configuration
+#[allow(dead_code)]
 const PHI_SILICA_BASE_URL: &str = "http://localhost:5001/v1";
+#[allow(dead_code)]
 const PHI_SILICA_MODEL: &str = "phi-silica";  // Model name used by WindowsCopilotRuntimeServer
 
 /// Check if Phi Silica (WindowsCopilotRuntimeServer) is available
@@ -182,8 +181,8 @@ Remember: Take action FIRST, explain SECOND. Never ask, just do.")
         let final_response = response;
 
         // Handle tool calls if any
-        if let Some(choice) = final_response.choices.first() {
-            if let Some(tool_calls) = &choice.message.tool_calls {
+        if let Some(choice) = final_response.choices.first()
+            && let Some(tool_calls) = &choice.message.tool_calls {
                 // Add assistant message with tool calls
                 let assistant_message = ChatCompletionRequestAssistantMessageArgs::default()
                     .content(choice.message.content.clone().unwrap_or_default())
@@ -297,7 +296,6 @@ Remember: Take action FIRST, explain SECOND. Never ask, just do.")
                     recommendations,
                 });
             }
-        }
 
         // Parse the final response
         let analysis = final_response.choices.first()
@@ -638,6 +636,7 @@ REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAG
 
 /// Analyze system using Phi Silica (WindowsCopilotRuntimeServer on localhost:5001)
 /// This uses the same OpenAI-compatible API but with a local endpoint
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn analyze_system_with_phi_silica(
     prompt: String,
@@ -738,6 +737,7 @@ pub async fn analyze_system_with_phi_silica(
 }
 
 /// Unified AI analysis command that supports both OpenAI and Phi Silica
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn analyze_system_with_ai_provider(
     provider: String,
@@ -749,7 +749,8 @@ pub async fn analyze_system_with_ai_provider(
         "phi_silica" => {
             analyze_system_with_phi_silica(prompt, app_handle).await
         }
-        "openai" | _ => {
+        _ => {
+            // Default to OpenAI
             let key = api_key.ok_or("OpenAI API key is required")?;
             analyze_system_with_ai(key, prompt, app_handle).await
         }

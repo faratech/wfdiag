@@ -60,7 +60,7 @@ impl IssueFixer {
             Err(_) => {
                 // Try alternative approach
                 let alt_output = Command::new("cmd")
-                    .args(&["/c", "start", "dfrgui"])
+                    .args(["/c", "start", "dfrgui"])
                     .spawn();
 
                 if alt_output.is_ok() {
@@ -89,7 +89,7 @@ impl IssueFixer {
         // Launch Windows Disk Cleanup utility
         // This will open the disk cleanup tool for the user to run with proper permissions
         let output = Command::new("cleanmgr")
-            .args(&["/sagerun:1"])
+            .args(["/sagerun:1"])
             .spawn();
 
         match output {
@@ -107,7 +107,7 @@ impl IssueFixer {
             Err(_) => {
                 // Try alternative approach - open disk cleanup with default settings
                 let alt_output = Command::new("cmd")
-                    .args(&["/c", "start", "cleanmgr"])
+                    .args(["/c", "start", "cleanmgr"])
                     .spawn();
 
                 if alt_output.is_ok() {
@@ -135,7 +135,7 @@ impl IssueFixer {
 
         // Stop Windows Update service
         let _ = Command::new("net")
-            .args(&["stop", "wuauserv"])
+            .args(["stop", "wuauserv"])
             .output()?;
         actions.push("Stopped Windows Update service".to_string());
 
@@ -149,7 +149,7 @@ impl IssueFixer {
 
         // Restart Windows Update service
         let output = Command::new("net")
-            .args(&["start", "wuauserv"])
+            .args(["start", "wuauserv"])
             .output()?;
 
         if output.status.success() {
@@ -174,7 +174,7 @@ impl IssueFixer {
         let mut actions = Vec::new();
 
         let output = Command::new("ipconfig")
-            .args(&["/flushdns"])
+            .args(["/flushdns"])
             .output()?;
 
         if output.status.success() {
@@ -210,14 +210,12 @@ impl IssueFixer {
         // Delete thumbnail cache
         let thumb_cache_path = format!("{}\\AppData\\Local\\Microsoft\\Windows\\Explorer", home);
         if let Ok(entries) = std::fs::read_dir(&thumb_cache_path) {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let path = entry.path();
-                    if path.file_name()
-                        .and_then(|n| n.to_str())
-                        .map_or(false, |n| n.starts_with("thumbcache")) {
-                        let _ = std::fs::remove_file(&path);
-                    }
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("thumbcache")) {
+                    let _ = std::fs::remove_file(&path);
                 }
             }
             actions.push("Cleared thumbnail cache".to_string());
@@ -237,13 +235,11 @@ impl IssueFixer {
         let prefetch_path = "C:\\Windows\\Prefetch";
         if let Ok(entries) = std::fs::read_dir(prefetch_path) {
             let mut count = 0;
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let path = entry.path();
-                    if path.extension().map_or(false, |ext| ext == "pf") {
-                        let _ = std::fs::remove_file(&path);
-                        count += 1;
-                    }
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "pf") {
+                    let _ = std::fs::remove_file(&path);
+                    count += 1;
                 }
             }
             actions.push(format!("Deleted {} prefetch files", count));
@@ -262,7 +258,7 @@ impl IssueFixer {
 
         // Empty recycle bin using PowerShell
         let output = Command::new("powershell")
-            .args(&["-Command", "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"])
+            .args(["-Command", "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"])
             .output()?;
 
         if output.status.success() {
@@ -295,7 +291,7 @@ impl IssueFixer {
 
         for service in critical_services {
             let output = Command::new("sc")
-                .args(&["start", service])
+                .args(["start", service])
                 .output()?;
 
             if output.status.success() {
@@ -337,7 +333,7 @@ impl IssueFixer {
             Err(_) => {
                 // Try alternative approach
                 let alt_output = Command::new("cmd")
-                    .args(&["/c", "start", "taskmgr"])
+                    .args(["/c", "start", "taskmgr"])
                     .spawn();
 
                 if alt_output.is_ok() {
@@ -365,13 +361,13 @@ impl IssueFixer {
 
         // Clear working sets to free up memory
         let _ = Command::new("powershell")
-            .args(&["-Command", "[System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers(); [System.GC]::Collect()"])
+            .args(["-Command", "[System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers(); [System.GC]::Collect()"])
             .output();
         actions.push("Triggered garbage collection".to_string());
 
         // Empty working sets
         let _ = Command::new("cmd")
-            .args(&["/c", "echo off | clip"])
+            .args(["/c", "echo off | clip"])
             .output();
         actions.push("Cleared clipboard to free memory".to_string());
 

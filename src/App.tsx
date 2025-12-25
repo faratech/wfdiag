@@ -6,7 +6,6 @@ import { DiagnosticsTab } from './tabs/DiagnosticsTab'
 import { IssuesTab } from './tabs/IssuesTab'
 import { wfDarkTheme } from './theme'
 import {
-  Titlebar,
   NavigationHeader,
   TabNavigation,
   SettingsDialog,
@@ -36,7 +35,7 @@ const useStyles = makeStyles({
   },
   contentArea: {
     padding: tokens.spacingVerticalXXL,
-    height: 'calc(100vh - 212px)', // Account for titlebar (32px) + header + tabs (180px)
+    height: 'calc(100vh - 180px)', // Account for header + tabs (180px)
     overflowY: 'auto',
     overflowX: 'hidden',
   },
@@ -75,9 +74,6 @@ const AppContent: React.FC = () => {
 
   return (
     <div className={styles.mainContainer}>
-      {/* Custom Titlebar */}
-      <Titlebar />
-
       {/* Navigation Header */}
       <NavigationHeader
         computerName={systemInfo?.computer_name}
@@ -87,7 +83,7 @@ const AppContent: React.FC = () => {
         onOpenSettings={() => setShowSettings(true)}
         onOpenAbout={() => setShowAbout(true)}
         onExportDiagnostics={exportResults}
-        version="2.1.5"
+        version="2.1.6"
       />
 
       {/* Tab Navigation */}
