@@ -51,4 +51,4 @@ jobs:
       - name: Publish to Microsoft Store
         shell: pwsh
         run: |
-          msstore publish "${{ steps.find-bundle.outputs.bundle_file }}" --id 9NJ59RH053PV
+          msstore publish -i bundle -id 9NJ59RH053PV -v
