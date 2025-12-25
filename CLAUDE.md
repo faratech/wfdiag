@@ -54,6 +54,13 @@ Automated scripts to bump version numbers across all project files:
 
 See `VERSION-BUMP.md` for detailed documentation.
 
+### CI/CD Releases
+The main release workflow is `build-and-publish-store.yml`:
+- **Trigger**: Push any version tag (e.g., `git tag v2.1.7 && git push origin v2.1.7`)
+- **Actions**: Builds x64/ARM64, creates MSIX bundle, attestations, GitHub Release, and publishes to Microsoft Store
+- **Store publishing**: Uses `microsoft/setup-msstore-cli` with `msstore publish` command
+- **Manual dispatch**: Available for testing without creating tags
+
 ### Package Signing (Windows)
 - **Build MSIX package**: `.\build-msix.ps1` - PowerShell script to build MSIX for Store
 - **Sign MSIX package**: `.\sign-msix.ps1` - Sign MSIX with certificate
@@ -136,7 +143,6 @@ The app uses these Tauri v2 plugins:
 - `tauri-plugin-fs`: File system operations
 - `tauri-plugin-dialog`: Native dialogs
 - `tauri-plugin-clipboard-manager`: Clipboard access
-- `tauri-plugin-process`: Process management
 - `tauri-plugin-shell`: Shell operations
 
 ## Diagnostic Task Categories
@@ -206,6 +212,7 @@ The backend makes extensive use of Windows APIs through the `windows` crate:
 6. **Performance**: Keep diagnostic batches small (5 tasks) to maintain UI responsiveness
 7. **Tauri v2 Imports**: Use `@tauri-apps/api/core` for invoke, plugin packages for specific features
 8. **Real-time Updates**: Use Tauri events (`emit` from backend, `listen` in frontend) for streaming data
+9. **Monitoring Cleanup**: System monitoring automatically stops when switching tabs or when app is hidden (visibility change API)
 
 ## Phi Silica (On-Device AI) Integration
 
