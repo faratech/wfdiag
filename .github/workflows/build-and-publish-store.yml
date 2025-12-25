@@ -1,16 +1,14 @@
 name: Build and Publish to Microsoft Store
 
-# Trigger on version tags:
-#   v2.1.6        - Build, attest, release (no store publish)
-#   v2.1.6-store  - Build, attest, release, AND publish to Microsoft Store
+# Trigger on version tags (e.g., v2.1.6)
+# All version tags will build, create release, AND publish to Microsoft Store
 #
 # Manual dispatch is available for testing without creating tags
 
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'        # e.g., v2.1.6 - release only
-      - 'v[0-9]+.[0-9]+.[0-9]+-store'  # e.g., v2.1.6-store - release + store publish
+      - 'v[0-9]+.[0-9]+.[0-9]+'  # e.g., v2.1.6
   workflow_dispatch:
     inputs:
       version:
@@ -19,7 +17,7 @@ on:
       publish_to_store:
         description: 'Publish to Microsoft Store'
         type: boolean
-        default: false
+        default: true
       create_release:
         description: 'Create GitHub Release'
         type: boolean
@@ -56,17 +54,12 @@ jobs:
             $publishToStore = "${{ github.event.inputs.publish_to_store }}"
             $createRelease = "${{ github.event.inputs.create_release }}"
           } elseif ("${{ github.ref_type }}" -eq "tag") {
-            # Tag push - always create release, check for -store suffix for store publish
+            # Tag push - always create release and publish to store
             $tagName = "${{ github.ref_name }}"
+            $version = $tagName.TrimStart('v')
             $createRelease = "true"
-
-            if ($tagName -match "^v(.+)-store$") {
-              $version = $matches[1]
-              $publishToStore = "true"
-              Write-Host "Store release detected from tag: $tagName"
-            } else {
-              $version = $tagName.TrimStart('v')
-            }
+            $publishToStore = "true"
+            Write-Host "Tag release detected: $tagName"
           } else {
             $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
           }
