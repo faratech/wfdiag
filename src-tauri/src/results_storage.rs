@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use chrono::{DateTime, Utc};
+use crate::timestamp::Timestamp;
 use crate::diagnostics::TaskResult;
 use crate::encrypted_storage::EncryptedStorage;
 
@@ -10,7 +10,7 @@ use crate::encrypted_storage::EncryptedStorage;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanRecord {
     pub id: String,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
     pub computer_name: String,
     pub os_version: String,
     pub is_admin: bool,
@@ -26,7 +26,7 @@ pub struct ScanRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanSummary {
     pub id: String,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
     pub computer_name: String,
     pub task_count: usize,
     pub success_count: usize,
@@ -60,6 +60,7 @@ pub struct TaskChange {
 }
 
 pub struct ScanStorage {
+    #[allow(dead_code)]
     storage_dir: PathBuf,
     max_scans: usize,
     encrypted_storage: EncryptedStorage,
@@ -442,8 +443,6 @@ impl ScanStorage {
 
         if failed_count > 0 {
             Err(format!("Cleared {} scans, but {} failed to delete", deleted_count, failed_count))
-        } else if deleted_count == 0 {
-            Ok(()) // No scans to delete is not an error
         } else {
             Ok(())
         }
