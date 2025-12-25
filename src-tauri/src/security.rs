@@ -150,7 +150,7 @@ impl SecureCommandExecutor {
             .ok_or_else(|| anyhow::anyhow!("PowerShell not configured"))?;
 
         let mut command = self.create_secure_command(&config.executable);
-        command.args(&["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script]);
+        command.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script]);
 
         command.output()
             .map_err(|e| anyhow::anyhow!("Failed to execute PowerShell script: {}", e))
@@ -325,19 +325,17 @@ impl SecureCommandExecutor {
             }
         } else {
             // For non-existent files, check parent directory
-            if let Some(parent) = path_buf.parent() {
-                if parent != temp_dir {
+            if let Some(parent) = path_buf.parent()
+                && parent != temp_dir {
                     return Err(anyhow::anyhow!("Path must be in temp directory"));
                 }
-            }
         }
 
         // Check filename starts with safe prefix
-        if let Some(filename) = path_buf.file_name().and_then(|f| f.to_str()) {
-            if !filename.starts_with("wfdiag_") {
+        if let Some(filename) = path_buf.file_name().and_then(|f| f.to_str())
+            && !filename.starts_with("wfdiag_") {
                 return Err(anyhow::anyhow!("Temp filename must start with 'wfdiag_'"));
             }
-        }
 
         Ok(())
     }
@@ -354,7 +352,7 @@ impl SecureCommandExecutor {
         }
         
         let letter = chars[0].to_ascii_uppercase();
-        if !letter.is_ascii_alphabetic() || letter < 'A' || letter > 'Z' {
+        if !letter.is_ascii_alphabetic() || !letter.is_ascii_uppercase() {
             return Err(anyhow::anyhow!("Drive letter must be A-Z"));
         }
         

@@ -1,7 +1,7 @@
 {
     "name":  "wfdiag-tauri-ui",
     "private":  true,
-    "version":  "2.1.5",
+    "version":  "2.1.6",
     "type":  "module",
     "scripts":  {
                     "dev":  "vite",

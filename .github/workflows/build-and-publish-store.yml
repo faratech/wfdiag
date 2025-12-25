@@ -1,0 +1,583 @@
+name: Build and Publish to Microsoft Store
+
+# Trigger on version tags:
+#   v2.1.6        - Build, attest, release (no store publish)
+#   v2.1.6-store  - Build, attest, release, AND publish to Microsoft Store
+#
+# Manual dispatch is available for testing without creating tags
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'        # e.g., v2.1.6 - release only
+      - 'v[0-9]+.[0-9]+.[0-9]+-store'  # e.g., v2.1.6-store - release + store publish
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., 2.1.5)'
+        required: true
+      publish_to_store:
+        description: 'Publish to Microsoft Store'
+        type: boolean
+        default: false
+      create_release:
+        description: 'Create GitHub Release'
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  PROJECT_NAME: WindowsForum_Diagnostics
+  PUBLISHER: CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4
+
+jobs:
+  # =============================================================================
+  # Build x64 executable
+  # =============================================================================
+  build-x64:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish_to_store: ${{ steps.version.outputs.publish_to_store }}
+      create_release: ${{ steps.version.outputs.create_release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version and release type
+        id: version
+        shell: pwsh
+        run: |
+          $publishToStore = "false"
+          $createRelease = "false"
+
+          if ("${{ github.event.inputs.version }}" -ne "") {
+            # Manual dispatch
+            $version = "${{ github.event.inputs.version }}"
+            $publishToStore = "${{ github.event.inputs.publish_to_store }}"
+            $createRelease = "${{ github.event.inputs.create_release }}"
+          } elseif ("${{ github.ref_type }}" -eq "tag") {
+            # Tag push - always create release, check for -store suffix for store publish
+            $tagName = "${{ github.ref_name }}"
+            $createRelease = "true"
+
+            if ($tagName -match "^v(.+)-store$") {
+              $version = $matches[1]
+              $publishToStore = "true"
+              Write-Host "Store release detected from tag: $tagName"
+            } else {
+              $version = $tagName.TrimStart('v')
+            }
+          } else {
+            $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          }
+
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "publish_to_store=$publishToStore" >> $env:GITHUB_OUTPUT
+          echo "create_release=$createRelease" >> $env:GITHUB_OUTPUT
+          Write-Host "Building version: $version"
+          Write-Host "Publish to store: $publishToStore"
+          Write-Host "Create release: $createRelease"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: x64
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build x64 executable
+        working-directory: src-tauri
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Upload x64 executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: exe-x64
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/wfdiag-tauri.exe
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist/
+
+  # =============================================================================
+  # Build ARM64 executable
+  # =============================================================================
+  build-arm64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: arm64
+
+      - name: Check ARM64 build tools
+        shell: pwsh
+        run: |
+          # GitHub-hosted runners should have ARM64 tools pre-installed
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Write-Host "VS Path: $vsPath"
+
+          # Find ARM64 tools
+          $arm64Paths = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC\*\bin\Hostx64\arm64" -ErrorAction SilentlyContinue
+          if ($arm64Paths) {
+            Write-Host "ARM64 build tools found:"
+            $arm64Paths | ForEach-Object { Write-Host "  $_" }
+          } else {
+            Write-Host "::warning::ARM64 build tools not found in default location"
+            # List what's available
+            Write-Host "Available MSVC tools:"
+            Get-ChildItem "$vsPath\VC\Tools\MSVC\*\bin\Hostx64" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+          }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build ARM64 executable
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          # Set up environment for ARM64 cross-compilation
+          cargo build --release --target aarch64-pc-windows-msvc
+        env:
+          # Ensure linker can find ARM64 libs
+          RUSTFLAGS: -C target-feature=+crt-static
+
+      - name: Upload ARM64 executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: exe-arm64
+          path: src-tauri/target/aarch64-pc-windows-msvc/release/wfdiag-tauri.exe
+
+  # =============================================================================
+  # Create MSIX Bundle with AI DLLs
+  # =============================================================================
+  create-msix-bundle:
+    needs: [build-x64, build-arm64]
+    runs-on: windows-latest
+    outputs:
+      bundle_path: ${{ steps.bundle.outputs.bundle_path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download x64 executable
+        uses: actions/download-artifact@v4
+        with:
+          name: exe-x64
+          path: artifacts/x64
+
+      - name: Download ARM64 executable
+        uses: actions/download-artifact@v4
+        with:
+          name: exe-arm64
+          path: artifacts/arm64
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: artifacts/dist
+
+      - name: Prepare MSIX package directories
+        id: bundle
+        shell: pwsh
+        run: |
+          $version = "${{ needs.build-x64.outputs.version }}"
+          $projectName = "${{ env.PROJECT_NAME }}"
+          $publisher = "${{ env.PUBLISHER }}"
+
+          Write-Host "Creating MSIX bundle v$version"
+
+          # Create directories
+          $msixDir = "msix-build"
+          $x64Dir = "$msixDir/x64"
+          $arm64Dir = "$msixDir/arm64"
+          $bundleDir = "$msixDir/bundle"
+
+          New-Item -ItemType Directory -Force -Path $x64Dir, $arm64Dir, $bundleDir
+
+          # Process each architecture
+          foreach ($arch in @("x64", "arm64")) {
+            $targetDir = "$msixDir/$arch"
+            $exeSource = "artifacts/$arch/wfdiag-tauri.exe"
+
+            Write-Host "`nPreparing $arch package..."
+
+            # Copy executable
+            Copy-Item $exeSource "$targetDir/$projectName.exe"
+
+            # Copy frontend dist
+            Copy-Item -Recurse "artifacts/dist" "$targetDir/dist"
+
+            # Copy icons (use PNG versions)
+            Copy-Item "src-tauri/icons/icon.png" "$targetDir/Logo.png"
+            Copy-Item "src-tauri/icons/192x192.png" "$targetDir/Square150x150Logo.png"
+            Copy-Item "src-tauri/icons/44x44.png" "$targetDir/Square44x44Logo.png"
+
+            # Copy Windows App SDK AI DLLs if they exist
+            $aiSdkDir = "src-tauri/resources/ai-sdk/$arch"
+            if (Test-Path $aiSdkDir) {
+              Write-Host "  Copying AI SDK DLLs for $arch..."
+              Get-ChildItem "$aiSdkDir/*.dll" | ForEach-Object {
+                Copy-Item $_.FullName "$targetDir/$($_.Name)"
+                Write-Host "    - $($_.Name)"
+              }
+            } else {
+              Write-Host "  Note: No AI SDK DLLs found at $aiSdkDir"
+            }
+
+            # Create AppxManifest.xml
+            $manifest = @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+                   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+                   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+                   xmlns:systemai="http://schemas.microsoft.com/appx/manifest/systemai/windows10"
+                   IgnorableNamespaces="uap rescap systemai">
+            <Identity Name="32827MikeFara.WindowsForumDiagnostics"
+                      Publisher="$publisher"
+                      Version="$version.0"
+                      ProcessorArchitecture="$arch" />
+            <Properties>
+              <DisplayName>WindowsForum Diagnostics</DisplayName>
+              <PublisherDisplayName>Mike Fara</PublisherDisplayName>
+              <Logo>Logo.png</Logo>
+            </Properties>
+            <Dependencies>
+              <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.26100.0" MaxVersionTested="10.0.26226.0" />
+              <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26226.0" />
+              <PackageDependency Name="Microsoft.WindowsAppRuntime.1.8"
+                                 MinVersion="8000.675.1142.0"
+                                 Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
+            </Dependencies>
+            <Resources>
+              <Resource Language="en-us" />
+            </Resources>
+            <Applications>
+              <Application Id="App" Executable="$projectName.exe" EntryPoint="Windows.FullTrustApplication">
+                <uap:VisualElements DisplayName="WindowsForum Diagnostics"
+                                    Description="System diagnostics tool for Windows"
+                                    BackgroundColor="transparent"
+                                    Square150x150Logo="Square150x150Logo.png"
+                                    Square44x44Logo="Square44x44Logo.png">
+                </uap:VisualElements>
+              </Application>
+            </Applications>
+            <Capabilities>
+              <rescap:Capability Name="runFullTrust" />
+              <systemai:Capability Name="systemAIModels"/>
+            </Capabilities>
+          </Package>
+          "@
+            $manifest | Out-File -Encoding utf8 "$targetDir/AppxManifest.xml"
+          }
+
+          # Find Windows SDK
+          $sdkPath = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*" -Directory |
+                     Sort-Object Name -Descending |
+                     Select-Object -First 1
+          $makeAppx = Join-Path $sdkPath.FullName "x64\MakeAppx.exe"
+
+          Write-Host "`nUsing MakeAppx from: $makeAppx"
+
+          # Create individual MSIX packages
+          foreach ($arch in @("x64", "arm64")) {
+            $msixPath = "$bundleDir/${projectName}_${version}_$arch.msix"
+            Write-Host "`nCreating $arch MSIX..."
+            & $makeAppx pack /d "$msixDir/$arch" /p $msixPath /o
+            if ($LASTEXITCODE -ne 0) { throw "Failed to create $arch MSIX" }
+          }
+
+          # Create MSIX bundle
+          $bundlePath = "$msixDir/${projectName}_${version}.msixbundle"
+          Write-Host "`nCreating MSIX bundle..."
+          & $makeAppx bundle /d $bundleDir /p $bundlePath /o
+          if ($LASTEXITCODE -ne 0) { throw "Failed to create MSIX bundle" }
+
+          Write-Host "`nBundle created: $bundlePath"
+          echo "bundle_path=$bundlePath" >> $env:GITHUB_OUTPUT
+
+      - name: Upload unsigned bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: msixbundle-unsigned
+          path: msix-build/*.msixbundle
+
+  # =============================================================================
+  # Sign the MSIX Bundle
+  # =============================================================================
+  sign-bundle:
+    needs: [build-x64, create-msix-bundle]
+    runs-on: windows-latest
+    if: ${{ secrets.CERTIFICATE_BASE64 != '' || secrets.WINDOWS_CERTIFICATE != '' }}
+    outputs:
+      signed_bundle_path: ${{ steps.sign.outputs.signed_bundle_path }}
+    steps:
+      - name: Download unsigned bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: msixbundle-unsigned
+          path: bundle
+
+      - name: Sign bundle
+        id: sign
+        shell: pwsh
+        run: |
+          $version = "${{ needs.build-x64.outputs.version }}"
+          $bundlePath = "bundle/${{ env.PROJECT_NAME }}_${version}.msixbundle"
+
+          # Decode certificate
+          $certBase64 = "${{ secrets.CERTIFICATE_BASE64 }}"
+          if (-not $certBase64) {
+            $certBase64 = "${{ secrets.WINDOWS_CERTIFICATE }}"
+          }
+
+          $certBytes = [Convert]::FromBase64String($certBase64)
+          $certPath = "certificate.pfx"
+          [IO.File]::WriteAllBytes($certPath, $certBytes)
+
+          # Find SignTool
+          $sdkPath = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*" -Directory |
+                     Sort-Object Name -Descending |
+                     Select-Object -First 1
+          $signTool = Join-Path $sdkPath.FullName "x64\signtool.exe"
+
+          Write-Host "Signing bundle with certificate..."
+
+          # Get password
+          $password = "${{ secrets.CERTIFICATE_PASSWORD }}"
+          if (-not $password) {
+            $password = "${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}"
+          }
+
+          # Sign
+          & $signTool sign /fd SHA256 /f $certPath /p $password /tr http://timestamp.digicert.com /td SHA256 $bundlePath
+          if ($LASTEXITCODE -ne 0) { throw "Failed to sign bundle" }
+
+          # Clean up certificate
+          Remove-Item $certPath -Force
+
+          # Verify signature
+          Write-Host "Verifying signature..."
+          & $signTool verify /pa $bundlePath
+
+          $signedPath = "signed/${{ env.PROJECT_NAME }}_${version}.msixbundle"
+          New-Item -ItemType Directory -Force -Path "signed"
+          Move-Item $bundlePath $signedPath
+
+          echo "signed_bundle_path=$signedPath" >> $env:GITHUB_OUTPUT
+
+      - name: Upload signed bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: msixbundle-signed
+          path: signed/*.msixbundle
+
+  # =============================================================================
+  # Publish to Microsoft Store
+  # =============================================================================
+  publish-to-store:
+    needs: [build-x64, sign-bundle]
+    runs-on: windows-latest
+    if: needs.build-x64.outputs.publish_to_store == 'true'
+    steps:
+      - name: Check for Store credentials
+        id: check-creds
+        shell: pwsh
+        run: |
+          $hasCreds = ("${{ secrets.AZURE_TENANT_ID }}" -ne "") -and `
+                      ("${{ secrets.AZURE_CLIENT_ID }}" -ne "") -and `
+                      ("${{ secrets.AZURE_CLIENT_SECRET }}" -ne "")
+          if (-not $hasCreds) {
+            Write-Host "::error::Missing Microsoft Store credentials. Set AZURE_TENANT_ID, AZURE_CLIENT_ID, and AZURE_CLIENT_SECRET secrets."
+            exit 1
+          }
+          Write-Host "Store credentials configured"
+
+      - name: Download signed bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: msixbundle-signed
+          path: bundle
+
+      - name: Find bundle file
+        id: find-bundle
+        shell: pwsh
+        run: |
+          $bundle = Get-ChildItem "bundle/*.msixbundle" | Select-Object -First 1
+          Write-Host "Found bundle: $($bundle.FullName)"
+          echo "bundle_file=$($bundle.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Publish to Microsoft Store
+        uses: microsoft/store-submission@v1
+        with:
+          command: publish
+          productId: ${{ secrets.STORE_PRODUCT_ID }}
+          packagePath: ${{ steps.find-bundle.outputs.bundle_file }}
+          tenantId: ${{ secrets.AZURE_TENANT_ID }}
+          clientId: ${{ secrets.AZURE_CLIENT_ID }}
+          clientSecret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          skipPolling: false
+
+  # =============================================================================
+  # Generate Attestations for all artifacts
+  # =============================================================================
+  attest-artifacts:
+    needs: [build-x64, build-arm64, create-msix-bundle]
+    # Run even if sign-bundle was skipped (no certificates)
+    if: always() && needs.build-x64.result == 'success' && needs.build-arm64.result == 'success' && needs.create-msix-bundle.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f -name "*.exe" -o -name "*.msixbundle" | head -20
+
+      - name: Attest x64 executable
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/exe-x64/wfdiag-tauri.exe
+
+      - name: Attest ARM64 executable
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/exe-arm64/wfdiag-tauri.exe
+
+      - name: Attest signed bundle
+        if: ${{ hashFiles('artifacts/msixbundle-signed/*.msixbundle') != '' }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/msixbundle-signed/*.msixbundle
+
+      - name: Attest unsigned bundle (fallback)
+        if: ${{ hashFiles('artifacts/msixbundle-signed/*.msixbundle') == '' }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/msixbundle-unsigned/*.msixbundle
+
+  # =============================================================================
+  # Create GitHub Release
+  # =============================================================================
+  create-release:
+    needs: [build-x64, create-msix-bundle, attest-artifacts]
+    runs-on: ubuntu-latest
+    # Run if builds succeeded and release was requested (sign-bundle may have been skipped)
+    if: always() && needs.build-x64.result == 'success' && needs.create-msix-bundle.result == 'success' && needs.build-x64.outputs.create_release == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download signed bundle
+        id: download-signed
+        uses: actions/download-artifact@v4
+        with:
+          name: msixbundle-signed
+          path: release
+        continue-on-error: true
+
+      - name: Download unsigned bundle (fallback)
+        if: steps.download-signed.outcome != 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: msixbundle-unsigned
+          path: release
+
+      - name: Download x64 executable
+        uses: actions/download-artifact@v4
+        with:
+          name: exe-x64
+          path: release/exe-x64
+
+      - name: Download ARM64 executable
+        uses: actions/download-artifact@v4
+        with:
+          name: exe-arm64
+          path: release/exe-arm64
+
+      - name: Prepare release files
+        run: |
+          cd release
+          VERSION="${{ needs.build-x64.outputs.version }}"
+
+          # Rename executables for clarity
+          if [ -f "exe-x64/wfdiag-tauri.exe" ]; then
+            mv exe-x64/wfdiag-tauri.exe "WindowsForum_Diagnostics_${VERSION}_x64.exe"
+          fi
+          if [ -f "exe-arm64/wfdiag-tauri.exe" ]; then
+            mv exe-arm64/wfdiag-tauri.exe "WindowsForum_Diagnostics_${VERSION}_arm64.exe"
+          fi
+
+          # Clean up empty directories
+          rmdir exe-x64 exe-arm64 2>/dev/null || true
+
+          ls -la
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build-x64.outputs.version }}
+          name: WindowsForum Diagnostics v${{ needs.build-x64.outputs.version }}
+          draft: false
+          prerelease: false
+          files: |
+            release/*.msixbundle
+            release/*.exe
+          body: |
+            ## WindowsForum Diagnostics v${{ needs.build-x64.outputs.version }}
+
+            ### Downloads
+            - **MSIX Bundle** (recommended for Windows 10/11): Install via Microsoft Store or download the `.msixbundle` file
+            - **Portable EXE**: Standalone executables for x64 and ARM64
+
+            ### What's New
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+
+            ### Installation
+            **Microsoft Store** (recommended): Search for "WindowsForum Diagnostics" or use this link.
+
+            **Manual Installation**:
+            ```powershell
+            Add-AppxPackage -Path "WindowsForum_Diagnostics_${{ needs.build-x64.outputs.version }}.msixbundle"
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -8,10 +8,10 @@ use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 // Performance counter imports removed - not used in current implementation
 use winreg::enums::*;
 use winreg::RegKey;
-use scraper::{Html, Selector};
 
 pub struct NativeDiagnostics;
 
+#[allow(dead_code)]
 impl NativeDiagnostics {
     pub fn new() -> Result<Self> {
         Ok(Self)
@@ -23,7 +23,7 @@ impl NativeDiagnostics {
         } else {
             WMIConnection::new()?
         };
-        let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(&format!("SELECT * FROM {}", class_name))?;
+        let results: Vec<HashMap<String, wmi::Variant>> = wmi_con.raw_query(format!("SELECT * FROM {}", class_name))?;
         
         let mut json_results = Vec::new();
         for result in results {
@@ -99,8 +99,8 @@ impl NativeDiagnostics {
             // Find matching adapter info
             if let Some(idx) = index {
                 for adapter in &adapter_results {
-                    if let Some(wmi::Variant::UI4(adapter_idx)) = adapter.get("DeviceID") {
-                        if *adapter_idx == idx {
+                    if let Some(wmi::Variant::UI4(adapter_idx)) = adapter.get("DeviceID")
+                        && *adapter_idx == idx {
                             // Add adapter-specific info
                             for (key, value) in adapter {
                                 if !adapter_info.contains_key(key) {
@@ -109,7 +109,6 @@ impl NativeDiagnostics {
                             }
                             break;
                         }
-                    }
                 }
             }
             
@@ -221,11 +220,10 @@ impl NativeDiagnostics {
             }
             
             // Get hardware info
-            if let Ok(hw_key) = hklm.open_subkey("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0") {
-                if let Ok(cpu_name) = hw_key.get_value::<String, _>("ProcessorNameString") {
+            if let Ok(hw_key) = hklm.open_subkey("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0")
+                && let Ok(cpu_name) = hw_key.get_value::<String, _>("ProcessorNameString") {
                     info["cpu_name"] = json!(cpu_name.trim());
                 }
-            }
         }
         
         Ok(info)
@@ -344,11 +342,10 @@ impl NativeDiagnostics {
                         
                         // Read common fields
                         for field in &["DisplayName", "DisplayVersion", "Publisher", "InstallDate", "UninstallString", "InstallLocation"] {
-                            if let Ok(value) = subkey.get_value::<String, _>(field) {
-                                if !value.is_empty() {
+                            if let Ok(value) = subkey.get_value::<String, _>(field)
+                                && !value.is_empty() {
                                     program_info.insert(field.to_string(), json!(value));
                                 }
-                            }
                         }
                         
                         // Only add if it has a display name
@@ -424,11 +421,10 @@ impl NativeDiagnostics {
         // Try to get DirectX version from registry
         {
             let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-            if let Ok(dx_key) = hklm.open_subkey("SOFTWARE\\Microsoft\\DirectX") {
-                if let Ok(version) = dx_key.get_value::<String, _>("Version") {
+            if let Ok(dx_key) = hklm.open_subkey("SOFTWARE\\Microsoft\\DirectX")
+                && let Ok(version) = dx_key.get_value::<String, _>("Version") {
                     info["directx_version"] = json!(version);
                 }
-            }
         }
         
         Ok(info)
@@ -543,8 +539,8 @@ impl NativeDiagnostics {
             // Try to run scanhealth for more detailed info
             let scan_output = Self::execute_secure_command("dism", &["/online", "/cleanup-image", "/scanhealth"]);
                 
-            if let Ok(scan) = scan_output {
-                if scan.status.success() {
+            if let Ok(scan) = scan_output
+                && scan.status.success() {
                     let scan_str = String::from_utf8_lossy(&scan.stdout);
                     health_info["scan_output"] = json!(scan_str.to_string());
                     
@@ -556,7 +552,6 @@ impl NativeDiagnostics {
                         }
                     }
                 }
-            }
             
             Ok(health_info)
         } else {
@@ -686,7 +681,7 @@ impl NativeDiagnostics {
             .find(|line| line.contains("fragmented space =") || line.contains("Current fragmentation ="))
             .and_then(|line| {
                 line.split('%').next()
-                    .and_then(|part| part.split('=').last())
+                    .and_then(|part| part.split('=').next_back())
                     .and_then(|num_str| num_str.trim().parse::<u32>().ok())
             })
     }
@@ -733,122 +728,134 @@ impl NativeDiagnostics {
         }
     }
 
-    /// Parse battery report HTML and extract key information
+    /// Parse battery report HTML and extract key information using simple string parsing
     fn parse_battery_html(&self, html_content: &str) -> Result<Value> {
-        let document = Html::parse_document(html_content);
-
-        // Selectors for different sections of the battery report
-        let battery_info_selector = Selector::parse("table")
-            .map_err(|e| anyhow::anyhow!("Failed to parse table selector: {:?}", e))?;
-        let row_selector = Selector::parse("tr")
-            .map_err(|e| anyhow::anyhow!("Failed to parse tr selector: {:?}", e))?;
-        let cell_selector = Selector::parse("td")
-            .map_err(|e| anyhow::anyhow!("Failed to parse td selector: {:?}", e))?;
-        
         let mut battery_info = json!({
             "report_generated": true,
             "batteries": []
         });
-        
-        // Find all tables
-        for (table_index, table) in document.select(&battery_info_selector).enumerate() {
-            // Look for battery information table (usually the first few tables)
-            if table_index < 5 {
-                let rows: Vec<_> = table.select(&row_selector).collect();
-                
-                // Extract battery basic info
-                if rows.len() > 2 && table_index == 1 {
-                    let mut battery_data = Vec::new();
-                    
-                    for row in rows.iter().skip(1) { // Skip header
-                        let cells: Vec<_> = row.select(&cell_selector)
-                            .map(|cell| cell.text().collect::<String>().trim().to_string())
-                            .collect();
-                        
-                        if cells.len() >= 2 {
-                            battery_data.push(json!({
-                                "property": cells[0].clone(),
-                                "value": cells[1].clone()
-                            }));
+
+        // Simple regex-free parsing: extract text between td tags
+        fn extract_table_cells(html: &str) -> Vec<Vec<String>> {
+            let mut tables = Vec::new();
+            let mut current_pos = 0;
+
+            while let Some(table_start) = html[current_pos..].find("<table") {
+                let abs_start = current_pos + table_start;
+                if let Some(table_end) = html[abs_start..].find("</table>") {
+                    let table_html = &html[abs_start..abs_start + table_end];
+                    let mut rows = Vec::new();
+                    let mut row_pos = 0;
+
+                    while let Some(tr_start) = table_html[row_pos..].find("<tr") {
+                        let abs_tr_start = row_pos + tr_start;
+                        if let Some(tr_end) = table_html[abs_tr_start..].find("</tr>") {
+                            let row_html = &table_html[abs_tr_start..abs_tr_start + tr_end];
+                            let mut cells = Vec::new();
+                            let mut cell_pos = 0;
+
+                            while let Some(td_start) = row_html[cell_pos..].find("<td") {
+                                let abs_td_start = cell_pos + td_start;
+                                if let Some(tag_end) = row_html[abs_td_start..].find('>') {
+                                    let content_start = abs_td_start + tag_end + 1;
+                                    if let Some(td_end) = row_html[content_start..].find("</td>") {
+                                        let cell_content = &row_html[content_start..content_start + td_end];
+                                        // Strip HTML tags and decode entities
+                                        let text = cell_content
+                                            .replace("<br>", " ")
+                                            .replace("<br/>", " ")
+                                            .replace("&nbsp;", " ")
+                                            .replace("&amp;", "&")
+                                            .split('<')
+                                            .filter_map(|s| s.split('>').next_back())
+                                            .collect::<Vec<_>>()
+                                            .join("")
+                                            .trim()
+                                            .to_string();
+                                        cells.push(text);
+                                        cell_pos = content_start + td_end;
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                            if !cells.is_empty() {
+                                rows.push(cells);
+                            }
+                            row_pos = abs_tr_start + tr_end;
+                        } else {
+                            break;
                         }
                     }
-                    
-                    if !battery_data.is_empty() {
-                        battery_info["batteries"] = json!(battery_data);
+                    if !rows.is_empty() {
+                        tables.push(rows);
                     }
+                    current_pos = abs_start + table_end;
+                } else {
+                    break;
                 }
-                
-                // Look for recent usage
-                if table_index == 2 {
-                    let mut usage_data = Vec::new();
-                    
-                    for row in rows.iter().skip(1).take(10) { // Last 10 usage entries
-                        let cells: Vec<_> = row.select(&cell_selector)
-                            .map(|cell| cell.text().collect::<String>().trim().to_string())
-                            .collect();
-                        
-                        if cells.len() >= 4 {
-                            usage_data.push(json!({
-                                "start_time": cells[0].clone(),
-                                "state": cells[1].clone(),
-                                "capacity_remaining": cells[2].clone(),
-                                "duration": cells[3].clone()
-                            }));
-                        }
-                    }
-                    
-                    battery_info["recent_usage"] = json!(usage_data);
+            }
+            tables.into_iter().flatten().collect()
+        }
+
+        let all_rows = extract_table_cells(html_content);
+
+        // Extract battery properties (look for key-value pairs)
+        let mut battery_data = Vec::new();
+        let mut capacity_history = Vec::new();
+
+        for row in &all_rows {
+            if row.len() >= 2 {
+                let key = row[0].to_lowercase();
+                // Battery info patterns
+                if key.contains("manufacturer") || key.contains("chemistry") ||
+                   key.contains("design capacity") || key.contains("full charge") ||
+                   key.contains("serial") || key.contains("cycle") {
+                    battery_data.push(json!({
+                        "property": row[0].clone(),
+                        "value": row[1].clone()
+                    }));
                 }
-                
-                // Look for battery capacity history
-                if table_index == 3 {
-                    let mut capacity_history = Vec::new();
-                    
-                    for row in rows.iter().skip(1).take(5) { // Last 5 capacity readings
-                        let cells: Vec<_> = row.select(&cell_selector)
-                            .map(|cell| cell.text().collect::<String>().trim().to_string())
-                            .collect();
-                        
-                        if cells.len() >= 3 {
-                            capacity_history.push(json!({
-                                "period": cells[0].clone(),
-                                "full_charge_capacity": cells[1].clone(),
-                                "design_capacity": cells[2].clone()
-                            }));
-                        }
-                    }
-                    
-                    battery_info["battery_capacity_history"] = json!(capacity_history);
+                // Capacity history patterns (has mWh values)
+                if row.len() >= 3 && (row[1].contains("mWh") || row[2].contains("mWh")) {
+                    capacity_history.push(json!({
+                        "period": row[0].clone(),
+                        "full_charge_capacity": row[1].clone(),
+                        "design_capacity": if row.len() > 2 { row[2].clone() } else { String::new() }
+                    }));
                 }
             }
         }
-        
-        // Try to calculate battery health percentage
-        if let Some(_batteries) = battery_info["batteries"].as_array() {
-            if let Some(latest) = battery_info["battery_capacity_history"].as_array()
-                .and_then(|h| h.first()) {
-                
-                if let (Some(full_charge), Some(design_capacity)) = (
-                    latest["full_charge_capacity"].as_str(),
-                    latest["design_capacity"].as_str()
-                ) {
-                    if let (Ok(full_mwh), Ok(design_mwh)) = (
-                        self.extract_mwh_value(full_charge),
-                        self.extract_mwh_value(design_capacity)
-                    ) {
-                        if design_mwh > 0.0 {
-                            let health_percentage = (full_mwh / design_mwh * 100.0).round();
-                            battery_info["battery_health_percentage"] = json!(health_percentage);
-                            battery_info["battery_health_status"] = json!(
-                                if health_percentage >= 80.0 { "Good" }
-                                else if health_percentage >= 60.0 { "Fair" }
-                                else { "Poor" }
-                            );
-                        }
-                    }
-                }
-            }
+
+        if !battery_data.is_empty() {
+            battery_info["batteries"] = json!(battery_data);
         }
+        if !capacity_history.is_empty() {
+            battery_info["battery_capacity_history"] = json!(capacity_history);
+        }
+
+        // Calculate battery health
+        if let Some(latest) = battery_info["battery_capacity_history"].as_array()
+            .and_then(|h| h.first())
+            && let (Some(full_charge), Some(design_capacity)) = (
+                latest["full_charge_capacity"].as_str(),
+                latest["design_capacity"].as_str()
+            )
+                && let (Ok(full_mwh), Ok(design_mwh)) = (
+                    self.extract_mwh_value(full_charge),
+                    self.extract_mwh_value(design_capacity)
+                )
+                    && design_mwh > 0.0 {
+                        let health_percentage = (full_mwh / design_mwh * 100.0).round();
+                        battery_info["battery_health_percentage"] = json!(health_percentage);
+                        battery_info["battery_health_status"] = json!(
+                            if health_percentage >= 80.0 { "Good" }
+                            else if health_percentage >= 60.0 { "Fair" }
+                            else { "Poor" }
+                        );
+                    }
 
         Ok(battery_info)
     }
@@ -880,8 +887,8 @@ impl NativeDiagnostics {
 
         if let Ok(entries) = fs::read_dir(minidump_path) {
             for entry in entries.filter_map(Result::ok) {
-                if let Ok(metadata) = entry.metadata() {
-                    if entry.path().extension().and_then(|s| s.to_str()) == Some("dmp") {
+                if let Ok(metadata) = entry.metadata()
+                    && entry.path().extension().and_then(|s| s.to_str()) == Some("dmp") {
                         dumps.push(json!({
                             "filename": entry.file_name().to_string_lossy(),
                             "size": metadata.len(),
@@ -894,13 +901,12 @@ impl NativeDiagnostics {
                             "path": entry.path().to_string_lossy()
                         }));
                     }
-                }
             }
         }
 
         // Check if Desktop\Minidumps exists
         let desktop_minidumps = self.get_desktop_minidumps_path();
-        let desktop_minidumps_exists = desktop_minidumps.as_ref().map_or(false, |p| p.exists());
+        let desktop_minidumps_exists = desktop_minidumps.as_ref().is_some_and(|p| p.exists());
 
         Ok(json!({
             "dumps": dumps,
@@ -914,11 +920,7 @@ impl NativeDiagnostics {
 
     /// Get the Desktop\Minidumps path for the current user
     fn get_desktop_minidumps_path(&self) -> Option<PathBuf> {
-        if let Some(desktop_path) = dirs::desktop_dir() {
-            Some(desktop_path.join("Minidumps"))
-        } else {
-            None
-        }
+        dirs::desktop_dir().map(|desktop_path| desktop_path.join("Minidumps"))
     }
 
     /// Copy minidumps to Desktop\Minidumps for easy sharing on forums
@@ -946,15 +948,14 @@ impl NativeDiagnostics {
         };
 
         // Create Desktop\Minidumps directory if it doesn't exist
-        if !desktop_minidumps.exists() {
-            if let Err(e) = fs::create_dir_all(&desktop_minidumps) {
+        if !desktop_minidumps.exists()
+            && let Err(e) = fs::create_dir_all(&desktop_minidumps) {
                 return Ok(json!({
                     "success": false,
                     "message": format!("Failed to create Desktop\\Minidumps directory: {}", e),
                     "copied_files": []
                 }));
             }
-        }
 
         let mut copied_files = Vec::new();
         let mut errors = Vec::new();
@@ -1034,41 +1035,38 @@ impl NativeDiagnostics {
         // Get CPU performance data
         if let Ok(cpu_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
             "SELECT * FROM Win32_PerfFormattedData_PerfOS_Processor WHERE Name='_Total'"
-        ) {
-            if let Some(result) = cpu_results.first() {
+        )
+            && let Some(result) = cpu_results.first() {
                 let mut cpu_info = json!({});
                 for (key, value) in result {
                     cpu_info[key] = self.variant_to_json(value.clone());
                 }
                 perf_data["cpu_performance"] = cpu_info;
             }
-        }
         
         // Get memory performance data
         if let Ok(mem_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
             "SELECT * FROM Win32_PerfFormattedData_PerfOS_Memory"
-        ) {
-            if let Some(result) = mem_results.first() {
+        )
+            && let Some(result) = mem_results.first() {
                 let mut mem_info = json!({});
                 for (key, value) in result {
                     mem_info[key] = self.variant_to_json(value.clone());
                 }
                 perf_data["memory_performance"] = mem_info;
             }
-        }
         
         // Get disk performance data
         if let Ok(disk_results) = wmi_con.raw_query::<HashMap<String, wmi::Variant>>(
             "SELECT * FROM Win32_PerfFormattedData_PerfDisk_PhysicalDisk WHERE Name='_Total'"
-        ) {
-            if let Some(result) = disk_results.first() {
+        )
+            && let Some(result) = disk_results.first() {
                 let mut disk_info = json!({});
                 for (key, value) in result {
                     disk_info[key] = self.variant_to_json(value.clone());
                 }
                 perf_data["disk_performance"] = disk_info;
             }
-        }
         
         Ok(perf_data)
     }
