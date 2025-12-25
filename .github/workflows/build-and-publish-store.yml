@@ -351,20 +351,7 @@ jobs:
     runs-on: windows-latest
     if: needs.build-x64.outputs.publish_to_store == 'true'
     steps:
-      - name: Check for Store credentials
-        id: check-creds
-        shell: pwsh
-        run: |
-          $hasCreds = ("${{ secrets.AZURE_TENANT_ID }}" -ne "") -and `
-                      ("${{ secrets.AZURE_CLIENT_ID }}" -ne "") -and `
-                      ("${{ secrets.AZURE_CLIENT_SECRET }}" -ne "")
-          if (-not $hasCreds) {
-            Write-Host "::error::Missing Microsoft Store credentials. Set AZURE_TENANT_ID, AZURE_CLIENT_ID, and AZURE_CLIENT_SECRET secrets."
-            exit 1
-          }
-          Write-Host "Store credentials configured"
-
-      - name: Download signed bundle
+      - name: Download bundle
         uses: actions/download-artifact@v4
         with:
           name: msixbundle-unsigned
@@ -377,17 +364,62 @@ jobs:
           $bundle = Get-ChildItem "bundle/*.msixbundle" | Select-Object -First 1
           Write-Host "Found bundle: $($bundle.FullName)"
           echo "bundle_file=$($bundle.FullName)" >> $env:GITHUB_OUTPUT
+          echo "bundle_name=$($bundle.Name)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload bundle to Azure Blob Storage
+        id: upload-blob
+        shell: pwsh
+        env:
+          AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+        run: |
+          # Install Azure CLI module if needed
+          az storage blob upload `
+            --container-name packages `
+            --file "${{ steps.find-bundle.outputs.bundle_file }}" `
+            --name "${{ steps.find-bundle.outputs.bundle_name }}" `
+            --overwrite
+
+          # Generate SAS URL valid for 1 hour
+          $expiry = (Get-Date).AddHours(1).ToString("yyyy-MM-ddTHH:mm:ssZ")
+          $sasUrl = az storage blob generate-sas `
+            --container-name packages `
+            --name "${{ steps.find-bundle.outputs.bundle_name }}" `
+            --permissions r `
+            --expiry $expiry `
+            --full-uri `
+            --output tsv
+
+          echo "package_url=$sasUrl" >> $env:GITHUB_OUTPUT
+          Write-Host "Package uploaded to Azure Blob Storage"
+
+      - name: Configure Store credentials
+        uses: microsoft/store-submission@v1
+        with:
+          command: configure
+          type: win32
+          seller-id: ${{ secrets.STORE_SELLER_ID }}
+          product-id: ${{ secrets.STORE_PRODUCT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: Update submission with package
+        uses: microsoft/store-submission@v1
+        with:
+          command: update
+          product-update: |
+            {
+              "packages": [{
+                "packageUrl": "${{ steps.upload-blob.outputs.package_url }}",
+                "languages": ["en"],
+                "architectures": ["X64", "Arm64"]
+              }]
+            }
 
       - name: Publish to Microsoft Store
         uses: microsoft/store-submission@v1
         with:
           command: publish
-          productId: ${{ secrets.STORE_PRODUCT_ID }}
-          packagePath: ${{ steps.find-bundle.outputs.bundle_file }}
-          tenantId: ${{ secrets.AZURE_TENANT_ID }}
-          clientId: ${{ secrets.AZURE_CLIENT_ID }}
-          clientSecret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          skipPolling: false
 
   # =============================================================================
   # Generate Attestations for all artifacts
