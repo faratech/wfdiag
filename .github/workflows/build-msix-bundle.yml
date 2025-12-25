@@ -21,6 +21,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   build-x64:
     runs-on: windows-latest
