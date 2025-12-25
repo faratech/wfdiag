@@ -11,6 +11,7 @@ import {
   type SettingsData
 } from './components'
 import { AppProvider, useAppContext } from './contexts/AppContext'
+import { AIProvider } from './contexts/AIContext'
 import { ToastProvider } from './contexts/ToastContext'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { useDiagnostics } from './hooks/useDiagnostics'
@@ -202,9 +203,11 @@ const ThemedApp: React.FC = () => {
 
   return (
     <ThemeProvider initialMode={(settings.theme as 'dark' | 'light' | 'auto') || 'dark'}>
-      <ToastProvider>
-        <AppContent />
-      </ToastProvider>
+      <AIProvider>
+        <ToastProvider>
+          <AppContent />
+        </ToastProvider>
+      </AIProvider>
     </ThemeProvider>
   )
 }

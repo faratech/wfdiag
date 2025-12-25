@@ -25,6 +25,10 @@ pub enum AiProvider {
     PhiSilica,  // Local Phi Silica via WindowsCopilotRuntimeServer
 }
 
+/// OpenAI model to use for all API calls (when Phi Silica is not available)
+/// Change this constant to switch models globally
+pub const OPENAI_MODEL: &str = "gpt-5-nano";
+
 /// Phi Silica local server configuration
 #[allow(dead_code)]
 const PHI_SILICA_BASE_URL: &str = "http://localhost:5001/v1";
@@ -162,7 +166,7 @@ Remember: Take action FIRST, explain SECOND. Never ask, just do.")
 
         // Create the request
         let request = CreateChatCompletionRequestArgs::default()
-            .model("gpt-5.2")
+            .model(OPENAI_MODEL)
             .messages(messages.clone())
             .tools(vec![diagnostic_tool, get_all_diagnostics_tool])
             .tool_choice("auto")
@@ -255,7 +259,7 @@ Remember: Take action FIRST, explain SECOND. Never ask, just do.")
                 
                 // Create final request to get analysis of diagnostic results
                 let final_request = CreateChatCompletionRequestArgs::default()
-                    .model("gpt-5.2")
+                    .model(OPENAI_MODEL)
                     .messages(messages)
                     .build()?;
                 
@@ -407,7 +411,21 @@ pub async fn analyze_system_with_ai(
         ChatCompletionRequestToolMessageArgs,
         ChatCompletionToolArgs, ChatCompletionToolType,
     };
-    
+
+    // Validate API key is not empty
+    let api_key = api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Err("OpenAI API key is empty. Please enter your API key in Settings.".to_string());
+    }
+
+    // Log key prefix for debugging (masked)
+    let key_preview = if api_key.len() > 8 {
+        format!("{}...{}", &api_key[..4], &api_key[api_key.len()-4..])
+    } else {
+        "****".to_string()
+    };
+    println!("Using API key: {}", key_preview);
+
     // Create the OpenAI client
     let config = OpenAIConfig::new().with_api_key(api_key);
     let client = Client::with_config(config);
@@ -493,7 +511,7 @@ REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAG
     
     // Create request with tools
     let request = CreateChatCompletionRequestArgs::default()
-        .model("gpt-5.2")
+        .model(OPENAI_MODEL)
         .messages(messages.clone())
         .tools(vec![diagnostic_tool])
         .tool_choice("auto")
@@ -514,7 +532,7 @@ REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAG
             if error_msg.contains("401") || error_msg.contains("Unauthorized") {
                 return Err("Invalid API key. Please check your OpenAI API key is correct and starts with 'sk-'.".to_string());
             } else if error_msg.contains("404") {
-                return Err("Model not found. The model 'gpt-5.2' may not be available on your account.".to_string());
+                return Err(format!("Model not found. The model '{}' may not be available on your account.", OPENAI_MODEL));
             } else if error_msg.contains("429") {
                 return Err("Rate limit exceeded. Please wait a moment and try again.".to_string());
             } else if error_msg.contains("insufficient_quota") {
@@ -592,7 +610,7 @@ REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAG
             
             // Get final response with diagnostic results
             let final_request = CreateChatCompletionRequestArgs::default()
-                .model("gpt-5.2")
+                .model(OPENAI_MODEL)
                 .messages(messages)
                 .build()
                 .map_err(|e| format!("Failed to build final request: {}", e))?;

@@ -27,7 +27,8 @@ import {
   Save20Regular,
   Dismiss20Regular,
   Key20Regular,
-  Folder20Regular
+  Folder20Regular,
+  Sparkle20Regular
 } from '@fluentui/react-icons'
 
 const useStyles = makeStyles({
@@ -85,6 +86,10 @@ export interface SettingsData {
   customExportPath?: string
   retainHistory?: boolean
   historyLimit?: number
+  /** Enable AI-powered insights throughout the app */
+  aiEnabled?: boolean
+  /** Preferred AI provider: auto-detect, openai, or phi_silica */
+  preferredAIProvider?: 'auto' | 'openai' | 'phi_silica'
 }
 
 export interface SettingsDialogProps {
@@ -112,6 +117,8 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
     showNotifications: true,
     retainHistory: true,
     historyLimit: 30,
+    aiEnabled: true,
+    preferredAIProvider: 'auto',
     ...initialSettings
   })
 
@@ -135,21 +142,54 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
           Settings
         </DialogTitle>
         <DialogContent className={styles.content}>
-          {/* API Configuration */}
+          {/* AI Settings */}
           <div className={styles.section}>
-            <Label className={styles.sectionTitle}>API Configuration</Label>
-            <Field
-              label="OpenAI API Key"
-              hint="Required for AI-powered analysis features"
-            >
-              <Input
-                type="password"
-                value={settings.openAiApiKey || ''}
-                onChange={(_, data) => updateSetting('openAiApiKey', data.value)}
-                placeholder="sk-..."
-                contentBefore={<Key20Regular />}
+            <Label className={styles.sectionTitle}>
+              <Sparkle20Regular style={{ marginRight: tokens.spacingHorizontalXS, verticalAlign: 'middle' }} />
+              AI Analysis
+            </Label>
+
+            <div className={styles.switchField}>
+              <div>
+                <Label>Enable AI-Powered Insights</Label>
+                <Caption1 className={styles.hint}>
+                  Get intelligent analysis of diagnostic results
+                </Caption1>
+              </div>
+              <Switch
+                checked={settings.aiEnabled}
+                onChange={(_, data) => updateSetting('aiEnabled', data.checked)}
               />
-            </Field>
+            </div>
+
+            {settings.aiEnabled && (
+              <>
+                <Field label="Preferred AI Provider">
+                  <RadioGroup
+                    value={settings.preferredAIProvider}
+                    onChange={(_, data) => updateSetting('preferredAIProvider', data.value as any)}
+                  >
+                    <Radio value="auto" label="Auto-detect (Recommended)" />
+                    <Radio value="phi_silica" label="Phi Silica (Local, Copilot+ PCs)" />
+                    <Radio value="openai" label="OpenAI (Cloud, requires API key)" />
+                  </RadioGroup>
+                </Field>
+
+                <Field
+                  label="OpenAI API Key"
+                  hint="Required when using OpenAI provider"
+                >
+                  <Input
+                    type="password"
+                    value={settings.openAiApiKey || ''}
+                    onChange={(_, data) => updateSetting('openAiApiKey', data.value)}
+                    placeholder="sk-..."
+                    contentBefore={<Key20Regular />}
+                    disabled={settings.preferredAIProvider === 'phi_silica'}
+                  />
+                </Field>
+              </>
+            )}
           </div>
 
           <Divider />
