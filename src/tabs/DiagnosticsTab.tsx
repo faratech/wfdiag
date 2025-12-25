@@ -70,6 +70,7 @@ export const DiagnosticsTab: React.FC = () => {
     performGlobalSearch,
     setSelectedTab,
     scanStartTime,
+    scanEndTime,
     highlightedTaskId,
     setHighlightedTaskId,
     searchHighlight,
@@ -115,7 +116,9 @@ export const DiagnosticsTab: React.FC = () => {
 
     let faultCount = 0
     let warningCount = 0
-    let duration = Date.now() - scanStartTime
+    // Use scanEndTime if available, otherwise use current time (for in-progress scans)
+    const endTime = scanEndTime > 0 ? scanEndTime : Date.now()
+    let duration = endTime - scanStartTime
 
     // Group results
     Object.entries(results).forEach(([taskId, result]) => {
@@ -159,7 +162,7 @@ export const DiagnosticsTab: React.FC = () => {
         duration
       }
     }
-  }, [results, availableTasks, scanStartTime])
+  }, [results, availableTasks, scanStartTime, scanEndTime])
 
   const handleSearchChange = (value: string) => {
     setGlobalSearchQuery(value)
