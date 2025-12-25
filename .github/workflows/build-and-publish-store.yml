@@ -28,6 +28,10 @@ env:
   PROJECT_NAME: WindowsForum_Diagnostics
   PUBLISHER: CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4
 
+# Default to minimal permissions
+permissions:
+  contents: read
+
 jobs:
   # =============================================================================
   # Build x64 executable
