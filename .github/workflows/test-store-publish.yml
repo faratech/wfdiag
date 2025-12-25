@@ -35,76 +35,20 @@ jobs:
           }
           Write-Host "Found bundle: $($bundle.FullName)"
           echo "bundle_file=$($bundle.FullName)" >> $env:GITHUB_OUTPUT
-          echo "bundle_name=$($bundle.Name)" >> $env:GITHUB_OUTPUT
 
-          # Extract version from filename
-          if ($bundle.Name -match '_(\d+\.\d+\.\d+)\.msixbundle$') {
-            $version = $matches[1]
-            echo "version=$version" >> $env:GITHUB_OUTPUT
-          }
-
-      - name: Create draft release and upload
-        id: release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $version = "${{ steps.find-bundle.outputs.version }}"
-          $tag = "store-test-$version-${{ github.run_id }}"
-          $bundlePath = "${{ steps.find-bundle.outputs.bundle_file }}"
-
-          # Create draft release
-          gh release create $tag `
-            --title "Store Test $version" `
-            --notes "Temporary release for store submission testing" `
-            --draft `
-            $bundlePath
-
-          # Get the asset download URL
-          $release = gh release view $tag --json assets | ConvertFrom-Json
-          $assetUrl = $release.assets[0].url
-
-          Write-Host "Package URL: $assetUrl"
-          echo "package_url=$assetUrl" >> $env:GITHUB_OUTPUT
-          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+      - name: Setup Microsoft Store CLI
+        uses: microsoft/setup-msstore-cli@v1
 
       - name: Configure Store credentials
-        uses: microsoft/store-submission@v1
-        with:
-          command: configure
-          type: msix
-          seller-id: ${{ secrets.STORE_SELLER_ID }}
-          product-id: ${{ secrets.STORE_PRODUCT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-
-      - name: Update submission with package
-        uses: microsoft/store-submission@v1
-        with:
-          command: update
-          product-update: |
-            {
-              "packages": [{
-                "packageUrl": "${{ steps.release.outputs.package_url }}",
-                "languages": ["en"],
-                "architectures": ["X64", "Arm64"]
-              }]
-            }
+        shell: pwsh
+        run: |
+          msstore reconfigure `
+            --tenantId ${{ secrets.AZURE_TENANT_ID }} `
+            --sellerId ${{ secrets.STORE_SELLER_ID }} `
+            --clientId ${{ secrets.AZURE_CLIENT_ID }} `
+            --clientSecret ${{ secrets.AZURE_CLIENT_SECRET }}
 
       - name: Publish to Microsoft Store
-        uses: microsoft/store-submission@v1
-        with:
-          command: publish
-
-      - name: Cleanup draft release
-        if: always()
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tag = "${{ steps.release.outputs.tag }}"
-          if ($tag) {
-            gh release delete $tag --yes 2>$null
-            git push --delete origin $tag 2>$null
-          }
+          msstore publish "${{ steps.find-bundle.outputs.bundle_file }}" --id 9NJ59RH053PV
