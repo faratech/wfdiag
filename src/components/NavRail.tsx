@@ -363,7 +363,7 @@ export const NavRail: React.FC<NavRailProps> = ({
           <Text weight="bold" size={400}>
             WF Diagnostics
           </Text>
-          <Caption1 style={{ color: tokens.colorNeutralForeground3 }}>v2.1.6</Caption1>
+          <Caption1 style={{ color: tokens.colorNeutralForeground3 }}>v2.1.7</Caption1>
         </div>
       </div>
 
