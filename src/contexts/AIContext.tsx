@@ -93,11 +93,11 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   const preferredProvider: AIProviderPreference = (settings.preferredAIProvider as AIProviderPreference) ?? 'auto'
 
   // Derived state - AI is available if backend reports provider OR if we have an API key
-  const backendAvailable = aiStatus?.active_provider !== 'none'
+  const backendAvailable = !!aiStatus && aiStatus.active_provider !== 'none'
   const hasSettingsApiKey = !!settings.openAiApiKey
   const isAIAvailable = backendAvailable || hasSettingsApiKey
   const activeProvider: AIProvider = backendAvailable
-    ? (aiStatus?.active_provider ?? 'none')
+    ? (aiStatus!.active_provider)
     : (hasSettingsApiKey ? 'openai' : 'none')
 
   // Load AI status
