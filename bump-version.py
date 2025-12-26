@@ -225,6 +225,16 @@ def main():
     ):
         success_count += 1
 
+    # 10. src/components/NavRail.tsx - v2.1.X in Caption1
+    total_count += 1
+    if update_tsx_file(
+        script_dir / 'src' / 'components' / 'NavRail.tsx',
+        new_version,
+        [(r'>v[\d.]+<', f'>vVERSION<')],
+        dry_run
+    ):
+        success_count += 1
+
     print()
     if dry_run:
         print(f"[DRY RUN] {success_count}/{total_count} files would be updated to version {new_version}")
