@@ -1,0 +1,201 @@
+name: Update Release with Store Status
+
+# This workflow checks if the Store submission is published and updates
+# the GitHub Release notes to indicate the signed version is available.
+#
+# Run this after your Store submission has been certified and published.
+# The Microsoft Store doesn't provide a public API to download signed packages,
+# so this workflow updates the release to direct users to the Store.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to update (e.g., 2.1.7)'
+        required: true
+
+env:
+  APP_ID: 9NJ59RH053PV
+  STORE_URL: https://apps.microsoft.com/detail/9nj59rh053pv
+
+permissions:
+  contents: write
+
+jobs:
+  update-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify release exists
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          TAG="v${VERSION}"
+
+          echo "Checking for release $TAG..."
+
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            echo "::error::Release $TAG not found"
+            exit 1
+          fi
+
+          echo "✅ Release $TAG exists"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Get Partner Center access token
+        id: auth
+        run: |
+          RESPONSE=$(curl -s -X POST \
+            "https://login.microsoftonline.com/${{ secrets.AZURE_TENANT_ID }}/oauth2/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=client_credentials" \
+            -d "client_id=${{ secrets.AZURE_CLIENT_ID }}" \
+            -d "client_secret=${{ secrets.AZURE_CLIENT_SECRET }}" \
+            -d "resource=https://manage.devcenter.microsoft.com")
+
+          TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
+
+          if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
+            echo "::error::Failed to get access token"
+            echo "$RESPONSE" | jq .
+            exit 1
+          fi
+
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+          echo "✅ Got Partner Center access token"
+
+      - name: Get application info
+        id: app-info
+        run: |
+          echo "Fetching application list..."
+
+          APPS=$(curl -s -X GET \
+            "https://manage.devcenter.microsoft.com/v1.0/my/applications" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
+
+          # Find our app
+          APP_ID=$(echo "$APPS" | jq -r '.value[] | select(.primaryName | test("WindowsForum|Diagnostics"; "i")) | .id' | head -1)
+
+          if [ -z "$APP_ID" ] || [ "$APP_ID" = "null" ]; then
+            echo "Available applications:"
+            echo "$APPS" | jq -r '.value[] | "  - \(.id): \(.primaryName)"'
+            echo "::error::Could not find WindowsForum Diagnostics app"
+            exit 1
+          fi
+
+          echo "✅ Found app ID: $APP_ID"
+          echo "app_id=$APP_ID" >> $GITHUB_OUTPUT
+
+      - name: Check submission status
+        id: submission
+        run: |
+          APP_ID="${{ steps.app-info.outputs.app_id }}"
+          VERSION="${{ steps.release.outputs.version }}"
+
+          echo "Fetching submission info..."
+
+          APP_DETAILS=$(curl -s -X GET \
+            "https://manage.devcenter.microsoft.com/v1.0/my/applications/$APP_ID" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
+
+          # Get last published submission
+          SUBMISSION_ID=$(echo "$APP_DETAILS" | jq -r '.lastPublishedApplicationSubmission.id // empty')
+
+          if [ -z "$SUBMISSION_ID" ]; then
+            echo "::warning::No published submission found"
+            echo "published=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Last published submission: $SUBMISSION_ID"
+
+          # Get submission details
+          SUBMISSION=$(curl -s -X GET \
+            "https://manage.devcenter.microsoft.com/v1.0/my/applications/$APP_ID/submissions/$SUBMISSION_ID" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
+
+          # Get version from packages
+          STORE_VERSION=$(echo "$SUBMISSION" | jq -r '.applicationPackages[0].version // "unknown"')
+          echo "Store version: $STORE_VERSION"
+
+          # Check if versions match (store has X.Y.Z.0, we have X.Y.Z)
+          EXPECTED="${VERSION}.0"
+          if [ "$STORE_VERSION" = "$EXPECTED" ]; then
+            echo "✅ Version match confirmed!"
+            echo "published=true" >> $GITHUB_OUTPUT
+            echo "store_version=$STORE_VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::Version mismatch - Store: $STORE_VERSION, Expected: $EXPECTED"
+            echo "published=false" >> $GITHUB_OUTPUT
+            echo "store_version=$STORE_VERSION" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update release notes
+        if: steps.submission.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.release.outputs.tag }}"
+          VERSION="${{ steps.release.outputs.version }}"
+          STORE_VERSION="${{ steps.submission.outputs.store_version }}"
+
+          echo "Updating release notes for $TAG..."
+
+          # Get current release body
+          CURRENT_BODY=$(gh release view "$TAG" --json body -q '.body')
+
+          # Check if already updated
+          if echo "$CURRENT_BODY" | grep -q "✅ Store-Signed Version Available"; then
+            echo "Release already indicates Store-signed version available"
+            exit 0
+          fi
+
+          # Create updated body with Store notice at top
+          STORE_URL="${{ env.STORE_URL }}"
+
+          # Write notice to temp file
+          {
+            echo "> ### ✅ Store-Signed Version Available"
+            echo "> Version ${VERSION} is now available on the Microsoft Store, signed by Microsoft."
+            echo "> **[Install from Microsoft Store](${STORE_URL})** for automatic updates and full Windows integration."
+            echo ""
+            echo "$CURRENT_BODY"
+          } > /tmp/release-body.md
+
+          # Update release
+          gh release edit "$TAG" --notes-file /tmp/release-body.md
+
+          echo "✅ Updated release notes for $TAG"
+          echo ""
+          echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/$TAG"
+
+      - name: Summary
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "Summary"
+          echo "=========================================="
+          echo "Version: ${{ steps.release.outputs.version }}"
+          echo "Tag: ${{ steps.release.outputs.tag }}"
+          echo "Store published: ${{ steps.submission.outputs.published }}"
+          echo "Store version: ${{ steps.submission.outputs.store_version }}"
+          echo ""
+
+          if [ "${{ steps.submission.outputs.published }}" = "true" ]; then
+            echo "✅ Release notes updated to indicate Store-signed version available."
+            echo ""
+            echo "Users can now:"
+            echo "  1. Install from Store (recommended): ${{ env.STORE_URL }}"
+            echo "  2. Download portable EXE from GitHub Release"
+          else
+            echo "⚠️ Store submission not yet published for this version."
+            echo "  - Current Store version: ${{ steps.submission.outputs.store_version }}"
+            echo "  - Expected: ${{ steps.release.outputs.version }}.0"
+            echo ""
+            echo "Wait for Store certification to complete, then run this workflow again."
+          fi

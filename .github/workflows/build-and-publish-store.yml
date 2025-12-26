@@ -471,17 +471,14 @@ jobs:
           body: |
             ## WindowsForum Diagnostics v${{ needs.build-x64.outputs.version }}
 
-            ### Downloads
-            - **MSIX Bundle** (recommended for Windows 10/11): Install via Microsoft Store or download the `.msixbundle` file
-            - **Portable EXE**: Standalone executables for x64 and ARM64
+            ### Recommended Installation
+            **[Get from Microsoft Store](https://apps.microsoft.com/detail/9nj59rh053pv)** - Signed by Microsoft, automatic updates
 
-            ### What's New
-            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+            ### Alternative Downloads
+            - **MSIX Bundle**: Unsigned, for sideloading (requires developer mode or self-signed cert)
+            - **Portable EXE**: Standalone executables for x64 and ARM64, no installation required
 
-            ### Installation
-            **Microsoft Store** (recommended): Search for "WindowsForum Diagnostics" or use this link.
-
-            **Manual Installation**:
+            ### Manual MSIX Installation
             ```powershell
             Add-AppxPackage -Path "WindowsForum_Diagnostics_${{ needs.build-x64.outputs.version }}.msixbundle"
             ```
