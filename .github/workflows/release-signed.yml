@@ -197,33 +197,19 @@ jobs:
         tag_name: ${{ steps.version.outputs.version }}
         release_name: WFDiag ${{ steps.version.outputs.version }} - Dual Signed
         body: |
-          # WindowsForum Diagnostic Tool ${{ steps.version.outputs.version }}
-          
-          ## 🔐 Digital Signatures
-          This release includes **dual signing** for maximum security and compatibility:
-          
-          ✅ **Windows Certificate Signing** - Embedded digital signatures  
-          - Reduces SmartScreen warnings  
-          - Shows "WindowsForum Fara Technologies LLC IT Department" as publisher  
-          - Compatible with all Windows security policies  
-          
-          ✅ **Sigstore Keyless Signing** - Modern cryptographic verification  
-          - Transparent, verifiable signatures using GitHub identity  
-          - Includes .sig and .crt files for advanced verification  
-          - Supports supply chain security best practices  
-          
-          ## 📥 Download
-          Download `wfdiag-${{ steps.version.outputs.version }}.exe` - this file contains both signature types embedded.
-          
-          ## 🔍 Signature Verification
+          ## WindowsForum Diagnostics ${{ steps.version.outputs.version }}
+
+          ### Recommended Installation
+          **[Get from Microsoft Store](https://apps.microsoft.com/detail/9nj59rh053pv)** - Signed by Microsoft, automatic updates
+
+          ### Alternative Downloads
+          - **MSIX Bundle**: Unsigned, for sideloading (requires developer mode or self-signed cert)
+          - **Portable EXE**: Standalone executables for x64 and ARM64, no installation required
+
+          ### Manual MSIX Installation
           ```powershell
-          # Check Windows digital signature (shows certificate info)
-          Get-AuthenticodeSignature wfdiag-*.exe
+          Add-AppxPackage -Path "WindowsForum_Diagnostics_${{ steps.version.outputs.version }}.msixbundle"
           ```
-          
-          Advanced users can verify the Sigstore signature using workflow artifacts containing the .sig/.crt files.
-          
-          Generated from commit: ${{ github.sha }}
         draft: false
         prerelease: ${{ steps.version.outputs.prerelease }}
 
