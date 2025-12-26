@@ -93,6 +93,7 @@ fn truncate_output(output: &str, max_chars: usize) -> String {
 
 /// Compress diagnostic output for Phi Silica's limited context
 /// Extracts key information and removes verbose content
+#[allow(dead_code)] // Available for Phi Silica optimizations
 pub fn compress_for_phi_silica(output: &str, max_chars: usize) -> String {
     // Remove excessive whitespace
     let compressed: String = output

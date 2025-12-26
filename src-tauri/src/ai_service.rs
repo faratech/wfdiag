@@ -91,11 +91,15 @@ pub struct AIProviderStatus {
 }
 
 /// Global AI service state
+/// Note: These are initialized lazily via OnceLock, so explicit initialization is optional
+#[allow(dead_code)] // Used for tracking - cache/preference are initialized lazily
 static AI_SERVICE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static AI_CACHE: OnceLock<std::sync::Mutex<AICache>> = OnceLock::new();
 static USER_PREFERENCE: OnceLock<std::sync::Mutex<AIProviderPreference>> = OnceLock::new();
 
 /// Initialize the AI service (call once at startup)
+/// Note: This is optional since OnceLock initializes lazily on first access
+#[allow(dead_code)] // Optional - caches initialize lazily
 pub fn init_ai_service() {
     if AI_SERVICE_INITIALIZED.swap(true, Ordering::SeqCst) {
         return; // Already initialized
@@ -345,8 +349,6 @@ async fn analyze_with_openai(prompt: &str, api_key: Option<String>) -> Result<St
                 .map_err(|e| e.to_string())?
                 .into(),
         ])
-        .max_tokens(500u32)
-        .temperature(0.3)
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -354,7 +356,10 @@ async fn analyze_with_openai(prompt: &str, api_key: Option<String>) -> Result<St
         .chat()
         .create(request)
         .await
-        .map_err(|e| format!("OpenAI API error: {}", e))?;
+        .map_err(|e| {
+            eprintln!("OpenAI API error in ai_service: {:?}", e);
+            format!("OpenAI API error: {}", e)
+        })?;
 
     response
         .choices

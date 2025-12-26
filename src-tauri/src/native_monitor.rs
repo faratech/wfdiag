@@ -401,6 +401,8 @@ impl SystemMonitor {
 // ============================================================================
 
 /// Pre-initialize all static caches. Call this at app startup for faster first display.
+/// Note: Caches are also initialized lazily on first access, so calling this is optional.
+#[allow(dead_code)] // Optional optimization - caches initialize lazily
 pub fn initialize_static_caches() {
     // Fast initializations first (< 1ms each)
     CPU_COUNT.get_or_init(|| unsafe {

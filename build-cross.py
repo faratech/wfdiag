@@ -96,6 +96,18 @@ def run_command(cmd: list, env: dict = None, cwd: Path = None) -> bool:
         return False
 
 
+def check_sccache_available() -> bool:
+    """Check if sccache is available and running."""
+    if shutil.which("sccache") is None:
+        return False
+    # Try to start sccache server if not running
+    try:
+        subprocess.run(["sccache", "--start-server"], capture_output=True, timeout=5)
+    except:
+        pass
+    return True
+
+
 def check_prerequisites() -> bool:
     """Check that required tools are available."""
     print("Checking prerequisites...")
@@ -266,13 +278,14 @@ def copy_to_output(target_name: str, release: bool = True) -> Path | None:
     return final_path
 
 
-def build_target(target_name: str, release: bool = True, jobs: int = None) -> bool:
+def build_target(target_name: str, release: bool = True, jobs: int = None, use_sccache: bool = False) -> bool:
     """Build for a specific target.
 
     Args:
         target_name: The target architecture name (x64, arm64)
         release: Whether to build in release mode
         jobs: Number of parallel jobs (defaults to CPU count)
+        use_sccache: Whether to use sccache for compilation caching
     """
     target = TARGETS[target_name]
     triple = target["triple"]
@@ -283,12 +296,20 @@ def build_target(target_name: str, release: bool = True, jobs: int = None) -> bo
     print(f"\n{'='*60}")
     print(f"Building for {target_name} ({triple})")
     print(f"Using {num_jobs} parallel jobs")
+    if use_sccache:
+        print("Using sccache for compilation caching")
     print(f"{'='*60}")
 
     env = get_env_for_target(target_name)
 
     # Set CARGO_BUILD_JOBS to use all available cores
     env["CARGO_BUILD_JOBS"] = str(num_jobs)
+
+    # Enable sccache if requested
+    if use_sccache:
+        env["RUSTC_WRAPPER"] = "sccache"
+        # Set sccache to use more cache slots for parallel builds
+        env["SCCACHE_IDLE_TIMEOUT"] = "0"  # Don't timeout
 
     # Set RUSTFLAGS for parallel code generation
     existing_rustflags = env.get("RUSTFLAGS", "")
@@ -709,11 +730,22 @@ def main():
         action="store_true",
         help="Sign the MSIX bundle with self-signed certificate"
     )
+    parser.add_argument(
+        "--no-sccache",
+        action="store_true",
+        help="Disable sccache (enabled by default if available)"
+    )
 
     args = parser.parse_args()
     release = not args.debug
     jobs = args.jobs
     skip_frontend = args.skip_frontend
+
+    # Determine sccache usage - enabled by default if available
+    if args.no_sccache:
+        use_sccache = False
+    else:
+        use_sccache = check_sccache_available()
 
     # Display system info
     mem_gb = get_system_memory_gb()
@@ -725,6 +757,7 @@ def main():
         print(f"  Total RAM: {mem_gb:.1f} GB")
     print(f"  Parallel jobs: {jobs if jobs else CPU_COUNT}")
     print(f"  Build mode: {'Debug' if args.debug else 'Release'}")
+    print(f"  sccache: {'enabled' if use_sccache else 'disabled'}")
 
     # Check prerequisites
     if not check_prerequisites():
@@ -750,7 +783,7 @@ def main():
         # Build single target
         if not ensure_targets():
             sys.exit(1)
-        if not build_target(args.target, release, jobs):
+        if not build_target(args.target, release, jobs, use_sccache):
             sys.exit(1)
 
         # Copy to output directory
@@ -781,7 +814,7 @@ def main():
 
         results = {}
         for target_name in TARGETS:
-            results[target_name] = build_target(target_name, release, jobs)
+            results[target_name] = build_target(target_name, release, jobs, use_sccache)
 
         print(f"\n{'='*60}")
         print("Build Summary")

@@ -29,7 +29,6 @@ mod ai_prompts;
 
 use crate::diagnostics::{DiagnosticTask, TaskResult};
 use crate::issue_detector::Issue;
-use keyring::{Entry, Error as KeyringError};
 use native_monitor::{NetworkConnection, SystemMonitor};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
