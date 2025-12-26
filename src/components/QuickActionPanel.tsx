@@ -335,7 +335,7 @@ export const QuickActionPanel: React.FC<QuickActionPanelProps> = ({
           <img
             src="/icon.png"
             alt="WF Diagnostics"
-            style={{ width: '50px', height: '50px', filter: 'brightness(0) invert(1)' }}
+            style={{ width: '50px', height: '50px' }}
           />
         </div>
 

@@ -96,9 +96,25 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   const backendAvailable = !!aiStatus && aiStatus.active_provider !== 'none'
   const hasSettingsApiKey = !!settings.openAiApiKey
   const isAIAvailable = backendAvailable || hasSettingsApiKey
-  const activeProvider: AIProvider = backendAvailable
-    ? (aiStatus!.active_provider)
-    : (hasSettingsApiKey ? 'openai' : 'none')
+
+  // Determine active provider based on what will actually be used
+  // Priority: settings API key (since that's what we send to backend), then backend status
+  const activeProvider: AIProvider = (() => {
+    if (hasSettingsApiKey) {
+      // If user prefers Phi Silica and it's available, use that
+      if (preferredProvider === 'phi_silica' && aiStatus?.phi_silica_available) {
+        return 'phi_silica'
+      }
+      // Otherwise use OpenAI since we have an API key
+      return 'openai'
+    }
+    // No settings API key - check if Phi Silica is available
+    if (aiStatus?.phi_silica_available) {
+      return 'phi_silica'
+    }
+    // Fall back to backend status
+    return backendAvailable ? aiStatus!.active_provider : 'none'
+  })()
 
   // Load AI status
   const refreshStatus = useCallback(async () => {
