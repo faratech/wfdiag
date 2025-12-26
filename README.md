@@ -1,51 +1,50 @@
-# WF Diagnostics v2.1.1 - WindowsForum Diagnostic Tool
+# WF Diagnostics v2.1.7 - WindowsForum Diagnostic Tool
 
 [![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC_BY--NC--ND_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
-[![Version](https://img.shields.io/badge/version-2.1.1-blue.svg)](https://github.com/faratech/wfdiag/releases)
+[![Version](https://img.shields.io/badge/version-2.1.7-blue.svg)](https://github.com/faratech/wfdiag/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightblue.svg)](https://github.com/faratech/wfdiag)
 [![Security](https://img.shields.io/badge/security-hardened-green.svg)](https://github.com/faratech/wfdiag)
+[![AI](https://img.shields.io/badge/AI-Hybrid-purple.svg)](https://github.com/faratech/wfdiag)
 
-A **security-hardened**, modern diagnostic tool built with **Tauri v2** and **React** for Windows systems. Developed by **Fara Technologies LLC** for **WindowsForum.com**. This comprehensive rewrite features advanced security architecture, encrypted data storage, and intelligent system analysis.
+A **security-hardened**, modern diagnostic tool built with **Tauri v2** and **React** for Windows systems. Developed by **Fara Technologies LLC** for **WindowsForum.com**. This comprehensive utility features advanced security architecture, encrypted data storage, and a unique **Hybrid AI** analysis engine that leverages both OpenAI and local **Phi Silica** models on Copilot+ PCs.
 
 ## 🚀 Key Features
 
 ### **Core Capabilities**
-- **38+ Diagnostic Tasks** across 8 categories (33 standard user + 5 admin-only)
-- **Real-time System Monitoring** with CPU, memory, disk, and network stats
+- **38+ Diagnostic Tasks** across 8 categories (System, Hardware, Storage, Network, etc.)
+- **Real-time System Monitoring** with live CPU, memory, disk, and network visualization
 - **Encrypted Data Storage** using AES-256-GCM with machine-specific keys
-- **AI-Powered Analysis** via OpenAI integration with function calling
-- **OAuth2 Authentication** with WindowsForum.com integration
+- **Automated Issue Detection** identifies critical problems (low disk space, firewall disabled, etc.)
+- **One-Click Fixes** for common system issues
 - **Scan History & Comparison** with intelligent change detection
-- **Multiple Export Formats** (JSON, Text, Forum-formatted)
+- **Multiple Export Formats** (JSON, Text, HTML, Forum-formatted)
+
+### **Hybrid AI Architecture** 🧠
+- **Unified AI Service**: Seamlessly switches between Cloud (OpenAI) and Edge (Phi Silica) models.
+- **Local AI (Phi Silica)**: Runs entirely on-device using the NPU on Copilot+ PCs (Windows 11 24H2+).
+- **Cloud AI (OpenAI)**: Fallback integration for standard PCs with function calling support.
+- **Context-Aware Analysis**: Intelligent interpretation of diagnostic results and health scores.
 
 ### **Security Architecture** 🔒
 - **Command Injection Prevention** with strict command whitelisting (12 allowed commands)
 - **PowerShell Script Filtering** blocks dangerous operations, allows only diagnostic cmdlets
-- **Filesystem Access Restrictions** limited to 6 specific directory patterns
+- **Filesystem Access Restrictions** limited to specific safe directories
 - **Encrypted Local Storage** for sensitive scan data and API keys
-- **Secure OAuth2 Implementation** with PKCE and state validation
+- **Secure OAuth2 Implementation** with PKCE for WindowsForum.com integration
 - **Input Validation & Sanitization** on all user inputs and system commands
-
-### **Performance & UX** ⚡
-- **Lightweight**: ~10MB vs ~100MB traditional tools
-- **Fast Startup**: <1 second application launch
-- **Batch Processing**: Runs 5 tasks concurrently for optimal performance
-- **Smart Privilege Model**: 33/38 tasks work without admin privileges
-- **Real-time Progress**: Live updates with health scoring
-- **Responsive UI**: Modern Fluent Design System
 
 ## 📋 Diagnostic Categories
 
-| Category | Tasks | Admin Required | Description |
-|----------|-------|----------------|-------------|
-| **System** | 7 | 0 | OS info, BIOS, boot config, environment variables |
-| **Hardware** | 6 | 0 | CPU, RAM, motherboard, TPM, device enumeration |
-| **Storage** | 5 | 2 | Disks, partitions, volumes, health checks |
-| **Network** | 4 | 0 | Adapters, IP config, routing, connectivity |
-| **Drivers** | 3 | 1 | System drivers, versions, digital signatures |
-| **Software** | 6 | 0 | Programs, services, Windows features |
-| **Logs** | 4 | 1 | Event logs, Windows Update, reliability |
-| **Debug** | 3 | 1 | BSOD analysis, crash dumps, system files |
+| Category | Tasks | Description |
+|----------|-------|-------------|
+| **System** | 7 | OS info, BIOS, boot config, environment variables, updates |
+| **Hardware** | 6 | CPU, RAM, motherboard, TPM, device enumeration |
+| **Storage** | 5 | Disks, partitions, volumes, fragmentation, SMART health |
+| **Network** | 4 | Adapters, IP config, routing, connectivity, DNS |
+| **Drivers** | 3 | System drivers, versions, digital signatures |
+| **Software** | 6 | Programs, services, Windows features, startup apps |
+| **Logs** | 4 | Event logs, Windows Update history, reliability |
+| **Debug** | 3 | BSOD analysis, crash dumps, system files |
 
 ## 🛠️ Architecture
 
@@ -53,24 +52,24 @@ A **security-hardened**, modern diagnostic tool built with **Tauri v2** and **Re
 ┌─────────────────────────────────────────────────────────┐
 │                    Frontend (React + TypeScript)        │
 ├─────────────────────────────────────────────────────────┤
-│  • App.tsx - Main application & diagnostics UI         │
+│  • App.tsx - Main application layout & routing         │
 │  • SystemMonitoring.tsx - Real-time stats dashboard    │
-│  • ComparisonView.tsx - Scan comparison interface      │
-│  • OAuthLogin.tsx - WindowsForum authentication        │
-│  • OpenAIIntegration.tsx - AI analysis interface       │
+│  • IssuesTab.tsx - Issue detection & remediation UI    │
+│  • AIInterpretationPanel.tsx - AI analysis display     │
+│  • HealthModel.tsx - System health scoring visualization│
 ├─────────────────────────────────────────────────────────┤
 │                    Tauri v2 IPC Bridge                 │
 ├─────────────────────────────────────────────────────────┤
 │                Backend (Pure Rust)                     │
 ├─────────────────────────────────────────────────────────┤
-│  • lib.rs - 30+ Tauri commands & app lifecycle         │
-│  • diagnostics.rs - Task definitions & execution       │
-│  • security.rs - Command validation & filtering        │
-│  • native_diagnostics.rs - Windows API implementations │
+│  • lib.rs - Command exposure & app state management    │
+│  • diagnostics.rs - Core diagnostic task execution     │
+│  • ai_service.rs - Unified AI provider abstraction     │
+│  • phi_silica.rs - Local AI (Windows App SDK/WinRT)    │
+│  • issue_detector.rs - Automated problem identification│
+│  • security.rs - Command validation & input filtering  │
 │  • encrypted_storage.rs - AES-256-GCM data encryption  │
-│  • oauth.rs - WindowsForum OAuth2 with PKCE           │
-│  • monitoring.rs - Real-time system stats collection   │
-│  • openai_integration.rs - AI analysis with functions  │
+│  • native_monitor.rs - Real-time performance counters  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -80,35 +79,22 @@ A **security-hardened**, modern diagnostic tool built with **Tauri v2** and **Re
 - **Whitelist-Only Execution**: Only 12 pre-approved system commands
 - **Argument Validation**: Strict parameter checking for each command
 - **PowerShell Protection**: Blocks dangerous cmdlets (Invoke-Expression, Start-Process, etc.)
-- **WMI Query Filtering**: Approved Windows Management classes only
 
 ### **Data Protection**
 - **AES-256-GCM Encryption**: All scan data encrypted at rest
 - **Machine-Specific Keys**: Derived from Windows GUID + user context
-- **PBKDF2 Key Derivation**: 100,000 iterations with unique salts
-- **Memory Safety**: Sensitive keys zeroized after use
-
-### **Network Security**
-- **HTTPS-Only Communication**: All external requests use TLS
-- **OAuth2 with PKCE**: Industry-standard authentication flow
-- **Token Encryption**: Access tokens stored encrypted in Windows Credential Manager
-- **Request Validation**: All API calls validated and sanitized
+- **DPAPI Integration**: Secure storage for API keys and tokens
 
 ## 📦 Installation & Usage
 
 ### **Prerequisites**
 - **Windows 10/11** (x64)
-- **Administrator privileges** for 5 advanced diagnostic tasks
-- **Internet connection** for AI analysis and updates
+- **Rust**: `winget install Rustlang.Rust.GNU`
+- **Node.js**: `winget install OpenJS.NodeJS`
+- **(Optional) Copilot+ PC**: Required for local Phi Silica AI features (Windows 11 24H2+)
 
 ### **Development Setup**
 ```bash
-# Install Rust
-winget install Rustlang.Rust.GNU
-
-# Install Node.js
-winget install OpenJS.NodeJS
-
 # Clone repository
 git clone https://github.com/faratech/wfdiag.git
 cd wfdiag
@@ -126,106 +112,53 @@ npm run tauri build
 ## 🎯 Tauri Commands API
 
 ### **Core Diagnostics**
-- `get_system_info()` - System info and admin status
-- `get_available_tasks()` - List all 38 diagnostic tasks
 - `start_diagnostics(task_ids)` - Begin diagnostic session
-- `run_diagnostic_task(task_id)` - Execute single task
 - `run_diagnostics_parallel(task_ids)` - Batch execution (5 concurrent)
-- `get_session_results(session_id)` - Retrieve results
-- `export_results(format, results)` - Export as JSON/Text/Forum
+- `detect_issues()` - Analyze results for specific problems
+- `fix_issue(issue_id)` - Attempt to automatically resolve an issue
 
-### **Security & Authentication**
-- `store_api_key(key)` - Encrypt and store OpenAI API key
-- `load_api_key()` - Decrypt and load API key
-- `oauth_start_flow()` - Initiate WindowsForum OAuth2
-- `oauth_handle_callback(code)` - Complete OAuth flow
-- `authenticate(username, password)` - Direct login
-- `logout()` - Clear authentication tokens
+### **AI & Analysis**
+- `ai_get_status()` - Check availability of OpenAI and Phi Silica
+- `ai_analyze_diagnostic(...)` - Interpret specific task results
+- `analyze_with_phi_silica(prompt)` - Direct interaction with local model
+- `ensure_phi_silica()` - Initialize/Download local model
 
 ### **Data Management**
 - `save_current_scan(results)` - Store encrypted scan results
-- `list_scan_history()` - List all saved scans
-- `load_scan(scan_id)` - Load specific scan results
 - `compare_scans(current_id, previous_id)` - Intelligent comparison
+- `export_results(format)` - Export as JSON/Text/HTML
 
-### **Monitoring & Analysis**
-- `start_monitoring()` - Begin real-time system monitoring
-- `get_current_stats()` - Current CPU/memory/disk/network stats
-- `get_network_connections()` - Active network connections
-- `analyze_system_with_ai(api_key, results)` - OpenAI function calling analysis
+## 🧠 AI Capabilities
 
-### **System Integration**
-- `restart_as_admin()` - Elevate privileges for advanced tasks
-- `shell_open(path)` - Open files/folders in default applications
-- `save_results_to_file(path, content)` - Export to disk
+The tool employs a **Hybrid AI Strategy**:
 
-## 🧠 AI Analysis Features
-
-- **OpenAI Responses API** integration with function calling
-- **Automated problem detection** across all diagnostic categories
-- **Intelligent recommendations** based on system state
-- **Context-aware analysis** using diagnostic task metadata
-- **Secure API key storage** with Windows Credential Manager
-
-## 📊 System Requirements
-
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| **OS** | Windows 10 (1809) | Windows 11 22H2+ |
-| **Memory** | 4GB RAM | 8GB+ RAM |
-| **Storage** | 50MB free | 100MB+ free |
-| **Network** | Optional | Required for AI analysis |
-| **Privileges** | Standard user | Admin for 5 advanced tasks |
+1.  **Phi Silica (Local):** Prioritized on supported hardware (Copilot+ PCs). It runs locally on the NPU, ensuring privacy and zero latency. It uses the `Microsoft.Windows.AI.Text` API via Windows App SDK.
+2.  **OpenAI (Cloud):** Fallback for standard PCs. Requires an API key. Supports advanced function calling to autonomously select and run diagnostic tasks based on user queries.
 
 ## 🔄 Version History
 
-### **v2.0.8b (Current) - Security Hardened Release**
-- ✅ **Complete security architecture overhaul**
-- ✅ **AES-256-GCM encryption** for all data storage
-- ✅ **Command injection prevention** with strict whitelisting
-- ✅ **OAuth2 authentication** with WindowsForum.com
-- ✅ **Scan comparison system** with intelligent change detection
-- ✅ **Real-time monitoring** dashboard
-- ✅ **Enhanced UI** with login dialogs and comparison views
+### **v2.1.7 (Current) - Hybrid AI & Remediation**
+- ✅ **Hybrid AI Engine**: Integration of local Phi Silica models alongside OpenAI.
+- ✅ **Issue Detector**: Automated identification of common system problems.
+- ✅ **Auto-Fixer**: One-click remediation for supported issues.
+- ✅ **Health Model**: Visual health scoring system.
+- ✅ **UI Updates**: New Issues tab and improved navigation rail.
 
 ### **Previous Versions**
-- **v2.0.7b** - Initial Tauri v2 implementation
-- **v1.x** - WinUI 3 version (deprecated)
+- **v2.1.0** - Security Hardening & Encryption
+- **v2.0.0** - Rewrite in Tauri v2 + React
 
 ## 📄 License
 
 This project is licensed under the **Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License**.
 
-### **Permissions & Restrictions**
 - ✅ **Free for personal, educational, and research use**
-- ✅ **Attribution required**: Must credit Fara Technologies LLC and WindowsForum.com  
 - ❌ **No commercial use** without permission
-- ❌ **No derivative works** - modifications not allowed for redistribution
-- ❌ **No selling or profit** from this software
+- ❌ **No derivative works**
 
 ### **Commercial Licensing**
-For commercial use, enterprise licensing, or to create derivative works, contact:
-- * [contact](https://windowsforum.com/misc/contact)
-
-### **Attribution Requirements**
-When using or sharing this software, include:
-> "WF Diagnostics Tool developed by Fara Technologies LLC for WindowsForum.com"
-
-## 🤝 Contributing
-
-While derivative works are restricted under the CC BY-NC-ND 4.0 license, you can:
-- **Report Issues**: Submit bug reports and feature requests
-- **Provide Feedback**: Share suggestions for improvements  
-- **Documentation**: Help improve documentation and guides
-- **Testing**: Help test new features and report compatibility issues
-
-## 📞 Support
-
-- **Issues**: [GitHub Issues](https://github.com/faratech/wfdiag/issues)
-- **Documentation**: [WindowsForum.com](https://windowsforum.com/resources/windowsforum-com-diagnostic-tool.1/)
-- **Commercial Support**: admin@windowsforum.com
+Contact: * [contact](https://windowsforum.com/misc/contact)
 
 ---
 **Copyright © 2025 Fara Technologies LLC. All rights reserved.**
-
-**Developed for WindowsForum.com - Your trusted Windows diagnostic solution.**
+**Developed for WindowsForum.com**
