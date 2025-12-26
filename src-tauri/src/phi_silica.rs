@@ -711,16 +711,44 @@ fn get_diagnostic_list_for_prompt() -> String {
     let tasks = crate::diagnostics::get_all_tasks();
     let mut list = String::new();
 
-    // Group by category, show ID=Name pairs
+    // Provide enhanced descriptions for common diagnostics so Phi Silica knows what data they contain
+    let enhanced_descriptions: std::collections::HashMap<&str, &str> = [
+        ("physical_memory", "RAM capacity, speed, manufacturer, modules installed"),
+        ("comp_system", "Computer manufacturer, model, system type"),
+        ("os_info", "Windows version, build number, install date"),
+        ("processor", "CPU name, cores, speed, architecture"),
+        ("logical_disk", "Drive letters, total/free space, file system"),
+        ("disk_drive", "Physical disk model, size, interface type"),
+        ("network_adapter", "Network cards, MAC addresses, connection status"),
+        ("systeminfo", "Full system summary including RAM, CPU, OS, network"),
+        ("bios", "BIOS version, manufacturer, release date"),
+        ("ipconfig", "IP addresses, DNS servers, gateway"),
+        ("installed_programs", "List of installed software with versions"),
+        ("services", "Windows services and their status"),
+        ("processes", "Running processes and resource usage"),
+        ("drivers_list", "Installed drivers and versions"),
+        ("windows_update", "Windows Update history and pending updates"),
+        ("event_logs", "Recent system/application event logs"),
+        ("startup_command", "Programs that run at startup"),
+        ("firewall_status", "Windows Firewall status and rules"),
+    ].into_iter().collect();
+
+    // Group by category with enhanced descriptions
     let mut by_category: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for task in tasks {
-        // Show ID with short description
-        let entry = format!("{} ({})", task.id, task.name);
+        // Use enhanced description if available, otherwise use default
+        let desc = enhanced_descriptions.get(task.id.as_str())
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| task.description.clone());
+        let entry = format!("{}: {}", task.id, desc);
         by_category.entry(task.category.clone()).or_default().push(entry);
     }
 
     for (category, entries) in by_category {
-        list.push_str(&format!("[{}] {}\n", category, entries.join(", ")));
+        list.push_str(&format!("[{}]\n", category));
+        for entry in entries {
+            list.push_str(&format!("  {}\n", entry));
+        }
     }
     list
 }
@@ -731,6 +759,142 @@ fn truncate_output(text: &str, max_chars: usize) -> String {
         text.to_string()
     } else {
         format!("{}... [truncated]", &text[..max_chars])
+    }
+}
+
+/// Smart extraction of key fields from WMI output for specific diagnostics
+/// This ensures important data (like RAM capacity) isn't lost to truncation
+fn smart_extract(task_id: &str, text: &str) -> String {
+    match task_id {
+        "physical_memory" => extract_ram_essentials(text),
+        "comp_system" => extract_comp_system_essentials(text),
+        "processor" => extract_processor_essentials(text),
+        "logical_disk" => extract_disk_essentials(text),
+        _ => text.to_string(),
+    }
+}
+
+/// Extract essential RAM info: Capacity, Speed, Manufacturer per module
+fn extract_ram_essentials(text: &str) -> String {
+    let mut result = String::new();
+    let mut module_count = 0;
+    let mut total_capacity: u64 = 0;
+
+    // Key fields to extract
+    let key_fields = ["Capacity", "Speed", "Manufacturer", "MemoryType", "FormFactor"];
+
+    // Split into instances (WMI output has multiple objects)
+    let instances: Vec<&str> = text.split("---").collect();
+
+    for instance in instances {
+        if instance.trim().is_empty() {
+            continue;
+        }
+
+        let mut module_info = Vec::new();
+
+        for line in instance.lines() {
+            let line = line.trim();
+            for &field in &key_fields {
+                if line.starts_with(field) {
+                    // Extract value
+                    if let Some(value) = line.split(':').nth(1).or_else(|| line.split('=').nth(1)) {
+                        let value = value.trim();
+                        if !value.is_empty() && value != "N/A" {
+                            // Convert capacity bytes to GB for readability
+                            if field == "Capacity" {
+                                if let Ok(bytes) = value.parse::<u64>() {
+                                    total_capacity += bytes;
+                                    let gb = bytes / (1024 * 1024 * 1024);
+                                    module_info.push(format!("Capacity: {} GB", gb));
+                                } else {
+                                    module_info.push(format!("{}: {}", field, value));
+                                }
+                            } else {
+                                module_info.push(format!("{}: {}", field, value));
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        if !module_info.is_empty() {
+            module_count += 1;
+            result.push_str(&format!("Module {}: {}\n", module_count, module_info.join(", ")));
+        }
+    }
+
+    // Add summary at the top
+    let total_gb = total_capacity / (1024 * 1024 * 1024);
+    let summary = format!("TOTAL RAM: {} GB ({} modules)\n", total_gb, module_count);
+
+    if result.is_empty() {
+        // Fallback: try to extract just capacity values from raw text
+        let mut capacities = Vec::new();
+        for line in text.lines() {
+            if line.contains("Capacity") {
+                if let Some(val) = line.split(':').nth(1).or_else(|| line.split('=').nth(1)) {
+                    let val = val.trim();
+                    if let Ok(bytes) = val.parse::<u64>() {
+                        capacities.push(bytes / (1024 * 1024 * 1024));
+                    }
+                }
+            }
+        }
+        if !capacities.is_empty() {
+            let total: u64 = capacities.iter().sum();
+            return format!("TOTAL RAM: {} GB\nModules: {:?} GB each", total, capacities);
+        }
+        // Last resort: return original truncated
+        truncate_output(text, 2000)
+    } else {
+        format!("{}{}", summary, result)
+    }
+}
+
+/// Extract essential computer system info
+fn extract_comp_system_essentials(text: &str) -> String {
+    let key_fields = ["Manufacturer", "Model", "SystemType", "TotalPhysicalMemory", "Name", "Domain"];
+    extract_key_fields(text, &key_fields)
+}
+
+/// Extract essential processor info
+fn extract_processor_essentials(text: &str) -> String {
+    let key_fields = ["Name", "NumberOfCores", "NumberOfLogicalProcessors", "MaxClockSpeed", "Architecture", "Manufacturer"];
+    extract_key_fields(text, &key_fields)
+}
+
+/// Extract essential disk info
+fn extract_disk_essentials(text: &str) -> String {
+    let key_fields = ["DeviceID", "Size", "FreeSpace", "FileSystem", "VolumeName", "DriveType"];
+    extract_key_fields(text, &key_fields)
+}
+
+/// Generic helper to extract key fields from WMI output
+fn extract_key_fields(text: &str, key_fields: &[&str]) -> String {
+    let mut result = Vec::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        for &field in key_fields {
+            if line.starts_with(field) {
+                if let Some(value) = line.split(':').nth(1).or_else(|| line.split('=').nth(1)) {
+                    let value = value.trim();
+                    if !value.is_empty() && value != "N/A" {
+                        result.push(format!("{}: {}", field, value));
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    if result.is_empty() {
+        truncate_output(text, 2000)
+    } else {
+        result.join("\n")
     }
 }
 
@@ -894,7 +1058,7 @@ fn suggest_diagnostics_for_question(question: &str) -> Vec<&'static str> {
 
     // Memory/RAM questions
     if question.contains("memory") || question.contains("ram") || question.contains("gb") {
-        suggestions.extend(["physical_memory", "comp_system"]);
+        suggestions.extend(["physical_memory", "systeminfo", "comp_system"]);
     }
 
     // Storage questions
@@ -1019,8 +1183,9 @@ Select 3-6 diagnostics to answer this question. Output ONLY a JSON array. Exampl
 
         match crate::diagnostics::run_diagnostic_task_sync(task_id) {
             Ok(result) => {
-                // Truncate individual outputs
-                let truncated = truncate_output(&result.output, MAX_OUTPUT_CHARS);
+                // Smart extract key fields, then truncate if still too long
+                let extracted = smart_extract(task_id, &result.output);
+                let truncated = truncate_output(&extracted, MAX_OUTPUT_CHARS);
                 diagnostic_results.push_str(&format!("[{}]\n{}\n\n", task_id, truncated));
                 diagnostics_run.push(task_id.clone());
             }
@@ -1073,7 +1238,9 @@ async fn run_with_default_diagnostics(prompt: &str) -> Result<PhiSilicaAnalysisR
 
     for task_id in &default_diagnostics {
         if let Ok(result) = crate::diagnostics::run_diagnostic_task_sync(task_id) {
-            let truncated = truncate_output(&result.output, MAX_OUTPUT_CHARS);
+            // Smart extract key fields, then truncate if still too long
+            let extracted = smart_extract(task_id, &result.output);
+            let truncated = truncate_output(&extracted, MAX_OUTPUT_CHARS);
             diagnostic_results.push_str(&format!("[{}]\n{}\n\n", task_id, truncated));
             diagnostics_run.push(task_id.to_string());
         }
