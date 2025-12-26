@@ -128,10 +128,10 @@ pub fn get_user_preference() -> AIProviderPreference {
 
 /// Set user preference
 pub fn set_user_preference(pref: AIProviderPreference) {
-    if let Some(mutex) = USER_PREFERENCE.get() {
-        if let Ok(mut p) = mutex.lock() {
-            *p = pref;
-        }
+    // Use get_or_init to ensure the mutex is initialized before setting
+    let mutex = USER_PREFERENCE.get_or_init(|| std::sync::Mutex::new(AIProviderPreference::Auto));
+    if let Ok(mut p) = mutex.lock() {
+        *p = pref;
     }
 }
 
