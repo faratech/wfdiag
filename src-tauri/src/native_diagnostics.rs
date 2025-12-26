@@ -404,6 +404,17 @@ impl NativeDiagnostics {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
 
+                    // Convert operational status to text (0=Unknown, 1=Other, 2=OK, 3=Degraded, etc.)
+                    let operational_str = match operational_status {
+                        2 => "OK",
+                        3 => { all_healthy = false; "Degraded" },
+                        4 => { all_healthy = false; "Stressed" },
+                        5 => { all_healthy = false; "Predictive Failure" },
+                        6 => { all_healthy = false; "Error" },
+                        _ => "Unknown"
+                    };
+                    disk_info.insert("OperationalStatusText".to_string(), json!(operational_str));
+
                     let health_str = match health_status {
                         0 => "Healthy",
                         1 => { all_healthy = false; "Warning" },
@@ -1191,7 +1202,7 @@ impl NativeDiagnostics {
     pub fn get_scheduled_tasks(&self) -> Result<Value> {
         use windows::core::BSTR;
         use windows::Win32::System::TaskScheduler::{
-            ITaskService, TaskScheduler, ITaskFolder, IRegisteredTaskCollection,
+            ITaskService, TaskScheduler, ITaskFolder,
             TASK_STATE_DISABLED, TASK_STATE_QUEUED, TASK_STATE_READY, TASK_STATE_RUNNING,
         };
         use windows::Win32::System::Com::{

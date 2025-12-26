@@ -435,6 +435,8 @@ fn run_command(cmd: &str, args: &[&str]) -> TaskResult {
     }
 }
 
+/// PowerShell execution helper - used by tasks that need PowerShell scripts
+#[allow(dead_code)] // Fallback for native implementations
 fn run_powershell(script: &str) -> TaskResult {
     // Use secure PowerShell execution
     let executor = crate::security::SecureCommandExecutor::new();
@@ -522,6 +524,8 @@ async fn run_dxdiag() -> TaskResult {
     }
 }
 
+/// Event log retrieval helper - fallback for native implementations
+#[allow(dead_code)] // Fallback for native implementations
 fn run_event_logs() -> TaskResult {
     let mut output = String::new();
     let mut has_error = false;

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 struct CacheEntry {
     value: String,
     created_at: Instant,
+    #[allow(dead_code)] // Tracked for potential future analytics
     access_count: u32,
 }
 

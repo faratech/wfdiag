@@ -142,6 +142,7 @@ impl SecureCommandExecutor {
     }
 
     /// Validate PowerShell scripts against known safe patterns
+    #[allow(dead_code)] // Used by fallback diagnostics
     pub fn execute_powershell_script(&self, script: &str) -> Result<std::process::Output> {
         // Validate PowerShell script for safety
         self.validate_powershell_script(script)?;
@@ -224,6 +225,7 @@ impl SecureCommandExecutor {
         }
     }
 
+    #[allow(dead_code)] // Used by execute_powershell_script
     fn validate_powershell_script(&self, script: &str) -> Result<()> {
         // Whitelist of allowed PowerShell commands for diagnostics
         let allowed_cmdlets = [

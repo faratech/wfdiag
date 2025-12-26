@@ -1,7 +1,7 @@
 //! Standalone debug binary to test NPU detection and utilization
 //! Run with: cargo run --bin debug_diagnostics --target aarch64-pc-windows-msvc
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 fn main() {

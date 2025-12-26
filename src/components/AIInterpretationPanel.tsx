@@ -203,7 +203,7 @@ export const AIInterpretationPanel: React.FC<AIInterpretationPanelProps> = ({
         </div>
         <div className={styles.error}>
           <ErrorCircle16Regular />
-          <Text>Analysis failed. Click to retry.</Text>
+          <Text>{error || 'Analysis failed. Click to retry.'}</Text>
         </div>
       </div>
     )
