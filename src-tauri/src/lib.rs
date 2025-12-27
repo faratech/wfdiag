@@ -64,7 +64,7 @@ pub struct AppSettings {
     // AI settings
     #[serde(default = "default_true")]
     pub ai_enabled: bool,
-    #[serde(default = "default_ai_provider")]
+    #[serde(default = "default_ai_provider", rename = "preferredAIProvider")]
     pub preferred_ai_provider: String,
     // API key - stored in keyring, included in frontend response
     #[serde(default)]
@@ -138,6 +138,15 @@ async fn save_settings(settings: AppSettings) -> Result<(), String> {
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
     std::fs::write(&path, json)
         .map_err(|e| format!("Failed to write settings file: {}", e))?;
+    
+    // Sync AI preference to in-memory state
+    let pref = match settings.preferred_ai_provider.to_lowercase().as_str() {
+        "openai" => ai_service::AIProviderPreference::OpenAI,
+        "phi_silica" | "phisilica" => ai_service::AIProviderPreference::PhiSilica,
+        _ => ai_service::AIProviderPreference::Auto,
+    };
+    ai_service::set_user_preference(pref);
+
     println!("Settings saved to {:?}", path);
     Ok(())
 }
@@ -155,6 +164,14 @@ async fn load_settings() -> Result<AppSettings, String> {
         serde_json::from_str(&json)
             .map_err(|e| format!("Failed to parse settings: {}", e))?
     };
+
+    // Sync loaded AI preference to in-memory state
+    let pref = match settings.preferred_ai_provider.to_lowercase().as_str() {
+        "openai" => ai_service::AIProviderPreference::OpenAI,
+        "phi_silica" | "phisilica" => ai_service::AIProviderPreference::PhiSilica,
+        _ => ai_service::AIProviderPreference::Auto,
+    };
+    ai_service::set_user_preference(pref);
 
     // Load API key from keyring and include in response
     if let Some(api_key) = load_api_key_internal().await {

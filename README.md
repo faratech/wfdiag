@@ -1,7 +1,7 @@
-# WF Diagnostics v2.1.7 - WindowsForum Diagnostic Tool
+# WF Diagnostics v2.1.8 - WindowsForum Diagnostic Tool
 
 [![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC_BY--NC--ND_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
-[![Version](https://img.shields.io/badge/version-2.1.7-blue.svg)](https://github.com/faratech/wfdiag/releases)
+[![Version](https://img.shields.io/badge/version-2.1.8-blue.svg)](https://github.com/faratech/wfdiag/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightblue.svg)](https://github.com/faratech/wfdiag)
 [![Security](https://img.shields.io/badge/security-hardened-green.svg)](https://github.com/faratech/wfdiag)
 [![AI](https://img.shields.io/badge/AI-Hybrid-purple.svg)](https://github.com/faratech/wfdiag)
@@ -12,7 +12,7 @@ A **security-hardened**, modern diagnostic tool built with **Tauri v2** and **Re
 
 ### **Core Capabilities**
 - **38+ Diagnostic Tasks** across 8 categories (System, Hardware, Storage, Network, etc.)
-- **Real-time System Monitoring** with live CPU, memory, disk, and network visualization
+- **Real-time System Monitoring** with live CPU, memory, disk, and network visualization (Non-blocking)
 - **Encrypted Data Storage** using AES-256-GCM with machine-specific keys
 - **Automated Issue Detection** identifies critical problems (low disk space, firewall disabled, etc.)
 - **One-Click Fixes** for common system issues
@@ -137,7 +137,14 @@ The tool employs a **Hybrid AI Strategy**:
 
 ## 🔄 Version History
 
-### **v2.1.7 (Current) - Hybrid AI & Remediation**
+### **v2.1.8 (Current) - Performance & Accuracy Improvements**
+- ✅ **Non-blocking System Monitor**: Decoupled slow polling operations (Disk, NPU) for instant UI responsiveness.
+- ✅ **Network Rate Fix**: Corrected transfer rate calculation to eliminate spikes during startup.
+- ✅ ✅ **Accurate Swap Metrics**: Switched to native PDH counters for true paging file utilization.
+- ✅ **Settings Persistence**: Resolved issue with AI provider preference resetting to "Auto".
+- ✅ **UI Polishing**: Enhanced network charts with simultaneous Upload/Download tooltips.
+
+### **v2.1.7 - Hybrid AI & Remediation**
 - ✅ **Hybrid AI Engine**: Integration of local Phi Silica models alongside OpenAI.
 - ✅ **Issue Detector**: Automated identification of common system problems.
 - ✅ **Auto-Fixer**: One-click remediation for supported issues.

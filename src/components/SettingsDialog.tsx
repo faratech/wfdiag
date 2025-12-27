@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import {
   Dialog,
@@ -121,6 +121,16 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
     preferredAIProvider: 'auto',
     ...initialSettings
   })
+
+  // Sync local state with props when dialog opens or props change
+  useEffect(() => {
+    if (open) {
+      setSettings(prev => ({
+        ...prev,
+        ...initialSettings
+      }))
+    }
+  }, [open, initialSettings])
 
   const handleSave = () => {
     onSave?.(settings)
