@@ -195,17 +195,7 @@ def main():
     if update_appx_manifest(script_dir / 'AppxManifest.xml', new_version, dry_run):
         success_count += 1
 
-    # 7. src/App.tsx - version="X.Y.Z"
-    total_count += 1
-    if update_tsx_file(
-        script_dir / 'src' / 'App.tsx',
-        new_version,
-        [(r'version="[\d.]+"', 'version="VERSION"')],
-        dry_run
-    ):
-        success_count += 1
-
-    # 8. src/components/AboutDialog.tsx - Version X.Y.Z
+    # 7. src/components/AboutDialog.tsx - Version X.Y.Z
     total_count += 1
     if update_tsx_file(
         script_dir / 'src' / 'components' / 'AboutDialog.tsx',
@@ -215,7 +205,7 @@ def main():
     ):
         success_count += 1
 
-    # 9. src/components/NavigationHeader.tsx - version = 'X.Y.Z'
+    # 8. src/components/NavigationHeader.tsx - version = 'X.Y.Z'
     total_count += 1
     if update_tsx_file(
         script_dir / 'src' / 'components' / 'NavigationHeader.tsx',
@@ -225,12 +215,26 @@ def main():
     ):
         success_count += 1
 
-    # 10. src/components/NavRail.tsx - v2.1.X in Caption1
+    # 9. src/components/NavRail.tsx - v2.1.X in Caption1
     total_count += 1
     if update_tsx_file(
         script_dir / 'src' / 'components' / 'NavRail.tsx',
         new_version,
         [(r'>v[\d.]+<', f'>vVERSION<')],
+        dry_run
+    ):
+        success_count += 1
+
+    # 10. README.md
+    total_count += 1
+    if update_tsx_file(
+        script_dir / 'README.md',
+        new_version,
+        [
+            (r'# WF Diagnostics v[\d.]+', '# WF Diagnostics vVERSION'),
+            (r'badge/version-[\d.]+-blue\.svg', 'badge/version-VERSION-blue.svg'),
+            (r'v[\d.]+ \(Current\)', 'vVERSION (Current)')
+        ],
         dry_run
     ):
         success_count += 1

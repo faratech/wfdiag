@@ -241,6 +241,23 @@ struct CachedNpuUtilization {
     last_update: Instant,
 }
 
+#[derive(Clone)]
+struct FastStats {
+    cpu_utilization: f32,
+    per_cpu_utilization: Vec<f32>,
+    cpu_frequency: u64,
+    memory_total: u64,
+    memory_used: u64,
+    memory_available: u64,
+    swap_total: u64,
+    swap_used: u64,
+    network_upload_kb: f64,
+    network_download_kb: f64,
+    top_processes: Vec<ProcessInfo>,
+    disk_read_bytes: u64,
+    disk_write_bytes: u64,
+}
+
 // ============================================================================
 // SYSTEM MONITOR
 // ============================================================================
@@ -248,18 +265,29 @@ struct CachedNpuUtilization {
 type NetworkBytes = HashMap<String, (u64, u64)>;
 type ProcessCpuTimes = HashMap<u32, (u64, u64, Instant)>;
 
+struct NetworkState {
+    bytes: NetworkBytes,
+    last_update: Instant,
+}
+
 pub struct SystemMonitor {
     app_handle: AppHandle,
     monitoring: Arc<Mutex<bool>>,
     pdh_state: Arc<std::sync::Mutex<PdhState>>,
-    previous_network: Arc<Mutex<NetworkBytes>>,
+    previous_network: Arc<Mutex<NetworkState>>,
     previous_processes: Arc<Mutex<ProcessCpuTimes>>,
     update_interval: Arc<Mutex<Duration>>,
     // Cached slow-changing data
     cached_disks: Arc<Mutex<Option<CachedDiskInfo>>>,
     cached_npu_util: Arc<Mutex<Option<CachedNpuUtilization>>>,
+    // Cached fast-changing data
+    cached_fast_stats: Arc<Mutex<Option<FastStats>>>,
     // Tick counter for tiered refresh
     tick_count: Arc<AtomicU64>,
+    // Async update flags
+    disk_update_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    npu_update_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    fast_update_in_progress: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SystemMonitor {
@@ -317,12 +345,19 @@ impl SystemMonitor {
             app_handle,
             monitoring: Arc::new(Mutex::new(false)),
             pdh_state: Arc::new(std::sync::Mutex::new(PdhState::default())),
-            previous_network: Arc::new(Mutex::new(HashMap::new())),
+            previous_network: Arc::new(Mutex::new(NetworkState {
+                bytes: HashMap::new(),
+                last_update: Instant::now(),
+            })),
             previous_processes: Arc::new(Mutex::new(HashMap::new())),
             update_interval: Arc::new(Mutex::new(Duration::from_secs(1))),
             cached_disks: Arc::new(Mutex::new(None)),
             cached_npu_util: Arc::new(Mutex::new(None)),
+            cached_fast_stats: Arc::new(Mutex::new(None)),
             tick_count: Arc::new(AtomicU64::new(0)),
+            disk_update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            npu_update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fast_update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -339,7 +374,11 @@ impl SystemMonitor {
         let update_interval = Arc::clone(&self.update_interval);
         let cached_disks = Arc::clone(&self.cached_disks);
         let cached_npu_util = Arc::clone(&self.cached_npu_util);
+        let cached_fast_stats = Arc::clone(&self.cached_fast_stats);
         let tick_count = Arc::clone(&self.tick_count);
+        let disk_update_in_progress = Arc::clone(&self.disk_update_in_progress);
+        let npu_update_in_progress = Arc::clone(&self.npu_update_in_progress);
+        let fast_update_in_progress = Arc::clone(&self.fast_update_in_progress);
 
         tokio::spawn(async move {
             let interval_duration = *update_interval.lock().await;
@@ -362,6 +401,10 @@ impl SystemMonitor {
                     &previous_processes,
                     &cached_disks,
                     &cached_npu_util,
+                    &cached_fast_stats,
+                    &disk_update_in_progress,
+                    &npu_update_in_progress,
+                    &fast_update_in_progress,
                     tick,
                 )
                 .await;
@@ -384,6 +427,10 @@ impl SystemMonitor {
             &self.previous_processes,
             &self.cached_disks,
             &self.cached_npu_util,
+            &self.cached_fast_stats,
+            &self.disk_update_in_progress,
+            &self.npu_update_in_progress,
+            &self.fast_update_in_progress,
             tick,
         )
         .await
@@ -459,37 +506,40 @@ pub fn initialize_static_caches() {
 
 async fn collect_stats_optimized(
     pdh_state: &Arc<std::sync::Mutex<PdhState>>,
-    previous_network: &Arc<Mutex<NetworkBytes>>,
+    previous_network: &Arc<Mutex<NetworkState>>,
     previous_processes: &Arc<Mutex<ProcessCpuTimes>>,
     cached_disks: &Arc<Mutex<Option<CachedDiskInfo>>>,
     cached_npu_util: &Arc<Mutex<Option<CachedNpuUtilization>>>,
+    cached_fast_stats: &Arc<Mutex<Option<FastStats>>>,
+    disk_update_in_progress: &Arc<std::sync::atomic::AtomicBool>,
+    npu_update_in_progress: &Arc<std::sync::atomic::AtomicBool>,
+    fast_update_in_progress: &Arc<std::sync::atomic::AtomicBool>,
     tick: u64,
 ) -> SystemStats {
-    // FAST PATH: CPU, memory, network (every tick)
-    let cpu_count = *CPU_COUNT.get_or_init(|| unsafe {
-        let mut sys_info = SYSTEM_INFO::default();
-        GetSystemInfo(&mut sys_info);
-        sys_info.dwNumberOfProcessors as usize
-    });
+    // 1. Get Fast Stats (CPU, Mem, Net, Proc) via non-blocking update
+    let fast_stats = get_fast_stats_cached(
+        pdh_state,
+        previous_network,
+        previous_processes,
+        cached_fast_stats,
+        fast_update_in_progress,
+    )
+    .await;
 
-    let (cpu_utilization, per_cpu_utilization) = get_cpu_utilization_pdh(pdh_state, cpu_count);
-    let cpu_frequency = *CPU_FREQUENCY.get_or_init(get_cpu_frequency_uncached);
-
-    // Memory (very fast, no caching needed)
-    let (memory_total, memory_used, memory_available, swap_total, swap_used) = get_memory_info();
-    let memory_utilization = if memory_total > 0 {
-        (memory_used as f32 / memory_total as f32) * 100.0
+    // Calculate derived metrics from fast stats (or use defaults if empty)
+    let memory_utilization = if fast_stats.memory_total > 0 {
+        (fast_stats.memory_used as f32 / fast_stats.memory_total as f32) * 100.0
     } else {
         0.0
     };
-    let swap_utilization = if swap_total > 0 {
-        (swap_used as f32 / swap_total as f32) * 100.0
+    let swap_utilization = if fast_stats.swap_total > 0 {
+        (fast_stats.swap_used as f32 / fast_stats.swap_total as f32) * 100.0
     } else {
         0.0
     };
 
-    // MEDIUM PATH: Disk space (every 5 ticks / 5 seconds)
-    let disks = get_disks_cached(cached_disks, tick).await;
+    // 2. Get Disk Stats (Non-blocking)
+    let disks = get_disks_cached(cached_disks, disk_update_in_progress, tick).await;
     let total_disk: u64 = disks
         .iter()
         .map(|d| (d.total_gb * 1024.0 * 1024.0 * 1024.0) as u64)
@@ -504,51 +554,134 @@ async fn collect_stats_optimized(
         0.0
     };
 
-    // Network (every tick, uses delta calculation)
-    let (network_upload_kb, network_download_kb) = get_network_stats(previous_network).await;
-
-    // Processes (every tick, uses optimized buffer)
-    let (top_processes, disk_read_bytes, disk_write_bytes) =
-        get_top_processes_optimized(memory_total, previous_processes).await;
-
-    // SLOW PATH: NPU utilization (every 5 ticks)
-    // Non-blocking: use cached NPU info if available
-    let (npu_available, npu_name) = NPU_INFO
-        .get()
-        .cloned()
-        .unwrap_or((false, None));
+    // 3. Get NPU Stats (Non-blocking)
+    let (npu_available, npu_name) = NPU_INFO.get().cloned().unwrap_or((false, None));
     let npu_utilization = if npu_available {
-        get_npu_util_cached(cached_npu_util, tick).await
+        get_npu_util_cached(cached_npu_util, npu_update_in_progress, tick).await
     } else {
         None
     };
 
     SystemStats {
-        cpu_utilization,
-        per_cpu_utilization,
-        cpu_frequency,
-        memory_total_gb: memory_total as f64 / (1024.0 * 1024.0 * 1024.0),
-        memory_used_gb: memory_used as f64 / (1024.0 * 1024.0 * 1024.0),
-        memory_available_gb: memory_available as f64 / (1024.0 * 1024.0 * 1024.0),
+        cpu_utilization: fast_stats.cpu_utilization,
+        per_cpu_utilization: fast_stats.per_cpu_utilization,
+        cpu_frequency: fast_stats.cpu_frequency,
+        memory_total_gb: fast_stats.memory_total as f64 / (1024.0 * 1024.0 * 1024.0),
+        memory_used_gb: fast_stats.memory_used as f64 / (1024.0 * 1024.0 * 1024.0),
+        memory_available_gb: fast_stats.memory_available as f64 / (1024.0 * 1024.0 * 1024.0),
         memory_utilization,
-        swap_total_gb: swap_total as f64 / (1024.0 * 1024.0 * 1024.0),
-        swap_used_gb: swap_used as f64 / (1024.0 * 1024.0 * 1024.0),
+        swap_total_gb: fast_stats.swap_total as f64 / (1024.0 * 1024.0 * 1024.0),
+        swap_used_gb: fast_stats.swap_used as f64 / (1024.0 * 1024.0 * 1024.0),
         swap_utilization,
         disk_utilization,
-        disk_read_bytes,
-        disk_write_bytes,
+        disk_read_bytes: fast_stats.disk_read_bytes,
+        disk_write_bytes: fast_stats.disk_write_bytes,
         disks,
-        network_upload_kb,
-        network_download_kb,
+        network_upload_kb: fast_stats.network_upload_kb,
+        network_download_kb: fast_stats.network_download_kb,
         npu_available,
         npu_name,
         npu_utilization,
-        top_processes,
+        top_processes: fast_stats.top_processes,
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0),
     }
+}
+
+async fn get_fast_stats_cached(
+    pdh_state: &Arc<std::sync::Mutex<PdhState>>,
+    previous_network: &Arc<Mutex<NetworkState>>,
+    previous_processes: &Arc<Mutex<ProcessCpuTimes>>,
+    cached: &Arc<Mutex<Option<FastStats>>>,
+    update_in_progress: &Arc<std::sync::atomic::AtomicBool>,
+) -> FastStats {
+    // If no update is in progress, spawn one
+    if !update_in_progress.swap(true, std::sync::atomic::Ordering::Acquire) {
+        let pdh_clone = Arc::clone(pdh_state);
+        let net_clone = Arc::clone(previous_network);
+        let proc_clone = Arc::clone(previous_processes);
+        let cached_clone = Arc::clone(cached);
+        let flag_clone = Arc::clone(update_in_progress);
+
+        tokio::spawn(async move {
+            let stats = tokio::task::spawn_blocking(move || {
+                // 1. CPU & Swap (PDH)
+                let cpu_count = *CPU_COUNT.get_or_init(|| unsafe {
+                    let mut sys_info = SYSTEM_INFO::default();
+                    GetSystemInfo(&mut sys_info);
+                    sys_info.dwNumberOfProcessors as usize
+                });
+                let (cpu_utilization, per_cpu_utilization, swap_utilization) = get_pdh_stats(&pdh_clone, cpu_count);
+                let cpu_frequency = *CPU_FREQUENCY.get_or_init(get_cpu_frequency_uncached);
+
+                // 2. Memory
+                let (memory_total, memory_used, memory_available, swap_total, _) = get_memory_info();
+                
+                // Calculate swap used based on PDH utilization if available
+                let swap_used = if swap_total > 0 {
+                    (swap_total as f32 * (swap_utilization / 100.0)) as u64
+                } else {
+                    0
+                };
+
+                // 3. Network
+                // Need to lock async mutex in blocking context - use block_on
+                let (network_upload_kb, network_download_kb) = tauri::async_runtime::block_on(async {
+                     get_network_stats(&net_clone).await
+                });
+
+                // 4. Processes
+                let (top_processes, disk_read_bytes, disk_write_bytes) = tauri::async_runtime::block_on(async {
+                    get_top_processes_optimized(memory_total, &proc_clone).await
+                });
+
+                FastStats {
+                    cpu_utilization,
+                    per_cpu_utilization,
+                    cpu_frequency,
+                    memory_total,
+                    memory_used,
+                    memory_available,
+                    swap_total,
+                    swap_used,
+                    network_upload_kb,
+                    network_download_kb,
+                    top_processes,
+                    disk_read_bytes,
+                    disk_write_bytes,
+                }
+            })
+            .await
+            .ok();
+
+            if let Some(new_stats) = stats {
+                let mut cache_lock = cached_clone.lock().await;
+                *cache_lock = Some(new_stats);
+            }
+
+            flag_clone.store(false, std::sync::atomic::Ordering::Release);
+        });
+    }
+
+    // Return cached value or default
+    let cache = cached.lock().await;
+    cache.clone().unwrap_or(FastStats {
+        cpu_utilization: 0.0,
+        per_cpu_utilization: Vec::new(),
+        cpu_frequency: 0,
+        memory_total: 0,
+        memory_used: 0,
+        memory_available: 0,
+        swap_total: 0,
+        swap_used: 0,
+        network_upload_kb: 0.0,
+        network_download_kb: 0.0,
+        top_processes: Vec::new(),
+        disk_read_bytes: 0,
+        disk_write_bytes: 0,
+    })
 }
 
 // ============================================================================
@@ -557,60 +690,98 @@ async fn collect_stats_optimized(
 
 async fn get_disks_cached(
     cached: &Arc<Mutex<Option<CachedDiskInfo>>>,
+    update_in_progress: &Arc<std::sync::atomic::AtomicBool>,
     tick: u64,
 ) -> Vec<DiskInfo> {
-    let mut cache = cached.lock().await;
+    let cache_guard = cached.lock().await;
 
     // Refresh every 5 ticks (5 seconds at 1Hz)
-    let should_refresh = match &*cache {
+    let should_refresh = match &*cache_guard {
         Some(c) => tick.is_multiple_of(5) || c.last_update.elapsed() > Duration::from_secs(5),
         None => true,
     };
 
     if should_refresh {
-        let disks = get_disk_info_optimized();
-        *cache = Some(CachedDiskInfo {
-            disks: disks.clone(),
-            last_update: Instant::now(),
-        });
-        disks
-    } else {
-        cache.as_ref().unwrap().disks.clone()
+        // Check if update is already in progress
+        if !update_in_progress.swap(true, std::sync::atomic::Ordering::Acquire) {
+            // No update in progress, start one in background
+            let cached_clone = Arc::clone(cached);
+            let update_flag = Arc::clone(update_in_progress);
+            
+            tokio::spawn(async move {
+                // Run heavy IO in blocking thread
+                let disks = tokio::task::spawn_blocking(get_disk_info_optimized)
+                    .await
+                    .unwrap_or_default();
+                
+                // Update cache
+                let mut cache_lock = cached_clone.lock().await;
+                *cache_lock = Some(CachedDiskInfo {
+                    disks,
+                    last_update: Instant::now(),
+                });
+                
+                // Release flag
+                update_flag.store(false, std::sync::atomic::Ordering::Release);
+            });
+        }
+    }
+
+    // Return current cache or empty if not yet initialized
+    match &*cache_guard {
+        Some(c) => c.disks.clone(),
+        None => Vec::new(),
     }
 }
 
 async fn get_npu_util_cached(
     cached: &Arc<Mutex<Option<CachedNpuUtilization>>>,
+    update_in_progress: &Arc<std::sync::atomic::AtomicBool>,
     tick: u64,
 ) -> Option<f32> {
-    let mut cache = cached.lock().await;
+    let cache_guard = cached.lock().await;
 
     // Refresh every 5 ticks
-    let should_refresh = match &*cache {
+    let should_refresh = match &*cache_guard {
         Some(c) => tick.is_multiple_of(5) || c.last_update.elapsed() > Duration::from_secs(5),
         None => true,
     };
 
     if should_refresh {
-        let util = get_npu_utilization();
-        *cache = Some(CachedNpuUtilization {
-            utilization: util,
-            last_update: Instant::now(),
-        });
-        util
-    } else {
-        cache.as_ref().unwrap().utilization
+        if !update_in_progress.swap(true, std::sync::atomic::Ordering::Acquire) {
+            let cached_clone = Arc::clone(cached);
+            let update_flag = Arc::clone(update_in_progress);
+
+            tokio::spawn(async move {
+                let util = tokio::task::spawn_blocking(get_npu_utilization)
+                    .await
+                    .unwrap_or(None);
+                
+                let mut cache_lock = cached_clone.lock().await;
+                *cache_lock = Some(CachedNpuUtilization {
+                    utilization: util,
+                    last_update: Instant::now(),
+                });
+                
+                update_flag.store(false, std::sync::atomic::Ordering::Release);
+            });
+        }
+    }
+
+    match &*cache_guard {
+        Some(c) => c.utilization,
+        None => None,
     }
 }
 
 // ============================================================================
-// CPU MONITORING (PDH)
+// CPU & SWAP MONITORING (PDH)
 // ============================================================================
 
-fn get_cpu_utilization_pdh(
+fn get_pdh_stats(
     pdh_state: &Arc<std::sync::Mutex<PdhState>>,
     cpu_count: usize,
-) -> (f32, Vec<f32>) {
+) -> (f32, Vec<f32>, f32) {
     let mut state = pdh_state.lock().unwrap();
 
     if !state.initialized {
@@ -618,11 +789,12 @@ fn get_cpu_utilization_pdh(
             let mut query = PDH_HQUERY::default();
             let status = PdhOpenQueryW(PCWSTR::null(), 0, &mut query);
             if status != 0 {
-                return (0.0, vec![0.0; cpu_count]);
+                return (0.0, vec![0.0; cpu_count], 0.0);
             }
             state.query = SendPtr(query.0);
 
-            state.counters.reserve(cpu_count);
+            // CPU Counters (Indices 0..cpu_count-1)
+            state.counters.reserve(cpu_count + 1);
             for i in 0..cpu_count {
                 let path = format!("\\Processor({})\\% Processor Time\0", i);
                 let path_wide: Vec<u16> = path.encode_utf16().collect();
@@ -631,7 +803,21 @@ fn get_cpu_utilization_pdh(
                     PdhAddEnglishCounterW(query, PCWSTR(path_wide.as_ptr()), 0, &mut counter);
                 if status == 0 {
                     state.counters.push(SendPtr(counter.0));
+                } else {
+                    state.counters.push(SendPtr(std::ptr::null_mut()));
                 }
+            }
+
+            // Swap Counter (Index cpu_count)
+            // \Paging File(_Total)\% Usage
+            let path_wide: Vec<u16> = "\\Paging File(_Total)\\% Usage\0".encode_utf16().collect();
+            let mut counter = PDH_HCOUNTER::default();
+            let status =
+                PdhAddEnglishCounterW(query, PCWSTR(path_wide.as_ptr()), 0, &mut counter);
+            if status == 0 {
+                state.counters.push(SendPtr(counter.0));
+            } else {
+                state.counters.push(SendPtr(std::ptr::null_mut()));
             }
 
             state.initialized = true;
@@ -641,22 +827,31 @@ fn get_cpu_utilization_pdh(
     unsafe {
         let status = PdhCollectQueryData(state.query.as_query());
         if status != 0 {
-            return (0.0, vec![0.0; cpu_count]);
+            return (0.0, vec![0.0; cpu_count], 0.0);
         }
     }
 
     if !state.first_sample_done {
         state.first_sample_done = true;
-        return (0.0, vec![0.0; cpu_count]);
+        return (0.0, vec![0.0; cpu_count], 0.0);
     }
 
     let mut per_cpu = Vec::with_capacity(cpu_count);
-    let mut total = 0.0f32;
+    let mut total_cpu = 0.0f32;
 
-    for counter in &state.counters {
+    // Process CPU counters
+    for i in 0..cpu_count {
+        if i >= state.counters.len() { break; }
+        
+        let counter_ptr = state.counters[i].0;
+        if counter_ptr.is_null() {
+            per_cpu.push(0.0);
+            continue;
+        }
+
         let mut value = PDH_FMT_COUNTERVALUE::default();
         let status = unsafe {
-            PdhGetFormattedCounterValue(counter.as_counter(), PDH_FMT_DOUBLE, None, &mut value)
+            PdhGetFormattedCounterValue(PDH_HCOUNTER(counter_ptr), PDH_FMT_DOUBLE, None, &mut value)
         };
         let cpu_pct = if status == 0 && value.CStatus == PDH_CSTATUS_VALID_DATA {
             unsafe { (value.Anonymous.doubleValue as f32).clamp(0.0, 100.0) }
@@ -664,16 +859,36 @@ fn get_cpu_utilization_pdh(
             0.0
         };
         per_cpu.push(cpu_pct);
-        total += cpu_pct;
+        total_cpu += cpu_pct;
     }
 
-    let avg = if !per_cpu.is_empty() {
-        total / per_cpu.len() as f32
+    let avg_cpu = if !per_cpu.is_empty() {
+        total_cpu / per_cpu.len() as f32
     } else {
         0.0
     };
 
-    (avg, per_cpu)
+    // Process Swap counter (last element)
+    let swap_util = if state.counters.len() > cpu_count {
+        let counter_ptr = state.counters[cpu_count].0;
+        if !counter_ptr.is_null() {
+            let mut value = PDH_FMT_COUNTERVALUE::default();
+            let status = unsafe {
+                PdhGetFormattedCounterValue(PDH_HCOUNTER(counter_ptr), PDH_FMT_DOUBLE, None, &mut value)
+            };
+            if status == 0 && value.CStatus == PDH_CSTATUS_VALID_DATA {
+                unsafe { (value.Anonymous.doubleValue as f32).clamp(0.0, 100.0) }
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    (avg_cpu, per_cpu, swap_util)
 }
 
 fn get_cpu_frequency_uncached() -> u64 {
@@ -860,7 +1075,7 @@ fn get_disk_info_optimized() -> Vec<DiskInfo> {
 // NETWORK
 // ============================================================================
 
-async fn get_network_stats(previous_network: &Arc<Mutex<NetworkBytes>>) -> (f64, f64) {
+async fn get_network_stats(previous_network: &Arc<Mutex<NetworkState>>) -> (f64, f64) {
     let mut current_stats: NetworkBytes = HashMap::new();
 
     unsafe {
@@ -886,21 +1101,33 @@ async fn get_network_stats(previous_network: &Arc<Mutex<NetworkBytes>>) -> (f64,
         }
     }
 
-    let mut prev = previous_network.lock().await;
-    let mut upload_kb = 0.0;
-    let mut download_kb = 0.0;
+    let now = Instant::now();
+    let mut prev_state = previous_network.lock().await;
+    
+    let mut upload_kb_per_sec = 0.0;
+    let mut download_kb_per_sec = 0.0;
+    
+    // Calculate time elapsed since last update (in seconds)
+    let elapsed = now.duration_since(prev_state.last_update).as_secs_f64();
+    
+    // Update timestamp
+    prev_state.last_update = now;
 
-    if !prev.is_empty() {
+    if !prev_state.bytes.is_empty() && elapsed > 0.001 { // Avoid division by zero
         for (interface, (tx, rx)) in &current_stats {
-            if let Some((prev_tx, prev_rx)) = prev.get(interface) {
-                upload_kb += tx.saturating_sub(*prev_tx) as f64 / 1024.0;
-                download_kb += rx.saturating_sub(*prev_rx) as f64 / 1024.0;
+            if let Some((prev_tx, prev_rx)) = prev_state.bytes.get(interface) {
+                let tx_delta = tx.saturating_sub(*prev_tx) as f64;
+                let rx_delta = rx.saturating_sub(*prev_rx) as f64;
+                
+                // Calculate rate: (Total KB delta) / (Seconds elapsed)
+                upload_kb_per_sec += (tx_delta / 1024.0) / elapsed;
+                download_kb_per_sec += (rx_delta / 1024.0) / elapsed;
             }
         }
     }
 
-    *prev = current_stats;
-    (upload_kb, download_kb)
+    prev_state.bytes = current_stats;
+    (upload_kb_per_sec, download_kb_per_sec)
 }
 
 // ============================================================================

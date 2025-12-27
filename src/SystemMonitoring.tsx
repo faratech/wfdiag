@@ -372,6 +372,10 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
   const chartOptions = {
     responsive: true,
     maintainAspectRatio: false,
+    interaction: {
+      mode: 'index' as const,
+      intersect: false,
+    },
     plugins: {
       legend: {
         display: true,
