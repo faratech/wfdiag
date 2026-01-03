@@ -2,20 +2,20 @@
 
 mod architecture;
 mod diagnostics;
-mod native_monitor;
+#[cfg(windows)]
+mod dpapi;
+mod encrypted_storage;
+mod issue_detector;
+mod issue_fixer;
 mod native_diagnostics;
+mod native_monitor;
 mod openai_integration;
 mod results_storage;
+mod security;
 mod timestamp;
 mod windows_native;
 #[cfg(windows)]
 mod wmi_native;
-mod security;
-mod issue_detector;
-mod issue_fixer;
-mod encrypted_storage;
-#[cfg(windows)]
-mod dpapi;
 
 // Phi Silica wrapper (uses windows-bindgen generated bindings)
 mod phi_silica;
@@ -23,21 +23,21 @@ mod phi_silica;
 mod windows_ai_bindings;
 
 // Unified AI service layer
-mod ai_service;
 mod ai_cache;
 mod ai_prompts;
+mod ai_service;
 
 use crate::diagnostics::{DiagnosticTask, TaskResult};
 use crate::issue_detector::Issue;
 use native_monitor::{NetworkConnection, SystemMonitor};
+use results_storage::{ComparisonResult, ScanRecord, ScanStorage, ScanSummary};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::Emitter;
 use tauri::State;
 use tokio::sync::Mutex;
-use results_storage::{ScanStorage, ScanRecord, ScanSummary, ComparisonResult};
 
 /// Application settings that persist across sessions
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -71,17 +71,29 @@ pub struct AppSettings {
     pub open_ai_api_key: Option<String>,
 }
 
-fn default_max_concurrent() -> u32 { 5 }
-fn default_export_format() -> String { "text".to_string() }
-fn default_theme() -> String { "dark".to_string() }
-fn default_true() -> bool { true }
-fn default_history_limit() -> u32 { 30 }
-fn default_ai_provider() -> String { "auto".to_string() }
+fn default_max_concurrent() -> u32 {
+    5
+}
+fn default_export_format() -> String {
+    "text".to_string()
+}
+fn default_theme() -> String {
+    "dark".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_history_limit() -> u32 {
+    30
+}
+fn default_ai_provider() -> String {
+    "auto".to_string()
+}
 
 /// Get the settings file path
 fn get_settings_path() -> Result<PathBuf, String> {
-    let app_data = dirs::config_dir()
-        .ok_or_else(|| "Could not find config directory".to_string())?;
+    let app_data =
+        dirs::config_dir().ok_or_else(|| "Could not find config directory".to_string())?;
     let settings_dir = app_data.join("com.windowsforum.diagnostics");
 
     // Create directory if it doesn't exist
@@ -136,9 +148,8 @@ async fn save_settings(settings: AppSettings) -> Result<(), String> {
 
     let json = serde_json::to_string_pretty(&settings_for_file)
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
-    std::fs::write(&path, json)
-        .map_err(|e| format!("Failed to write settings file: {}", e))?;
-    
+    std::fs::write(&path, json).map_err(|e| format!("Failed to write settings file: {}", e))?;
+
     // Sync AI preference to in-memory state
     let pref = match settings.preferred_ai_provider.to_lowercase().as_str() {
         "openai" => ai_service::AIProviderPreference::OpenAI,
@@ -161,8 +172,7 @@ async fn load_settings() -> Result<AppSettings, String> {
     } else {
         let json = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read settings file: {}", e))?;
-        serde_json::from_str(&json)
-            .map_err(|e| format!("Failed to parse settings: {}", e))?
+        serde_json::from_str(&json).map_err(|e| format!("Failed to parse settings: {}", e))?
     };
 
     // Sync loaded AI preference to in-memory state
@@ -282,7 +292,9 @@ async fn store_api_key(key: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn load_api_key() -> Result<String, String> {
-    load_api_key_internal().await.ok_or_else(|| "No API key set".to_string())
+    load_api_key_internal()
+        .await
+        .ok_or_else(|| "No API key set".to_string())
 }
 
 /// Internal function for loading API key (used by ai_service)
@@ -318,17 +330,18 @@ async fn clear_api_key() -> Result<(), String> {
     }
 }
 
-
 /// Get detailed Windows version information from registry
 #[cfg(windows)]
 fn get_windows_version_info() -> String {
-    use winreg::enums::HKEY_LOCAL_MACHINE;
     use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
 
     if let Ok(cv_key) = hklm.open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion") {
-        let product_name = cv_key.get_value::<String, _>("ProductName").unwrap_or_else(|_| "Windows".to_string());
+        let product_name = cv_key
+            .get_value::<String, _>("ProductName")
+            .unwrap_or_else(|_| "Windows".to_string());
         let display_version = cv_key.get_value::<String, _>("DisplayVersion").ok();
         let edition_id = cv_key.get_value::<String, _>("EditionID").ok();
         let current_build = cv_key.get_value::<String, _>("CurrentBuild").ok();
@@ -383,7 +396,7 @@ async fn get_system_info() -> Result<SystemInfo, String> {
     let is_admin = {
         use windows::Win32::Foundation::HANDLE;
         use windows::Win32::Security::{
-            GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+            GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
         };
         use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -402,7 +415,8 @@ async fn get_system_info() -> Result<SystemInfo, String> {
                     std::mem::size_of::<TOKEN_ELEVATION>() as u32,
                     &mut ret_len,
                 )
-                .is_ok() {
+                .is_ok()
+                {
                     is_elevated = elevation.TokenIsElevated != 0;
                 }
             }
@@ -432,25 +446,29 @@ async fn start_diagnostics(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     use uuid::Uuid;
-    
+
     // Create consistent scan ID that will be used throughout
     let session_id = format!("scan_{}", Uuid::new_v4().simple());
-    
+
     println!("Starting new diagnostic session: {}", session_id);
-    
+
     // Validate task IDs
     let available_tasks = diagnostics::get_all_tasks();
     let valid_task_ids: Vec<String> = task_ids
         .into_iter()
         .filter(|id| available_tasks.iter().any(|task| task.id == *id))
         .collect();
-    
+
     if valid_task_ids.is_empty() {
         return Err("No valid tasks provided".to_string());
     }
-    
-    println!("Session {} will run {} tasks", session_id, valid_task_ids.len());
-    
+
+    println!(
+        "Session {} will run {} tasks",
+        session_id,
+        valid_task_ids.len()
+    );
+
     let session = DiagnosticSession {
         session_id: session_id.clone(),
         start_time: std::time::SystemTime::now(),
@@ -460,9 +478,9 @@ async fn start_diagnostics(
 
     let mut current = state.current_session.lock().await;
     *current = Some(session);
-    
+
     println!("Diagnostic session {} started successfully", session_id);
-    
+
     Ok(session_id)
 }
 
@@ -625,12 +643,12 @@ async fn export_results(
     if let Some(ref session) = *current {
         // Get all available tasks to map IDs to names
         let all_tasks = diagnostics::get_all_tasks();
-        let task_map: std::collections::HashMap<String, &DiagnosticTask> = 
+        let task_map: std::collections::HashMap<String, &DiagnosticTask> =
             all_tasks.iter().map(|t| (t.id.clone(), t)).collect();
 
         match format.as_str() {
             "json" => {
-                let json = 
+                let json =
                     serde_json::to_string_pretty(&session.results).map_err(|e| e.to_string())?;
                 Ok(json)
             }
@@ -667,7 +685,7 @@ async fn export_results(
 
                                 if result.success {
                                     // Parse and format the output
-                                    if let Ok(parsed) = 
+                                    if let Ok(parsed) =
                                         serde_json::from_str::<serde_json::Value>(&result.output)
                                     {
                                         text.push_str(&format_json_value(&parsed, 1));
@@ -698,7 +716,9 @@ async fn export_results(
                 html.push_str("h2 { color: #93c5fd; margin-top: 30px; }\n");
                 html.push_str(".task { background: #16213e; border-radius: 8px; padding: 15px; margin: 10px 0; border-left: 4px solid #3b82f6; }\n");
                 html.push_str(".task.error { border-left-color: #ef4444; }\n");
-                html.push_str(".task-name { font-weight: bold; color: #60a5fa; margin-bottom: 8px; }\n");
+                html.push_str(
+                    ".task-name { font-weight: bold; color: #60a5fa; margin-bottom: 8px; }\n",
+                );
                 html.push_str(".output { white-space: pre-wrap; font-family: 'Consolas', 'Monaco', monospace; font-size: 13px; background: #0f0f1a; padding: 10px; border-radius: 4px; overflow-x: auto; }\n");
                 html.push_str(".error-msg { color: #f87171; }\n");
                 html.push_str(".meta { color: #9ca3af; font-size: 12px; margin-top: 20px; }\n");
@@ -734,18 +754,26 @@ async fn export_results(
                             if let Some(task) = task_map.get(*task_id) {
                                 let class = if result.success { "task" } else { "task error" };
                                 html.push_str(&format!("<div class=\"{}\">\n", class));
-                                html.push_str(&format!("<div class=\"task-name\">{}</div>\n", html_escape(&task.name)));
+                                html.push_str(&format!(
+                                    "<div class=\"task-name\">{}</div>\n",
+                                    html_escape(&task.name)
+                                ));
 
                                 if result.success {
                                     html.push_str("<div class=\"output\">");
-                                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result.output) {
+                                    if let Ok(parsed) =
+                                        serde_json::from_str::<serde_json::Value>(&result.output)
+                                    {
                                         html.push_str(&html_escape(&format_json_value(&parsed, 0)));
                                     } else {
                                         html.push_str(&html_escape(&result.output));
                                     }
                                     html.push_str("</div>\n");
                                 } else if let Some(error) = &result.error {
-                                    html.push_str(&format!("<div class=\"error-msg\">Error: {}</div>\n", html_escape(error)));
+                                    html.push_str(&format!(
+                                        "<div class=\"error-msg\">Error: {}</div>\n",
+                                        html_escape(error)
+                                    ));
                                 }
 
                                 html.push_str("</div>\n");
@@ -754,7 +782,9 @@ async fn export_results(
                     }
                 }
 
-                html.push_str("<p class=\"meta\">Generated using WindowsForum Diagnostics Tool</p>\n");
+                html.push_str(
+                    "<p class=\"meta\">Generated using WindowsForum Diagnostics Tool</p>\n",
+                );
                 html.push_str("</body>\n</html>");
                 Ok(html)
             }
@@ -809,9 +839,7 @@ async fn get_uptime() -> Result<serde_json::Value, String> {
 #[tauri::command]
 async fn fix_issue(issue_id: String) -> Result<issue_fixer::FixResult, String> {
     let fixer = issue_fixer::IssueFixer::new();
-    fixer.fix_issue(&issue_id)
-        .await
-        .map_err(|e| e.to_string())
+    fixer.fix_issue(&issue_id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -820,15 +848,18 @@ async fn restart_as_admin() -> Result<(), String> {
     {
         use std::env;
         use std::ptr;
-        use windows::core::PCWSTR;
         use windows::Win32::UI::Shell::ShellExecuteW;
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use windows::core::PCWSTR;
 
         let exe_path = env::current_exe().map_err(|e| e.to_string())?;
 
         // Convert path to wide string for Windows API
         let exe_path_str = exe_path.to_string_lossy().to_string();
-        let exe_wide: Vec<u16> = exe_path_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let exe_wide: Vec<u16> = exe_path_str
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let runas_wide: Vec<u16> = "runas".encode_utf16().chain(std::iter::once(0)).collect();
 
         unsafe {
@@ -844,7 +875,10 @@ async fn restart_as_admin() -> Result<(), String> {
 
             // ShellExecuteW returns a value > 32 on success
             if result.0 as i32 <= 32 {
-                return Err(format!("Failed to restart with elevation. Error code: {}", result.0 as i32));
+                return Err(format!(
+                    "Failed to restart with elevation. Error code: {}",
+                    result.0 as i32
+                ));
             }
         }
 
@@ -895,7 +929,9 @@ async fn stop_monitoring(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn get_current_stats(state: State<'_, AppState>) -> Result<native_monitor::SystemStats, String> {
+async fn get_current_stats(
+    state: State<'_, AppState>,
+) -> Result<native_monitor::SystemStats, String> {
     let monitor_opt = state.system_monitor.lock().await;
 
     if let Some(monitor) = monitor_opt.as_ref() {
@@ -917,13 +953,13 @@ async fn save_current_scan(
     tags: Vec<String>,
 ) -> Result<String, String> {
     let session = state.current_session.lock().await;
-    
+
     if let Some(session) = session.as_ref() {
         let system_info = get_system_info().await?;
-        
+
         let success_count = session.results.values().filter(|r| r.success).count();
         let failure_count = session.results.values().filter(|r| !r.success).count();
-        
+
         // Use the session ID directly - no more ID mismatch!
         let scan_record = ScanRecord {
             id: session.session_id.clone(),
@@ -938,15 +974,15 @@ async fn save_current_scan(
             duration_ms,
             tags,
         };
-        
+
         println!("Auto-saving scan with session ID: {}", scan_record.id);
         println!("Scan has {} task results", scan_record.results.len());
-        
+
         let storage = state.scan_storage.lock().await;
         storage.save_scan(&scan_record)?;
-        
+
         println!("Scan auto-saved successfully: {}", scan_record.id);
-        
+
         Ok(scan_record.id)
     } else {
         Err("No active session to save".to_string())
@@ -961,8 +997,10 @@ async fn list_scan_history(state: State<'_, AppState>) -> Result<Vec<ScanSummary
         Ok(scans) => {
             println!("Found {} scans in history", scans.len());
             for scan in &scans {
-                println!("  - Scan ID: {}, Timestamp: {}, Tasks: {}", 
-                    scan.id, scan.timestamp, scan.task_count);
+                println!(
+                    "  - Scan ID: {}, Timestamp: {}, Tasks: {}",
+                    scan.id, scan.timestamp, scan.task_count
+                );
             }
             Ok(scans)
         }
@@ -991,8 +1029,14 @@ async fn compare_scans(
     match storage.compare_scans(&current_id, &previous_id) {
         Ok(comparison) => {
             println!("Comparison successful:");
-            println!("  - Current scan: {} ({})", comparison.current_scan.id, comparison.current_scan.timestamp);
-            println!("  - Previous scan: {} ({})", comparison.previous_scan.id, comparison.previous_scan.timestamp);
+            println!(
+                "  - Current scan: {} ({})",
+                comparison.current_scan.id, comparison.current_scan.timestamp
+            );
+            println!(
+                "  - Previous scan: {} ({})",
+                comparison.previous_scan.id, comparison.previous_scan.timestamp
+            );
             println!("  - Total changes: {}", comparison.total_changes);
             println!("  - New failures: {}", comparison.new_failures.len());
             println!("  - New successes: {}", comparison.new_successes.len());
@@ -1006,9 +1050,7 @@ async fn compare_scans(
 }
 
 #[tauri::command]
-async fn clear_scan_history(
-    state: State<'_, AppState>,
-) -> Result<String, String> {
+async fn clear_scan_history(state: State<'_, AppState>) -> Result<String, String> {
     println!("Clearing scan history via Tauri command...");
 
     let storage = state.scan_storage.lock().await;
@@ -1025,9 +1067,7 @@ async fn clear_scan_history(
 }
 
 #[tauri::command]
-async fn detect_issues(
-    state: State<'_, AppState>,
-) -> Result<Vec<Issue>, String> {
+async fn detect_issues(state: State<'_, AppState>) -> Result<Vec<Issue>, String> {
     let current = state.current_session.lock().await;
     if let Some(ref session) = *current {
         let issue_detector = issue_detector::IssueDetector::new();
@@ -1045,7 +1085,11 @@ async fn open_url(url: String) -> Result<(), String> {
         // Use PowerShell's Start-Process which handles URLs with special characters better
         // This avoids issues with & and other chars in mailto: URLs
         std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &format!("Start-Process '{}'", url.replace("'", "''"))])
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!("Start-Process '{}'", url.replace("'", "''")),
+            ])
             .spawn()
             .map_err(|e| format!("Failed to open URL: {}", e))?;
     }
@@ -1061,25 +1105,25 @@ async fn open_url(url: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn copy_minidumps_to_desktop() -> Result<serde_json::Value, String> {
-    let diagnostics = native_diagnostics::NativeDiagnostics::new().unwrap();
-    diagnostics.copy_minidumps_to_desktop()
+    let diagnostics = native_diagnostics::NativeDiagnostics::new()
+        .map_err(|e| format!("Failed to initialize diagnostics: {}", e))?;
+    diagnostics
+        .copy_minidumps_to_desktop()
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn get_architecture_info() -> Result<serde_json::Value, String> {
-    architecture::get_architecture_json()
-        .map_err(|e| e.to_string())
+    architecture::get_architecture_json().map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let scan_storage = ScanStorage::new()
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to initialize scan storage: {}", e);
-            std::process::exit(1);
-        });
-    
+    let scan_storage = ScanStorage::new().unwrap_or_else(|e| {
+        eprintln!("Failed to initialize scan storage: {}", e);
+        std::process::exit(1);
+    });
+
     let app_state = AppState {
         current_session: Arc::new(Mutex::new(None)),
         system_monitor: Arc::new(Mutex::new(None)),

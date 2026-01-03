@@ -1,16 +1,16 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 #[cfg(windows)]
 use windows::Win32::Security::Cryptography::{
-    CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB,
-    CRYPTPROTECT_UI_FORBIDDEN,
+    CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
 };
 
 #[cfg(windows)]
-use windows::Win32::Foundation::{LocalFree, HLOCAL};
+use windows::Win32::Foundation::{HLOCAL, LocalFree};
 
 /// Encrypted file header containing metadata
 const VERSION: u8 = 2; // Bumped version for DPAPI format
@@ -50,10 +50,10 @@ impl EncryptedStorage {
         let result = unsafe {
             CryptProtectData(
                 &input_blob,
-                None,           // Description (optional)
-                None,           // Optional entropy (we don't need it)
-                None,           // Reserved
-                None,           // Prompt struct
+                None,                      // Description (optional)
+                None,                      // Optional entropy (we don't need it)
+                None,                      // Reserved
+                None,                      // Prompt struct
                 CRYPTPROTECT_UI_FORBIDDEN, // No UI
                 &mut output_blob,
             )
@@ -92,10 +92,10 @@ impl EncryptedStorage {
         let result = unsafe {
             CryptUnprotectData(
                 &input_blob,
-                None,           // Description output
-                None,           // Optional entropy
-                None,           // Reserved
-                None,           // Prompt struct
+                None, // Description output
+                None, // Optional entropy
+                None, // Reserved
+                None, // Prompt struct
                 CRYPTPROTECT_UI_FORBIDDEN,
                 &mut output_blob,
             )
@@ -119,8 +119,8 @@ impl EncryptedStorage {
     /// Encrypt and store data
     pub fn store<T: Serialize>(&self, filename: &str, data: &T) -> Result<()> {
         // Serialize data to JSON
-        let json_data = serde_json::to_vec(data)
-            .map_err(|e| anyhow!("Failed to serialize data: {}", e))?;
+        let json_data =
+            serde_json::to_vec(data).map_err(|e| anyhow!("Failed to serialize data: {}", e))?;
 
         // Encrypt using DPAPI
         #[cfg(windows)]
@@ -141,15 +141,26 @@ impl EncryptedStorage {
         file_data.extend(header_json);
         file_data.extend(encrypted_data);
 
-        // Write to file
+        // Write to file atomically to avoid corruption on crashes
         let file_path = self.storage_path.join(format!("{}.enc", filename));
         if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| anyhow!("Failed to create directory: {}", e))?;
+            fs::create_dir_all(parent).map_err(|e| anyhow!("Failed to create directory: {}", e))?;
         }
 
-        fs::write(file_path, file_data)
-            .map_err(|e| anyhow!("Failed to write encrypted file: {}", e))?;
+        let temp_path = file_path.with_extension("enc.tmp");
+        {
+            let mut temp_file = fs::File::create(&temp_path)
+                .map_err(|e| anyhow!("Failed to create temp file: {}", e))?;
+            temp_file
+                .write_all(&file_data)
+                .map_err(|e| anyhow!("Failed to write encrypted file: {}", e))?;
+            temp_file
+                .sync_all()
+                .map_err(|e| anyhow!("Failed to flush encrypted file: {}", e))?;
+        }
+
+        fs::rename(&temp_path, &file_path)
+            .map_err(|e| anyhow!("Failed to finalize encrypted file: {}", e))?;
 
         Ok(())
     }
@@ -158,17 +169,16 @@ impl EncryptedStorage {
     pub fn load<T: for<'de> Deserialize<'de>>(&self, filename: &str) -> Result<T> {
         let file_path = self.storage_path.join(format!("{}.enc", filename));
 
-        let file_data = fs::read(&file_path)
-            .map_err(|e| anyhow!("Failed to read encrypted file: {}", e))?;
+        let file_data =
+            fs::read(&file_path).map_err(|e| anyhow!("Failed to read encrypted file: {}", e))?;
 
         if file_data.len() < 4 {
             return Err(anyhow!("Invalid encrypted file format"));
         }
 
         // Read header length
-        let header_len = u32::from_le_bytes([
-            file_data[0], file_data[1], file_data[2], file_data[3],
-        ]) as usize;
+        let header_len =
+            u32::from_le_bytes([file_data[0], file_data[1], file_data[2], file_data[3]]) as usize;
 
         if file_data.len() < 4 + header_len {
             return Err(anyhow!("Invalid encrypted file format"));
@@ -181,7 +191,10 @@ impl EncryptedStorage {
 
         // Support both old (v1) and new (v2) formats during migration
         if header.version != VERSION && header.version != 1 {
-            return Err(anyhow!("Unsupported encryption version: {}", header.version));
+            return Err(anyhow!(
+                "Unsupported encryption version: {}",
+                header.version
+            ));
         }
 
         // Extract encrypted data
@@ -190,7 +203,9 @@ impl EncryptedStorage {
         // Handle version migration
         let decrypted_data = if header.version == 1 {
             // Old format - try to decrypt with legacy method or return error
-            return Err(anyhow!("Legacy v1 encrypted files need re-encryption. Please clear scan history and re-run diagnostics."));
+            return Err(anyhow!(
+                "Legacy v1 encrypted files need re-encryption. Please clear scan history and re-run diagnostics."
+            ));
         } else {
             // New DPAPI format
             #[cfg(windows)]
@@ -284,7 +299,9 @@ mod tests {
         };
 
         // Store encrypted data
-        storage.store("test_data", &test_data).expect("Failed to store data");
+        storage
+            .store("test_data", &test_data)
+            .expect("Failed to store data");
 
         // Load and decrypt data
         let loaded_data: TestData = storage.load("test_data").expect("Failed to load data");
