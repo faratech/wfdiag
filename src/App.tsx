@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useRef } from 'react'
 import { SystemMonitoring } from './SystemMonitoring'
 import { OpenAIIntegration } from './OpenAIIntegration'
 import { ComparisonView } from './ComparisonView'
@@ -92,6 +92,8 @@ const AppContent: React.FC = () => {
 
   // Track window width for responsive behavior
   const [isSmallScreen, setIsSmallScreen] = useState(false)
+  // Track if we've already run the startup scan
+  const hasRunStartupScan = useRef(false)
 
   useEffect(() => {
     const handleResize = () => {
@@ -114,11 +116,18 @@ const AppContent: React.FC = () => {
 
   // Scan on startup if enabled - wait for tasks to load first
   useEffect(() => {
-    if (settings.scanOnStartup && !isRunning && !sessionId && availableTasks.length > 0) {
+    if (
+      settings.scanOnStartup &&
+      !isRunning &&
+      !sessionId &&
+      availableTasks.length > 0 &&
+      !hasRunStartupScan.current
+    ) {
+      hasRunStartupScan.current = true
       console.log('Starting automatic scan on startup...', availableTasks.length, 'tasks available')
       runQuickScan()
     }
-  }, [settings.scanOnStartup, availableTasks.length]) // Run when settings load AND tasks are available
+  }, [settings.scanOnStartup, availableTasks.length, isRunning, sessionId, runQuickScan])
 
   const handleSettingsSave = async (newSettings: SettingsData) => {
     try {
