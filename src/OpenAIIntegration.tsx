@@ -24,6 +24,7 @@ import {
 } from '@fluentui/react-icons';
 import { PageHeader } from './components';
 import { useAppContext } from './contexts/AppContext';
+import { useToast } from './contexts/ToastContext';
 import { invoke } from '@tauri-apps/api/core';
 import * as logger from './utils/logger';
 import './styles.css';
@@ -78,6 +79,7 @@ type AiProvider = 'openai' | 'phi_silica';
 export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId }) => {
   const styles = useStyles();
   const { settings, setShowSettings } = useAppContext();
+  const { showSuccess, showError: showToastError } = useToast();
   const [prompt, setPrompt] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [response, setResponse] = useState<OpenAIResponse | null>(null);
@@ -305,9 +307,9 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
                 setIsCheckingUpdates(true);
                 try {
                   const result = await invoke('check_phi_silica_updates') as string;
-                  alert(result);
+                  showSuccess('Phi Silica Updates', result);
                 } catch (err) {
-                  alert(`Failed: ${err instanceof Error ? err.message : String(err)}`);
+                  showToastError('Update Check Failed', err instanceof Error ? err.message : String(err));
                 } finally {
                   setIsCheckingUpdates(false);
                 }
@@ -554,8 +556,8 @@ export const OpenAIIntegration: React.FC<OpenAIIntegrationProps> = ({ sessionId 
             </Button>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {conversationHistory.map((entry, index) => (
-              <div key={index} style={{
+            {conversationHistory.map((entry) => (
+              <div key={`${entry.role}-${entry.timestamp.getTime()}`} style={{
                 padding: 12,
                 borderRadius: 8,
                 background: entry.role === 'user'

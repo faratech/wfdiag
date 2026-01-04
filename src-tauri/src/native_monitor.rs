@@ -782,7 +782,8 @@ fn get_pdh_stats(
     pdh_state: &Arc<std::sync::Mutex<PdhState>>,
     cpu_count: usize,
 ) -> (f32, Vec<f32>, f32) {
-    let mut state = pdh_state.lock().unwrap();
+    // Use unwrap_or_else to recover from poisoned mutex instead of panicking
+    let mut state = pdh_state.lock().unwrap_or_else(|e| e.into_inner());
 
     if !state.initialized {
         unsafe {

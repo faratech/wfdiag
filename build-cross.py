@@ -103,7 +103,7 @@ def check_sccache_available() -> bool:
     # Try to start sccache server if not running
     try:
         subprocess.run(["sccache", "--start-server"], capture_output=True, timeout=5)
-    except:
+    except (subprocess.SubprocessError, subprocess.TimeoutExpired, OSError):
         pass
     return True
 
@@ -350,7 +350,7 @@ def get_system_memory_gb() -> float:
                     # Convert from kB to GB
                     kb = int(line.split()[1])
                     return kb / (1024 * 1024)
-    except:
+    except (OSError, IOError, ValueError, IndexError):
         pass
     return 0
 

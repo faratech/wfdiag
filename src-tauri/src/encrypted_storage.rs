@@ -36,9 +36,11 @@ impl EncryptedStorage {
     fn encrypt_data(data: &[u8]) -> Result<Vec<u8>> {
         use std::ptr::null_mut;
 
+        // Create mutable copy to avoid undefined behavior from const-to-mut cast
+        let mut data_copy = data.to_vec();
         let input_blob = CRYPT_INTEGER_BLOB {
-            cbData: data.len() as u32,
-            pbData: data.as_ptr() as *mut u8,
+            cbData: data_copy.len() as u32,
+            pbData: data_copy.as_mut_ptr(),
         };
 
         let mut output_blob = CRYPT_INTEGER_BLOB {
@@ -79,9 +81,11 @@ impl EncryptedStorage {
     fn decrypt_data(encrypted: &[u8]) -> Result<Vec<u8>> {
         use std::ptr::null_mut;
 
+        // Create mutable copy to avoid undefined behavior from const-to-mut cast
+        let mut encrypted_copy = encrypted.to_vec();
         let input_blob = CRYPT_INTEGER_BLOB {
-            cbData: encrypted.len() as u32,
-            pbData: encrypted.as_ptr() as *mut u8,
+            cbData: encrypted_copy.len() as u32,
+            pbData: encrypted_copy.as_mut_ptr(),
         };
 
         let mut output_blob = CRYPT_INTEGER_BLOB {

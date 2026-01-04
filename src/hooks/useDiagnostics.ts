@@ -74,10 +74,12 @@ ${content}
 [/CODE]`
 
       await writeText(forumPost)
+      showSuccess('Copied', 'Diagnostic report copied to clipboard')
     } catch (error) {
       logger.error('useDiagnostics', 'Failed to copy to clipboard', error)
+      showError('Copy Failed', 'Failed to copy to clipboard. Please try again.')
     }
-  }, [sessionId, systemInfo])
+  }, [sessionId, systemInfo, showSuccess, showError])
 
   const exportResults = useCallback(async () => {
     if (!sessionId) {

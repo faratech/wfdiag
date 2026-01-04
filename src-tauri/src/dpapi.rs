@@ -44,10 +44,11 @@ unsafe extern "system" {
 fn dpapi_encrypt(data: &str) -> Result<Vec<u8>, String> {
     use std::ptr::null_mut;
 
-    let data_bytes = data.as_bytes();
+    // Create mutable copy to avoid undefined behavior from const-to-mut cast
+    let mut data_bytes = data.as_bytes().to_vec();
     let mut data_in = CRYPT_INTEGER_BLOB {
         cbData: data_bytes.len() as u32,
-        pbData: data_bytes.as_ptr() as *mut u8,
+        pbData: data_bytes.as_mut_ptr(),
     };
 
     let mut data_out = CRYPT_INTEGER_BLOB {
@@ -90,9 +91,11 @@ fn dpapi_encrypt(data: &str) -> Result<Vec<u8>, String> {
 fn dpapi_decrypt(encrypted: &[u8]) -> Result<String, String> {
     use std::ptr::null_mut;
 
+    // Create mutable copy to avoid undefined behavior from const-to-mut cast
+    let mut encrypted_copy = encrypted.to_vec();
     let mut data_in = CRYPT_INTEGER_BLOB {
-        cbData: encrypted.len() as u32,
-        pbData: encrypted.as_ptr() as *mut u8,
+        cbData: encrypted_copy.len() as u32,
+        pbData: encrypted_copy.as_mut_ptr(),
     };
 
     let mut data_out = CRYPT_INTEGER_BLOB {

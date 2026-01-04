@@ -160,6 +160,8 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
   const [networkConnections, setNetworkConnections] = useState<NetworkConnection[]>([]);
   const [showNetworkConnections, setShowNetworkConnections] = useState(false);
   const unlistenRef = useRef<(() => void) | null>(null);
+  // Track if we've auto-started monitoring on mount
+  const hasAutoStarted = useRef(false);
 
   // Clear all monitoring data
   const clearMonitoringData = () => {
@@ -191,14 +193,15 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
 
   // Auto-start monitoring when component mounts
   useEffect(() => {
-    if (!isActive) {
+    if (!isActive && !hasAutoStarted.current) {
+      hasAutoStarted.current = true;
       onToggle(true);
     }
     // Clear data when component unmounts (tab switch)
     return () => {
       clearMonitoringData();
     };
-  }, []);
+  }, [isActive, onToggle]);
 
   useEffect(() => {
     let isMounted = true;
