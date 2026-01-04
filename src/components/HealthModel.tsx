@@ -5,101 +5,106 @@ import {
   shorthands,
   tokens
 } from '@fluentui/react-components'
+import {
+  CheckmarkCircle16Filled,
+  Warning16Filled,
+  ErrorCircle16Filled,
+} from '@fluentui/react-icons'
 
 const useStyles = makeStyles({
   container: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-    gap: tokens.spacingHorizontalL,
-    marginBottom: tokens.spacingVerticalXL,
+    gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+    gap: tokens.spacingHorizontalM,
+    marginBottom: tokens.spacingVerticalL,
   },
   healthCard: {
     backgroundColor: tokens.colorNeutralBackground1,
     ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke2),
-    ...shorthands.padding(tokens.spacingVerticalL),
+    ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalM),
     display: 'flex',
     flexDirection: 'column',
-    transition: 'all 0.2s cubic-bezier(0.33, 1, 0.68, 1)',
+    transition: 'all 0.15s ease-out',
     cursor: 'pointer',
+    position: 'relative',
+    overflow: 'hidden',
     ':hover': {
-      transform: 'translateY(-2px)',
       backgroundColor: tokens.colorNeutralBackground1Hover,
-      ...shorthands.borderColor(tokens.colorBrandStroke1),
-      boxShadow: tokens.shadow8,
+      ...shorthands.borderColor(tokens.colorNeutralStroke1),
+      boxShadow: tokens.shadow4,
+    },
+    ':active': {
+      transform: 'scale(0.98)',
     },
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
+  },
+  cardActive: {
+    ...shorthands.borderColor(tokens.colorBrandStroke1),
+    backgroundColor: tokens.colorNeutralBackground1Selected,
+    boxShadow: `0 0 0 1px ${tokens.colorBrandStroke1}`,
   },
   cardHeader: {
     display: 'flex',
     alignItems: 'center',
-    gap: tokens.spacingHorizontalM,
-    marginBottom: tokens.spacingVerticalM,
+    gap: tokens.spacingHorizontalS,
+    marginBottom: tokens.spacingVerticalS,
   },
-  iconBox: {
-    width: '32px',
-    height: '32px',
-    borderRadius: '8px',
+  iconContainer: {
+    width: '28px',
+    height: '28px',
+    borderRadius: '6px',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: tokens.colorNeutralBackgroundAlpha,
-    color: tokens.colorBrandForeground1,
+    backgroundColor: tokens.colorNeutralBackground3,
+    color: tokens.colorNeutralForeground2,
+    flexShrink: 0,
   },
-  scoreContainer: {
-    display: 'flex',
-    alignItems: 'baseline',
-    gap: tokens.spacingHorizontalXS,
-    marginBottom: tokens.spacingVerticalXS,
-  },
-  scoreValue: {
-    fontSize: '28px',
-    fontWeight: 700,
-    color: tokens.colorNeutralForeground1,
-    lineHeight: 1,
-  },
-  scoreLabel: {
+  labelText: {
     fontSize: tokens.fontSizeBase200,
-    color: tokens.colorNeutralForeground3,
-    fontWeight: 600,
-    textTransform: 'uppercase',
-    letterSpacing: '0.05em',
+    fontWeight: 500,
+    color: tokens.colorNeutralForeground2,
+    letterSpacing: '0.01em',
+    lineHeight: 1.2,
+    flex: 1,
   },
-  riskBadge: {
-    marginLeft: 'auto',
-    padding: '2px 8px',
-    borderRadius: '12px',
-    fontSize: '11px',
-    fontWeight: 700,
-    textTransform: 'uppercase',
-    letterSpacing: '0.05em',
+  meterContainer: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalS,
+    marginTop: 'auto',
   },
-  riskLow: {
-    backgroundColor: tokens.colorPaletteGreenBackground2,
-    color: tokens.colorPaletteGreenForeground1,
-    border: `1px solid ${tokens.colorPaletteGreenBorder2}`,
-  },
-  riskMonitor: {
-    backgroundColor: tokens.colorPaletteYellowBackground2,
-    color: tokens.colorPaletteYellowForeground1,
-    border: `1px solid ${tokens.colorPaletteYellowBorder2}`,
-  },
-  riskElevated: {
-    backgroundColor: tokens.colorPaletteRedBackground2,
-    color: tokens.colorPaletteRedForeground1,
-    border: `1px solid ${tokens.colorPaletteRedBorder2}`,
-  },
-  progressTrack: {
-    height: '4px',
-    backgroundColor: tokens.colorNeutralStroke2,
-    borderRadius: '2px',
+  meterTrack: {
+    flex: 1,
+    height: '6px',
+    backgroundColor: tokens.colorNeutralBackground3,
+    borderRadius: '3px',
     overflow: 'hidden',
-    marginTop: tokens.spacingVerticalS,
+    position: 'relative',
   },
-  progressBar: {
+  meterFill: {
     height: '100%',
-    borderRadius: '2px',
-    transition: 'width 1s cubic-bezier(0.33, 1, 0.68, 1)',
-  }
+    borderRadius: '3px',
+    transition: 'width 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
+  },
+  statusIndicator: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '18px',
+    height: '18px',
+    flexShrink: 0,
+  },
+  // Status-specific fills
+  fillLow: {
+    background: `linear-gradient(90deg, ${tokens.colorPaletteGreenBackground1} 0%, ${tokens.colorPaletteGreenForeground1} 100%)`,
+  },
+  fillMonitor: {
+    background: `linear-gradient(90deg, ${tokens.colorPaletteYellowBackground1} 0%, ${tokens.colorPaletteYellowForeground1} 100%)`,
+  },
+  fillElevated: {
+    background: `linear-gradient(90deg, ${tokens.colorPaletteRedBackground1} 0%, ${tokens.colorPaletteRedForeground1} 100%)`,
+  },
 })
 
 interface HealthMetric {
@@ -123,61 +128,70 @@ export const HealthModel: React.FC<HealthModelProps> = ({
 }) => {
   const styles = useStyles()
 
-  const getRiskStyle = (risk: string) => {
+  const getFillClass = (risk: string) => {
     switch (risk) {
-      case 'Low': return styles.riskLow
-      case 'Monitor': return styles.riskMonitor
-      case 'Elevated': return styles.riskElevated
-      default: return styles.riskLow
+      case 'Low': return styles.fillLow
+      case 'Monitor': return styles.fillMonitor
+      case 'Elevated': return styles.fillElevated
+      default: return styles.fillLow
     }
   }
 
-  const getProgressColor = (score: number) => {
-    if (score >= 90) return tokens.colorPaletteGreenBackground1
-    if (score >= 70) return tokens.colorPaletteYellowBackground1
-    return tokens.colorPaletteRedBackground1
+  const getStatusIcon = (risk: string) => {
+    switch (risk) {
+      case 'Low':
+        return <CheckmarkCircle16Filled primaryFill={tokens.colorPaletteGreenForeground1} />
+      case 'Monitor':
+        return <Warning16Filled primaryFill={tokens.colorPaletteYellowForeground1} />
+      case 'Elevated':
+        return <ErrorCircle16Filled primaryFill={tokens.colorPaletteRedForeground1} />
+      default:
+        return <CheckmarkCircle16Filled primaryFill={tokens.colorPaletteGreenForeground1} />
+    }
   }
 
   return (
     <div className={styles.container}>
-      {metrics.map((metric) => (
-        <div
-          key={metric.id}
-          className={styles.healthCard}
-          onClick={() => onMetricClick(metric.id)}
-          style={{
-            borderColor: activeMetricId === metric.id ? tokens.colorBrandStroke1 : tokens.colorNeutralStroke2,
-            backgroundColor: activeMetricId === metric.id ? tokens.colorNeutralBackground1Selected : undefined,
-          }}
-        >
-          <div className={styles.cardHeader}>
-            <div className={styles.iconBox}>
-              {metric.icon}
+      {metrics.map((metric) => {
+        const isActive = activeMetricId === metric.id
+        return (
+          <div
+            key={metric.id}
+            className={`${styles.healthCard} ${isActive ? styles.cardActive : ''}`}
+            onClick={() => onMetricClick(metric.id)}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onMetricClick(metric.id)
+              }
+            }}
+            aria-pressed={isActive}
+          >
+            <div className={styles.cardHeader}>
+              <div className={styles.iconContainer}>
+                {metric.icon}
+              </div>
+              <Text className={styles.labelText}>
+                {metric.label}
+              </Text>
             </div>
-            <Text weight="semibold" style={{ color: tokens.colorNeutralForeground2 }}>
-              {metric.label}
-            </Text>
-            <div className={`${styles.riskBadge} ${getRiskStyle(metric.risk)}`}>
-              {metric.risk}
+
+            <div className={styles.meterContainer}>
+              <div className={styles.meterTrack}>
+                <div
+                  className={`${styles.meterFill} ${getFillClass(metric.risk)}`}
+                  style={{ width: `${metric.score}%` }}
+                />
+              </div>
+              <div className={styles.statusIndicator}>
+                {getStatusIcon(metric.risk)}
+              </div>
             </div>
           </div>
-
-          <div className={styles.scoreContainer}>
-            <span className={styles.scoreValue}>{metric.score}</span>
-            <span className={styles.scoreLabel}>/ 100</span>
-          </div>
-
-          <div className={styles.progressTrack}>
-            <div
-              className={styles.progressBar}
-              style={{
-                width: `${metric.score}%`,
-                backgroundColor: getProgressColor(metric.score)
-              }}
-            />
-          </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }

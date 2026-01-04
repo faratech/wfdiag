@@ -64,11 +64,6 @@ const useStyles = makeStyles({
     cursor: 'pointer',
     gap: tokens.spacingHorizontalM,
   },
-  statusIcon: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   titleContainer: {
     flex: 1,
     display: 'flex',
@@ -93,12 +88,12 @@ const useStyles = makeStyles({
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap' as const,
   },
-  statusBadge: {
-    marginRight: tokens.spacingHorizontalM,
-    textTransform: 'uppercase',
-    fontWeight: 700,
-    fontSize: '10px',
-    letterSpacing: '0.05em',
+  statusIndicator: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: tokens.spacingHorizontalS,
+    flexShrink: 0,
   },
   content: {
     padding: `0 ${tokens.spacingHorizontalM} ${tokens.spacingVerticalM} ${tokens.spacingHorizontalM}`,
@@ -261,18 +256,6 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
     if (isError) return <ErrorCircle20Filled primaryFill={tokens.colorPaletteRedForeground1} />
     if (isWarning) return <Warning20Filled primaryFill={tokens.colorPaletteYellowForeground1} />
     return <CheckmarkCircle20Filled primaryFill={tokens.colorPaletteGreenForeground1} />
-  }
-
-  const getStatusText = () => {
-    if (isError) return 'Action Required'
-    if (isWarning) return 'Monitor'
-    return 'Verified'
-  }
-
-  const getStatusBadgeColor = () => {
-    if (isError) return 'danger'
-    if (isWarning) return 'warning'
-    return 'success'
   }
 
   // Helper to safely parse output if it's a JSON string
@@ -1737,7 +1720,6 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
   return (
     <div className={getCardStyle()}>
       <div className={styles.header} onClick={() => setExpanded(!expanded)}>
-        <div className={styles.statusIcon}>{getStatusIcon()}</div>
         <div className={styles.titleContainer}>
           <Text className={styles.title}>{highlightText ? highlightMatchingText(title) : title}</Text>
           <Text className={styles.meta}>
@@ -1750,9 +1732,9 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
             </Text>
           )}
         </div>
-        <Badge appearance="outline" color={getStatusBadgeColor()} className={styles.statusBadge}>
-          {getStatusText()}
-        </Badge>
+        <div className={styles.statusIndicator}>
+          {getStatusIcon()}
+        </div>
         {expanded ? <ChevronDown20Regular /> : <ChevronRight20Regular />}
       </div>
 
