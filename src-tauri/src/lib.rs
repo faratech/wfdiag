@@ -269,7 +269,8 @@ struct DiagnosticSession {
 struct AppState {
     current_session: Arc<Mutex<Option<DiagnosticSession>>>,
     system_monitor: Arc<Mutex<Option<SystemMonitor>>>,
-    scan_storage: Arc<Mutex<ScanStorage>>,
+    scan_storage: Arc<Mutex<Option<ScanStorage>>>,
+    scan_storage_error: Arc<Mutex<Option<String>>>,
 }
 
 #[tauri::command]
@@ -348,7 +349,17 @@ fn get_windows_version_info() -> String {
 
         // Determine Windows version (10 or 11) based on build number
         let is_win11 = if let Some(build) = current_build.as_ref() {
-            build.parse::<u32>().unwrap_or(0) >= 22000
+            match build.parse::<u32>() {
+                Ok(num) => num >= 22000,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Failed to parse Windows build number '{}': {}",
+                        build, e
+                    );
+                    // Fall back to checking product name
+                    product_name.contains("Windows 11")
+                }
+            }
         } else {
             product_name.contains("Windows 11")
         };
@@ -802,9 +813,120 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Get list of allowed directories for file saves (matching Tauri capabilities)
+fn get_allowed_save_paths() -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+
+    // $APPDATA/wfdiag-tauri/ (config dir)
+    if let Some(appdata) = dirs::config_dir() {
+        paths.push(appdata.join("wfdiag-tauri"));
+        paths.push(appdata.join("com.windowsforum.diagnostics"));
+    }
+
+    // $HOME/Documents/
+    if let Some(docs) = dirs::document_dir() {
+        paths.push(docs);
+    }
+
+    // $HOME/Desktop/
+    if let Some(desktop) = dirs::desktop_dir() {
+        paths.push(desktop);
+    }
+
+    // $HOME/Downloads/
+    if let Some(downloads) = dirs::download_dir() {
+        paths.push(downloads);
+    }
+
+    // $TEMP directory (with pattern restriction enforced in validate_save_path)
+    if let Ok(temp) = std::env::var("TEMP") {
+        paths.push(std::path::PathBuf::from(temp));
+    } else if let Ok(tmp) = std::env::var("TMP") {
+        paths.push(std::path::PathBuf::from(tmp));
+    }
+
+    paths
+}
+
+/// Validate that the save path is within allowed scopes (security)
+fn validate_save_path(path: &str) -> Result<(), String> {
+    use std::path::Path;
+
+    let path = Path::new(path);
+
+    // Get the path to validate (canonicalize parent for new files)
+    let path_to_check = if path.exists() {
+        path.canonicalize()
+            .map_err(|e| format!("Invalid path: {}", e))?
+    } else {
+        // For new files, check the parent directory exists and is allowed
+        let parent = path
+            .parent()
+            .ok_or_else(|| "Invalid path: no parent directory".to_string())?;
+        if !parent.exists() {
+            return Err("Parent directory does not exist".to_string());
+        }
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|e| format!("Invalid parent path: {}", e))?;
+        canonical_parent.join(path.file_name().unwrap_or_default())
+    };
+
+    let allowed_paths = get_allowed_save_paths();
+
+    // Check if path falls within any allowed scope
+    for allowed in &allowed_paths {
+        // Canonicalize allowed path for comparison (skip if it doesn't exist)
+        let canonical_allowed = match allowed.canonicalize() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        if path_to_check.starts_with(&canonical_allowed) {
+            // Additional check for TEMP directory: filename must match wfdiag_* pattern
+            if let Ok(temp) = std::env::var("TEMP").or_else(|_| std::env::var("TMP")) {
+                let temp_path = std::path::PathBuf::from(&temp);
+                if let Ok(canonical_temp) = temp_path.canonicalize() {
+                    if path_to_check.starts_with(&canonical_temp)
+                        && !path_to_check.starts_with(canonical_allowed.clone())
+                    {
+                        // This is in TEMP but matched a different allowed path, continue checking
+                        continue;
+                    }
+                    if path_to_check.starts_with(&canonical_temp) {
+                        // Enforce wfdiag_*.txt or wfdiag_*.html pattern for temp files
+                        if let Some(filename) = path_to_check.file_name().and_then(|f| f.to_str()) {
+                            if !filename.starts_with("wfdiag_") {
+                                return Err(
+                                    "Temp files must have filename starting with 'wfdiag_'"
+                                        .to_string(),
+                                );
+                            }
+                            if !filename.ends_with(".txt") && !filename.ends_with(".html") {
+                                return Err(
+                                    "Temp files must have .txt or .html extension".to_string()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    Err(
+        "Path not in allowed scope. Allowed: Documents, Desktop, Downloads, AppData, or Temp (wfdiag_*.txt/html only)"
+            .to_string(),
+    )
+}
+
 #[tauri::command]
 async fn save_results_to_file(path: String, content: String) -> Result<(), String> {
     use std::fs;
+
+    // Validate path is within allowed scopes (security fix)
+    validate_save_path(&path)?;
 
     fs::write(&path, content).map_err(|e| e.to_string())?;
     Ok(())
@@ -979,11 +1101,20 @@ async fn save_current_scan(
         println!("Scan has {} task results", scan_record.results.len());
 
         let storage = state.scan_storage.lock().await;
-        storage.save_scan(&scan_record)?;
-
-        println!("Scan auto-saved successfully: {}", scan_record.id);
-
-        Ok(scan_record.id)
+        match storage.as_ref() {
+            Some(storage) => {
+                storage.save_scan(&scan_record)?;
+                println!("Scan auto-saved successfully: {}", scan_record.id);
+                Ok(scan_record.id)
+            }
+            None => {
+                let error = state.scan_storage_error.lock().await;
+                Err(format!(
+                    "Scan history unavailable: {}",
+                    error.as_deref().unwrap_or("Storage initialization failed")
+                ))
+            }
+        }
     } else {
         Err("No active session to save".to_string())
     }
@@ -993,20 +1124,29 @@ async fn save_current_scan(
 async fn list_scan_history(state: State<'_, AppState>) -> Result<Vec<ScanSummary>, String> {
     println!("Listing scan history");
     let storage = state.scan_storage.lock().await;
-    match storage.list_scans() {
-        Ok(scans) => {
-            println!("Found {} scans in history", scans.len());
-            for scan in &scans {
-                println!(
-                    "  - Scan ID: {}, Timestamp: {}, Tasks: {}",
-                    scan.id, scan.timestamp, scan.task_count
-                );
+    match storage.as_ref() {
+        Some(storage) => match storage.list_scans() {
+            Ok(scans) => {
+                println!("Found {} scans in history", scans.len());
+                for scan in &scans {
+                    println!(
+                        "  - Scan ID: {}, Timestamp: {}, Tasks: {}",
+                        scan.id, scan.timestamp, scan.task_count
+                    );
+                }
+                Ok(scans)
             }
-            Ok(scans)
-        }
-        Err(e) => {
-            println!("Error listing scans: {}", e);
-            Err(e)
+            Err(e) => {
+                println!("Error listing scans: {}", e);
+                Err(e)
+            }
+        },
+        None => {
+            let error = state.scan_storage_error.lock().await;
+            Err(format!(
+                "Scan history unavailable: {}",
+                error.as_deref().unwrap_or("Storage initialization failed")
+            ))
         }
     }
 }
@@ -1015,7 +1155,16 @@ async fn list_scan_history(state: State<'_, AppState>) -> Result<Vec<ScanSummary
 async fn load_scan(state: State<'_, AppState>, scan_id: String) -> Result<ScanRecord, String> {
     println!("Loading scan: {}", scan_id);
     let storage = state.scan_storage.lock().await;
-    storage.load_scan(&scan_id)
+    match storage.as_ref() {
+        Some(storage) => storage.load_scan(&scan_id),
+        None => {
+            let error = state.scan_storage_error.lock().await;
+            Err(format!(
+                "Scan history unavailable: {}",
+                error.as_deref().unwrap_or("Storage initialization failed")
+            ))
+        }
+    }
 }
 
 #[tauri::command]
@@ -1026,25 +1175,34 @@ async fn compare_scans(
 ) -> Result<ComparisonResult, String> {
     println!("Comparing scans: '{}' vs '{}'", current_id, previous_id);
     let storage = state.scan_storage.lock().await;
-    match storage.compare_scans(&current_id, &previous_id) {
-        Ok(comparison) => {
-            println!("Comparison successful:");
-            println!(
-                "  - Current scan: {} ({})",
-                comparison.current_scan.id, comparison.current_scan.timestamp
-            );
-            println!(
-                "  - Previous scan: {} ({})",
-                comparison.previous_scan.id, comparison.previous_scan.timestamp
-            );
-            println!("  - Total changes: {}", comparison.total_changes);
-            println!("  - New failures: {}", comparison.new_failures.len());
-            println!("  - New successes: {}", comparison.new_successes.len());
-            Ok(comparison)
-        }
-        Err(e) => {
-            println!("Error comparing scans: {}", e);
-            Err(e)
+    match storage.as_ref() {
+        Some(storage) => match storage.compare_scans(&current_id, &previous_id) {
+            Ok(comparison) => {
+                println!("Comparison successful:");
+                println!(
+                    "  - Current scan: {} ({})",
+                    comparison.current_scan.id, comparison.current_scan.timestamp
+                );
+                println!(
+                    "  - Previous scan: {} ({})",
+                    comparison.previous_scan.id, comparison.previous_scan.timestamp
+                );
+                println!("  - Total changes: {}", comparison.total_changes);
+                println!("  - New failures: {}", comparison.new_failures.len());
+                println!("  - New successes: {}", comparison.new_successes.len());
+                Ok(comparison)
+            }
+            Err(e) => {
+                println!("Error comparing scans: {}", e);
+                Err(e)
+            }
+        },
+        None => {
+            let error = state.scan_storage_error.lock().await;
+            Err(format!(
+                "Scan history unavailable: {}",
+                error.as_deref().unwrap_or("Storage initialization failed")
+            ))
         }
     }
 }
@@ -1054,14 +1212,23 @@ async fn clear_scan_history(state: State<'_, AppState>) -> Result<String, String
     println!("Clearing scan history via Tauri command...");
 
     let storage = state.scan_storage.lock().await;
-    match storage.clear_history() {
-        Ok(_) => {
-            println!("Scan history cleared successfully");
-            Ok("Scan history cleared successfully".to_string())
-        }
-        Err(e) => {
-            println!("Failed to clear scan history: {}", e);
-            Err(e)
+    match storage.as_ref() {
+        Some(storage) => match storage.clear_history() {
+            Ok(_) => {
+                println!("Scan history cleared successfully");
+                Ok("Scan history cleared successfully".to_string())
+            }
+            Err(e) => {
+                println!("Failed to clear scan history: {}", e);
+                Err(e)
+            }
+        },
+        None => {
+            let error = state.scan_storage_error.lock().await;
+            Err(format!(
+                "Scan history unavailable: {}",
+                error.as_deref().unwrap_or("Storage initialization failed")
+            ))
         }
     }
 }
@@ -1119,15 +1286,23 @@ async fn get_architecture_info() -> Result<serde_json::Value, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let scan_storage = ScanStorage::new().unwrap_or_else(|e| {
-        eprintln!("Failed to initialize scan storage: {}", e);
-        std::process::exit(1);
-    });
+    // Initialize scan storage gracefully - don't crash if it fails
+    let (scan_storage, scan_storage_error) = match ScanStorage::new() {
+        Ok(storage) => (Some(storage), None),
+        Err(e) => {
+            eprintln!(
+                "Warning: Failed to initialize scan storage: {}. Scan history features will be unavailable.",
+                e
+            );
+            (None, Some(e.to_string()))
+        }
+    };
 
     let app_state = AppState {
         current_session: Arc::new(Mutex::new(None)),
         system_monitor: Arc::new(Mutex::new(None)),
         scan_storage: Arc::new(Mutex::new(scan_storage)),
+        scan_storage_error: Arc::new(Mutex::new(scan_storage_error)),
     };
 
     tauri::Builder::default()

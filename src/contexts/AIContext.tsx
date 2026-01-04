@@ -161,7 +161,16 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
 
       // Update backend preference if it changed
       if (currentProvider !== prevProvider) {
-        invoke('ai_set_preference', { preference: currentProvider }).catch(console.error)
+        invoke('ai_set_preference', { preference: currentProvider }).catch((error) => {
+          // Log to console for debugging
+          console.error('Failed to set AI preference:', error)
+          // Store error in context state for UI consumption
+          const errorMsg = error instanceof Error ? error.message : String(error)
+          setErrors((prev) => ({
+            ...prev,
+            'preference:update': `Failed to update AI preference: ${errorMsg}`,
+          }))
+        })
       }
 
       // Refresh status after a short delay to allow keyring update to complete

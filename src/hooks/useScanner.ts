@@ -27,6 +27,16 @@ export const useScanner = () => {
   // Track the current running session to prevent race conditions
   const currentSessionRef = useRef<string | null>(null)
   const isRunningRef = useRef<boolean>(false)
+  // Track auto-save timeout for cleanup
+  const autoSaveTimeoutRef = useRef<number | null>(null)
+
+  // Helper to clear any pending auto-save timeout
+  const clearAutoSaveTimeout = useCallback(() => {
+    if (autoSaveTimeoutRef.current !== null) {
+      clearTimeout(autoSaveTimeoutRef.current)
+      autoSaveTimeoutRef.current = null
+    }
+  }, [])
 
   const runDiagnostics = useCallback(async (taskIds: string[]) => {
     if (taskIds.length === 0) return
@@ -36,6 +46,9 @@ export const useScanner = () => {
       logger.warn('useScanner', 'Scan already in progress, ignoring new scan request')
       return
     }
+
+    // Clear any pending auto-save from previous scan
+    clearAutoSaveTimeout()
 
     isRunningRef.current = true
     setIsRunning(true)
@@ -105,7 +118,14 @@ export const useScanner = () => {
       setCurrentProgress(100)
 
       if (settings.autoSave) {
-        setTimeout(async () => {
+        // Store timeout ID so it can be cancelled on unmount or scan stop
+        autoSaveTimeoutRef.current = window.setTimeout(async () => {
+          // Check if we're still the current session (guard against race conditions)
+          if (currentSessionRef.current !== newSessionId) {
+            logger.warn('useScanner', 'Session changed, skipping auto-save for stale session')
+            return
+          }
+
           const scanDuration = Date.now() - scanStartTime
           try {
             const savedScanId = await invoke<string>('save_current_scan', {
@@ -116,9 +136,15 @@ export const useScanner = () => {
           } catch (error) {
             logger.error('useScanner', 'Failed to auto-save scan', error)
           } finally {
-            setScanEndTime(Date.now())
-            isRunningRef.current = false
-            setIsRunning(false)
+            // Clear the ref since timeout completed
+            autoSaveTimeoutRef.current = null
+
+            // Only update state if this is still the current session
+            if (currentSessionRef.current === newSessionId) {
+              setScanEndTime(Date.now())
+              isRunningRef.current = false
+              setIsRunning(false)
+            }
           }
         }, 500)
       } else {
@@ -133,6 +159,9 @@ export const useScanner = () => {
       if (unlisten) {
         unlisten()
       }
+
+      // Clear any pending auto-save timeout on error
+      clearAutoSaveTimeout()
 
       setScanEndTime(Date.now())
       isRunningRef.current = false
@@ -150,7 +179,8 @@ export const useScanner = () => {
     setScanEndTime,
     setSessionId,
     settings.autoSave,
-    settings.maxConcurrentTasks
+    settings.maxConcurrentTasks,
+    clearAutoSaveTimeout
   ])
 
   const runQuickScan = useCallback(async () => {
@@ -171,20 +201,24 @@ export const useScanner = () => {
   }, [availableTasks, systemInfo, runDiagnostics])
 
   const stopScan = useCallback(() => {
+    // Cancel any pending auto-save
+    clearAutoSaveTimeout()
     isRunningRef.current = false
     currentSessionRef.current = null
     setIsRunning(false)
     setCurrentProgress(0)
     setCurrentTaskName('')
-  }, [setIsRunning, setCurrentProgress, setCurrentTaskName])
+  }, [setIsRunning, setCurrentProgress, setCurrentTaskName, clearAutoSaveTimeout])
 
   const clearResults = useCallback(() => {
+    // Cancel any pending auto-save
+    clearAutoSaveTimeout()
     currentSessionRef.current = null
     setResults({})
     setSessionId(null)
     setCurrentProgress(0)
     setCurrentTaskName('')
-  }, [setResults, setSessionId, setCurrentProgress, setCurrentTaskName])
+  }, [setResults, setSessionId, setCurrentProgress, setCurrentTaskName, clearAutoSaveTimeout])
 
   // Search and filter functionality
   useEffect(() => {
@@ -215,11 +249,16 @@ export const useScanner = () => {
     setFilteredResults(filtered)
   }, [searchQuery, results, setFilteredResults])
 
-  // Cleanup on unmount - ensure refs are reset
+  // Cleanup on unmount - ensure refs are reset and timeouts are cleared
   useEffect(() => {
     return () => {
       isRunningRef.current = false
       currentSessionRef.current = null
+      // Clear any pending auto-save timeout on unmount
+      if (autoSaveTimeoutRef.current !== null) {
+        clearTimeout(autoSaveTimeoutRef.current)
+        autoSaveTimeoutRef.current = null
+      }
     }
   }, [])
 
