@@ -256,7 +256,13 @@ Remember: Take action FIRST, explain SECOND. Never ask, just do.")
                     "get_all_diagnostics" => {
                         // Return current diagnostic results
                         let all_results = serde_json::to_string(&diagnostic_results)
-                            .unwrap_or_else(|_| "{}".to_string());
+                            .unwrap_or_else(|e| {
+                                eprintln!(
+                                    "Warning: Failed to serialize diagnostic results: {}",
+                                    e
+                                );
+                                "{}".to_string()
+                            });
 
                         let tool_response = ChatCompletionRequestToolMessageArgs::default()
                             .tool_call_id(tool_call.id.clone())
@@ -650,7 +656,15 @@ REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAG
                         // Add tool response
                         let tool_message = ChatCompletionRequestToolMessageArgs::default()
                             .tool_call_id(tool_call.id.clone())
-                            .content(serde_json::to_string(&diagnostic_result).unwrap_or_default())
+                            .content(
+                                serde_json::to_string(&diagnostic_result).unwrap_or_else(|e| {
+                                    eprintln!(
+                                        "Warning: Failed to serialize diagnostic result: {}",
+                                        e
+                                    );
+                                    "{}".to_string()
+                                }),
+                            )
                             .build()
                             .map_err(|e| format!("Failed to build tool message: {}", e))?
                             .into();

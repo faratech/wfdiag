@@ -365,25 +365,22 @@ impl WindowsNativeAPI {
         Ok(json!(adapters))
     }
 
-    /// Get system services using native Windows APIs
+    /// Get system services using WMI for reliable enumeration
     pub fn get_services(&self) -> Result<Value> {
-        // TODO: Implement with EnumServicesStatusExW
-        // For now, return placeholder data
-        Ok(json!([
-            {
-                "service_name": "Windows Update",
-                "display_name": "Windows Update",
-                "service_type": 32,
-                "current_state": 4,
-                "current_state_name": "Running",
-                "controls_accepted": 1,
-                "win32_exit_code": 0,
-                "service_specific_exit_code": 0,
-                "check_point": 0,
-                "wait_hint": 0,
-                "process_id": 1000,
-                "service_flags": 0
-            }
-        ]))
+        // Use WMI for reliable service enumeration (consistent with native_diagnostics.rs)
+        let wmi_con = crate::wmi_native::WmiConnection::new()?;
+        let results = wmi_con.query(
+            "SELECT Name, DisplayName, State, StartMode, PathName, ProcessId FROM Win32_Service",
+        )?;
+
+        let services: Vec<Value> = results
+            .into_iter()
+            .map(|r| {
+                let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                Value::Object(obj)
+            })
+            .collect();
+
+        Ok(Value::Array(services))
     }
 }

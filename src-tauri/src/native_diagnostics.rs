@@ -396,30 +396,53 @@ impl NativeDiagnostics {
                     let mut disk_info: serde_json::Map<String, Value> = disk.into_iter().collect();
 
                     // Parse health status (0=Healthy, 1=Warning, 2=Unhealthy)
-                    let health_status = disk_info.get("HealthStatus")
+                    // Default to 255 (Unknown) instead of 0 (Healthy) to avoid hiding issues
+                    let health_status = disk_info
+                        .get("HealthStatus")
                         .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
+                        .unwrap_or(255);
 
-                    let operational_status = disk_info.get("OperationalStatus")
+                    // Default to 0 (Unknown) which is appropriate for OperationalStatus
+                    let operational_status = disk_info
+                        .get("OperationalStatus")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
 
                     // Convert operational status to text (0=Unknown, 1=Other, 2=OK, 3=Degraded, etc.)
                     let operational_str = match operational_status {
+                        0 => "Unknown",
                         2 => "OK",
-                        3 => { all_healthy = false; "Degraded" },
-                        4 => { all_healthy = false; "Stressed" },
-                        5 => { all_healthy = false; "Predictive Failure" },
-                        6 => { all_healthy = false; "Error" },
-                        _ => "Unknown"
+                        3 => {
+                            all_healthy = false;
+                            "Degraded"
+                        }
+                        4 => {
+                            all_healthy = false;
+                            "Stressed"
+                        }
+                        5 => {
+                            all_healthy = false;
+                            "Predictive Failure"
+                        }
+                        6 => {
+                            all_healthy = false;
+                            "Error"
+                        }
+                        _ => "Unknown",
                     };
                     disk_info.insert("OperationalStatusText".to_string(), json!(operational_str));
 
                     let health_str = match health_status {
                         0 => "Healthy",
-                        1 => { all_healthy = false; "Warning" },
-                        2 => { all_healthy = false; "Unhealthy" },
-                        _ => "Unknown"
+                        1 => {
+                            all_healthy = false;
+                            "Warning"
+                        }
+                        2 => {
+                            all_healthy = false;
+                            "Unhealthy"
+                        }
+                        _ => "Unknown", // Includes 255 (unavailable) and any unexpected values
                     };
 
                     disk_info.insert("HealthStatusText".to_string(), json!(health_str));
@@ -481,12 +504,13 @@ impl NativeDiagnostics {
                 for disk in results {
                     let mut disk_info: serde_json::Map<String, Value> = disk.into_iter().collect();
 
-                    // Check disk status
-                    let status = disk_info.get("Status")
+                    // Check disk status - default to "Unknown" instead of "OK" to avoid hiding issues
+                    let status = disk_info
+                        .get("Status")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("OK");
+                        .unwrap_or("Unknown");
 
-                    if status != "OK" {
+                    if status != "OK" && status != "Unknown" {
                         all_healthy = false;
                     }
 
@@ -913,9 +937,19 @@ impl NativeDiagnostics {
             }
 
             // Sort by modification time (newest first)
+            // Files with inaccessible metadata sort to the end (oldest position) - this is intentional
+            // as we want to prioritize recent, readable minidumps over potentially corrupted ones
             all_entries.sort_by(|a, b| {
-                let a_time = a.metadata().ok().and_then(|m| m.modified().ok()).unwrap_or(std::time::UNIX_EPOCH);
-                let b_time = b.metadata().ok().and_then(|m| m.modified().ok()).unwrap_or(std::time::UNIX_EPOCH);
+                let a_time = a
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                let b_time = b
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::UNIX_EPOCH);
                 b_time.cmp(&a_time)
             });
 
