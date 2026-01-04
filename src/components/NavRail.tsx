@@ -4,7 +4,6 @@ import {
   shorthands,
   tokens,
   Text,
-  Badge,
   Tooltip,
   Divider,
   Caption1,
@@ -254,7 +253,6 @@ export const NavRail: React.FC<NavRailProps> = ({
   onToggleCollapse,
   issueCount = 0,
   isMonitoringActive = false,
-  hasAIKey = false,
   onOpenSettings,
   onOpenAbout,
   systemInfo,
@@ -285,29 +283,42 @@ export const NavRail: React.FC<NavRailProps> = ({
     {
       id: 'monitoring',
       icon: <ChartMultiple24Regular />,
-      label: 'System Monitor',
+      label: 'Monitor',
       badge: isMonitoringActive ? (
-        <Badge appearance="filled" color="success" size="extra-small" shape="circular" />
+        <span style={{
+          width: 6,
+          height: 6,
+          borderRadius: '50%',
+          backgroundColor: tokens.colorPaletteGreenForeground1,
+          display: 'inline-block',
+        }} />
       ) : undefined,
     },
     {
       id: 'ai',
       icon: <Brain24Regular />,
       label: 'AI Analysis',
-      badge: hasAIKey ? (
-        <Badge appearance="tint" color="informative" size="extra-small">
-          Ready
-        </Badge>
-      ) : undefined,
     },
     {
       id: 'issues',
       icon: <Warning24Regular />,
       label: 'Issues',
       badge: issueCount > 0 ? (
-        <Badge appearance="filled" color={issueCount > 5 ? 'danger' : 'warning'} size="small">
+        <span style={{
+          minWidth: 18,
+          height: 18,
+          borderRadius: 9,
+          backgroundColor: issueCount > 5 ? tokens.colorPaletteRedBackground2 : tokens.colorPaletteYellowBackground2,
+          color: issueCount > 5 ? tokens.colorPaletteRedForeground1 : tokens.colorPaletteYellowForeground1,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: 11,
+          fontWeight: 600,
+          padding: '0 5px',
+        }}>
           {issueCount}
-        </Badge>
+        </span>
       ) : undefined,
     },
     {
