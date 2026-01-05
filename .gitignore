@@ -1,37 +1,128 @@
-# Private documentation (not public)
-docs/
-
+# =============================================================================
 # Dependencies
+# =============================================================================
 node_modules/
 .pnpm-store/
 
-# Testing
-coverage/
-.nyc_output/
-
-# Production builds
+# =============================================================================
+# Build Outputs
+# =============================================================================
 build/
 dist/
 out/
-
-# Local build scripts and artifacts
-build-msix-bundle.sh
 msix-build/
-
-# Release binaries (use GitHub Releases instead)
 release/
 releases/
+msix_layout/
 
-# Misc
+# Tauri build outputs
+src-tauri/target/
+src-tauri/gen/
+src-tauri/bundle/
+.tauri/
+
+# Binary outputs (use GitHub Releases)
+*.msi
+*.msix
+*.msixbundle
+*.exe
+*.appx
+*.nsis
+*.dmg
+*.deb
+*.rpm
+*.zip
+*.tar.gz
+WFDiagnostics_*.msix
+
+# =============================================================================
+# Security Sensitive Files - NEVER COMMIT
+# =============================================================================
+# Certificates and keys
+*.pfx
+*.p12
+*.key
+*.crt
+*.cer
+*.pem
+*.keystore
+*.jks
+*.rsa
+*.dsa
+*_key
+*_key.*
+certs/*.pem
+certs/*.key
+certs/*.pfx
+certs/*.p12
+certs/*.crt
+certs/*.cer
+wfdiag-signing-cert.pfx
+certificates/
+
+# Encrypted/secret files
+*.enc
+*.dat
+*.token
+*.secret
+*.priv
+
+# API keys and credentials
+.env
+.env.local
+.env.*.local
+apikey.txt
+token.txt
+oauth_tokens.json
+credentials.json
+auth_tokens.json
+
+# Sigstore signatures (local development only)
+signatures/
+*.sig
+*.bundle
+*.rekor
+*-signature.json
+
+# =============================================================================
+# Local Build Scripts (auto-generated, not tracked)
+# =============================================================================
+build-msix-bundle.sh
+rebuild-msix-signed.ps1
+sign-*.ps1
+build-*.ps1
+create-*cert.ps1
+
+# =============================================================================
+# IDE and Editor Files
+# =============================================================================
+.idea/
+.vscode/
+*.code-workspace
+.history/
+*.swp
+*.swo
+*~
+
+# =============================================================================
+# OS Generated Files
+# =============================================================================
 .DS_Store
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
+.Trash-*
+.fuse_hidden*
+.nfs*
 ehthumbs.db
 Thumbs.db
+*.stackdump
+*.lnk
 
-# Debug logs
+# =============================================================================
+# Logs and Debug Files
+# =============================================================================
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -39,112 +130,43 @@ yarn-error.log*
 lerna-debug.log*
 .pnpm-debug.log*
 
-# Environment files
-.env
-.env.local
-.env.development.local  
-.env.test.local
-.env.production.local
-.env.*.local
+# =============================================================================
+# Testing and Coverage
+# =============================================================================
+coverage/
+.nyc_output/
+*.cpuprofile
+*.heapprofile
+*.heapsnapshot
+*.perf
 
-# IDE files (allow some .vscode config)
-.idea/
-*.swp
-*.swo
-*~
-
-# TypeScript
+# =============================================================================
+# TypeScript and Rust Build Artifacts
+# =============================================================================
 *.tsbuildinfo
 *.tgz
-
-# Tauri specific
-src-tauri/target/
-src-tauri/gen/
+**/*.rs.bk
+*.orig
+Cargo.lock.orig
 src-tauri/Cargo.lock
 src-tauri/.cargo/
-.tauri/
 
-# Security sensitive files
-*.pfx
-*.p12
-*.key
-*.crt
-*.cer
-# certs/ - managed more specifically below
-certificates/
-*.keystore
-*.jks
-*.enc
-*.dat
-*.token
-*.secret
-*.priv
-*_key
-*_key.*
-*.rsa
-*.dsa
-*.msix
-
-# Sigstore signatures (local development only)
-signatures/
-*.sig
-*.pem
-*.bundle
-*.rekor
-*-signature.json
-
-# Temporary and cache files
+# =============================================================================
+# Temporary and Cache Files
+# =============================================================================
 .cache/
 .tmp/
 tmp/
 temp/
 *.tmp
 *.temp
+*.backup
+*.bak
+~$*
 
-# OS generated files
-.Trash-*
-*~
-.fuse_hidden*
-.nfs*
-
-# Application specific
-tempstats_app/
-
-# Signing and build artifacts
-*.msi
-*.exe
-*.zip
-*.dmg
-*.deb
-*.rpm
-*.tar.gz
-
-
-# Windows specific
-*.stackdump
-*.lnk
-
-# Build outputs that shouldn't be versioned
-src-tauri/target/release/
-src-tauri/target/debug/  
-src-tauri/bundle/
-WFDiagnostics_*.msix
-*.nsis
-*.appx
-*.msixbundle
-
-# PowerShell build scripts (auto-generated)
-rebuild-msix-signed.ps1
-sign-*.ps1
-build-*.ps1
-create-*cert.ps1
-
-# Rust build artifacts
-**/*.rs.bk
-*.orig
-Cargo.lock.orig
-
-# Local configuration and user data
+# =============================================================================
+# Local Configuration (user-specific)
+# =============================================================================
 config.json
 user_config.json
 settings.json
@@ -155,62 +177,27 @@ scan_results/
 *.db
 *.database
 
-# API keys and tokens (extra protection)
-apikey.txt
-token.txt
-oauth_tokens.json
-credentials.json
-auth_tokens.json
-
-# Development tools and artifacts
+# =============================================================================
+# Development Tools
+# =============================================================================
 .claude/
-.vscode/
-*.code-workspace
-.history/
 .devcontainer/
 .dockerignore
 docker-compose.override.yml
-
-# Package manager
-.pnpm-store/
-pnpm-lock.yaml
-yarn.lock
-.yarn/
-.pnp.*
-nul
-
-# GitHub Codespaces
-.devcontainer/
-.github/ISSUE_TEMPLATE/
-.github/PULL_REQUEST_TEMPLATE/
-
-# Performance and profiling
-.clinic/
-profile/
-*.cpuprofile
-*.heapprofile
-*.heapsnapshot
-*.perf
-
-# Modern build tools
 .turbo/
 .next/
 .nuxt/
 .output/
 .vercel/
 .netlify/
+.clinic/
+profile/
 
-# Backup and recovery files
-*.backup
-*.bak
-*.swp
-*.swo
-~$*
-# Certificate files - never commit private keys or certificates
-wfdiag-signing-cert.pfx
-certs/*.pem
-certs/*.key
-certs/*.pfx
-certs/*.p12
-certs/*.crt
-certs/*.cer
+# =============================================================================
+# Package Manager Alternatives (we use npm)
+# =============================================================================
+pnpm-lock.yaml
+yarn.lock
+.yarn/
+.pnp.*
+nul
