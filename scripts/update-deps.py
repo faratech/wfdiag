@@ -162,8 +162,8 @@ def update_cargo_toml(content: str, updates: dict[str, str]) -> str:
 def main():
     dry_run = '--dry-run' in sys.argv
 
-    # Find Cargo.toml in src-tauri directory
-    script_dir = Path(__file__).parent.resolve()
+    # Find Cargo.toml in src-tauri directory (go up from scripts/)
+    script_dir = Path(__file__).parent.parent.resolve()
     cargo_toml = script_dir / "src-tauri" / "Cargo.toml"
 
     if not cargo_toml.exists():

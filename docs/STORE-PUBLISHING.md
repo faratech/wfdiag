@@ -201,10 +201,7 @@ For local builds, use the existing scripts:
 
 ```bash
 # Build everything from WSL
-python3 build-cross.py build-all --build-msix --sign
-
-# Or use the bash script
-./build-msix-bundle.sh
+python3 scripts/build-cross.py build-all --build-msix --sign
 ```
 
 ## References
