@@ -80,3 +80,14 @@ export { DataRow, MetricCard as DataMetricCard, DataList, CodeDisplay, DataGrid 
 export { DiagnosticRow } from './DiagnosticRow'
 export { CompactToolbar } from './CompactToolbar'
 export { StatusBar } from './StatusBar'
+
+// Two-Panel Diagnostic Components (egui-style)
+export { StatusBadge } from './StatusBadge'
+export type { StatusBadgeVariant } from './StatusBadge'
+
+export { JsonRenderer, parseJsonSafe } from './JsonRenderer'
+
+export { DiagnosticListPanel } from './DiagnosticListPanel'
+export type { DiagnosticItem } from './DiagnosticListPanel'
+
+export { DiagnosticDetailPanel } from './DiagnosticDetailPanel'

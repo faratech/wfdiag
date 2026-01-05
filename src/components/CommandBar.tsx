@@ -33,20 +33,20 @@ import {
 
 const useStyles = makeStyles({
   toolbar: {
-    backgroundColor: 'rgba(30, 41, 59, 0.6)',
-    backdropFilter: 'blur(10px)',
-    ...shorthands.border('1px', 'solid', 'rgba(255, 255, 255, 0.1)'),
+    minHeight: '32px',
+    backgroundColor: tokens.colorNeutralBackground2,
+    ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke2),
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
-    marginBottom: tokens.spacingVerticalM,
+    ...shorthands.padding('4px', tokens.spacingHorizontalS),
+    marginBottom: tokens.spacingVerticalS,
     flexWrap: 'wrap',
-    ...shorthands.gap(tokens.spacingVerticalXS),
+    ...shorthands.gap('4px'),
   },
 
   toolbarGroup: {
     display: 'flex',
     alignItems: 'center',
-    ...shorthands.gap(tokens.spacingHorizontalXS),
+    ...shorthands.gap('4px'),
     flexWrap: 'wrap',
   },
 
@@ -59,19 +59,19 @@ const useStyles = makeStyles({
   statusIndicator: {
     display: 'inline-flex',
     alignItems: 'center',
-    ...shorthands.gap(tokens.spacingHorizontalXS),
-    ...shorthands.padding(tokens.spacingVerticalXS, tokens.spacingHorizontalS),
-    ...shorthands.borderRadius(tokens.borderRadiusSmall),
-    fontSize: tokens.fontSizeBase200,
+    ...shorthands.gap('4px'),
+    ...shorthands.padding('2px', '8px'),
+    ...shorthands.borderRadius('4px'),
+    fontSize: '11px',
   },
 
   statusActive: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    color: '#10B981',
+    backgroundColor: 'rgba(80, 180, 80, 0.2)',
+    color: 'rgb(80, 180, 80)',
   },
 
   statusInactive: {
-    backgroundColor: 'rgba(100, 116, 139, 0.2)',
+    backgroundColor: tokens.colorNeutralBackground3,
     color: tokens.colorNeutralForeground3,
   }
 })
