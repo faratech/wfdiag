@@ -10,3 +10,4 @@ pub mod settings;
 pub mod about;
 pub mod process_list;
 pub mod ai;
+pub mod ai_analysis;

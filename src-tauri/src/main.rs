@@ -132,6 +132,37 @@ pub struct WfDiagApp {
 
     /// Pending AI analysis requests
     ai_pending_requests: Vec<String>,
+
+    // === AI Chat State ===
+    /// Chat message history
+    ai_chat_messages: Vec<AiChatMessage>,
+
+    /// Current chat input
+    ai_chat_input: String,
+
+    /// Whether chat is waiting for response
+    ai_chat_loading: bool,
+
+    /// Chat error message
+    ai_chat_error: Option<String>,
+
+    /// Channel for receiving chat responses
+    ai_chat_rx: Option<mpsc::Receiver<Result<String, String>>>,
+}
+
+/// AI chat message
+#[derive(Clone)]
+pub struct AiChatMessage {
+    pub role: AiChatRole,
+    pub content: String,
+    pub timestamp: chrono::DateTime<chrono::Local>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum AiChatRole {
+    User,
+    Assistant,
+    System,
 }
 
 /// Result of an AI analysis request
@@ -156,6 +187,7 @@ pub enum Tab {
     Processes,
     Issues,
     History,
+    AI,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -359,6 +391,12 @@ impl Default for WfDiagApp {
             ai_errors: HashMap::new(),
             ai_analysis_rx: None,
             ai_pending_requests: Vec::new(),
+            // AI chat state
+            ai_chat_messages: Vec::new(),
+            ai_chat_input: String::new(),
+            ai_chat_loading: false,
+            ai_chat_error: None,
+            ai_chat_rx: None,
         }
     }
 }
@@ -915,7 +953,7 @@ impl eframe::App for WfDiagApp {
         ui::ai::process_ai_analysis_updates(self);
 
         // Request repaints based on active states
-        let has_ai_pending = self.ai_status_checking || !self.ai_loading.is_empty();
+        let has_ai_pending = self.ai_status_checking || !self.ai_loading.is_empty() || self.ai_chat_loading;
         if self.scan_state == ScanState::Running {
             // Use a slower repaint rate to reduce flashing (100ms = 10 FPS during scan)
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -953,6 +991,7 @@ impl eframe::App for WfDiagApp {
                 Tab::Processes => ui::processes::show(self, ui),
                 Tab::Issues => ui::issues::show(self, ui),
                 Tab::History => ui::history::show(self, ui),
+                Tab::AI => ui::ai_analysis::show(self, ui),
             }
         });
 
