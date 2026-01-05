@@ -7,7 +7,7 @@ use crate::{AiChatMessage, AiChatRole, AiProvider, WfDiagApp};
 use eframe::egui::{self, Color32, Margin, RichText, ScrollArea, TextEdit, Vec2};
 use tokio::sync::mpsc;
 
-use super::ai::{get_active_provider_name, is_ai_available, start_phi_silica_check};
+use super::ai::{get_active_provider_name, is_ai_available, is_phi_available, is_openai_configured, should_use_phi, start_phi_silica_check};
 
 /// Show the AI Analysis tab
 pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
@@ -90,19 +90,7 @@ fn render_header(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                 });
 
             // Provider selector if both are available
-            let phi_available = app
-                .ai_phi_silica_status
-                .as_ref()
-                .map(|s| s.available)
-                .unwrap_or(false);
-            let openai_available = app
-                .settings
-                .openai_api_key
-                .as_ref()
-                .map(|k| !k.is_empty())
-                .unwrap_or(false);
-
-            if phi_available && openai_available {
+            if is_phi_available(app) && is_openai_configured(app) {
                 ui.add_space(8.0);
                 egui::ComboBox::from_id_salt("ai_provider_select")
                     .selected_text(match app.settings.ai_provider {
@@ -497,19 +485,11 @@ fn send_chat_message(app: &mut WfDiagApp) {
     // Determine provider and whether to use keyword-based diagnostics
     let api_key = app.settings.openai_api_key.clone();
     let provider = app.settings.ai_provider;
-    let phi_available = app
-        .ai_phi_silica_status
-        .as_ref()
-        .map(|s| s.available)
-        .unwrap_or(false);
+    let phi_available = is_phi_available(app);
 
     // Determine if we'll use Phi Silica (which needs keyword-based diagnostics)
     // or OpenAI (which uses AI-driven function calling)
-    let use_phi = match provider {
-        AiProvider::Auto => phi_available,
-        AiProvider::PhiSilica => phi_available,
-        AiProvider::OpenAI => false,
-    };
+    let use_phi = should_use_phi(provider, phi_available);
 
     // For Phi Silica, run keyword-based diagnostics first
     // For OpenAI, the AI will decide via function calling
@@ -699,8 +679,62 @@ fn extract_key_data(output: &str, task_id: &str) -> String {
         "processor" => extract_cpu_info(&json),
         "network_adapter" => extract_network_info(&json),
         "npu_info" => extract_npu_info(&json),
+        "comp_system" => extract_comp_system_info(&json),
+        "os_info" => extract_os_info(&json),
         _ => extract_generic_info(&json),
     }
+}
+
+fn extract_comp_system_info(json: &serde_json::Value) -> String {
+    let obj = if let Some(arr) = json.as_array() {
+        arr.first().and_then(|v| v.as_object())
+    } else {
+        json.as_object()
+    };
+
+    if let Some(sys) = obj {
+        let mut parts = Vec::new();
+        if let Some(mfr) = sys.get("Manufacturer").and_then(|v| v.as_str()) {
+            parts.push(mfr.to_string());
+        }
+        if let Some(model) = sys.get("Model").and_then(|v| v.as_str()) {
+            parts.push(model.to_string());
+        }
+        if let Some(name) = sys.get("Name").and_then(|v| v.as_str()) {
+            parts.push(format!("({})", name));
+        }
+        if let Some(mem) = sys.get("TotalPhysicalMemory").and_then(|v| v.as_u64()) {
+            parts.push(format!("{:.0}GB RAM", mem as f64 / 1_073_741_824.0));
+        }
+        return parts.join(" ");
+    }
+    String::new()
+}
+
+fn extract_os_info(json: &serde_json::Value) -> String {
+    let obj = if let Some(arr) = json.as_array() {
+        arr.first().and_then(|v| v.as_object())
+    } else {
+        json.as_object()
+    };
+
+    if let Some(os) = obj {
+        let mut parts = Vec::new();
+        if let Some(caption) = os.get("Caption").and_then(|v| v.as_str()) {
+            parts.push(caption.to_string());
+        }
+        if let Some(version) = os.get("Version").and_then(|v| v.as_str()) {
+            parts.push(format!("({})", version));
+        }
+        if let Some(build) = os.get("BuildNumber").and_then(|v| v.as_str()) {
+            parts.push(format!("Build {}", build));
+        }
+        if let Some(arch) = os.get("OSArchitecture").and_then(|v| v.as_str()) {
+            parts.push(arch.to_string());
+        }
+        return parts.join(" ");
+    }
+    String::new()
 }
 
 fn extract_disk_info(json: &serde_json::Value) -> String {
@@ -826,11 +860,7 @@ async fn analyze_chat_message(
     provider: AiProvider,
     phi_available: bool,
 ) -> Result<String, String> {
-    let use_phi = match provider {
-        AiProvider::Auto => phi_available,
-        AiProvider::PhiSilica => phi_available,
-        AiProvider::OpenAI => false,
-    };
+    let use_phi = should_use_phi(provider, phi_available);
 
     // Build conversation context from history (last 4 exchanges max for Phi Silica)
     let max_history = if use_phi { 4 } else { 10 };
@@ -854,24 +884,27 @@ async fn analyze_chat_message(
         .join("\n");
 
     // Build prompt with context and conversation history
+    // Use specific instructions so AI actually analyzes the data
+    let analysis_instructions = "Analyze the diagnostic data above. Include SPECIFIC values (e.g., '85% disk used', '16GB RAM'). Mention any concerns (high usage, errors). Give 2-3 actionable recommendations.";
+
     let prompt = if !history_text.is_empty() && !context.is_empty() {
         format!(
-            "Previous conversation:\n{}\n\nCurrent system status:\n{}\n\nUser: {}\n\nRespond helpfully based on the conversation context and system data.",
-            history_text, context, message
+            "Previous conversation:\n{}\n\nDIAGNOSTIC DATA:\n{}\n\nUser question: {}\n\n{}",
+            history_text, context, message, analysis_instructions
         )
     } else if !history_text.is_empty() {
         format!(
-            "Previous conversation:\n{}\n\nUser: {}\n\nRespond helpfully based on the conversation context.",
+            "Previous conversation:\n{}\n\nUser: {}\n\nRespond based on the conversation. If asked about system status without data, say you need to run diagnostics first.",
             history_text, message
         )
     } else if !context.is_empty() {
         format!(
-            "System status:\n{}\n\nQuestion: {}\n\nGive a brief, helpful answer.",
-            context, message
+            "DIAGNOSTIC DATA:\n{}\n\nUser question: {}\n\n{}",
+            context, message, analysis_instructions
         )
     } else {
         format!(
-            "Answer this Windows question briefly: {}",
+            "User asked: {}\n\nNo diagnostic data available. Provide general Windows advice or suggest running a scan first.",
             message
         )
     };

@@ -1,3 +1,8 @@
+// Shared utilities
+pub mod colors;
+pub mod components;
+
+// UI modules
 pub mod toolbar;
 pub mod statusbar;
 pub mod nav;

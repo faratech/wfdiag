@@ -3,6 +3,26 @@
 use crate::{AiProvider, WfDiagApp, AiAnalysisResult};
 use eframe::egui::{self, Color32, RichText, Margin};
 use tokio::sync::mpsc;
+use super::colors;
+
+/// Check if Phi Silica is available
+pub fn is_phi_available(app: &WfDiagApp) -> bool {
+    app.ai_phi_silica_status.as_ref().map(|s| s.available).unwrap_or(false)
+}
+
+/// Check if OpenAI is configured
+pub fn is_openai_configured(app: &WfDiagApp) -> bool {
+    app.settings.openai_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false)
+}
+
+/// Determine whether to use Phi Silica based on provider setting
+pub fn should_use_phi(provider: AiProvider, phi_available: bool) -> bool {
+    match provider {
+        AiProvider::Auto => phi_available,
+        AiProvider::PhiSilica => phi_available,
+        AiProvider::OpenAI => false,
+    }
+}
 
 /// Check if AI is available (either Phi Silica or OpenAI configured)
 pub fn is_ai_available(app: &WfDiagApp) -> bool {
@@ -11,17 +31,9 @@ pub fn is_ai_available(app: &WfDiagApp) -> bool {
     }
 
     match app.settings.ai_provider {
-        AiProvider::Auto => {
-            // Phi Silica available OR OpenAI key configured
-            app.ai_phi_silica_status.as_ref().map(|s| s.available).unwrap_or(false)
-                || app.settings.openai_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false)
-        }
-        AiProvider::PhiSilica => {
-            app.ai_phi_silica_status.as_ref().map(|s| s.available).unwrap_or(false)
-        }
-        AiProvider::OpenAI => {
-            app.settings.openai_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false)
-        }
+        AiProvider::Auto => is_phi_available(app) || is_openai_configured(app),
+        AiProvider::PhiSilica => is_phi_available(app),
+        AiProvider::OpenAI => is_openai_configured(app),
     }
 }
 
@@ -437,15 +449,15 @@ pub fn render_ai_panel(
 
     // AI panel frame
     egui::Frame::new()
-        .fill(Color32::from_rgba_unmultiplied(99, 102, 241, 20))
+        .fill(colors::AI_PANEL_BG)
         .corner_radius(6.0)
         .inner_margin(Margin::same(10))
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(99, 102, 241, 50)))
+        .stroke(egui::Stroke::new(1.0, colors::AI_PANEL_STROKE))
         .show(ui, |ui| {
             // Header
             ui.horizontal(|ui| {
                 ui.label(RichText::new("✨").size(14.0));
-                ui.label(RichText::new("AI Interpretation").size(11.0).strong().color(Color32::from_rgb(99, 102, 241)));
+                ui.label(RichText::new("AI Interpretation").size(11.0).strong().color(colors::PRIMARY));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ai_available {
@@ -470,8 +482,8 @@ pub fn render_ai_panel(
                 ui.label(RichText::new(interpretation).size(11.0));
             } else if let Some(ref err) = error {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("⚠").size(11.0).color(Color32::from_rgb(220, 100, 100)));
-                    ui.label(RichText::new(err).size(11.0).color(Color32::from_rgb(220, 100, 100)));
+                    ui.label(RichText::new("⚠").size(11.0).color(colors::ERROR));
+                    ui.label(RichText::new(err).size(11.0).color(colors::ERROR));
                 });
                 if ui.small_button("Retry").clicked() {
                     should_retry = true;
@@ -510,9 +522,9 @@ pub fn render_ai_status_badge(ui: &mut egui::Ui, app: &WfDiagApp) {
     let (color, text) = if !app.settings.ai_enabled {
         (Color32::GRAY, "AI Off")
     } else if ai_available {
-        (Color32::from_rgb(99, 102, 241), provider)
+        (colors::PRIMARY, provider)
     } else {
-        (Color32::from_rgb(200, 150, 50), "AI N/A")
+        (colors::WARNING, "AI N/A")
     };
 
     egui::Frame::new()
@@ -525,21 +537,177 @@ pub fn render_ai_status_badge(ui: &mut egui::Ui, app: &WfDiagApp) {
 }
 
 // ============================================================================
-// System Monitoring AI Analysis
+// Generic AI Analysis Infrastructure
 // ============================================================================
 
-/// Request AI analysis of system monitoring stats
-pub fn request_monitoring_analysis(app: &mut WfDiagApp) {
-    const MONITORING_AI_KEY: &str = "__monitoring_analysis__";
+/// Generic AI analysis function - replaces all duplicate analyze_* functions
+async fn analyze_with_ai(
+    prompt: &str,
+    api_key: Option<String>,
+    provider: crate::AiProvider,
+    phi_available: bool,
+) -> Result<String, String> {
+    let use_phi = match provider {
+        crate::AiProvider::Auto => phi_available,
+        crate::AiProvider::PhiSilica => phi_available,
+        crate::AiProvider::OpenAI => false,
+    };
 
-    // Check if already loading
-    if app.ai_loading.get(MONITORING_AI_KEY).copied().unwrap_or(false) {
+    if use_phi {
+        wfdiag_tauri::phi_silica::analyze_with_phi_silica(prompt.to_string())
+            .await
+            .map(|r| r.analysis)
+    } else if let Some(key) = api_key {
+        if key.is_empty() {
+            return Err("OpenAI API key not configured".to_string());
+        }
+        analyze_generic_with_openai(&key, prompt).await
+    } else {
+        Err("No AI provider available".to_string())
+    }
+}
+
+/// Generic request AI analysis - consolidates all request_*_analysis patterns
+fn request_generic_analysis(
+    app: &mut WfDiagApp,
+    key: &'static str,
+    context_text: String,
+    prompt_template: &str,
+) {
+    if app.ai_loading.get(key).copied().unwrap_or(false) {
         return;
     }
 
+    let prompt = format!("{}\n\n{}", prompt_template, context_text);
+
+    app.ai_loading.insert(key.to_string(), true);
+    app.ai_errors.remove(key);
+
+    let (tx, rx) = mpsc::channel(1);
+    app.ai_analysis_rx = Some(rx);
+
+    let api_key = app.settings.openai_api_key.clone();
+    let provider = app.settings.ai_provider;
+    let phi_available = app.ai_phi_silica_status.as_ref().map(|s| s.available).unwrap_or(false);
+    let runtime = app.runtime.clone();
+    let key_string = key.to_string();
+
+    std::thread::spawn(move || {
+        runtime.block_on(async {
+            let result = analyze_with_ai(&prompt, api_key, provider, phi_available).await;
+            let _ = tx.send(crate::AiAnalysisResult {
+                task_id: key_string,
+                interpretation: result,
+            }).await;
+        });
+    });
+}
+
+/// Configuration for generic AI panel rendering
+struct AiPanelConfig<'a> {
+    key: &'static str,
+    title: &'a str,
+    no_data_msg: &'a str,
+    analyze_btn: &'a str,
+    analyzing_msg: &'a str,
+    has_data: bool,
+}
+
+/// Generic AI panel renderer - replaces all duplicate render_*_ai_panel functions
+fn render_generic_ai_panel(
+    ui: &mut egui::Ui,
+    app: &mut WfDiagApp,
+    config: AiPanelConfig,
+    on_analyze: impl FnOnce(&mut WfDiagApp),
+) {
+    let ai_available = is_ai_available(app);
+    let is_loading = app.ai_loading.get(config.key).copied().unwrap_or(false);
+    let cached = app.ai_interpretations.get(config.key).cloned();
+    let error = app.ai_errors.get(config.key).cloned();
+    let provider = get_active_provider_name(app).to_string();
+
+    let mut should_analyze = false;
+    let mut should_retry = false;
+
+    ai_panel_frame(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("✨").size(14.0));
+            ui.label(RichText::new(config.title).size(11.0).strong().color(colors::PRIMARY));
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ai_available {
+                    ui.label(RichText::new(&provider).size(9.0).weak());
+                }
+            });
+        });
+
+        ui.add_space(6.0);
+
+        if !app.settings.ai_enabled {
+            ui.label(RichText::new("AI analysis is disabled. Enable in Settings.").size(11.0).weak());
+        } else if !ai_available {
+            ui.label(RichText::new("No AI provider available.").size(11.0).weak());
+        } else if !config.has_data {
+            ui.label(RichText::new(config.no_data_msg).size(11.0).weak());
+        } else if is_loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new(format!("{} {}...", config.analyzing_msg, provider)).size(11.0).weak());
+            });
+        } else if let Some(ref interpretation) = cached {
+            ui.label(RichText::new(interpretation).size(11.0));
+            ui.add_space(4.0);
+            if ui.small_button("Refresh Analysis").clicked() {
+                should_analyze = true;
+            }
+        } else if let Some(ref err) = error {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("⚠").size(11.0).color(colors::ERROR));
+                ui.label(RichText::new(err).size(11.0).color(colors::ERROR));
+            });
+            if ui.small_button("Retry").clicked() {
+                should_retry = true;
+            }
+        } else {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(config.no_data_msg).size(11.0).weak());
+                if ui.small_button(config.analyze_btn).clicked() {
+                    should_analyze = true;
+                }
+            });
+        }
+    });
+
+    if should_analyze || should_retry {
+        if should_retry {
+            app.ai_errors.remove(config.key);
+        }
+        app.ai_interpretations.remove(config.key);
+        on_analyze(app);
+    }
+}
+
+/// Reusable AI panel frame styling
+fn ai_panel_frame(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(colors::AI_PANEL_BG)
+        .corner_radius(6.0)
+        .inner_margin(Margin::same(10))
+        .stroke(egui::Stroke::new(1.0, colors::AI_PANEL_STROKE))
+        .show(ui, add_contents);
+}
+
+// ============================================================================
+// System Monitoring AI Analysis
+// ============================================================================
+
+const MONITORING_AI_KEY: &str = "__monitoring_analysis__";
+const MONITORING_PROMPT: &str = "Analyze these Windows system monitoring stats. Provide a brief assessment (3-4 sentences) of:\n1. Overall system health\n2. Any concerns or bottlenecks\n3. Recommendations if any issues are detected";
+
+/// Request AI analysis of system monitoring stats
+pub fn request_monitoring_analysis(app: &mut WfDiagApp) {
     #[cfg(windows)]
     {
-        // Build stats summary from current monitoring state
         let stats = match &app.monitoring_state.stats {
             Some(s) => s.clone(),
             None => return,
@@ -574,65 +742,7 @@ pub fn request_monitoring_analysis(app: &mut WfDiagApp) {
             }
         );
 
-        // Mark as loading
-        app.ai_loading.insert(MONITORING_AI_KEY.to_string(), true);
-        app.ai_errors.remove(MONITORING_AI_KEY);
-
-        // Create channel
-        let (tx, rx) = mpsc::channel(1);
-        app.ai_analysis_rx = Some(rx);
-
-        let api_key = app.settings.openai_api_key.clone();
-        let provider = app.settings.ai_provider;
-        let phi_available = app.ai_phi_silica_status.as_ref().map(|s| s.available).unwrap_or(false);
-        let runtime = app.runtime.clone();
-
-        std::thread::spawn(move || {
-            runtime.block_on(async {
-                let result = analyze_monitoring_stats(&stats_text, api_key, provider, phi_available).await;
-                let _ = tx.send(crate::AiAnalysisResult {
-                    task_id: MONITORING_AI_KEY.to_string(),
-                    interpretation: result,
-                }).await;
-            });
-        });
-    }
-}
-
-/// Analyze system monitoring stats with AI
-#[cfg(windows)]
-async fn analyze_monitoring_stats(
-    stats_text: &str,
-    api_key: Option<String>,
-    provider: crate::AiProvider,
-    phi_available: bool,
-) -> Result<String, String> {
-    let use_phi = match provider {
-        crate::AiProvider::Auto => phi_available,
-        crate::AiProvider::PhiSilica => phi_available,
-        crate::AiProvider::OpenAI => false,
-    };
-
-    let prompt = format!(
-        "Analyze these Windows system monitoring stats. Provide a brief assessment (3-4 sentences) of:\n\
-         1. Overall system health\n\
-         2. Any concerns or bottlenecks\n\
-         3. Recommendations if any issues are detected\n\n\
-         {}",
-        stats_text
-    );
-
-    if use_phi {
-        wfdiag_tauri::phi_silica::analyze_with_phi_silica(prompt)
-            .await
-            .map(|r| r.analysis)
-    } else if let Some(key) = api_key {
-        if key.is_empty() {
-            return Err("OpenAI API key not configured".to_string());
-        }
-        analyze_generic_with_openai(&key, &prompt).await
-    } else {
-        Err("No AI provider available".to_string())
+        request_generic_analysis(app, MONITORING_AI_KEY, stats_text, MONITORING_PROMPT);
     }
 }
 
@@ -661,93 +771,26 @@ async fn analyze_generic_with_openai(api_key: &str, prompt: &str) -> Result<Stri
 
 /// Render monitoring AI panel
 pub fn render_monitoring_ai_panel(ui: &mut egui::Ui, app: &mut WfDiagApp) {
-    const MONITORING_AI_KEY: &str = "__monitoring_analysis__";
-
-    let ai_available = is_ai_available(app);
-    let is_loading = app.ai_loading.get(MONITORING_AI_KEY).copied().unwrap_or(false);
-    let cached = app.ai_interpretations.get(MONITORING_AI_KEY).cloned();
-    let error = app.ai_errors.get(MONITORING_AI_KEY).cloned();
-    let provider = get_active_provider_name(app).to_string();
     let has_stats = app.monitoring_state.stats.is_some();
-
-    let mut should_analyze = false;
-    let mut should_retry = false;
-
-    egui::Frame::new()
-        .fill(Color32::from_rgba_unmultiplied(99, 102, 241, 20))
-        .corner_radius(6.0)
-        .inner_margin(Margin::same(10))
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(99, 102, 241, 50)))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("✨").size(14.0));
-                ui.label(RichText::new("AI System Analysis").size(11.0).strong().color(Color32::from_rgb(99, 102, 241)));
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ai_available {
-                        ui.label(RichText::new(&provider).size(9.0).weak());
-                    }
-                });
-            });
-
-            ui.add_space(6.0);
-
-            if !app.settings.ai_enabled {
-                ui.label(RichText::new("AI analysis is disabled. Enable in Settings.").size(11.0).weak());
-            } else if !ai_available {
-                ui.label(RichText::new("No AI provider available.").size(11.0).weak());
-            } else if !has_stats {
-                ui.label(RichText::new("Start monitoring to enable AI analysis.").size(11.0).weak());
-            } else if is_loading {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(RichText::new(format!("Analyzing with {}...", provider)).size(11.0).weak());
-                });
-            } else if let Some(ref interpretation) = cached {
-                ui.label(RichText::new(interpretation).size(11.0));
-                ui.add_space(4.0);
-                if ui.small_button("Refresh Analysis").clicked() {
-                    should_analyze = true;
-                }
-            } else if let Some(ref err) = error {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("⚠").size(11.0).color(Color32::from_rgb(220, 100, 100)));
-                    ui.label(RichText::new(err).size(11.0).color(Color32::from_rgb(220, 100, 100)));
-                });
-                if ui.small_button("Retry").clicked() {
-                    should_retry = true;
-                }
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Get AI insights on your system performance.").size(11.0).weak());
-                    if ui.small_button("Analyze").clicked() {
-                        should_analyze = true;
-                    }
-                });
-            }
-        });
-
-    if should_analyze || should_retry {
-        if should_retry {
-            app.ai_errors.remove(MONITORING_AI_KEY);
-        }
-        app.ai_interpretations.remove(MONITORING_AI_KEY);
-        request_monitoring_analysis(app);
-    }
+    render_generic_ai_panel(ui, app, AiPanelConfig {
+        key: MONITORING_AI_KEY,
+        title: "AI System Analysis",
+        no_data_msg: "Start monitoring to enable AI analysis.",
+        analyze_btn: "Analyze",
+        analyzing_msg: "Analyzing with",
+        has_data: has_stats,
+    }, request_monitoring_analysis);
 }
 
 // ============================================================================
 // Process List AI Analysis
 // ============================================================================
 
+const PROCESS_AI_KEY: &str = "__process_analysis__";
+const PROCESS_PROMPT: &str = "Analyze these Windows processes. Provide a brief assessment (3-4 sentences):\n1. Identify any unusually high resource usage\n2. Flag any potentially suspicious or unnecessary processes\n3. Suggest optimizations if applicable";
+
 /// Request AI analysis of running processes
 pub fn request_process_analysis(app: &mut WfDiagApp) {
-    const PROCESS_AI_KEY: &str = "__process_analysis__";
-
-    if app.ai_loading.get(PROCESS_AI_KEY).copied().unwrap_or(false) {
-        return;
-    }
-
     if app.all_processes.is_empty() {
         return;
     }
@@ -774,152 +817,31 @@ pub fn request_process_analysis(app: &mut WfDiagApp) {
         app.all_processes.len()
     );
 
-    app.ai_loading.insert(PROCESS_AI_KEY.to_string(), true);
-    app.ai_errors.remove(PROCESS_AI_KEY);
-
-    let (tx, rx) = mpsc::channel(1);
-    app.ai_analysis_rx = Some(rx);
-
-    let api_key = app.settings.openai_api_key.clone();
-    let provider = app.settings.ai_provider;
-    let phi_available = app.ai_phi_silica_status.as_ref().map(|s| s.available).unwrap_or(false);
-    let runtime = app.runtime.clone();
-
-    std::thread::spawn(move || {
-        runtime.block_on(async {
-            let result = analyze_processes(&process_text, api_key, provider, phi_available).await;
-            let _ = tx.send(crate::AiAnalysisResult {
-                task_id: PROCESS_AI_KEY.to_string(),
-                interpretation: result,
-            }).await;
-        });
-    });
-}
-
-async fn analyze_processes(
-    process_text: &str,
-    api_key: Option<String>,
-    provider: crate::AiProvider,
-    phi_available: bool,
-) -> Result<String, String> {
-    let use_phi = match provider {
-        crate::AiProvider::Auto => phi_available,
-        crate::AiProvider::PhiSilica => phi_available,
-        crate::AiProvider::OpenAI => false,
-    };
-
-    let prompt = format!(
-        "Analyze these Windows processes. Provide a brief assessment (3-4 sentences):\n\
-         1. Identify any unusually high resource usage\n\
-         2. Flag any potentially suspicious or unnecessary processes\n\
-         3. Suggest optimizations if applicable\n\n\
-         {}",
-        process_text
-    );
-
-    if use_phi {
-        wfdiag_tauri::phi_silica::analyze_with_phi_silica(prompt)
-            .await
-            .map(|r| r.analysis)
-    } else if let Some(key) = api_key {
-        if key.is_empty() {
-            return Err("OpenAI API key not configured".to_string());
-        }
-        analyze_generic_with_openai(&key, &prompt).await
-    } else {
-        Err("No AI provider available".to_string())
-    }
+    request_generic_analysis(app, PROCESS_AI_KEY, process_text, PROCESS_PROMPT);
 }
 
 /// Render process list AI panel
 pub fn render_process_ai_panel(ui: &mut egui::Ui, app: &mut WfDiagApp) {
-    const PROCESS_AI_KEY: &str = "__process_analysis__";
-
-    let ai_available = is_ai_available(app);
-    let is_loading = app.ai_loading.get(PROCESS_AI_KEY).copied().unwrap_or(false);
-    let cached = app.ai_interpretations.get(PROCESS_AI_KEY).cloned();
-    let error = app.ai_errors.get(PROCESS_AI_KEY).cloned();
-    let provider = get_active_provider_name(app).to_string();
     let has_processes = !app.all_processes.is_empty();
-
-    let mut should_analyze = false;
-    let mut should_retry = false;
-
-    egui::Frame::new()
-        .fill(Color32::from_rgba_unmultiplied(99, 102, 241, 20))
-        .corner_radius(6.0)
-        .inner_margin(Margin::same(10))
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(99, 102, 241, 50)))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("✨").size(14.0));
-                ui.label(RichText::new("AI Process Analysis").size(11.0).strong().color(Color32::from_rgb(99, 102, 241)));
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ai_available {
-                        ui.label(RichText::new(&provider).size(9.0).weak());
-                    }
-                });
-            });
-
-            ui.add_space(6.0);
-
-            if !app.settings.ai_enabled {
-                ui.label(RichText::new("AI analysis is disabled. Enable in Settings.").size(11.0).weak());
-            } else if !ai_available {
-                ui.label(RichText::new("No AI provider available.").size(11.0).weak());
-            } else if !has_processes {
-                ui.label(RichText::new("Start monitoring to enable AI analysis.").size(11.0).weak());
-            } else if is_loading {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(RichText::new(format!("Analyzing processes with {}...", provider)).size(11.0).weak());
-                });
-            } else if let Some(ref interpretation) = cached {
-                ui.label(RichText::new(interpretation).size(11.0));
-                ui.add_space(4.0);
-                if ui.small_button("Refresh Analysis").clicked() {
-                    should_analyze = true;
-                }
-            } else if let Some(ref err) = error {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("⚠").size(11.0).color(Color32::from_rgb(220, 100, 100)));
-                    ui.label(RichText::new(err).size(11.0).color(Color32::from_rgb(220, 100, 100)));
-                });
-                if ui.small_button("Retry").clicked() {
-                    should_retry = true;
-                }
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Get AI insights on running processes.").size(11.0).weak());
-                    if ui.small_button("Analyze Processes").clicked() {
-                        should_analyze = true;
-                    }
-                });
-            }
-        });
-
-    if should_analyze || should_retry {
-        if should_retry {
-            app.ai_errors.remove(PROCESS_AI_KEY);
-        }
-        app.ai_interpretations.remove(PROCESS_AI_KEY);
-        request_process_analysis(app);
-    }
+    render_generic_ai_panel(ui, app, AiPanelConfig {
+        key: PROCESS_AI_KEY,
+        title: "AI Process Analysis",
+        no_data_msg: "Start monitoring to enable AI analysis.",
+        analyze_btn: "Analyze Processes",
+        analyzing_msg: "Analyzing processes with",
+        has_data: has_processes,
+    }, request_process_analysis);
 }
 
 // ============================================================================
 // Scan History AI Analysis
 // ============================================================================
 
+const COMPARISON_AI_KEY: &str = "__comparison_analysis__";
+const COMPARISON_PROMPT: &str = "Analyze this Windows diagnostic scan comparison. Provide a brief summary (3-4 sentences):\n1. What changed between the scans\n2. Whether the system health improved or degraded\n3. Priority actions if new failures were detected";
+
 /// Request AI analysis of scan comparison
 pub fn request_comparison_analysis(app: &mut WfDiagApp) {
-    const COMPARISON_AI_KEY: &str = "__comparison_analysis__";
-
-    if app.ai_loading.get(COMPARISON_AI_KEY).copied().unwrap_or(false) {
-        return;
-    }
-
     let comparison = match &app.comparison_result {
         Some(c) => c.clone(),
         None => return,
@@ -947,148 +869,27 @@ pub fn request_comparison_analysis(app: &mut WfDiagApp) {
         comparison.new_successes.iter().map(|c| format!("  - {}: {}", c.task_name, c.category)).collect::<Vec<_>>().join("\n"),
     );
 
-    app.ai_loading.insert(COMPARISON_AI_KEY.to_string(), true);
-    app.ai_errors.remove(COMPARISON_AI_KEY);
-
-    let (tx, rx) = mpsc::channel(1);
-    app.ai_analysis_rx = Some(rx);
-
-    let api_key = app.settings.openai_api_key.clone();
-    let provider = app.settings.ai_provider;
-    let phi_available = app.ai_phi_silica_status.as_ref().map(|s| s.available).unwrap_or(false);
-    let runtime = app.runtime.clone();
-
-    std::thread::spawn(move || {
-        runtime.block_on(async {
-            let result = analyze_comparison(&comparison_text, api_key, provider, phi_available).await;
-            let _ = tx.send(crate::AiAnalysisResult {
-                task_id: COMPARISON_AI_KEY.to_string(),
-                interpretation: result,
-            }).await;
-        });
-    });
-}
-
-async fn analyze_comparison(
-    comparison_text: &str,
-    api_key: Option<String>,
-    provider: crate::AiProvider,
-    phi_available: bool,
-) -> Result<String, String> {
-    let use_phi = match provider {
-        crate::AiProvider::Auto => phi_available,
-        crate::AiProvider::PhiSilica => phi_available,
-        crate::AiProvider::OpenAI => false,
-    };
-
-    let prompt = format!(
-        "Analyze this Windows diagnostic scan comparison. Provide a brief summary (3-4 sentences):\n\
-         1. What changed between the scans\n\
-         2. Whether the system health improved or degraded\n\
-         3. Priority actions if new failures were detected\n\n\
-         {}",
-        comparison_text
-    );
-
-    if use_phi {
-        wfdiag_tauri::phi_silica::analyze_with_phi_silica(prompt)
-            .await
-            .map(|r| r.analysis)
-    } else if let Some(key) = api_key {
-        if key.is_empty() {
-            return Err("OpenAI API key not configured".to_string());
-        }
-        analyze_generic_with_openai(&key, &prompt).await
-    } else {
-        Err("No AI provider available".to_string())
-    }
+    request_generic_analysis(app, COMPARISON_AI_KEY, comparison_text, COMPARISON_PROMPT);
 }
 
 /// Render comparison AI panel
 pub fn render_comparison_ai_panel(ui: &mut egui::Ui, app: &mut WfDiagApp) {
-    const COMPARISON_AI_KEY: &str = "__comparison_analysis__";
-
-    let ai_available = is_ai_available(app);
-    let is_loading = app.ai_loading.get(COMPARISON_AI_KEY).copied().unwrap_or(false);
-    let cached = app.ai_interpretations.get(COMPARISON_AI_KEY).cloned();
-    let error = app.ai_errors.get(COMPARISON_AI_KEY).cloned();
-    let provider = get_active_provider_name(app).to_string();
     let has_comparison = app.comparison_result.is_some();
-
-    let mut should_analyze = false;
-    let mut should_retry = false;
-
-    egui::Frame::new()
-        .fill(Color32::from_rgba_unmultiplied(99, 102, 241, 20))
-        .corner_radius(6.0)
-        .inner_margin(Margin::same(10))
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(99, 102, 241, 50)))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("✨").size(14.0));
-                ui.label(RichText::new("AI Comparison Analysis").size(11.0).strong().color(Color32::from_rgb(99, 102, 241)));
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ai_available {
-                        ui.label(RichText::new(&provider).size(9.0).weak());
-                    }
-                });
-            });
-
-            ui.add_space(6.0);
-
-            if !app.settings.ai_enabled {
-                ui.label(RichText::new("AI analysis is disabled. Enable in Settings.").size(11.0).weak());
-            } else if !ai_available {
-                ui.label(RichText::new("No AI provider available.").size(11.0).weak());
-            } else if !has_comparison {
-                ui.label(RichText::new("Select scans to compare for AI analysis.").size(11.0).weak());
-            } else if is_loading {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(RichText::new(format!("Analyzing comparison with {}...", provider)).size(11.0).weak());
-                });
-            } else if let Some(ref interpretation) = cached {
-                ui.label(RichText::new(interpretation).size(11.0));
-                ui.add_space(4.0);
-                if ui.small_button("Refresh Analysis").clicked() {
-                    should_analyze = true;
-                }
-            } else if let Some(ref err) = error {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("⚠").size(11.0).color(Color32::from_rgb(220, 100, 100)));
-                    ui.label(RichText::new(err).size(11.0).color(Color32::from_rgb(220, 100, 100)));
-                });
-                if ui.small_button("Retry").clicked() {
-                    should_retry = true;
-                }
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Get AI summary of scan differences.").size(11.0).weak());
-                    if ui.small_button("Analyze Changes").clicked() {
-                        should_analyze = true;
-                    }
-                });
-            }
-        });
-
-    if should_analyze || should_retry {
-        if should_retry {
-            app.ai_errors.remove(COMPARISON_AI_KEY);
-        }
-        app.ai_interpretations.remove(COMPARISON_AI_KEY);
-        request_comparison_analysis(app);
-    }
+    render_generic_ai_panel(ui, app, AiPanelConfig {
+        key: COMPARISON_AI_KEY,
+        title: "AI Comparison Analysis",
+        no_data_msg: "Select scans to compare for AI analysis.",
+        analyze_btn: "Analyze Changes",
+        analyzing_msg: "Analyzing comparison with",
+        has_data: has_comparison,
+    }, request_comparison_analysis);
 }
+
+const SCAN_AI_KEY: &str = "__scan_analysis__";
+const SCAN_PROMPT: &str = "Analyze this Windows diagnostic scan. Provide a brief summary (3-4 sentences):\n1. Overall system health assessment\n2. Key issues found (if any)\n3. Recommended actions";
 
 /// Request AI analysis of a single scan
 pub fn request_scan_analysis(app: &mut WfDiagApp) {
-    const SCAN_AI_KEY: &str = "__scan_analysis__";
-
-    if app.ai_loading.get(SCAN_AI_KEY).copied().unwrap_or(false) {
-        return;
-    }
-
     let scan = match &app.selected_scan {
         Some(s) => s.clone(),
         None => return,
@@ -1154,136 +955,18 @@ pub fn request_scan_analysis(app: &mut WfDiagApp) {
         passed.iter().take(10).map(|p| format!("  - {}", p)).collect::<Vec<_>>().join("\n")
     );
 
-    app.ai_loading.insert(SCAN_AI_KEY.to_string(), true);
-    app.ai_errors.remove(SCAN_AI_KEY);
-
-    let (tx, rx) = mpsc::channel(1);
-    app.ai_analysis_rx = Some(rx);
-
-    let api_key = app.settings.openai_api_key.clone();
-    let provider = app.settings.ai_provider;
-    let phi_available = app.ai_phi_silica_status.as_ref().map(|s| s.available).unwrap_or(false);
-    let runtime = app.runtime.clone();
-
-    std::thread::spawn(move || {
-        runtime.block_on(async {
-            let result = analyze_scan(&scan_text, api_key, provider, phi_available).await;
-            let _ = tx.send(crate::AiAnalysisResult {
-                task_id: SCAN_AI_KEY.to_string(),
-                interpretation: result,
-            }).await;
-        });
-    });
-}
-
-async fn analyze_scan(
-    scan_text: &str,
-    api_key: Option<String>,
-    provider: crate::AiProvider,
-    phi_available: bool,
-) -> Result<String, String> {
-    let use_phi = match provider {
-        crate::AiProvider::Auto => phi_available,
-        crate::AiProvider::PhiSilica => phi_available,
-        crate::AiProvider::OpenAI => false,
-    };
-
-    let prompt = format!(
-        "Analyze this Windows diagnostic scan. Provide a brief summary (3-4 sentences):\n\
-         1. Overall system health assessment\n\
-         2. Key issues found (if any)\n\
-         3. Recommended actions\n\n\
-         {}",
-        scan_text
-    );
-
-    if use_phi {
-        wfdiag_tauri::phi_silica::analyze_with_phi_silica(prompt)
-            .await
-            .map(|r| r.analysis)
-    } else if let Some(key) = api_key {
-        if key.is_empty() {
-            return Err("OpenAI API key not configured".to_string());
-        }
-        analyze_generic_with_openai(&key, &prompt).await
-    } else {
-        Err("No AI provider available".to_string())
-    }
+    request_generic_analysis(app, SCAN_AI_KEY, scan_text, SCAN_PROMPT);
 }
 
 /// Render scan detail AI panel
 pub fn render_scan_ai_panel(ui: &mut egui::Ui, app: &mut WfDiagApp) {
-    const SCAN_AI_KEY: &str = "__scan_analysis__";
-
-    let ai_available = is_ai_available(app);
-    let is_loading = app.ai_loading.get(SCAN_AI_KEY).copied().unwrap_or(false);
-    let cached = app.ai_interpretations.get(SCAN_AI_KEY).cloned();
-    let error = app.ai_errors.get(SCAN_AI_KEY).cloned();
-    let provider = get_active_provider_name(app).to_string();
     let has_scan = app.selected_scan.is_some();
-
-    let mut should_analyze = false;
-    let mut should_retry = false;
-
-    egui::Frame::new()
-        .fill(Color32::from_rgba_unmultiplied(99, 102, 241, 20))
-        .corner_radius(6.0)
-        .inner_margin(Margin::same(10))
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(99, 102, 241, 50)))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("✨").size(14.0));
-                ui.label(RichText::new("AI Scan Summary").size(11.0).strong().color(Color32::from_rgb(99, 102, 241)));
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ai_available {
-                        ui.label(RichText::new(&provider).size(9.0).weak());
-                    }
-                });
-            });
-
-            ui.add_space(6.0);
-
-            if !app.settings.ai_enabled {
-                ui.label(RichText::new("AI analysis is disabled. Enable in Settings.").size(11.0).weak());
-            } else if !ai_available {
-                ui.label(RichText::new("No AI provider available.").size(11.0).weak());
-            } else if !has_scan {
-                ui.label(RichText::new("Select a scan to view AI summary.").size(11.0).weak());
-            } else if is_loading {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(RichText::new(format!("Analyzing scan with {}...", provider)).size(11.0).weak());
-                });
-            } else if let Some(ref interpretation) = cached {
-                ui.label(RichText::new(interpretation).size(11.0));
-                ui.add_space(4.0);
-                if ui.small_button("Refresh Analysis").clicked() {
-                    should_analyze = true;
-                }
-            } else if let Some(ref err) = error {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("⚠").size(11.0).color(Color32::from_rgb(220, 100, 100)));
-                    ui.label(RichText::new(err).size(11.0).color(Color32::from_rgb(220, 100, 100)));
-                });
-                if ui.small_button("Retry").clicked() {
-                    should_retry = true;
-                }
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Get AI summary of this scan.").size(11.0).weak());
-                    if ui.small_button("Summarize Scan").clicked() {
-                        should_analyze = true;
-                    }
-                });
-            }
-        });
-
-    if should_analyze || should_retry {
-        if should_retry {
-            app.ai_errors.remove(SCAN_AI_KEY);
-        }
-        app.ai_interpretations.remove(SCAN_AI_KEY);
-        request_scan_analysis(app);
-    }
+    render_generic_ai_panel(ui, app, AiPanelConfig {
+        key: SCAN_AI_KEY,
+        title: "AI Scan Summary",
+        no_data_msg: "Select a scan to view AI summary.",
+        analyze_btn: "Summarize Scan",
+        analyzing_msg: "Analyzing scan with",
+        has_data: has_scan,
+    }, request_scan_analysis);
 }

@@ -1,6 +1,7 @@
 //! Scan History Tab - View, compare, and manage past diagnostic scans
 
 use super::diagnostics::{parse_diagnostic_output, render_json_output, render_parsed_output};
+use super::{colors, components};
 use crate::{HistoryView, WfDiagApp};
 use eframe::egui::{self, Color32, Margin, RichText};
 
@@ -14,27 +15,21 @@ pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
 
 fn show_list(app: &mut WfDiagApp, ui: &mut egui::Ui) {
     // Header
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("📜 Scan History").size(18.0).strong());
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if !app.stored_history.is_empty() {
-                if ui.button("🗑 Clear All").clicked() {
-                    app.clear_history();
-                }
-
-                ui.add_space(8.0);
-
-                if ui.button("↻ Refresh").clicked() {
-                    app.load_history();
-                }
+    components::page_header(ui, "📜 Scan History", |ui| {
+        if !app.stored_history.is_empty() {
+            if ui.button("🗑 Clear All").clicked() {
+                app.clear_history();
             }
-        });
+
+            ui.add_space(components::SPACE_SM);
+
+            if ui.button("↻ Refresh").clicked() {
+                app.load_history();
+            }
+        }
     });
 
-    ui.add_space(8.0);
-    ui.separator();
-    ui.add_space(8.0);
+    components::section_separator(ui);
 
     // Check if comparing
     if app.compare_scan_id.is_some() {
@@ -42,25 +37,22 @@ fn show_list(app: &mut WfDiagApp, ui: &mut egui::Ui) {
             ui.label(
                 RichText::new("⚖ Compare Mode: Select second scan to compare")
                     .size(12.0)
-                    .color(Color32::from_rgb(59, 130, 246)),
+                    .color(colors::INFO),
             );
             if ui.small_button("Cancel").clicked() {
                 app.compare_scan_id = None;
             }
         });
-        ui.add_space(8.0);
+        ui.add_space(components::SPACE_SM);
     }
 
     if app.stored_history.is_empty() {
-        // Empty state
-        ui.vertical_centered(|ui| {
-            ui.add_space(80.0);
-            ui.label(RichText::new("📜").size(48.0).weak());
-            ui.add_space(16.0);
-            ui.label(RichText::new("No Scan History").size(18.0).strong());
-            ui.add_space(8.0);
-            ui.label(RichText::new("Complete a diagnostic scan to see history here.\nScans are automatically saved and can be compared.").size(13.0).weak());
-        });
+        components::empty_state(
+            ui,
+            "📜",
+            "No Scan History",
+            "Complete a diagnostic scan to see history here.\nScans are automatically saved and can be compared.",
+        );
         return;
     }
 
@@ -91,11 +83,11 @@ fn show_list(app: &mut WfDiagApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().show(ui, |ui| {
         for (i, scan) in history.iter().enumerate() {
             let time_str = scan.timestamp.format("%Y-%m-%d %H:%M:%S");
-            let duration_str = format_duration(scan.duration_ms);
+            let duration_str = components::format_duration(scan.duration_ms);
             let is_selected_for_compare = compare_id.as_ref() == Some(&scan.id);
 
             let frame_color = if is_selected_for_compare {
-                Color32::from_rgb(59, 130, 246).linear_multiply(0.3)
+                colors::INFO.linear_multiply(0.3)
             } else {
                 ui.visuals().extreme_bg_color
             };
@@ -107,7 +99,7 @@ fn show_list(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                 .stroke(egui::Stroke::new(
                     if is_selected_for_compare { 2.0 } else { 1.0 },
                     if is_selected_for_compare {
-                        Color32::from_rgb(59, 130, 246)
+                        colors::INFO
                     } else {
                         ui.visuals().widgets.noninteractive.bg_stroke.color
                     },
@@ -127,7 +119,7 @@ fn show_list(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                                     ui.label(
                                         RichText::new("[Selected]")
                                             .size(10.0)
-                                            .color(Color32::from_rgb(59, 130, 246)),
+                                            .color(colors::INFO),
                                     );
                                 }
                             });
@@ -139,14 +131,14 @@ fn show_list(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                                 ui.label(
                                     RichText::new(format!("✓ {}", scan.success_count))
                                         .size(11.0)
-                                        .color(Color32::from_rgb(80, 180, 80)),
+                                        .color(colors::SUCCESS),
                                 );
 
                                 if scan.failure_count > 0 {
                                     ui.label(
                                         RichText::new(format!("✗ {}", scan.failure_count))
                                             .size(11.0)
-                                            .color(Color32::from_rgb(220, 80, 80)),
+                                            .color(colors::ERROR),
                                     );
                                 }
 
@@ -255,19 +247,19 @@ fn show_detail(app: &mut WfDiagApp, ui: &mut egui::Ui) {
         ui.label(
             RichText::new(format!("✓ {} passed", scan.success_count))
                 .size(12.0)
-                .color(Color32::from_rgb(80, 180, 80)),
+                .color(colors::SUCCESS),
         );
         ui.label(
             RichText::new(format!("✗ {} failed", scan.failure_count))
                 .size(12.0)
                 .color(if scan.failure_count > 0 {
-                    Color32::from_rgb(220, 80, 80)
+                    colors::ERROR
                 } else {
                     Color32::GRAY
                 }),
         );
         ui.label(
-            RichText::new(format!("⏱ {}", format_duration(scan.duration_ms)))
+            RichText::new(format!("⏱ {}", components::format_duration(scan.duration_ms)))
                 .size(12.0)
                 .weak(),
         );
@@ -334,9 +326,9 @@ fn show_detail(app: &mut WfDiagApp, ui: &mut egui::Ui) {
 
                             let status_icon = if result.success { "✓" } else { "✗" };
                             let status_color = if result.success {
-                                Color32::from_rgb(80, 180, 80)
+                                colors::SUCCESS
                             } else {
-                                Color32::from_rgb(220, 80, 80)
+                                colors::ERROR
                             };
 
                             ui.horizontal(|ui| {
@@ -452,12 +444,12 @@ fn show_comparison(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                     ui.label(
                         RichText::new(format!("✓ {}", comparison.previous_scan.success_count))
                             .size(11.0)
-                            .color(Color32::from_rgb(80, 180, 80)),
+                            .color(colors::SUCCESS),
                     );
                     ui.label(
                         RichText::new(format!("✗ {}", comparison.previous_scan.failure_count))
                             .size(11.0)
-                            .color(Color32::from_rgb(220, 80, 80)),
+                            .color(colors::ERROR),
                     );
                 });
             });
@@ -481,12 +473,12 @@ fn show_comparison(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                     ui.label(
                         RichText::new(format!("✓ {}", comparison.current_scan.success_count))
                             .size(11.0)
-                            .color(Color32::from_rgb(80, 180, 80)),
+                            .color(colors::SUCCESS),
                     );
                     ui.label(
                         RichText::new(format!("✗ {}", comparison.current_scan.failure_count))
                             .size(11.0)
-                            .color(Color32::from_rgb(220, 80, 80)),
+                            .color(colors::ERROR),
                     );
                 });
             });
@@ -506,7 +498,7 @@ fn show_comparison(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                 .color(if comparison.new_failures.is_empty() {
                     Color32::GRAY
                 } else {
-                    Color32::from_rgb(220, 80, 80)
+                    colors::ERROR
                 }),
         );
         ui.label(RichText::new("•").weak());
@@ -516,7 +508,7 @@ fn show_comparison(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                 .color(if comparison.new_successes.is_empty() {
                     Color32::GRAY
                 } else {
-                    Color32::from_rgb(80, 180, 80)
+                    colors::SUCCESS
                 }),
         );
     });
@@ -547,7 +539,7 @@ fn show_comparison(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                 RichText::new("🔴 New Failures")
                     .size(14.0)
                     .strong()
-                    .color(Color32::from_rgb(220, 80, 80)),
+                    .color(colors::ERROR),
             );
             ui.add_space(4.0);
 
@@ -564,7 +556,7 @@ fn show_comparison(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                 RichText::new("🟢 New Successes")
                     .size(14.0)
                     .strong()
-                    .color(Color32::from_rgb(80, 180, 80)),
+                    .color(colors::SUCCESS),
             );
             ui.add_space(4.0);
 
@@ -581,7 +573,7 @@ fn show_comparison(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                 RichText::new("🔵 Output Changed (Status Same)")
                     .size(14.0)
                     .strong()
-                    .color(Color32::from_rgb(59, 130, 246)),
+                    .color(colors::INFO),
             );
             ui.add_space(4.0);
 
@@ -623,14 +615,14 @@ fn show_change_card(
                 };
                 let curr_icon = if change.current_success { "✓" } else { "✗" };
                 let prev_color = if change.previous_success {
-                    Color32::from_rgb(80, 180, 80)
+                    colors::SUCCESS
                 } else {
-                    Color32::from_rgb(220, 80, 80)
+                    colors::ERROR
                 };
                 let curr_color = if change.current_success {
-                    Color32::from_rgb(80, 180, 80)
+                    colors::SUCCESS
                 } else {
-                    Color32::from_rgb(220, 80, 80)
+                    colors::ERROR
                 };
 
                 ui.label(RichText::new(prev_icon).size(11.0).color(prev_color));
@@ -684,16 +676,6 @@ fn show_change_card(
     ui.add_space(4.0);
 }
 
-fn format_duration(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{}ms", ms)
-    } else if ms < 60000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else {
-        format!("{}m {}s", ms / 60000, (ms % 60000) / 1000)
-    }
-}
-
 fn truncate_output(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
@@ -735,7 +717,7 @@ fn render_json_compact(
         }
         serde_json::Value::Bool(b) => {
             let (text, color) = if *b {
-                ("True", Color32::from_rgb(80, 180, 80))
+                ("True", colors::SUCCESS)
             } else {
                 ("False", Color32::from_rgb(180, 100, 100))
             };

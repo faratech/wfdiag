@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32, RichText, Vec2};
 use crate::{WfDiagApp, ScanState};
+use super::colors;
 
 pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
@@ -34,7 +35,7 @@ pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
             app.scan_state == ScanState::Running,
             egui::Button::new(RichText::new("⏹ Stop").size(12.0).color(
                 if app.scan_state == ScanState::Running {
-                    Color32::from_rgb(200, 80, 80)
+                    colors::ERROR
                 } else {
                     Color32::GRAY
                 }

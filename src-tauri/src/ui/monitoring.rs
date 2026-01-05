@@ -3,6 +3,7 @@
 use crate::WfDiagApp;
 use eframe::egui::{self, Color32, Margin, RichText, Stroke, Vec2};
 use std::collections::VecDeque;
+use super::{colors, components};
 
 /// Maximum number of data points to keep in history
 const MAX_HISTORY: usize = 60;
@@ -80,68 +81,39 @@ impl MonitoringState {
 
 pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
     // Header with controls
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("📊 System Monitor").size(18.0).strong());
+    components::page_header(ui, "📊 System Monitor", |ui| {
+        components::live_badge(ui, app.monitoring_state.is_active);
 
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Status badge
-            let (status_text, status_color) = if app.monitoring_state.is_active {
-                ("● Live", Color32::from_rgb(80, 200, 120))
+        ui.add_space(components::SPACE_LG);
+
+        // Start/Stop button
+        let button_text = if app.monitoring_state.is_active {
+            "⏹ Stop"
+        } else {
+            "▶ Start"
+        };
+        if ui.button(RichText::new(button_text).size(12.0)).clicked() {
+            if app.monitoring_state.is_active {
+                app.stop_monitoring();
             } else {
-                ("○ Inactive", Color32::GRAY)
-            };
-            ui.label(RichText::new(status_text).size(12.0).color(status_color));
-
-            ui.add_space(16.0);
-
-            // Start/Stop button
-            let button_text = if app.monitoring_state.is_active {
-                "⏹ Stop"
-            } else {
-                "▶ Start"
-            };
-            if ui.button(RichText::new(button_text).size(12.0)).clicked() {
-                if app.monitoring_state.is_active {
-                    app.stop_monitoring();
-                } else {
-                    app.start_monitoring();
-                }
+                app.start_monitoring();
             }
-        });
+        }
     });
 
-    ui.add_space(16.0);
+    ui.add_space(components::SPACE_LG);
     ui.separator();
-    ui.add_space(16.0);
+    ui.add_space(components::SPACE_LG);
 
     #[cfg(windows)]
     {
         if !app.monitoring_state.is_active || app.monitoring_state.stats.is_none() {
-            // Empty state
-            ui.vertical_centered(|ui| {
-                ui.add_space(80.0);
-                ui.label(RichText::new("📈").size(48.0).weak());
-                ui.add_space(16.0);
-                ui.label(
-                    RichText::new(if app.monitoring_state.is_active {
-                        "Initializing..."
-                    } else {
-                        "System Monitoring Inactive"
-                    })
-                    .size(18.0)
-                    .strong(),
-                );
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new(if app.monitoring_state.is_active {
-                        "Collecting system statistics..."
-                    } else {
-                        "Click Start to begin real-time system monitoring"
-                    })
-                    .size(13.0)
-                    .weak(),
-                );
-            });
+            let (title, desc) = if app.monitoring_state.is_active {
+                ("Initializing...", "Collecting system statistics...")
+            } else {
+                ("System Monitoring Inactive", "Click Start to begin real-time system monitoring")
+            };
+            components::empty_state(ui, "📈", title, desc);
             return;
         }
 
@@ -166,7 +138,7 @@ pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                         "CPU",
                         stats.cpu_utilization,
                         "%",
-                        Color32::from_rgb(59, 130, 246),
+                        colors::CHART_CPU,
                         Some(&format!("{} MHz", stats.cpu_frequency)),
                     );
 
@@ -176,7 +148,7 @@ pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                         "Memory",
                         stats.memory_utilization,
                         "%",
-                        Color32::from_rgb(16, 185, 129),
+                        colors::CHART_MEMORY,
                         Some(&format!(
                             "{:.1} / {:.1} GB",
                             stats.memory_used_gb, stats.memory_total_gb
@@ -190,7 +162,7 @@ pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                         "Network",
                         net_value as f32,
                         "KB/s",
-                        Color32::from_rgb(139, 92, 246),
+                        colors::CHART_UPLOAD,
                         Some(&format!(
                             "↑{:.1} ↓{:.1}",
                             stats.network_upload_kb, stats.network_download_kb
@@ -203,7 +175,7 @@ pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                         "Swap",
                         stats.swap_utilization,
                         "%",
-                        Color32::from_rgb(245, 158, 11),
+                        colors::WARNING,
                         Some(&format!(
                             "{:.1} / {:.1} GB",
                             stats.swap_used_gb, stats.swap_total_gb
@@ -215,8 +187,9 @@ pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
 
                 // NPU Card - always show, with different states
                 {
+                    let npu_color = colors::CHART_UPLOAD; // Purple for NPU
                     let (border_color, icon_bg_color) = if stats.npu_available {
-                        (Color32::from_rgb(139, 92, 246).linear_multiply(0.5), Color32::from_rgb(139, 92, 246))
+                        (npu_color.linear_multiply(0.5), npu_color)
                     } else {
                         (Color32::from_gray(80), Color32::from_gray(100))
                     };
@@ -262,41 +235,14 @@ pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                                     ui.horizontal(|ui| {
                                         ui.label(RichText::new("Usage").size(11.0).weak());
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            let color = if util > 80.0 {
-                                                Color32::from_rgb(239, 68, 68)  // Red
-                                            } else if util > 50.0 {
-                                                Color32::from_rgb(245, 158, 11) // Amber
-                                            } else {
-                                                Color32::from_rgb(16, 185, 129) // Green
-                                            };
+                                            let color = colors::utilization_color(util);
                                             ui.label(RichText::new(format!("{:.1}%", util)).size(11.0).color(color).strong());
                                         });
                                     });
                                     ui.add_space(4.0);
 
                                     // Color-coded progress bar
-                                    let bar_color = if util > 80.0 {
-                                        Color32::from_rgb(239, 68, 68)
-                                    } else if util > 50.0 {
-                                        Color32::from_rgb(245, 158, 11)
-                                    } else {
-                                        Color32::from_rgb(16, 185, 129)
-                                    };
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(ui.available_width(), 8.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    ui.painter().rect_filled(
-                                        rect,
-                                        4.0,
-                                        Color32::from_gray(60),
-                                    );
-                                    let filled_width = rect.width() * (util / 100.0);
-                                    ui.painter().rect_filled(
-                                        egui::Rect::from_min_size(rect.min, egui::vec2(filled_width, rect.height())),
-                                        4.0,
-                                        bar_color,
-                                    );
+                                    components::utilization_bar(ui, util, ui.available_width(), 8.0);
                                 } else {
                                     // Check if it's a Qualcomm NPU
                                     let is_qualcomm = stats.npu_name.as_ref()
@@ -352,7 +298,7 @@ pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                 draw_line_chart(
                     ui,
                     &app.monitoring_state.cpu_history,
-                    Color32::from_rgb(59, 130, 246),
+                    colors::CHART_CPU,
                     100.0,
                 );
 
@@ -364,7 +310,7 @@ pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                 draw_line_chart(
                     ui,
                     &app.monitoring_state.memory_history,
-                    Color32::from_rgb(16, 185, 129),
+                    colors::CHART_MEMORY,
                     100.0,
                 );
 
@@ -400,22 +346,15 @@ pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
                     ui,
                     &app.monitoring_state.network_up_history,
                     &app.monitoring_state.network_down_history,
-                    Color32::from_rgb(139, 92, 246),
-                    Color32::from_rgb(245, 158, 11),
+                    colors::CHART_UPLOAD,
+                    colors::CHART_DOWNLOAD,
                 );
             });
     }
 
     #[cfg(not(windows))]
     {
-        ui.vertical_centered(|ui| {
-            ui.add_space(80.0);
-            ui.label(RichText::new("📈").size(48.0).weak());
-            ui.add_space(16.0);
-            ui.label(RichText::new("System Monitoring").size(18.0).strong());
-            ui.add_space(8.0);
-            ui.label(RichText::new("Only available on Windows").size(13.0).weak());
-        });
+        components::empty_state(ui, "📈", "System Monitoring", "Only available on Windows");
     }
 }
 
@@ -438,12 +377,10 @@ fn stat_card(
                 ui.label(RichText::new(label).size(12.0).weak());
                 ui.add_space(4.0);
 
-                // Progress bar
+                // Progress bar with utilization coloring
                 let progress = (value / 100.0).clamp(0.0, 1.0);
-                let bar_color = if value > 80.0 {
-                    Color32::from_rgb(239, 68, 68)
-                } else if value > 50.0 {
-                    Color32::from_rgb(245, 158, 11)
+                let bar_color = if suffix == "%" {
+                    colors::utilization_color(value)
                 } else {
                     color
                 };
@@ -471,14 +408,8 @@ fn stat_card(
 
 #[cfg(windows)]
 fn disk_card(ui: &mut egui::Ui, disk: &wfdiag_tauri::native_monitor::DiskInfo) {
-    let color = Color32::from_rgb(245, 158, 11);
-    let bar_color = if disk.utilization > 90.0 {
-        Color32::from_rgb(239, 68, 68)
-    } else if disk.utilization > 70.0 {
-        Color32::from_rgb(245, 158, 11)
-    } else {
-        Color32::from_rgb(16, 185, 129)
-    };
+    let color = colors::WARNING;
+    let bar_color = colors::storage_color(disk.utilization);
 
     egui::Frame::new()
         .fill(ui.visuals().extreme_bg_color)
