@@ -816,16 +816,24 @@ def main():
         help="Disable sccache (enabled by default if available)"
     )
     parser.add_argument(
+        "--frontend",
+        choices=["react", "egui"],
+        default="react",
+        help="Frontend to build: 'react' (Tauri/web, default) or 'egui' (native Rust GUI)"
+    )
+    parser.add_argument(
         "--egui",
         action="store_true",
-        help="Build native egui version instead of Tauri/web version"
+        help="Shorthand for --frontend egui"
     )
 
     args = parser.parse_args()
     release = not args.debug
     jobs = args.jobs
     skip_frontend = args.skip_frontend
-    egui = args.egui
+
+    # Determine frontend type (--egui is shorthand for --frontend egui)
+    egui = args.egui or args.frontend == "egui"
 
     # Determine sccache usage - enabled by default if available
     if args.no_sccache:

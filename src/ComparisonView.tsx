@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useCallback } from 'react'
 import {
   Text,
   Badge,
@@ -26,8 +26,9 @@ import {
   History20Regular,
   ChevronRight12Regular,
 } from '@fluentui/react-icons'
-import { PageHeader, EmptyState } from './components'
+import { PageHeader, EmptyState, AIAnalysisPanel } from './components'
 import { useScanHistory } from './hooks/useScanHistory'
+import { useAI } from './hooks/useAI'
 import { useComparison, ComparisonFilter } from './hooks/useComparison'
 import { useJsonDiff } from './hooks/useJsonDiff'
 import { useToast } from './contexts/ToastContext'
@@ -96,10 +97,41 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({ onClose }) => {
   const { findJsonDifferences, formatDifference } = useJsonDiff()
   const { showError, showSuccess } = useToast()
 
+  // AI analysis hooks
+  const {
+    requestComparisonAnalysis,
+    getCachedComparisonAnalysis,
+    isComparisonAnalysisLoading,
+    getComparisonAnalysisError,
+  } = useAI()
+
   const [selectedCurrent, setSelectedCurrent] = useState<string>('')
   const [selectedPrevious, setSelectedPrevious] = useState<string>('')
   const [filter, setFilter] = useState<ComparisonFilter>('all')
   const [showClearDialog, setShowClearDialog] = useState(false)
+
+  // AI comparison analysis handler
+  const handleComparisonAnalysis = useCallback(() => {
+    if (!comparison) return
+    const comparisonJson = JSON.stringify({
+      total_changes: comparison.total_changes,
+      new_failures: comparison.new_failures.map(f => ({
+        task_name: f.task_name,
+        category: f.category,
+      })),
+      new_successes: comparison.new_successes.map(s => ({
+        task_name: s.task_name,
+        category: s.category,
+      })),
+      output_changes: comparison.status_unchanged
+        .filter(c => c.output_changed)
+        .map(c => ({
+          task_name: c.task_name,
+          category: c.category,
+        })),
+    }, null, 2)
+    requestComparisonAnalysis(comparisonJson)
+  }, [comparison, requestComparisonAnalysis])
 
   const handleCompare = async () => {
     if (!selectedCurrent || !selectedPrevious) {
@@ -431,6 +463,20 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({ onClose }) => {
               <Text size={200} style={{ color: '#94a3b8' }}>Output Changes</Text>
             </div>
           </div>
+
+          {/* AI Comparison Analysis */}
+          <AIAnalysisPanel
+            cacheKey="__comparison_analysis__"
+            title="AI Comparison Analysis"
+            hasData={comparison.total_changes > 0}
+            cachedResult={getCachedComparisonAnalysis()}
+            isLoading={isComparisonAnalysisLoading()}
+            error={getComparisonAnalysisError()}
+            onAnalyze={handleComparisonAnalysis}
+            analyzeButtonText="Analyze Changes"
+            noDataMessage="No changes detected between scans."
+            readyMessage="Click to get AI-powered analysis of what has improved or degraded between scans."
+          />
 
           {/* Filter Tabs and Results */}
           <div className="glass-card" style={{ padding: 24 }}>

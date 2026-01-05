@@ -79,26 +79,44 @@ pub const CHART_UPLOAD: Color32 = Color32::from_rgb(168, 85, 247);
 pub const CHART_DOWNLOAD: Color32 = Color32::from_rgb(34, 211, 238);
 
 // =============================================================================
-// Card/Frame Background Colors
+// Card/Frame Background Colors (functions due to non-const from_rgba_unmultiplied)
 // =============================================================================
 
 /// CPU stat card background
-pub const CARD_CPU_BG: Color32 = Color32::from_rgba_unmultiplied(59, 130, 246, 25);
+#[inline]
+pub fn card_cpu_bg() -> Color32 {
+    Color32::from_rgba_unmultiplied(59, 130, 246, 25)
+}
 
 /// Memory stat card background
-pub const CARD_MEMORY_BG: Color32 = Color32::from_rgba_unmultiplied(16, 185, 129, 25);
+#[inline]
+pub fn card_memory_bg() -> Color32 {
+    Color32::from_rgba_unmultiplied(16, 185, 129, 25)
+}
 
 /// Swap stat card background
-pub const CARD_SWAP_BG: Color32 = Color32::from_rgba_unmultiplied(245, 158, 11, 25);
+#[inline]
+pub fn card_swap_bg() -> Color32 {
+    Color32::from_rgba_unmultiplied(245, 158, 11, 25)
+}
 
 /// NPU stat card background
-pub const CARD_NPU_BG: Color32 = Color32::from_rgba_unmultiplied(168, 85, 247, 25);
+#[inline]
+pub fn card_npu_bg() -> Color32 {
+    Color32::from_rgba_unmultiplied(168, 85, 247, 25)
+}
 
 /// AI panel background
-pub const AI_PANEL_BG: Color32 = Color32::from_rgba_unmultiplied(99, 102, 241, 20);
+#[inline]
+pub fn ai_panel_bg() -> Color32 {
+    Color32::from_rgba_unmultiplied(99, 102, 241, 20)
+}
 
 /// AI panel stroke
-pub const AI_PANEL_STROKE: Color32 = Color32::from_rgba_unmultiplied(99, 102, 241, 50);
+#[inline]
+pub fn ai_panel_stroke() -> Color32 {
+    Color32::from_rgba_unmultiplied(99, 102, 241, 50)
+}
 
 // =============================================================================
 // Text/Label Colors (for dark mode compatible usage)

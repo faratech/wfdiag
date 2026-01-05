@@ -40,6 +40,7 @@ interface AIContextType {
   analyzeDiagnostic: (taskId: string, taskName: string, output: string) => Promise<string>
   analyzeSection: (sectionName: string, sectionData: string) => Promise<string>
   explainHealth: (metricsData: string) => Promise<string>
+  analyzeGeneric: (cacheKey: string, prompt: string, forceRefresh?: boolean) => Promise<string>
 
   // Loading states per context_id
   isAnalyzing: Record<string, boolean>
@@ -313,6 +314,48 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     }
   }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey])
 
+  // Generic analysis function for monitoring, processes, comparisons, etc.
+  const analyzeGeneric = useCallback(async (
+    cacheKey: string,
+    prompt: string,
+    forceRefresh = false
+  ): Promise<string> => {
+    if (!aiEnabled || (!isAIAvailable && !hasApiKey)) {
+      return ''
+    }
+
+    // Return cached if not forcing refresh
+    if (!forceRefresh && interpretations[cacheKey]) {
+      return interpretations[cacheKey]
+    }
+
+    setIsAnalyzing(prev => ({ ...prev, [cacheKey]: true }))
+    setErrors(prev => {
+      const { [cacheKey]: _, ...rest } = prev
+      return rest
+    })
+
+    try {
+      // Use ai_analyze_section with a special section name for generic analyses
+      const response = await invoke<AIResponse>('ai_analyze_section', {
+        sectionName: cacheKey,
+        sectionData: prompt,
+        sessionId,
+        apiKey: settings.openAiApiKey || null
+      })
+
+      const interpretation = response.interpretation
+      setInterpretations(prev => ({ ...prev, [cacheKey]: interpretation }))
+      return interpretation
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error)
+      setErrors(prev => ({ ...prev, [cacheKey]: errorMsg }))
+      throw error
+    } finally {
+      setIsAnalyzing(prev => ({ ...prev, [cacheKey]: false }))
+    }
+  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey])
+
   // Cache management
   const clearCache = useCallback(async (targetSessionId?: string) => {
     try {
@@ -346,6 +389,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     analyzeDiagnostic,
     analyzeSection,
     explainHealth,
+    analyzeGeneric,
     isAnalyzing,
     interpretations,
     errors,

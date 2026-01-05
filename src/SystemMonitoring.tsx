@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   ProgressBar,
   Text,
@@ -13,7 +13,8 @@ import {
   Play20Regular,
   Stop20Regular,
 } from '@fluentui/react-icons';
-import { PageHeader } from './components';
+import { PageHeader, AIAnalysisPanel } from './components';
+import { useAI } from './hooks/useAI';
 import * as logger from './utils/logger';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
@@ -152,6 +153,18 @@ const formatBytes = (bytes: number): string => {
 export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, onToggle }) => {
   const styles = useStyles();
   const [stats, setStats] = useState<SystemStats | null>(null);
+
+  // AI analysis hooks
+  const {
+    requestMonitoringAnalysis,
+    getCachedMonitoringAnalysis,
+    isMonitoringAnalysisLoading,
+    getMonitoringAnalysisError,
+    requestProcessAnalysis,
+    getCachedProcessAnalysis,
+    isProcessAnalysisLoading,
+    getProcessAnalysisError,
+  } = useAI();
   const [cpuHistory, setCpuHistory] = useState<number[]>([]);
   const [memoryHistory, setMemoryHistory] = useState<number[]>([]);
   const [networkUploadHistory, setNetworkUploadHistory] = useState<number[]>([]);
@@ -174,6 +187,49 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
     setNetworkConnections([]);
     setShowNetworkConnections(false);
   };
+
+  // AI analysis handlers
+  const handleMonitoringAnalysis = useCallback(() => {
+    if (!stats) return;
+    const statsJson = JSON.stringify({
+      cpu_utilization: stats.cpu_utilization,
+      cpu_frequency: stats.cpu_frequency,
+      memory_utilization: stats.memory_utilization,
+      memory_used_gb: stats.memory_used_gb,
+      memory_total_gb: stats.memory_total_gb,
+      swap_utilization: stats.swap_utilization,
+      disks: stats.disks.map(d => ({
+        name: d.name,
+        mount_point: d.mount_point,
+        utilization: d.utilization,
+        used_gb: d.used_gb,
+        total_gb: d.total_gb,
+      })),
+      network_upload_kb: stats.network_upload_kb,
+      network_download_kb: stats.network_download_kb,
+      npu_available: stats.npu_available,
+      npu_name: stats.npu_name,
+      npu_utilization: stats.npu_utilization,
+    }, null, 2);
+    requestMonitoringAnalysis(statsJson);
+  }, [stats, requestMonitoringAnalysis]);
+
+  const handleProcessAnalysis = useCallback(() => {
+    if (!stats?.top_processes?.length) return;
+    const processesJson = JSON.stringify(
+      stats.top_processes.slice(0, 15).map(p => ({
+        pid: p.pid,
+        name: p.name,
+        cpu_percent: p.cpu_percent,
+        memory_mb: p.memory_mb,
+        memory_percent: p.memory_percent,
+        status: p.status,
+      })),
+      null,
+      2
+    );
+    requestProcessAnalysis(processesJson);
+  }, [stats, requestProcessAnalysis]);
 
   // Stop monitoring and clear data when page becomes hidden
   useEffect(() => {
@@ -749,6 +805,22 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
           </div>
         </div>
 
+        {/* AI System Health Analysis */}
+        <div style={{ gridColumn: '1 / -1' }}>
+          <AIAnalysisPanel
+            cacheKey="__monitoring_analysis__"
+            title="AI System Health Analysis"
+            hasData={!!stats}
+            cachedResult={getCachedMonitoringAnalysis()}
+            isLoading={isMonitoringAnalysisLoading()}
+            error={getMonitoringAnalysisError()}
+            onAnalyze={handleMonitoringAnalysis}
+            analyzeButtonText="Analyze System"
+            noDataMessage="Start monitoring to collect system data for AI analysis."
+            readyMessage="Click to get AI-powered analysis of your system health, performance, and recommendations."
+          />
+        </div>
+
         {/* Network Connections */}
         <div className="glass-card" style={{ gridColumn: '1 / -1', padding: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16, gap: 12 }}>
@@ -934,6 +1006,22 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
               </tbody>
             </table>
           </div>
+        </div>
+
+        {/* AI Process Analysis */}
+        <div style={{ gridColumn: '1 / -1' }}>
+          <AIAnalysisPanel
+            cacheKey="__process_analysis__"
+            title="AI Process Analysis"
+            hasData={!!stats?.top_processes?.length}
+            cachedResult={getCachedProcessAnalysis()}
+            isLoading={isProcessAnalysisLoading()}
+            error={getProcessAnalysisError()}
+            onAnalyze={handleProcessAnalysis}
+            analyzeButtonText="Analyze Processes"
+            noDataMessage="No process data available to analyze."
+            readyMessage="Click to get AI-powered analysis of running processes, resource usage, and optimization suggestions."
+          />
         </div>
       </div>
     </div>
