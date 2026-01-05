@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react'
 import { SystemMonitoring } from './SystemMonitoring'
 import { OpenAIIntegration } from './OpenAIIntegration'
 import { ComparisonView } from './ComparisonView'
-import { DiagnosticsTab } from './tabs/DiagnosticsTab'
+import { CompactDiagnosticsTab } from './tabs/CompactDiagnosticsTab'
 import { IssuesTab } from './tabs/IssuesTab'
 import {
   NavRail,
@@ -64,6 +64,7 @@ const useStyles = makeStyles({
     maxWidth: '1400px',
     margin: '0 auto',
     width: '100%',
+    animation: 'fadeSlideIn 0.2s ease-out',
   },
 })
 
@@ -161,8 +162,8 @@ const AppContent: React.FC = () => {
       {/* Main Content Area */}
       <main className={`${styles.mainArea} ${effectiveCollapsed ? styles.mainAreaCollapsed : styles.mainAreaExpanded}`}>
         <div className={styles.contentArea}>
-          <div className={styles.contentWrapper}>
-            {selectedTab === 'diagnostics' && <DiagnosticsTab />}
+          <div key={selectedTab} className={styles.contentWrapper}>
+            {selectedTab === 'diagnostics' && <CompactDiagnosticsTab />}
             {selectedTab === 'monitoring' && (
               <SystemMonitoring
                 isActive={isMonitoringActive}

@@ -311,15 +311,11 @@ pub async fn analyze(
     })
 }
 
-/// Analyze using OpenAI
+/// Analyze using OpenAI Responses API
 /// If api_key is provided, uses it directly; otherwise loads from DPAPI storage
 async fn analyze_with_openai(prompt: &str, api_key: Option<String>) -> Result<String, String> {
     use async_openai::{
-        types::{
-            ChatCompletionRequestSystemMessageArgs,
-            ChatCompletionRequestUserMessageArgs,
-            CreateChatCompletionRequestArgs,
-        },
+        types::responses::{CreateResponseArgs, InputParam},
         Client,
         config::OpenAIConfig,
     };
@@ -335,25 +331,16 @@ async fn analyze_with_openai(prompt: &str, api_key: Option<String>) -> Result<St
     let config = OpenAIConfig::new().with_api_key(api_key);
     let client = Client::with_config(config);
 
-    let request = CreateChatCompletionRequestArgs::default()
+    let full_prompt = format!("{}\n\n{}", SYSTEM_PROMPT, prompt);
+
+    let request = CreateResponseArgs::default()
         .model(OPENAI_MODEL)
-        .messages([
-            ChatCompletionRequestSystemMessageArgs::default()
-                .content(SYSTEM_PROMPT)
-                .build()
-                .map_err(|e| e.to_string())?
-                .into(),
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(prompt)
-                .build()
-                .map_err(|e| e.to_string())?
-                .into(),
-        ])
+        .input(InputParam::Text(full_prompt))
         .build()
         .map_err(|e| e.to_string())?;
 
     let response = client
-        .chat()
+        .responses()
         .create(request)
         .await
         .map_err(|e| {
@@ -361,16 +348,27 @@ async fn analyze_with_openai(prompt: &str, api_key: Option<String>) -> Result<St
             format!("OpenAI API error: {}", e)
         })?;
 
-    response
-        .choices
-        .first()
-        .and_then(|c| c.message.content.clone())
-        .ok_or_else(|| "No response from OpenAI".to_string())
+    Ok(response.output_text().unwrap_or_default())
 }
 
+/// Maximum prompt size for Phi Silica (~4K token context = ~2000 chars safe limit)
+const PHI_SILICA_MAX_PROMPT_CHARS: usize = 2000;
+
 /// Analyze using Phi Silica
+/// Note: ai_prompts.rs already converts JSON to readable text and truncates
+/// This is a final safety check
 async fn analyze_with_phi_silica(prompt: &str) -> Result<String, String> {
-    crate::phi_silica::generate_response(prompt).await
+    // Final safety truncation if prompt is still too large
+    let final_prompt = if prompt.len() > PHI_SILICA_MAX_PROMPT_CHARS {
+        format!(
+            "{}... [input truncated]",
+            &prompt[..PHI_SILICA_MAX_PROMPT_CHARS - 25]
+        )
+    } else {
+        prompt.to_string()
+    };
+
+    crate::phi_silica::generate_response(&final_prompt).await
 }
 
 /// Clear AI cache for a session or all

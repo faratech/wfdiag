@@ -24,12 +24,13 @@ const useStyles = makeStyles({
     ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalM),
     display: 'flex',
     flexDirection: 'column',
-    transition: 'all 0.15s ease-out',
+    transitionProperty: 'background-color, border-color, box-shadow, transform',
+    transitionDuration: tokens.durationNormal,
+    transitionTimingFunction: tokens.curveEasyEase,
     cursor: 'pointer',
     position: 'relative',
     overflow: 'hidden',
     ':hover': {
-      backgroundColor: tokens.colorNeutralBackground1Hover,
       ...shorthands.borderColor(tokens.colorNeutralStroke1),
       boxShadow: tokens.shadow4,
     },
@@ -86,6 +87,7 @@ const useStyles = makeStyles({
     height: '100%',
     borderRadius: '3px',
     transition: 'width 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
+    animation: 'meterFillIn 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
   },
   statusIndicator: {
     display: 'flex',

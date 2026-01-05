@@ -9,33 +9,64 @@ edition = "2024"
 name = "wfdiag_tauri"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Tauri app binary (runs from lib.rs)
+[[bin]]
+name = "wfdiag-tauri"
+path = "src/main_tauri.rs"
+
+# Debug diagnostics binary
 [[bin]]
 name = "debug_diagnostics"
 path = "src/bin/debug_diagnostics.rs"
+
+# Standalone egui native app
+[[bin]]
+name = "wfdiag"
+path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.5", features = [] }
 
 [dependencies]
+# Tauri framework
 tauri = { version = "2.9", features = [] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-# Tauri plugins for v2
+
+# Tauri v2 plugins
 tauri-plugin-fs = "2.4"
 tauri-plugin-dialog = "2.4"
 tauri-plugin-clipboard-manager = "2.3"
 tauri-plugin-shell = "2.3"
-tokio = { version = "1.47", features = ["rt-multi-thread", "sync", "time", "macros"] }
-anyhow = "1.0"
-uuid = { version = "1.17", features = ["v4"] }
+
+# egui for native GUI
+eframe = { version = "0.33.3", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "persistence",
+] }
+egui_extras = { version = "0.33.3", features = ["all_loaders", "image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+arboard = "3.6.1"
+chrono = "0.4"
+
+# Async runtime
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync", "time", "macros"] }
 futures = "0.3"
-async-openai = { version = "0.30", default-features = false, features = ["native-tls"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+anyhow = "1.0"
+uuid = { version = "1.19.0", features = ["v4"] }
 rand = "0.9"
 base64 = "0.22"
 url = "2.5"
-keyring = "3.6"
 dirs = "6.0"
 
+# OpenAI integration - using Responses API
+async-openai = { version = "0.32", default-features = false, features = ["native-tls", "responses"] }
+keyring = "3.6"
 
 # Windows-specific dependencies
 [target.'cfg(windows)'.dependencies]
@@ -81,3 +112,6 @@ codegen-units = 1
 lto = true
 opt-level = "z"
 strip = true
+
+[profile.dev]
+opt-level = 1

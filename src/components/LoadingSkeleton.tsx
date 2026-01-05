@@ -20,13 +20,10 @@ const useStyles = makeStyles({
       right: 0,
       bottom: 0,
       background: `linear-gradient(90deg, transparent, ${tokens.colorNeutralBackground2}, transparent)`,
-      animationName: {
-        '0%': { transform: 'translateX(-100%)' },
-        '100%': { transform: 'translateX(100%)' },
-      },
-      animationDuration: '1.5s',
+      animationName: 'shimmer',
+      animationDuration: '1.8s',
       animationIterationCount: 'infinite',
-      animationTimingFunction: 'ease-in-out',
+      animationTimingFunction: tokens.curveEasyEase,
     },
   },
 
@@ -71,6 +68,8 @@ export interface LoadingSkeletonProps {
   rows?: number
   animated?: boolean
   className?: string
+  /** Stagger delay in ms for row animations */
+  staggerDelay?: number
 }
 
 export const LoadingSkeleton: React.FC<LoadingSkeletonProps> = ({
@@ -80,6 +79,7 @@ export const LoadingSkeleton: React.FC<LoadingSkeletonProps> = ({
   rows = 1,
   animated = true,
   className,
+  staggerDelay = 0,
 }) => {
   const styles = useStyles()
 
@@ -130,6 +130,8 @@ export const LoadingSkeleton: React.FC<LoadingSkeletonProps> = ({
               ...skeletonStyle,
               // Vary width for text rows for more natural look
               width: variant === 'text' && index === rows - 1 ? '70%' : skeletonStyle.width,
+              // Apply stagger delay if specified
+              animationDelay: staggerDelay > 0 ? `${index * staggerDelay}ms` : undefined,
             }}
           />
         ))}

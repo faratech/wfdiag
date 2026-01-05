@@ -57,6 +57,42 @@ body {
   100% { left: 100%; }
 }
 
+@keyframes fadeSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    transform: scale(0.95);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes badgePulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.15); }
+}
+
+@keyframes meterFillIn {
+  from { width: 0; }
+}
+
+@keyframes gentlePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 /* Animation utility classes */
 .icon-spin {
   animation: spin 2s linear infinite;
@@ -64,6 +100,32 @@ body {
 
 .icon-pulse {
   animation: pulse 2s infinite;
+}
+
+/* Entrance animations */
+.fade-slide-in {
+  animation: fadeSlideIn 0.3s ease-out forwards;
+}
+
+.scale-in {
+  animation: scaleIn 0.2s ease-out forwards;
+}
+
+/* Button press feedback */
+.pressable {
+  transition: transform 0.1s ease-out;
+}
+
+.pressable:active {
+  transform: scale(0.98);
+}
+
+/* Global focus-visible styles for consistent keyboard navigation */
+.focus-ring:focus-visible,
+button:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid var(--colorBrandStroke1, #0f6cbd);
+  outline-offset: 2px;
 }
 
 /* Scan animation overlay */

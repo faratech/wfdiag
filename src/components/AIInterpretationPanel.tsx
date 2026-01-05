@@ -129,16 +129,20 @@ export const AIInterpretationPanel: React.FC<AIInterpretationPanelProps> = ({
   const error = getDiagnosticError(taskId)
 
   const defaultFallback = isSuccess
-    ? 'Operating within normal parameters.'
-    : 'Review output for specific details.'
+    ? 'This check passed. Click "Analyze" for a plain-language explanation of what was tested.'
+    : 'This check needs attention. Click "Analyze" for AI-powered guidance on what to do next.'
 
   const handleAnalyze = useCallback(async () => {
     setHasRequested(true)
     await requestDiagnosticInterpretation(taskId, taskName, output)
   }, [taskId, taskName, output, requestDiagnosticInterpretation])
 
-  // If AI is disabled or unavailable, show fallback
+  // If AI is disabled or unavailable, show fallback with explanation
   if (!aiEnabled || !isAIAvailable) {
+    const unavailableReason = !aiEnabled
+      ? 'AI analysis is disabled in Settings.'
+      : 'No AI provider available. Configure OpenAI in Settings or use a Copilot+ PC for local AI.'
+
     return (
       <div className={`${styles.container} ${className ?? ''}`}>
         <div className={styles.header}>
@@ -146,14 +150,14 @@ export const AIInterpretationPanel: React.FC<AIInterpretationPanelProps> = ({
             <Sparkle20Regular />
             <Text className={styles.title}>AI Interpretation</Text>
           </div>
-          {!isAIAvailable && (
+          <Tooltip content={unavailableReason} relationship="description">
             <Badge appearance="outline" size="small" color="subtle">
-              Unavailable
+              {!aiEnabled ? 'Disabled' : 'Unavailable'}
             </Badge>
-          )}
+          </Tooltip>
         </div>
         <Text className={styles.fallback}>
-          {fallbackMessage ?? defaultFallback}
+          {fallbackMessage ?? (isSuccess ? 'This check passed successfully.' : 'Review the output details above.')}
         </Text>
       </div>
     )
@@ -228,7 +232,7 @@ export const AIInterpretationPanel: React.FC<AIInterpretationPanelProps> = ({
     )
   }
 
-  // Show analyze button (on-demand)
+  // Show analyze button (on-demand) with helpful explanation
   return (
     <div className={`${styles.container} ${className ?? ''}`}>
       <div className={styles.header}>
@@ -237,7 +241,10 @@ export const AIInterpretationPanel: React.FC<AIInterpretationPanelProps> = ({
           <Text className={styles.title}>AI Interpretation</Text>
         </div>
         {showAnalyzeButton && (
-          <Tooltip content={`Analyze with ${getProviderDisplayName(activeProvider)}`} relationship="label">
+          <Tooltip
+            content={`Get a plain-language explanation using ${getProviderDisplayName(activeProvider)}`}
+            relationship="description"
+          >
             <Button
               appearance="subtle"
               size="small"
@@ -245,7 +252,7 @@ export const AIInterpretationPanel: React.FC<AIInterpretationPanelProps> = ({
               onClick={handleAnalyze}
               className={styles.analyzeButton}
             >
-              Analyze
+              Explain This
             </Button>
           </Tooltip>
         )}

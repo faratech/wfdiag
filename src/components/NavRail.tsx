@@ -291,6 +291,7 @@ export const NavRail: React.FC<NavRailProps> = ({
           borderRadius: '50%',
           backgroundColor: tokens.colorPaletteGreenForeground1,
           display: 'inline-block',
+          animation: 'gentlePulse 2s ease-in-out infinite',
         }} />
       ) : undefined,
     },
@@ -316,6 +317,7 @@ export const NavRail: React.FC<NavRailProps> = ({
           fontSize: 11,
           fontWeight: 600,
           padding: '0 5px',
+          animation: 'scaleIn 0.2s ease-out',
         }}>
           {issueCount}
         </span>

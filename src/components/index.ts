@@ -75,3 +75,8 @@ export type { CommandBarProps } from './CommandBar'
 
 // Data Display Components
 export { DataRow, MetricCard as DataMetricCard, DataList, CodeDisplay, DataGrid } from './DataDisplay'
+
+// Compact Native-Style Components
+export { DiagnosticRow } from './DiagnosticRow'
+export { CompactToolbar } from './CompactToolbar'
+export { StatusBar } from './StatusBar'

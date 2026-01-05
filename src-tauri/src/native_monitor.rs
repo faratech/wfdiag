@@ -93,6 +93,8 @@ pub struct SystemStats {
     pub npu_name: Option<String>,
     pub npu_utilization: Option<f32>,
     pub top_processes: Vec<ProcessInfo>,
+    /// All processes (for htop-like full process list view)
+    pub all_processes: Vec<ProcessInfo>,
     pub timestamp: i64,
 }
 
@@ -108,19 +110,74 @@ pub struct DiskInfo {
     pub disk_type: String,
 }
 
+/// Process architecture (for mixed x86/x64/ARM64 environments)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ProcessArch {
+    #[default]
+    Native,
+    X86,
+    X64,
+    Arm64,
+}
+
+impl ProcessArch {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProcessArch::Native => "",
+            ProcessArch::X86 => "x86",
+            ProcessArch::X64 => "x64",
+            ProcessArch::Arm64 => "ARM64",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessInfo {
+    // Core identification
     pub pid: u32,
+    pub parent_pid: u32,
     pub name: String,
+    pub exe_path: String,
+    pub command: String,
+    pub user: String,
+
+    // Performance metrics
     pub cpu_percent: f32,
     pub memory_percent: f32,
     pub memory_mb: f64,
     pub virtual_memory_mb: f64,
-    pub disk_read_bytes: u64,
-    pub disk_write_bytes: u64,
-    pub status: String,
+    pub shared_memory_mb: f64,
+
+    // Timing
+    pub cpu_time_secs: u64,
     pub start_time: i64,
-    pub command: String,
+    pub status: String,
+
+    // Counts
+    pub thread_count: u32,
+    pub handle_count: u32,
+    pub priority: i32,
+
+    // I/O
+    pub io_read_bytes: u64,
+    pub io_write_bytes: u64,
+
+    // Windows-specific
+    pub is_elevated: bool,
+    pub efficiency_mode: bool,
+    pub arch: ProcessArch,
+
+    // Tree view fields
+    pub tree_depth: usize,
+    pub tree_prefix: String,
+    pub has_children: bool,
+    pub is_collapsed: bool,
+
+    // Pre-computed for filtering (lowercase)
+    #[serde(skip)]
+    pub name_lower: String,
+    #[serde(skip)]
+    pub command_lower: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,14 +192,19 @@ pub struct NetworkConnection {
 #[derive(Clone, Debug)]
 struct NativeProcessInfo {
     pid: u32,
+    parent_pid: u32,
     name: String,
     working_set: u64,
     private_bytes: u64,
+    virtual_size: u64,
     kernel_time: u64,
     user_time: u64,
     create_time: u64,
     read_bytes: u64,
     write_bytes: u64,
+    thread_count: u32,
+    handle_count: u32,
+    base_priority: i32,
 }
 
 // SYSTEM_PROCESS_INFORMATION layout
@@ -254,6 +316,7 @@ struct FastStats {
     network_upload_kb: f64,
     network_download_kb: f64,
     top_processes: Vec<ProcessInfo>,
+    all_processes: Vec<ProcessInfo>,
     disk_read_bytes: u64,
     disk_write_bytes: u64,
 }
@@ -313,31 +376,11 @@ impl SystemMonitor {
             }
         });
 
-        // Initialize slow caches in background (disk types, NPU detection)
+        // Initialize slow caches in background (disk types only)
+        // NPU detection is done lazily in spawn_blocking context for proper COM support
         std::thread::spawn(|| {
             // These can take 1-5 seconds
             DISK_TYPES.get_or_init(detect_all_disk_types);
-
-            // NPU detection - try DXCore first (fast), then WMI fallback (slow)
-            let npu_result = NPU_INFO.get_or_init(|| {
-                if let Some((name, _)) = detect_npu_dxcore() {
-                    (true, Some(name))
-                } else {
-                    let (available, name, _) = detect_npu_wmi_fallback();
-                    (available, name)
-                }
-            });
-
-            // If NPU was detected, also discover LUID for utilization queries
-            if npu_result.0 {
-                if let Ok(wmi_con) = crate::wmi_native::WmiConnection::new() {
-                    NPU_LUID.get_or_init(|| discover_npu_luid_with_wmi(&wmi_con));
-                }
-            } else {
-                // No NPU - set LUID to None so utilization queries can fast-path
-                NPU_LUID.get_or_init(|| None);
-            }
-
             INIT_COMPLETE.store(true, std::sync::atomic::Ordering::Release);
         });
 
@@ -554,8 +597,35 @@ async fn collect_stats_optimized(
         0.0
     };
 
-    // 3. Get NPU Stats (Non-blocking)
-    let (npu_available, npu_name) = NPU_INFO.get().cloned().unwrap_or((false, None));
+    // 3. Get NPU Stats - run detection in blocking context if not yet initialized
+    let (npu_available, npu_name) = if let Some(info) = NPU_INFO.get() {
+        info.clone()
+    } else {
+        // First time - run detection in spawn_blocking since DXCore/WMI need proper thread context
+        let detected = tokio::task::spawn_blocking(|| {
+            let result = NPU_INFO.get_or_init(|| {
+                // Try DXCore first
+                if let Some((name, _)) = detect_npu_dxcore() {
+                    return (true, Some(name));
+                }
+                // Fall back to WMI
+                let (available, name, _) = detect_npu_wmi_fallback();
+                (available, name)
+            }).clone();
+
+            // Also initialize NPU_LUID for utilization queries
+            if result.0 {
+                if let Ok(wmi_con) = crate::wmi_native::WmiConnection::new() {
+                    NPU_LUID.get_or_init(|| discover_npu_luid_with_wmi(&wmi_con));
+                }
+            } else {
+                NPU_LUID.get_or_init(|| None);
+            }
+
+            result
+        }).await.unwrap_or((false, None));
+        detected
+    };
     let npu_utilization = if npu_available {
         get_npu_util_cached(cached_npu_util, npu_update_in_progress, tick).await
     } else {
@@ -583,6 +653,7 @@ async fn collect_stats_optimized(
         npu_name,
         npu_utilization,
         top_processes: fast_stats.top_processes,
+        all_processes: fast_stats.all_processes,
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -632,10 +703,13 @@ async fn get_fast_stats_cached(
                      get_network_stats(&net_clone).await
                 });
 
-                // 4. Processes
-                let (top_processes, disk_read_bytes, disk_write_bytes) = tauri::async_runtime::block_on(async {
+                // 4. Processes (returns all processes sorted by CPU)
+                let (all_procs, disk_read_bytes, disk_write_bytes) = tauri::async_runtime::block_on(async {
                     get_top_processes_optimized(memory_total, &proc_clone).await
                 });
+
+                // Top processes are the first 15 sorted by CPU usage
+                let top_processes: Vec<ProcessInfo> = all_procs.iter().take(15).cloned().collect();
 
                 FastStats {
                     cpu_utilization,
@@ -649,6 +723,7 @@ async fn get_fast_stats_cached(
                     network_upload_kb,
                     network_download_kb,
                     top_processes,
+                    all_processes: all_procs,
                     disk_read_bytes,
                     disk_write_bytes,
                 }
@@ -679,6 +754,7 @@ async fn get_fast_stats_cached(
         network_upload_kb: 0.0,
         network_download_kb: 0.0,
         top_processes: Vec::new(),
+        all_processes: Vec::new(),
         disk_read_bytes: 0,
         disk_write_bytes: 0,
     })
@@ -1196,14 +1272,19 @@ fn query_all_processes_optimized() -> Vec<NativeProcessInfo> {
 
             processes.push(NativeProcessInfo {
                 pid: proc_info.unique_process_id.0 as usize as u32,
+                parent_pid: proc_info.inherited_from_unique_process_id.0 as usize as u32,
                 name,
                 working_set: proc_info.working_set_size as u64,
                 private_bytes: proc_info.private_page_count as u64,
+                virtual_size: proc_info.pagefile_usage as u64,
                 kernel_time: proc_info.kernel_time as u64,
                 user_time: proc_info.user_time as u64,
                 create_time: proc_info.create_time as u64,
                 read_bytes: proc_info.read_transfer_count as u64,
                 write_bytes: proc_info.write_transfer_count as u64,
+                thread_count: proc_info.number_of_threads,
+                handle_count: proc_info.handle_count,
+                base_priority: proc_info.base_priority,
             });
 
             if proc_info.next_entry_offset == 0 {
@@ -1275,18 +1356,44 @@ async fn get_top_processes_optimized(
 
         let start_time = filetime_to_unix(proc.create_time);
 
+        // Calculate CPU time in seconds
+        let total_100ns = proc.kernel_time + proc.user_time;
+        let cpu_time_secs = total_100ns / 10_000_000;
+
+        // Calculate shared memory (working set - private bytes)
+        let shared_memory = proc.working_set.saturating_sub(proc.private_bytes);
+
+        let name_lower = proc.name.to_lowercase();
+
         processes.push(ProcessInfo {
             pid: proc.pid,
+            parent_pid: proc.parent_pid,
             name: proc.name.clone(),
+            exe_path: String::new(), // Requires opening process handle - expensive
+            command: proc.name.clone(), // Command line requires separate query
+            user: String::new(), // Requires token query - expensive
             cpu_percent,
             memory_percent,
             memory_mb: proc.working_set as f64 / (1024.0 * 1024.0),
-            virtual_memory_mb: proc.private_bytes as f64 / (1024.0 * 1024.0),
-            disk_read_bytes: proc.read_bytes,
-            disk_write_bytes: proc.write_bytes,
-            status: "Running".to_string(),
+            virtual_memory_mb: proc.virtual_size as f64 / (1024.0 * 1024.0),
+            shared_memory_mb: shared_memory as f64 / (1024.0 * 1024.0),
+            cpu_time_secs,
             start_time: start_time as i64,
-            command: proc.name.clone(),
+            status: "Running".to_string(),
+            thread_count: proc.thread_count,
+            handle_count: proc.handle_count,
+            priority: proc.base_priority,
+            io_read_bytes: proc.read_bytes,
+            io_write_bytes: proc.write_bytes,
+            is_elevated: false, // Requires token query - expensive
+            efficiency_mode: false, // Requires PowerThrottling query
+            arch: ProcessArch::Native, // Requires IsWow64Process2
+            tree_depth: 0,
+            tree_prefix: String::new(),
+            has_children: false,
+            is_collapsed: false,
+            name_lower: name_lower.clone(),
+            command_lower: name_lower,
         });
 
         // Update cache with current CPU times
@@ -1294,15 +1401,36 @@ async fn get_top_processes_optimized(
         prev.insert(proc.pid, (total_time, proc.create_time, now));
     }
 
-    // Sort by CPU and take top 20
+    // Sort by CPU descending
     processes.sort_by(|a, b| {
         b.cpu_percent
             .partial_cmp(&a.cpu_percent)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    processes.truncate(20);
 
     (processes, total_disk_read, total_disk_write)
+}
+
+/// Get ALL processes with full information (for process list view)
+pub async fn get_all_processes(
+    previous_processes: &Arc<Mutex<ProcessCpuTimes>>,
+) -> Vec<ProcessInfo> {
+    let total_memory = *TOTAL_MEMORY.get_or_init(|| {
+        let mut mem_status = MEMORYSTATUSEX {
+            dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+            ..Default::default()
+        };
+        unsafe {
+            if GlobalMemoryStatusEx(&mut mem_status).is_ok() {
+                mem_status.ullTotalPhys
+            } else {
+                0
+            }
+        }
+    });
+
+    let (processes, _, _) = get_top_processes_optimized(total_memory, previous_processes).await;
+    processes
 }
 
 #[inline]
@@ -1347,7 +1475,7 @@ pub async fn get_network_connections() -> Vec<NetworkConnection> {
 // NPU DETECTION
 // ============================================================================
 
-fn get_npu_utilization() -> Option<f32> {
+pub fn get_npu_utilization() -> Option<f32> {
     use crate::wmi_native::WmiConnection;
 
     // Check if we have a cached NPU LUID first (fast path)
@@ -1619,4 +1747,99 @@ fn detect_npu_wmi_fallback() -> (bool, Option<String>, Option<f32>) {
 
 pub fn get_uptime_seconds() -> u64 {
     unsafe { GetTickCount64() / 1000 }
+}
+
+// ============================================================================
+// NPU DIAGNOSTIC INFO
+// ============================================================================
+
+/// Get detailed NPU diagnostic information for the diagnostics tab
+pub fn get_npu_diagnostic_info() -> serde_json::Value {
+    use serde_json::json;
+
+    // Try DXCore first (fast)
+    if let Some((name, _)) = detect_npu_dxcore() {
+        let tops = estimate_npu_tops(&name);
+        return json!({
+            "detected": true,
+            "name": name,
+            "detection_method": "DXCore",
+            "tops_estimate": tops,
+            "phi_silica_capable": tops.map(|t| t >= 40).unwrap_or(false),
+            "status": "Available",
+            "description": format_npu_description(&name, tops),
+        });
+    }
+
+    // Fall back to WMI (slower but catches more devices)
+    let (available, name, _) = detect_npu_wmi_fallback();
+    if available {
+        let name = name.unwrap_or_else(|| "Unknown NPU".to_string());
+        let tops = estimate_npu_tops(&name);
+        return json!({
+            "detected": true,
+            "name": name,
+            "detection_method": "WMI",
+            "tops_estimate": tops,
+            "phi_silica_capable": tops.map(|t| t >= 40).unwrap_or(false),
+            "status": "Available",
+            "description": format_npu_description(&name, tops),
+        });
+    }
+
+    // No NPU detected
+    json!({
+        "detected": false,
+        "name": null,
+        "detection_method": null,
+        "tops_estimate": null,
+        "phi_silica_capable": false,
+        "status": "Not Detected",
+        "description": "No Neural Processing Unit (NPU) detected. NPUs are available on Copilot+ PCs with Snapdragon X, Intel Core Ultra, or AMD Ryzen AI processors.",
+    })
+}
+
+/// Estimate TOPS (Tera Operations Per Second) based on NPU name
+fn estimate_npu_tops(name: &str) -> Option<u32> {
+    let name_lower = name.to_lowercase();
+
+    // Qualcomm Snapdragon X
+    if name_lower.contains("snapdragon") || name_lower.contains("hexagon") || name_lower.contains("x elite") || name_lower.contains("x plus") {
+        return Some(45); // Snapdragon X Elite/Plus NPUs are 45 TOPS
+    }
+
+    // Intel Core Ultra
+    if name_lower.contains("intel") || name_lower.contains("core ultra") || name_lower.contains("meteor lake") || name_lower.contains("lunar lake") {
+        if name_lower.contains("lunar lake") {
+            return Some(48); // Lunar Lake NPU is 48 TOPS
+        }
+        return Some(10); // Meteor Lake/Core Ultra Gen 1 is ~10 TOPS
+    }
+
+    // AMD XDNA
+    if name_lower.contains("amd") || name_lower.contains("xdna") || name_lower.contains("ryzen ai") {
+        if name_lower.contains("xdna 2") || name_lower.contains("strix") {
+            return Some(50); // XDNA 2 (Strix Point) is 50 TOPS
+        }
+        return Some(16); // XDNA 1 (Hawk Point) is ~16 TOPS
+    }
+
+    None
+}
+
+/// Format a human-readable NPU description
+fn format_npu_description(name: &str, tops: Option<u32>) -> String {
+    let tops_str = tops
+        .map(|t| format!("{} TOPS", t))
+        .unwrap_or_else(|| "Unknown performance".to_string());
+
+    let copilot_status = if tops.map(|t| t >= 40).unwrap_or(false) {
+        "Meets Copilot+ PC requirements (40+ TOPS). Phi Silica on-device AI available."
+    } else if tops.is_some() {
+        "Below Copilot+ PC threshold (40 TOPS). Phi Silica not available."
+    } else {
+        "Performance specifications unknown."
+    };
+
+    format!("{}\nEstimated Performance: {}\n{}", name, tops_str, copilot_status)
 }
