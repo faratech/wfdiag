@@ -483,6 +483,9 @@ impl WfDiagApp {
             }
         }
 
+        // Start monitoring immediately so Monitoring and Processes tabs are ready
+        app.start_monitoring();
+
         app
     }
 
@@ -819,70 +822,72 @@ impl WfDiagApp {
         self.last_scan_duration = None;
     }
 
-    #[cfg(windows)]
     pub fn start_monitoring(&mut self) {
         if self.monitoring_active.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
 
+        // Set active flags immediately so UI shows "Live" status
         self.monitoring_active.store(true, std::sync::atomic::Ordering::Relaxed);
         self.monitoring_state.is_active = true;
 
-        let (tx, rx) = mpsc::channel(32);
-        self.monitoring_rx = Some(rx);
+        #[cfg(windows)]
+        {
+            let (tx, rx) = mpsc::channel(32);
+            self.monitoring_rx = Some(rx);
 
-        let active_flag = self.monitoring_active.clone();
-        let runtime = self.runtime.clone();
+            let active_flag = self.monitoring_active.clone();
+            let runtime = self.runtime.clone();
 
-        std::thread::spawn(move || {
-            runtime.block_on(async move {
-                // Create monitoring state for stats collection
-                let pdh_state = Arc::new(std::sync::Mutex::new(wfdiag_tauri::native_monitor_helpers::PdhStateWrapper::default()));
-                let previous_network = Arc::new(tokio::sync::Mutex::new(wfdiag_tauri::native_monitor_helpers::NetworkStateWrapper::default()));
-                let previous_processes = Arc::new(tokio::sync::Mutex::new(wfdiag_tauri::native_monitor_helpers::ProcessCpuCache::new()));
-                let cached_disks = Arc::new(tokio::sync::Mutex::new(None));
-                let cached_npu_util = Arc::new(tokio::sync::Mutex::new(None));
-                let cached_fast_stats = Arc::new(tokio::sync::Mutex::new(None));
-                let disk_update_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let npu_update_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let fast_update_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let mut tick: u64 = 0;
+            std::thread::spawn(move || {
+                runtime.block_on(async move {
+                    // Create monitoring state for stats collection
+                    let pdh_state = Arc::new(std::sync::Mutex::new(wfdiag_tauri::native_monitor_helpers::PdhStateWrapper::default()));
+                    let previous_network = Arc::new(tokio::sync::Mutex::new(wfdiag_tauri::native_monitor_helpers::NetworkStateWrapper::default()));
+                    let previous_processes = Arc::new(tokio::sync::Mutex::new(wfdiag_tauri::native_monitor_helpers::ProcessCpuCache::new()));
+                    let cached_disks = Arc::new(tokio::sync::Mutex::new(None));
+                    let cached_npu_util = Arc::new(tokio::sync::Mutex::new(None));
+                    let cached_fast_stats = Arc::new(tokio::sync::Mutex::new(None));
+                    let disk_update_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let npu_update_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let fast_update_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let mut tick: u64 = 0;
 
-                loop {
-                    if !active_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
+                    loop {
+                        if !active_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+
+                        // Collect stats using the standalone helper
+                        let stats = wfdiag_tauri::native_monitor_helpers::collect_stats_standalone(
+                            &pdh_state,
+                            &previous_network,
+                            &previous_processes,
+                            &cached_disks,
+                            &cached_npu_util,
+                            &cached_fast_stats,
+                            &disk_update_flag,
+                            &npu_update_flag,
+                            &fast_update_flag,
+                            tick,
+                        ).await;
+
+                        tick += 1;
+
+                        if tx.send(stats).await.is_err() {
+                            break;
+                        }
+
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
-
-                    // Collect stats using the standalone helper
-                    let stats = wfdiag_tauri::native_monitor_helpers::collect_stats_standalone(
-                        &pdh_state,
-                        &previous_network,
-                        &previous_processes,
-                        &cached_disks,
-                        &cached_npu_util,
-                        &cached_fast_stats,
-                        &disk_update_flag,
-                        &npu_update_flag,
-                        &fast_update_flag,
-                        tick,
-                    ).await;
-
-                    tick += 1;
-
-                    if tx.send(stats).await.is_err() {
-                        break;
-                    }
-
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                }
+                });
             });
-        });
-    }
+        }
 
-    #[cfg(not(windows))]
-    pub fn start_monitoring(&mut self) {
-        // Monitoring only available on Windows
-        self.status_message = "System monitoring is only available on Windows".to_string();
+        #[cfg(not(windows))]
+        {
+            self.status_message = "System monitoring is only available on Windows".to_string();
+        }
     }
 
     pub fn stop_monitoring(&mut self) {

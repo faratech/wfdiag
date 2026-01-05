@@ -166,7 +166,7 @@ export const AboutDialog: React.FC<AboutDialogProps> = ({ open, onOpenChange }) 
               <Text className={styles.title}>WindowsForum Diagnostics</Text>
               <div className={styles.version}>
                 <Badge appearance="filled" color="brand" size="medium">
-                  Version 2.1.8
+                  Version 2.1.9
                 </Badge>
                 <Badge appearance="tint" color="success" size="medium">
                   <Shield20Regular style={{ marginRight: '4px' }} />
