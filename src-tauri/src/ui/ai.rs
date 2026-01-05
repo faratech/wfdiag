@@ -201,8 +201,10 @@ async fn analyze_diagnostic(
 /// OpenAI can handle much more, but we limit to keep responses focused
 const MAX_DIAGNOSTIC_OUTPUT_CHARS: usize = 12000;
 
-/// Maximum characters for Phi Silica (very limited context ~4K tokens)
-const PHI_SILICA_MAX_CHARS: usize = 1200;
+/// Maximum characters for Phi Silica diagnostic context
+/// Phi Silica has 4k token context (~4 chars/token = ~16k chars max)
+/// Use 1500 chars for diagnostic data, leaving room for prompt + output
+const PHI_SILICA_MAX_CHARS: usize = 1500;
 
 /// Analyze using Phi Silica (on-device AI)
 async fn analyze_with_phi_silica(task_name: &str, output: &str) -> Result<String, String> {

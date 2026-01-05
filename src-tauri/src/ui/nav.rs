@@ -12,6 +12,7 @@ pub fn show(app: &mut WfDiagApp, ui: &mut egui::Ui) {
             (Tab::Processes, "📋", "Processes"),
             (Tab::Issues, "⚠", "Issues"),
             (Tab::History, "📜", "History"),
+            (Tab::AI, "✨", "AI Analysis"),
         ];
 
         for (tab, icon, tooltip) in tabs {

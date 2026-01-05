@@ -2,8 +2,10 @@
 //!
 //! Contains prompt templates for different AI analysis scenarios.
 
-/// Maximum characters for Phi Silica prompts (conservative for ~4K token context)
-const PHI_SILICA_MAX_OUTPUT: usize = 1500;
+/// Maximum characters for diagnostic output in prompts
+/// Phi Silica has 4k token context (~16k chars max)
+/// Use 1200 chars for data to leave room for prompt template + output
+const PHI_SILICA_MAX_OUTPUT: usize = 1200;
 
 /// Generate prompt for single diagnostic interpretation
 pub fn diagnostic_interpretation_prompt(task_name: &str, output: &str) -> String {
@@ -196,7 +198,7 @@ fn format_bytes_if_numeric(s: &str) -> String {
 /// Generate prompt for section summary (Hardware, System, Storage, Network)
 pub fn section_summary_prompt(section_name: &str, section_data: &str) -> String {
     // Convert JSON to readable text
-    let readable_data = json_to_readable_text(section_data, 2000);
+    let readable_data = json_to_readable_text(section_data, 1500);
 
     format!(
         r#"Summarize {section_name} diagnostics:
@@ -229,7 +231,7 @@ Keep the response under 120 words. Be encouraging but honest."#,
 
 /// Generate prompt for issue prioritization
 pub fn issue_prioritization_prompt(issues_data: &str) -> String {
-    let readable_data = json_to_readable_text(issues_data, 1500);
+    let readable_data = json_to_readable_text(issues_data, 1200);
 
     format!(
         r#"Prioritize these Windows issues:

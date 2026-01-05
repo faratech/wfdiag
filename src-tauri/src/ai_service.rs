@@ -351,8 +351,10 @@ async fn analyze_with_openai(prompt: &str, api_key: Option<String>) -> Result<St
     Ok(response.output_text().unwrap_or_default())
 }
 
-/// Maximum prompt size for Phi Silica (~4K token context = ~2000 chars safe limit)
-const PHI_SILICA_MAX_PROMPT_CHARS: usize = 2000;
+/// Maximum prompt size for Phi Silica
+/// Phi Silica has 4k token context (~4 chars/token = ~16k chars max)
+/// Use 2500 chars for prompt to leave room for output (~1500 chars)
+const PHI_SILICA_MAX_PROMPT_CHARS: usize = 2500;
 
 /// Analyze using Phi Silica
 /// Note: ai_prompts.rs already converts JSON to readable text and truncates
