@@ -156,8 +156,8 @@ def main():
         print(f"Error: Invalid version format '{new_version}'. Expected format: X.Y.Z (e.g., 2.1.6)")
         sys.exit(1)
 
-    # Get project root
-    script_dir = Path(__file__).parent.resolve()
+    # Get project root (go up from scripts/ directory)
+    script_dir = Path(__file__).parent.parent.resolve()
 
     print(f"{'[DRY RUN] ' if dry_run else ''}Bumping version to {new_version}...")
     print()

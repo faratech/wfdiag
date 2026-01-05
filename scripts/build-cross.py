@@ -13,7 +13,8 @@ import json
 from pathlib import Path
 
 # Build configuration
-PROJECT_DIR = Path(__file__).parent.resolve()
+# Go up from scripts/ to project root
+PROJECT_DIR = Path(__file__).parent.parent.resolve()
 SRC_TAURI = PROJECT_DIR / "src-tauri"
 TARGET_DIR = SRC_TAURI / "target"
 OUTPUT_DIR = Path("/mnt/c/code")  # Always output to Windows drive

@@ -225,7 +225,7 @@ The key breakthrough was understanding that **standard WinRT activation (`RoGetA
 ### Files Involved
 - **`src-tauri/src/phi_silica.rs`**: Main implementation with `create_language_model_direct()` function
 - **`src-tauri/src/windows_ai_bindings.rs`**: Auto-generated WinRT bindings via `windows-bindgen` 0.65
-- **`build-cross.py`**: Build script that bundles Windows App SDK DLLs
+- **`scripts/build-cross.py`**: Build script that bundles Windows App SDK DLLs
 
 ### Bundled DLLs (per architecture)
 The MSIX package includes these DLLs for both x64 and ARM64:
@@ -309,10 +309,10 @@ Originally thought to be required, but the direct DLL activation approach works 
 ### Build Commands
 ```bash
 # Full build with MSIX and signing (includes DLL bundling)
-python3 build-cross.py build-all --build-msix --sign
+python3 scripts/build-cross.py build-all --build-msix --sign
 
 # Just rebuild MSIX (without recompiling)
-python3 build-cross.py build-msix --sign
+python3 scripts/build-cross.py build-msix --sign
 ```
 
 ### Testing
