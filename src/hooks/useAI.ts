@@ -114,6 +114,123 @@ export const useAI = () => {
     }
   }, [])
 
+  // ============================================================================
+  // Monitoring Analysis
+  // ============================================================================
+  const MONITORING_CACHE_KEY = '__monitoring_analysis__'
+  const MONITORING_PROMPT_TEMPLATE = `Analyze these Windows system monitoring stats. Provide a brief assessment (3-4 sentences) of:
+1. Overall system health
+2. Any concerns or bottlenecks
+3. Recommendations if any issues are detected
+
+System Stats:
+`
+
+  const requestMonitoringAnalysis = useCallback(
+    async (statsJson: string, forceRefresh = false): Promise<string | null> => {
+      if (!context.aiEnabled || !context.isAIAvailable) {
+        return null
+      }
+      try {
+        const prompt = MONITORING_PROMPT_TEMPLATE + statsJson
+        return await context.analyzeGeneric(MONITORING_CACHE_KEY, prompt, forceRefresh)
+      } catch {
+        return null
+      }
+    },
+    [context]
+  )
+
+  const getCachedMonitoringAnalysis = useCallback((): string | null => {
+    return context.interpretations[MONITORING_CACHE_KEY] ?? null
+  }, [context.interpretations])
+
+  const isMonitoringAnalysisLoading = useCallback((): boolean => {
+    return context.isAnalyzing[MONITORING_CACHE_KEY] ?? false
+  }, [context.isAnalyzing])
+
+  const getMonitoringAnalysisError = useCallback((): string | null => {
+    return context.errors[MONITORING_CACHE_KEY] ?? null
+  }, [context.errors])
+
+  // ============================================================================
+  // Process Analysis
+  // ============================================================================
+  const PROCESS_CACHE_KEY = '__process_analysis__'
+  const PROCESS_PROMPT_TEMPLATE = `Analyze these running Windows processes. Provide a brief assessment (3-4 sentences) of:
+1. High resource consumers that may need attention
+2. Any suspicious or unnecessary processes
+3. Optimization suggestions
+
+Top Processes:
+`
+
+  const requestProcessAnalysis = useCallback(
+    async (processesJson: string, forceRefresh = false): Promise<string | null> => {
+      if (!context.aiEnabled || !context.isAIAvailable) {
+        return null
+      }
+      try {
+        const prompt = PROCESS_PROMPT_TEMPLATE + processesJson
+        return await context.analyzeGeneric(PROCESS_CACHE_KEY, prompt, forceRefresh)
+      } catch {
+        return null
+      }
+    },
+    [context]
+  )
+
+  const getCachedProcessAnalysis = useCallback((): string | null => {
+    return context.interpretations[PROCESS_CACHE_KEY] ?? null
+  }, [context.interpretations])
+
+  const isProcessAnalysisLoading = useCallback((): boolean => {
+    return context.isAnalyzing[PROCESS_CACHE_KEY] ?? false
+  }, [context.isAnalyzing])
+
+  const getProcessAnalysisError = useCallback((): string | null => {
+    return context.errors[PROCESS_CACHE_KEY] ?? null
+  }, [context.errors])
+
+  // ============================================================================
+  // Comparison Analysis
+  // ============================================================================
+  const COMPARISON_CACHE_KEY = '__comparison_analysis__'
+  const COMPARISON_PROMPT_TEMPLATE = `Compare these two Windows diagnostic scans. Provide a brief assessment (3-4 sentences) of:
+1. What has improved since the previous scan
+2. What has degraded or needs attention
+3. Overall health trend
+
+Scan Comparison:
+`
+
+  const requestComparisonAnalysis = useCallback(
+    async (comparisonJson: string, forceRefresh = false): Promise<string | null> => {
+      if (!context.aiEnabled || !context.isAIAvailable) {
+        return null
+      }
+      try {
+        const prompt = COMPARISON_PROMPT_TEMPLATE + comparisonJson
+        return await context.analyzeGeneric(COMPARISON_CACHE_KEY, prompt, forceRefresh)
+      } catch {
+        return null
+      }
+    },
+    [context]
+  )
+
+  const getCachedComparisonAnalysis = useCallback((): string | null => {
+    return context.interpretations[COMPARISON_CACHE_KEY] ?? null
+  }, [context.interpretations])
+
+  const isComparisonAnalysisLoading = useCallback((): boolean => {
+    return context.isAnalyzing[COMPARISON_CACHE_KEY] ?? false
+  }, [context.isAnalyzing])
+
+  const getComparisonAnalysisError = useCallback((): string | null => {
+    return context.errors[COMPARISON_CACHE_KEY] ?? null
+  }, [context.errors])
+
   /**
    * Check if any AI operation is in progress
    */
@@ -145,6 +262,24 @@ export const useAI = () => {
 
     // Health operations
     explainHealth: context.explainHealth,
+
+    // Monitoring analysis
+    requestMonitoringAnalysis,
+    getCachedMonitoringAnalysis,
+    isMonitoringAnalysisLoading,
+    getMonitoringAnalysisError,
+
+    // Process analysis
+    requestProcessAnalysis,
+    getCachedProcessAnalysis,
+    isProcessAnalysisLoading,
+    getProcessAnalysisError,
+
+    // Comparison analysis
+    requestComparisonAnalysis,
+    getCachedComparisonAnalysis,
+    isComparisonAnalysisLoading,
+    getComparisonAnalysisError,
 
     // Utilities
     getProviderDisplayName,

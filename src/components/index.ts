@@ -91,3 +91,7 @@ export { DiagnosticListPanel } from './DiagnosticListPanel'
 export type { DiagnosticItem } from './DiagnosticListPanel'
 
 export { DiagnosticDetailPanel } from './DiagnosticDetailPanel'
+
+// AI Components
+export { AIAnalysisPanel } from './AIAnalysisPanel'
+export type { AIAnalysisPanelProps } from './AIAnalysisPanel'

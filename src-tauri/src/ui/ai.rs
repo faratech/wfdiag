@@ -449,10 +449,10 @@ pub fn render_ai_panel(
 
     // AI panel frame
     egui::Frame::new()
-        .fill(colors::AI_PANEL_BG)
+        .fill(colors::ai_panel_bg())
         .corner_radius(6.0)
         .inner_margin(Margin::same(10))
-        .stroke(egui::Stroke::new(1.0, colors::AI_PANEL_STROKE))
+        .stroke(egui::Stroke::new(1.0, colors::ai_panel_stroke()))
         .show(ui, |ui| {
             // Header
             ui.horizontal(|ui| {
@@ -690,10 +690,10 @@ fn render_generic_ai_panel(
 /// Reusable AI panel frame styling
 fn ai_panel_frame(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
-        .fill(colors::AI_PANEL_BG)
+        .fill(colors::ai_panel_bg())
         .corner_radius(6.0)
         .inner_margin(Margin::same(10))
-        .stroke(egui::Stroke::new(1.0, colors::AI_PANEL_STROKE))
+        .stroke(egui::Stroke::new(1.0, colors::ai_panel_stroke()))
         .show(ui, add_contents);
 }
 
