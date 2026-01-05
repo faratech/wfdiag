@@ -25,6 +25,7 @@ import {
   NAV_RAIL_WIDTH_COLLAPSED,
   NAV_RAIL_WIDTH_EXPANDED,
   NAV_RAIL_BREAKPOINT,
+  NAV_ICONS,
 } from '../theme'
 import type { TabValue } from './TabNavigation'
 
@@ -237,6 +238,7 @@ export interface NavRailProps {
     computer_name: string
     os_version: string
   } | null
+  useEmojiIcons?: boolean
 }
 
 interface NavItem {
@@ -245,6 +247,11 @@ interface NavItem {
   label: string
   badge?: React.ReactNode
 }
+
+// Emoji icon component
+const EmojiIcon: React.FC<{ emoji: string }> = ({ emoji }) => (
+  <span style={{ fontSize: '18px', lineHeight: 1 }}>{emoji}</span>
+)
 
 export const NavRail: React.FC<NavRailProps> = ({
   selectedItem,
@@ -256,6 +263,7 @@ export const NavRail: React.FC<NavRailProps> = ({
   onOpenSettings,
   onOpenAbout,
   systemInfo,
+  useEmojiIcons = false,
 }) => {
   const styles = useStyles()
   const [isAutoCollapsed, setIsAutoCollapsed] = useState(false)
@@ -277,12 +285,12 @@ export const NavRail: React.FC<NavRailProps> = ({
   const navItems: NavItem[] = [
     {
       id: 'diagnostics',
-      icon: <Stethoscope24Regular />,
+      icon: useEmojiIcons ? <EmojiIcon emoji={NAV_ICONS.diagnostics} /> : <Stethoscope24Regular />,
       label: 'Diagnostics',
     },
     {
       id: 'monitoring',
-      icon: <ChartMultiple24Regular />,
+      icon: useEmojiIcons ? <EmojiIcon emoji={NAV_ICONS.monitoring} /> : <ChartMultiple24Regular />,
       label: 'Monitor',
       badge: isMonitoringActive ? (
         <span style={{
@@ -297,12 +305,12 @@ export const NavRail: React.FC<NavRailProps> = ({
     },
     {
       id: 'ai',
-      icon: <Brain24Regular />,
+      icon: useEmojiIcons ? <EmojiIcon emoji={NAV_ICONS.ai} /> : <Brain24Regular />,
       label: 'AI Analysis',
     },
     {
       id: 'issues',
-      icon: <Warning24Regular />,
+      icon: useEmojiIcons ? <EmojiIcon emoji={NAV_ICONS.issues} /> : <Warning24Regular />,
       label: 'Issues',
       badge: issueCount > 0 ? (
         <span style={{
@@ -325,7 +333,7 @@ export const NavRail: React.FC<NavRailProps> = ({
     },
     {
       id: 'history',
-      icon: <History24Regular />,
+      icon: useEmojiIcons ? <EmojiIcon emoji={NAV_ICONS.history} /> : <History24Regular />,
       label: 'History',
     },
   ]
