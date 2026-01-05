@@ -36,6 +36,27 @@ impl Timestamp {
         self.secs + duration.as_secs() as i64 <= other.secs
     }
 
+    /// Format timestamp with a format string (simplified implementation)
+    /// Supported: %Y (year), %m (month), %d (day), %H (hour), %M (minute), %S (second)
+    pub fn format(&self, fmt: &str) -> String {
+        let secs = self.secs;
+        let days = secs / 86400;
+        let remaining = secs % 86400;
+
+        let hours = (remaining / 3600) % 24;
+        let minutes = (remaining % 3600) / 60;
+        let seconds = remaining % 60;
+
+        let (year, month, day) = days_to_ymd(days);
+
+        fmt.replace("%Y", &format!("{:04}", year))
+           .replace("%m", &format!("{:02}", month))
+           .replace("%d", &format!("{:02}", day))
+           .replace("%H", &format!("{:02}", hours))
+           .replace("%M", &format!("{:02}", minutes))
+           .replace("%S", &format!("{:02}", seconds))
+    }
+
     /// Format as ISO 8601 string (YYYY-MM-DDTHH:MM:SSZ)
     #[allow(clippy::wrong_self_convention)]
     pub fn to_iso_string(&self) -> String {

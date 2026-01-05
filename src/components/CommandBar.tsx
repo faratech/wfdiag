@@ -39,12 +39,21 @@ const useStyles = makeStyles({
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
     ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
     marginBottom: tokens.spacingVerticalM,
+    flexWrap: 'wrap',
+    ...shorthands.gap(tokens.spacingVerticalXS),
   },
 
   toolbarGroup: {
     display: 'flex',
     alignItems: 'center',
     ...shorthands.gap(tokens.spacingHorizontalXS),
+    flexWrap: 'wrap',
+  },
+
+  secondaryActions: {
+    '@media (max-width: 1024px)': {
+      display: 'none',
+    },
   },
 
   statusIndicator: {
@@ -220,14 +229,16 @@ export const CommandBar: React.FC<CommandBarProps> = ({
         <ToolbarDivider />
 
         {/* View Controls */}
-        <Tooltip content="Filter results" relationship="description">
-          <ToolbarButton
-            appearance="subtle"
-            icon={<Filter20Regular />}
-            onClick={onToggleFilter}
-            aria-label="Toggle filter"
-          />
-        </Tooltip>
+        <span className={styles.secondaryActions}>
+          <Tooltip content="Filter results" relationship="description">
+            <ToolbarButton
+              appearance="subtle"
+              icon={<Filter20Regular />}
+              onClick={onToggleFilter}
+              aria-label="Toggle filter"
+            />
+          </Tooltip>
+        </span>
 
         <Tooltip content="Compare with previous scan" relationship="description">
           <ToolbarButton
@@ -252,15 +263,17 @@ export const CommandBar: React.FC<CommandBarProps> = ({
           />
         </Tooltip>
 
-        <Tooltip content="Copy to clipboard" relationship="description">
-          <ToolbarButton
-            appearance="subtle"
-            icon={<Copy20Regular />}
-            onClick={onCopyToClipboard}
-            disabled={resultCount === 0}
-            aria-label="Copy"
-          />
-        </Tooltip>
+        <span className={styles.secondaryActions}>
+          <Tooltip content="Copy to clipboard" relationship="description">
+            <ToolbarButton
+              appearance="subtle"
+              icon={<Copy20Regular />}
+              onClick={onCopyToClipboard}
+              disabled={resultCount === 0}
+              aria-label="Copy"
+            />
+          </Tooltip>
+        </span>
 
         <Menu>
           <MenuTrigger disableButtonEnhancement>

@@ -33,14 +33,18 @@ import {
 
 const useStyles = makeStyles({
   surface: {
-    maxWidth: '600px',
-    width: '90vw',
+    width: 'clamp(320px, 90vw, 600px)',
+    maxHeight: '90vh',
+    overflowY: 'auto',
   },
 
   content: {
     display: 'flex',
     flexDirection: 'column',
     ...shorthands.gap(tokens.spacingVerticalL),
+    '@media (max-width: 480px)': {
+      ...shorthands.gap(tokens.spacingVerticalM),
+    },
   },
 
   section: {

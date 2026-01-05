@@ -1,0 +1,12 @@
+pub mod toolbar;
+pub mod statusbar;
+pub mod nav;
+pub mod diagnostics;
+pub mod monitoring;
+pub mod processes;
+pub mod issues;
+pub mod history;
+pub mod settings;
+pub mod about;
+pub mod process_list;
+pub mod ai;

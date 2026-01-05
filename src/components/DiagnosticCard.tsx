@@ -8,17 +8,18 @@ import {
   Badge,
   ProgressBar,
   Tab,
-  TabList
+  TabList,
+  Tooltip
 } from '@fluentui/react-components'
 import {
   CheckmarkCircle20Filled,
   Warning20Filled,
   ErrorCircle20Filled,
-  ChevronDown20Regular,
   ChevronRight20Regular,
   Copy16Regular,
   Code20Regular,
-  SlideText20Regular
+  SlideText20Regular,
+  Info12Regular
 } from '@fluentui/react-icons'
 import { AIInterpretationPanel } from './AIInterpretationPanel'
 
@@ -27,10 +28,13 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground1,
     ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke2),
     marginBottom: tokens.spacingVerticalM,
-    transition: 'all 0.2s ease',
+    transitionProperty: 'background-color, border-color, box-shadow, transform',
+    transitionDuration: tokens.durationNormal,
+    transitionTimingFunction: tokens.curveEasyEase,
     ':hover': {
       backgroundColor: tokens.colorNeutralBackground1Hover,
-      ...shorthands.borderColor(tokens.colorNeutralStroke1),
+      ...shorthands.borderColor(tokens.colorBrandStroke2),
+      boxShadow: tokens.shadow4,
     },
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
   },
@@ -106,7 +110,7 @@ const useStyles = makeStyles({
     fontWeight: 700,
     color: tokens.colorNeutralForeground3,
     textTransform: 'uppercase',
-    letterSpacing: '0.05em',
+    letterSpacing: '0.02em',
     marginBottom: tokens.spacingVerticalXS,
     marginTop: tokens.spacingVerticalM,
     display: 'block',
@@ -182,8 +186,109 @@ const useStyles = makeStyles({
     fontWeight: 600,
     fontSize: tokens.fontSizeBase200,
     marginBottom: tokens.spacingVerticalXS,
-  }
+  },
+  chevronIcon: {
+    transitionProperty: 'transform',
+    transitionDuration: tokens.durationNormal,
+    transitionTimingFunction: tokens.curveEasyEase,
+  },
+  chevronExpanded: {
+    transform: 'rotate(90deg)',
+  },
+  contentWrapper: {
+    overflow: 'hidden',
+    animation: 'fadeSlideIn 0.2s ease-out',
+  },
+  errorBlock: {
+    fontFamily: 'Consolas, "Courier New", monospace',
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorPaletteRedForeground1,
+    backgroundColor: tokens.colorPaletteRedBackground1,
+    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
+    ...shorthands.borderRadius(tokens.borderRadiusSmall),
+    borderLeft: `3px solid ${tokens.colorPaletteRedBorder2}`,
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+  },
+  statusLabel: {
+    fontSize: tokens.fontSizeBase100,
+    fontWeight: tokens.fontWeightMedium,
+    ...shorthands.padding('2px', tokens.spacingHorizontalS),
+    ...shorthands.borderRadius(tokens.borderRadiusSmall),
+    marginLeft: tokens.spacingHorizontalXS,
+    display: 'inline-flex',
+    alignItems: 'center',
+    ...shorthands.gap('4px'),
+  },
+  statusLabelPassed: {
+    backgroundColor: tokens.colorPaletteGreenBackground1,
+    color: tokens.colorPaletteGreenForeground1,
+  },
+  statusLabelReview: {
+    backgroundColor: tokens.colorPaletteYellowBackground1,
+    color: tokens.colorPaletteYellowForeground1,
+  },
+  statusLabelNeedsAttention: {
+    backgroundColor: tokens.colorPaletteRedBackground1,
+    color: tokens.colorPaletteRedForeground1,
+  },
+  titleWithHelp: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    ...shorthands.gap('6px'),
+  },
+  helpIcon: {
+    color: tokens.colorBrandForeground2,
+    cursor: 'help',
+    opacity: 0.7,
+    transitionProperty: 'opacity, color',
+    transitionDuration: tokens.durationFast,
+    ':hover': {
+      opacity: 1,
+      color: tokens.colorBrandForeground1,
+    },
+  },
 })
+
+// User-friendly status labels and descriptions
+const STATUS_INFO = {
+  verified: {
+    label: 'Passed',
+    description: 'This check completed successfully. No issues detected.',
+  },
+  monitor: {
+    label: 'Review',
+    description: 'This may need attention. Review the details to determine if action is required.',
+  },
+  action_required: {
+    label: 'Needs Attention',
+    description: 'An issue was detected that should be addressed.',
+  },
+} as const
+
+// Plain-language explanations for technical diagnostic terms
+const TECHNICAL_TERMS: Record<string, string> = {
+  'DISM Health': 'Windows component store integrity check - verifies system files are not corrupted',
+  'SFC': 'System File Checker - scans and repairs protected Windows system files',
+  'Driver Verifier': 'Built-in tool that monitors drivers for errors and potential crashes',
+  'HOSTS File': 'Local DNS override file that can redirect or block website addresses',
+  'IRQ': 'Hardware interrupt assignments - how devices communicate with the CPU',
+  'TPM': 'Trusted Platform Module - hardware security chip for encryption and secure boot',
+  'BIOS': 'Basic Input/Output System - firmware that initializes hardware before Windows starts',
+  'UEFI': 'Unified Extensible Firmware Interface - modern replacement for BIOS',
+  'SMB': 'Server Message Block - protocol for sharing files and printers on a network',
+  'WMI': 'Windows Management Instrumentation - system for managing Windows configuration',
+  'Pagefile': 'Virtual memory file on disk used when RAM is full',
+  'Registry': 'Windows database storing system and application settings',
+  'Event Log': 'Windows log files recording system, security, and application events',
+  'Services': 'Background programs that run without a user interface',
+  'Drivers': 'Software that allows Windows to communicate with hardware devices',
+  'Disk Health': 'S.M.A.R.T. status and performance metrics for storage drives',
+  'Network Adapter': 'Hardware or software component for network connectivity',
+  'Firewall': 'Security system that monitors and controls network traffic',
+  'Boot Configuration': 'Settings that control how Windows starts up',
+  'Memory': 'RAM (Random Access Memory) - temporary high-speed storage for running programs',
+}
 
 export interface DiagnosticCardProps {
   /** Unique task ID for AI caching */
@@ -257,6 +362,26 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
     if (isWarning) return <Warning20Filled primaryFill={tokens.colorPaletteYellowForeground1} />
     return <CheckmarkCircle20Filled primaryFill={tokens.colorPaletteGreenForeground1} />
   }
+
+  const getStatusLabelClass = () => {
+    if (isError) return `${styles.statusLabel} ${styles.statusLabelNeedsAttention}`
+    if (isWarning) return `${styles.statusLabel} ${styles.statusLabelReview}`
+    return `${styles.statusLabel} ${styles.statusLabelPassed}`
+  }
+
+  const statusInfo = STATUS_INFO[status]
+
+  // Find technical term tooltip for title
+  const getTechnicalTermTooltip = (): string | null => {
+    const lowerTitle = title.toLowerCase()
+    for (const [term, explanation] of Object.entries(TECHNICAL_TERMS)) {
+      if (lowerTitle.includes(term.toLowerCase())) {
+        return explanation
+      }
+    }
+    return null
+  }
+  const technicalTooltip = getTechnicalTermTooltip()
 
   // Helper to safely parse output if it's a JSON string
   const getParsedOutput = () => {
@@ -1721,7 +1846,18 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
     <div className={getCardStyle()}>
       <div className={styles.header} onClick={() => setExpanded(!expanded)}>
         <div className={styles.titleContainer}>
-          <Text className={styles.title}>{highlightText ? highlightMatchingText(title) : title}</Text>
+          <span className={styles.titleWithHelp}>
+            <Text className={styles.title}>{highlightText ? highlightMatchingText(title) : title}</Text>
+            {technicalTooltip && (
+              <Tooltip
+                content={technicalTooltip}
+                relationship="description"
+                positioning="after"
+              >
+                <Info12Regular className={styles.helpIcon} aria-label="What is this?" />
+              </Tooltip>
+            )}
+          </span>
           <Text className={styles.meta}>
             {importance !== 'primary' && `${category} • `}
             {executionTime ? `${executionTime}ms` : ''}
@@ -1732,14 +1868,25 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
             </Text>
           )}
         </div>
-        <div className={styles.statusIndicator}>
-          {getStatusIcon()}
-        </div>
-        {expanded ? <ChevronDown20Regular /> : <ChevronRight20Regular />}
+        <Tooltip
+          content={statusInfo.description}
+          relationship="description"
+          positioning="above"
+        >
+          <div className={styles.statusIndicator} style={{ display: 'flex', alignItems: 'center' }}>
+            {getStatusIcon()}
+            <span className={getStatusLabelClass()}>
+              {statusInfo.label}
+            </span>
+          </div>
+        </Tooltip>
+        <ChevronRight20Regular
+          className={`${styles.chevronIcon} ${expanded ? styles.chevronExpanded : ''}`}
+        />
       </div>
 
       {expanded && (
-        <div className={styles.content}>
+        <div className={`${styles.content} ${styles.contentWrapper}`}>
           {description && (
             <>
               <Text className={styles.sectionTitle}>Objective</Text>
@@ -1761,8 +1908,8 @@ export const DiagnosticCard: React.FC<DiagnosticCardProps> = ({
           
           <div className={styles.outputContainer}>
             {error ? (
-              <div style={{ color: tokens.colorPaletteRedForeground1, fontFamily: 'monospace' }}>
-                Error: {error}
+              <div className={styles.errorBlock}>
+                {error}
               </div>
             ) : (
               viewMode === 'summary' ? renderSummary() : renderData(parsedData)

@@ -24,6 +24,7 @@ import {
   ErrorCircleRegular,
   WarningRegular,
   History20Regular,
+  ChevronRight12Regular,
 } from '@fluentui/react-icons'
 import { PageHeader, EmptyState } from './components'
 import { useScanHistory } from './hooks/useScanHistory'
@@ -57,6 +58,30 @@ const useStyles = makeStyles({
   changesList: {
     maxHeight: '600px',
     overflowY: 'auto',
+  },
+  breadcrumbs: {
+    display: 'flex',
+    alignItems: 'center',
+    ...shorthands.gap(tokens.spacingHorizontalXS),
+    marginBottom: tokens.spacingVerticalS,
+  },
+  breadcrumbItem: {
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground3,
+    cursor: 'pointer',
+    transitionProperty: 'color',
+    transitionDuration: tokens.durationNormal,
+    ':hover': {
+      color: tokens.colorBrandForeground1,
+    },
+  },
+  breadcrumbCurrent: {
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground1,
+    fontWeight: tokens.fontWeightSemibold,
+  },
+  breadcrumbSeparator: {
+    color: tokens.colorNeutralForeground4,
   },
 })
 
@@ -252,10 +277,23 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({ onClose }) => {
 
   return (
     <div className={styles.container}>
+      {/* Breadcrumb Navigation */}
+      <nav className={styles.breadcrumbs} aria-label="Breadcrumb">
+        <span className={styles.breadcrumbItem} onClick={onClose}>
+          Diagnostics
+        </span>
+        <ChevronRight12Regular className={styles.breadcrumbSeparator} />
+        <span className={styles.breadcrumbCurrent}>
+          {comparison ? 'Scan Comparison' : 'Scan History'}
+        </span>
+      </nav>
+
       {/* Page Header */}
       <PageHeader
         title="Scan Comparison"
-        description="Compare diagnostic results between scans"
+        description={comparison
+          ? 'Review changes between selected scans'
+          : 'Compare diagnostic results between scans'}
         icon={<History20Regular />}
         actions={
           <div style={{ display: 'flex', gap: tokens.spacingHorizontalM }}>

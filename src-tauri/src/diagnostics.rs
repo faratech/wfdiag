@@ -87,6 +87,13 @@ pub fn get_all_tasks() -> Vec<DiagnosticTask> {
             admin_required: false,
         },
         DiagnosticTask {
+            id: "npu_info".to_string(),
+            name: "NPU (Neural Processing Unit)".to_string(),
+            description: "AI accelerator / Neural Processing Unit detection".to_string(),
+            category: "Hardware".to_string(),
+            admin_required: false,
+        },
+        DiagnosticTask {
             id: "disk_drive".to_string(),
             name: "Disk Drives".to_string(),
             description: "Physical disk information".to_string(),
@@ -335,6 +342,7 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             "device_memory" => diagnostics.run_wmi_query("Win32_DeviceMemoryAddress", None),
             "dma_channel" => diagnostics.run_wmi_query("Win32_DMAChannel", None),
             "irq_resource" => diagnostics.run_wmi_query("Win32_IRQResource", None),
+            "npu_info" => Ok(crate::native_monitor::get_npu_diagnostic_info()),
             "disk_drive" => diagnostics.run_wmi_query("Win32_DiskDrive", None),
             "disk_partition" => diagnostics.run_wmi_query("Win32_DiskPartition", None),
             "logical_disk" => diagnostics.get_native_disk_space(),

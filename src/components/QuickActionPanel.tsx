@@ -32,24 +32,13 @@ const useStyles = makeStyles({
   },
 
   welcomeCard: {
-    background: 'var(--theme-card-gradient)',
+    backgroundColor: tokens.colorNeutralBackground1,
     ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke1),
     ...shorthands.padding(tokens.spacingVerticalXXXL),
     textAlign: 'center',
     boxShadow: tokens.shadow8,
     position: 'relative',
     ...shorthands.overflow('hidden'),
-    // Hero gradient overlay
-    '&::before': {
-      content: '""',
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      background: 'var(--theme-hero-gradient)',
-      pointerEvents: 'none',
-    },
   },
 
   iconContainer: {
@@ -57,11 +46,11 @@ const useStyles = makeStyles({
     height: '72px',
     ...shorthands.margin('0', 'auto', tokens.spacingVerticalXL),
     ...shorthands.borderRadius('50%'),
-    background: 'var(--theme-accent-gradient)',
+    backgroundColor: tokens.colorBrandBackground,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    boxShadow: '0 8px 24px rgba(51, 95, 227, 0.35)',
+    boxShadow: tokens.shadow16,
     position: 'relative',
     zIndex: 1,
   },
@@ -98,7 +87,7 @@ const useStyles = makeStyles({
 
   featureCard: {
     ...shorthands.padding(tokens.spacingVerticalXL),
-    background: 'var(--theme-card-gradient)',
+    backgroundColor: tokens.colorNeutralBackground2,
     ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke1),
     ...shorthands.borderRadius(tokens.borderRadiusLarge),
     boxShadow: tokens.shadow4,
@@ -109,7 +98,7 @@ const useStyles = makeStyles({
     zIndex: 1,
 
     ':hover': {
-      background: 'var(--theme-card-gradient-hover)',
+      backgroundColor: tokens.colorNeutralBackground1Hover,
       transform: 'translateY(-4px)',
       boxShadow: tokens.shadow16,
     }
@@ -171,7 +160,7 @@ const useStyles = makeStyles({
 
   statCard: {
     ...shorthands.padding(tokens.spacingVerticalM),
-    background: 'var(--theme-card-gradient)',
+    backgroundColor: tokens.colorNeutralBackground2,
     ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke1),
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
     boxShadow: tokens.shadow2,
@@ -188,6 +177,10 @@ export interface QuickActionPanelProps {
   isScanning?: boolean
   scanProgress?: number
   currentTask?: string
+  /** Current task number (1-based) */
+  currentTaskNumber?: number
+  /** Total number of tasks in scan */
+  totalTasks?: number
   hasResults?: boolean
   stats?: {
     totalTasks: number
@@ -206,6 +199,8 @@ export const QuickActionPanel: React.FC<QuickActionPanelProps> = ({
   isScanning = false,
   scanProgress = 0,
   currentTask = '',
+  currentTaskNumber = 0,
+  totalTasks = 0,
   hasResults = false,
   stats
 }) => {
@@ -223,9 +218,15 @@ export const QuickActionPanel: React.FC<QuickActionPanelProps> = ({
             Scanning Your System...
           </Title2>
 
-          <Body1 block style={{ color: tokens.colorNeutralForeground3, marginBottom: tokens.spacingVerticalXL }}>
-            {currentTask || 'Initializing scan...'}
+          <Body1 block style={{ color: tokens.colorNeutralForeground3, marginBottom: tokens.spacingVerticalS }}>
+            {currentTaskNumber > 0 && totalTasks > 0
+              ? `Task ${currentTaskNumber} of ${totalTasks}`
+              : 'Initializing scan...'}
           </Body1>
+
+          <Caption1 block style={{ color: tokens.colorNeutralForeground2, marginBottom: tokens.spacingVerticalXL }}>
+            {currentTask || 'Preparing diagnostics...'}
+          </Caption1>
 
           <ProgressBar
             value={scanProgress / 100}
@@ -235,7 +236,11 @@ export const QuickActionPanel: React.FC<QuickActionPanelProps> = ({
 
           <div className={styles.progressInfo}>
             <Caption1>{Math.round(scanProgress)}% Complete</Caption1>
-            <Caption1>Please wait...</Caption1>
+            <Caption1>
+              {totalTasks > 0
+                ? `${totalTasks - currentTaskNumber} tasks remaining`
+                : 'Please wait...'}
+            </Caption1>
           </div>
         </Card>
       </div>
@@ -296,25 +301,25 @@ export const QuickActionPanel: React.FC<QuickActionPanelProps> = ({
               <Title3 style={{ color: tokens.colorPaletteBlueForeground2 }}>
                 {stats.totalTasks}
               </Title3>
-              <Caption1>Total Tasks</Caption1>
+              <Caption1>Checks Run</Caption1>
             </div>
             <div className={styles.statCard}>
               <Title3 style={{ color: tokens.colorPaletteGreenForeground1 }}>
                 {stats.successfulTasks}
               </Title3>
-              <Caption1>Successful</Caption1>
+              <Caption1>Passed</Caption1>
             </div>
             <div className={styles.statCard}>
               <Title3 style={{ color: stats.failedTasks > 0 ? tokens.colorPaletteRedForeground1 : tokens.colorNeutralForeground3 }}>
                 {stats.failedTasks}
               </Title3>
-              <Caption1>Failed</Caption1>
+              <Caption1>Need Attention</Caption1>
             </div>
             <div className={styles.statCard}>
               <Title3 style={{ color: tokens.colorPaletteYellowForeground1 }}>
                 {Math.round((stats.successfulTasks / stats.totalTasks) * 100)}%
               </Title3>
-              <Caption1>Success Rate</Caption1>
+              <Caption1>Health Score</Caption1>
             </div>
           </div>
 
@@ -348,34 +353,43 @@ export const QuickActionPanel: React.FC<QuickActionPanelProps> = ({
           maxWidth: '600px',
           margin: '0 auto'
         }}>
-          Choose a scan type to analyze your Windows system. Quick Scan covers essential checks,
-          while Full Scan performs comprehensive analysis of all components.
+          Analyze your Windows system for issues, performance bottlenecks, and configuration problems.
         </Body1>
 
         <div className={styles.scanButtons}>
-          <Button
-            className={styles.scanButton}
-            appearance="primary"
-            icon={<Flash20Regular />}
-            onClick={onQuickScan}
-          >
-            Quick Scan
-            <Caption1 style={{ marginLeft: tokens.spacingHorizontalS, opacity: 0.8 }}>
-              ~30 seconds
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: tokens.spacingVerticalS }}>
+            <Button
+              className={styles.scanButton}
+              appearance="primary"
+              icon={<Flash20Regular />}
+              onClick={onQuickScan}
+            >
+              Quick Scan
+              <Caption1 style={{ marginLeft: tokens.spacingHorizontalS, opacity: 0.8 }}>
+                ~30 sec
+              </Caption1>
+            </Button>
+            <Caption1 style={{ color: tokens.colorNeutralForeground3, textAlign: 'center', maxWidth: '200px' }}>
+              Essential checks: drivers, disk space, memory, and critical services
             </Caption1>
-          </Button>
+          </div>
 
-          <Button
-            className={styles.scanButton}
-            appearance="secondary"
-            icon={<Search20Regular />}
-            onClick={onFullScan}
-          >
-            Full Scan
-            <Caption1 style={{ marginLeft: tokens.spacingHorizontalS, opacity: 0.8 }}>
-              3-5 minutes
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: tokens.spacingVerticalS }}>
+            <Button
+              className={styles.scanButton}
+              appearance="secondary"
+              icon={<Search20Regular />}
+              onClick={onFullScan}
+            >
+              Full Scan
+              <Caption1 style={{ marginLeft: tokens.spacingHorizontalS, opacity: 0.8 }}>
+                3-5 min
+              </Caption1>
+            </Button>
+            <Caption1 style={{ color: tokens.colorNeutralForeground3, textAlign: 'center', maxWidth: '200px' }}>
+              Complete analysis: hardware, software, network, logs, and security
             </Caption1>
-          </Button>
+          </div>
         </div>
 
         <div className={styles.featureGrid}>

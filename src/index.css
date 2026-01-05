@@ -27,6 +27,7 @@
   padding: 24px;
   overflow-y: auto;
   overflow-x: hidden;
+  scroll-behavior: smooth;
 }
 
 /* Fluent component transitions */

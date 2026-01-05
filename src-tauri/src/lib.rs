@@ -1,24 +1,26 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod architecture;
-mod diagnostics;
+pub mod diagnostics;
 #[cfg(windows)]
 mod dpapi;
 mod encrypted_storage;
 mod issue_detector;
 mod issue_fixer;
 mod native_diagnostics;
-mod native_monitor;
-mod openai_integration;
-mod results_storage;
+pub mod native_monitor;
+#[cfg(windows)]
+pub mod native_monitor_helpers;
+pub mod openai_integration;
+pub mod results_storage;
 mod security;
-mod timestamp;
+pub mod timestamp;
 mod windows_native;
 #[cfg(windows)]
 mod wmi_native;
 
 // Phi Silica wrapper (uses windows-bindgen generated bindings)
-mod phi_silica;
+pub mod phi_silica;
 #[cfg(windows)]
 mod windows_ai_bindings;
 

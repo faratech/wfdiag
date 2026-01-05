@@ -26,6 +26,13 @@ const useStyles = makeStyles({
     background: 'var(--theme-card-gradient)',
     ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke1),
     boxShadow: tokens.shadow4,
+    transitionProperty: 'box-shadow, border-color',
+    transitionDuration: tokens.durationNormal,
+    transitionTimingFunction: tokens.curveEasyEase,
+    ':hover': {
+      boxShadow: tokens.shadow8,
+      ...shorthands.borderColor(tokens.colorNeutralStroke1Hover),
+    },
   },
   header: {
     display: 'flex',

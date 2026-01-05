@@ -27,8 +27,8 @@ const useStyles = makeStyles({
   },
 
   iconContainer: {
-    width: '80px',
-    height: '80px',
+    width: 'clamp(64px, 10vw, 80px)',
+    height: 'clamp(64px, 10vw, 80px)',
     ...shorthands.borderRadius('50%'),
     backgroundColor: tokens.colorNeutralBackground3,
     display: 'flex',
@@ -36,6 +36,13 @@ const useStyles = makeStyles({
     justifyContent: 'center',
     marginBottom: tokens.spacingVerticalL,
     color: tokens.colorNeutralForeground3,
+    transitionProperty: 'background-color, transform',
+    transitionDuration: tokens.durationNormal,
+    transitionTimingFunction: tokens.curveEasyEase,
+    ':hover': {
+      backgroundColor: tokens.colorNeutralBackground3Hover,
+      transform: 'scale(1.05)',
+    },
   },
 
   iconContainerSuccess: {

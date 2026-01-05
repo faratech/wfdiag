@@ -595,8 +595,25 @@ impl NativeDiagnostics {
     }
 
     pub fn run_ipconfig(&self) -> Result<Value> {
-        // Use WMI for network configuration
-        self.get_native_network_adapters()
+        // Query Win32_NetworkAdapterConfiguration for IP settings (different from Network Adapters)
+        let wmi_con = WmiConnection::new()?;
+
+        let results = wmi_con.query("SELECT Description, IPAddress, IPSubnet, DefaultIPGateway, DNSServerSearchOrder, DHCPEnabled, DHCPServer, MACAddress, DNSDomain FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled = TRUE")?;
+
+        let configs: Vec<Value> = results.into_iter().map(|config| {
+            let mut obj = serde_json::Map::new();
+
+            // Copy relevant fields, filtering out nulls
+            for (key, value) in config {
+                if !value.is_null() {
+                    obj.insert(key, value);
+                }
+            }
+
+            Value::Object(obj)
+        }).collect();
+
+        Ok(json!(configs))
     }
 
     pub fn read_hosts_file(&self) -> Result<Value> {

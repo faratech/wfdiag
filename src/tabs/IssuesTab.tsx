@@ -90,7 +90,7 @@ export const IssuesTab: React.FC = () => {
           {Object.keys(results).length === 0 ? (
             <EmptyState
               title="No Scan Data Available"
-              description="Run a diagnostic scan first to check for system issues."
+              description="Run a diagnostic scan to check for issues like low disk space, outdated drivers, misconfigured services, and other system problems."
               variant="info"
               icon={<Stethoscope20Regular style={{ width: 40, height: 40 }} />}
               primaryAction={{
@@ -100,8 +100,8 @@ export const IssuesTab: React.FC = () => {
             />
           ) : (
             <EmptyState
-              title="No Issues Found"
-              description="Your system appears to be healthy with no issues detected."
+              title="All Clear!"
+              description="No issues detected. Your system configuration is healthy and all checks passed successfully."
               variant="success"
             />
           )}

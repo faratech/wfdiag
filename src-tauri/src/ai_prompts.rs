@@ -2,43 +2,210 @@
 //!
 //! Contains prompt templates for different AI analysis scenarios.
 
+/// Maximum characters for Phi Silica prompts (conservative for ~4K token context)
+const PHI_SILICA_MAX_OUTPUT: usize = 1500;
+
 /// Generate prompt for single diagnostic interpretation
 pub fn diagnostic_interpretation_prompt(task_name: &str, output: &str) -> String {
+    // Convert JSON to readable text for better token efficiency
+    let readable_output = json_to_readable_text(output, PHI_SILICA_MAX_OUTPUT);
+
     format!(
-        r#"Analyze this Windows diagnostic output and provide a brief interpretation.
+        r#"Analyze this Windows diagnostic:
 
-**Diagnostic:** {task_name}
-
-**Output:**
+{task_name}:
 {output}
 
-Provide:
-1. A 1-2 sentence summary of what this data shows
-2. Any notable concerns or anomalies (if any)
-3. A brief recommendation if action is needed
-
-Keep the response under 100 words. Be direct and technical but accessible."#,
+Give a 2-3 sentence summary. Note any concerns. Keep response under 80 words."#,
         task_name = task_name,
-        output = truncate_output(output, 3000)
+        output = readable_output
     )
+}
+
+/// Convert JSON diagnostic output to human-readable text
+/// This dramatically reduces token count vs raw JSON
+fn json_to_readable_text(output: &str, max_chars: usize) -> String {
+    // Try to parse as JSON
+    let trimmed = output.trim();
+
+    // If it's JSON, convert to readable format
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let text = render_json_value(&json, 0);
+            return truncate_output(&text, max_chars);
+        }
+    }
+
+    // Not JSON, just truncate the raw text
+    truncate_output(output, max_chars)
+}
+
+/// Render a JSON value as readable text
+fn render_json_value(value: &serde_json::Value, depth: usize) -> String {
+    // Limit recursion depth
+    if depth > 3 {
+        return "[...]".to_string();
+    }
+
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(b) => if *b { "Yes" } else { "No" }.to_string(),
+        serde_json::Value::Number(n) => format_number_value(n),
+        serde_json::Value::String(s) => {
+            // Skip empty or very long strings
+            if s.is_empty() || s.len() > 200 {
+                if s.len() > 200 {
+                    format!("{}...", &s[..100])
+                } else {
+                    String::new()
+                }
+            } else {
+                s.clone()
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            // For arrays, show count and first few items
+            if arr.is_empty() {
+                return String::new();
+            }
+
+            let mut lines = Vec::new();
+            for (i, item) in arr.iter().take(5).enumerate() {
+                let rendered = render_json_value(item, depth + 1);
+                if !rendered.is_empty() {
+                    lines.push(format!("{}. {}", i + 1, rendered));
+                }
+            }
+            if arr.len() > 5 {
+                lines.push(format!("... and {} more", arr.len() - 5));
+            }
+            lines.join("\n")
+        }
+        serde_json::Value::Object(obj) => {
+            render_object_as_text(obj, depth)
+        }
+    }
+}
+
+/// Render a JSON object as key: value text
+fn render_object_as_text(obj: &serde_json::Map<String, serde_json::Value>, depth: usize) -> String {
+    // Priority fields to show first (most important diagnostic info)
+    let priority_fields = [
+        "Name", "Caption", "Description", "Status", "State",
+        "Capacity", "Size", "FreeSpace", "TotalPhysicalMemory",
+        "Speed", "MaxClockSpeed", "NumberOfCores", "NumberOfLogicalProcessors",
+        "Manufacturer", "Model", "Version", "DeviceID",
+        "IPAddress", "MACAddress", "AdapterType",
+    ];
+
+    let mut lines = Vec::new();
+    let mut shown_keys = std::collections::HashSet::new();
+
+    // Show priority fields first
+    for &field in &priority_fields {
+        if let Some(val) = obj.get(field) {
+            let rendered = render_json_value(val, depth + 1);
+            if !rendered.is_empty() && rendered != "null" {
+                // Format large numbers nicely
+                let display_val = if field.contains("Size") || field.contains("Capacity") ||
+                                    field.contains("Memory") || field.contains("Space") {
+                    format_bytes_if_numeric(&rendered)
+                } else {
+                    rendered
+                };
+                lines.push(format!("{}: {}", format_field_name(field), display_val));
+                shown_keys.insert(field.to_string());
+            }
+        }
+    }
+
+    // Show other non-empty fields (limit to avoid bloat)
+    let max_other_fields = 10 - lines.len();
+    let mut other_count = 0;
+
+    for (key, val) in obj {
+        if other_count >= max_other_fields {
+            break;
+        }
+        if shown_keys.contains(key) {
+            continue;
+        }
+        // Skip internal/technical fields
+        if key.starts_with("__") || key.starts_with("Cim") ||
+           key.contains("Path") || key.contains("Class") {
+            continue;
+        }
+
+        let rendered = render_json_value(val, depth + 1);
+        if !rendered.is_empty() && rendered != "null" && rendered.len() < 150 {
+            lines.push(format!("{}: {}", format_field_name(key), rendered));
+            other_count += 1;
+        }
+    }
+
+    lines.join("\n")
+}
+
+/// Format a field name for display (CamelCase -> readable)
+fn format_field_name(name: &str) -> String {
+    // Add spaces before capitals
+    let mut result = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if i > 0 && c.is_uppercase() {
+            result.push(' ');
+        }
+        result.push(c);
+    }
+    result
+}
+
+/// Format a number, converting bytes to human-readable
+fn format_number_value(n: &serde_json::Number) -> String {
+    if let Some(i) = n.as_u64() {
+        // Check if it looks like bytes (very large number)
+        if i > 1_000_000_000 {
+            format!("{:.1} GB", i as f64 / 1_073_741_824.0)
+        } else if i > 1_000_000 {
+            format!("{:.1} MB", i as f64 / 1_048_576.0)
+        } else {
+            i.to_string()
+        }
+    } else if let Some(f) = n.as_f64() {
+        if f > 1_000_000_000.0 {
+            format!("{:.1} GB", f / 1_073_741_824.0)
+        } else {
+            format!("{:.1}", f)
+        }
+    } else {
+        n.to_string()
+    }
+}
+
+/// Format a string as bytes if it looks like a byte count
+fn format_bytes_if_numeric(s: &str) -> String {
+    if let Ok(bytes) = s.parse::<u64>() {
+        if bytes > 1_000_000_000 {
+            return format!("{:.1} GB", bytes as f64 / 1_073_741_824.0);
+        } else if bytes > 1_000_000 {
+            return format!("{:.1} MB", bytes as f64 / 1_048_576.0);
+        }
+    }
+    s.to_string()
 }
 
 /// Generate prompt for section summary (Hardware, System, Storage, Network)
 pub fn section_summary_prompt(section_name: &str, section_data: &str) -> String {
-    format!(
-        r#"Summarize these {section_name} diagnostics for a Windows system.
+    // Convert JSON to readable text
+    let readable_data = json_to_readable_text(section_data, 2000);
 
-**Diagnostic Results:**
+    format!(
+        r#"Summarize {section_name} diagnostics:
+
 {section_data}
 
-Provide:
-1. Overall status assessment (healthy/needs attention/critical)
-2. Key findings in 2-3 bullet points
-3. Top recommendation if any issues found
-
-Keep the response under 150 words. Focus on actionable insights."#,
+Status (healthy/needs attention/critical), key findings (2-3 points), recommendation. Under 100 words."#,
         section_name = section_name,
-        section_data = truncate_output(section_data, 6000)
+        section_data = readable_data
     )
 }
 
@@ -62,19 +229,15 @@ Keep the response under 120 words. Be encouraging but honest."#,
 
 /// Generate prompt for issue prioritization
 pub fn issue_prioritization_prompt(issues_data: &str) -> String {
-    format!(
-        r#"Prioritize these Windows system issues by importance and impact.
+    let readable_data = json_to_readable_text(issues_data, 1500);
 
-**Detected Issues:**
+    format!(
+        r#"Prioritize these Windows issues:
+
 {issues_data}
 
-Provide:
-1. Issues ranked by priority (highest first)
-2. Brief reason for each ranking
-3. Which issue to address first and why
-
-Keep the response under 150 words. Focus on practical impact."#,
-        issues_data = truncate_output(issues_data, 4000)
+Rank by priority, brief reason each, which to fix first. Under 100 words."#,
+        issues_data = readable_data
     )
 }
 
