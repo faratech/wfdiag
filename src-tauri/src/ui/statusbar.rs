@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32, RichText};
 use crate::WfDiagApp;
+use super::{colors, components};
 
 pub fn show(app: &WfDiagApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
@@ -19,22 +20,17 @@ pub fn show(app: &WfDiagApp, ui: &mut egui::Ui) {
 
             ui.label(RichText::new(format!("✓ {} Passed", passed))
                 .size(11.0)
-                .color(Color32::from_rgb(80, 180, 80)));
+                .color(colors::SUCCESS));
 
             if failed > 0 {
                 ui.label(RichText::new(format!("✗ {} Failed", failed))
                     .size(11.0)
-                    .color(Color32::from_rgb(220, 80, 80)));
+                    .color(colors::ERROR));
             }
 
             // Duration
             if let Some(duration) = app.last_scan_duration {
-                let secs = duration.as_secs_f32();
-                let duration_str = if secs < 60.0 {
-                    format!("{:.1}s", secs)
-                } else {
-                    format!("{}m {:.0}s", (secs / 60.0) as u32, secs % 60.0)
-                };
+                let duration_str = components::format_duration(duration.as_millis() as u64);
                 ui.label(RichText::new(format!("⏱ {}", duration_str)).size(11.0).weak());
             }
         }
@@ -45,7 +41,7 @@ pub fn show(app: &WfDiagApp, ui: &mut egui::Ui) {
                 if info.is_admin {
                     ui.label(RichText::new("🛡 Admin")
                         .size(11.0)
-                        .color(Color32::from_rgb(80, 150, 220)));
+                        .color(colors::INFO));
                 } else {
                     ui.label(RichText::new("👤 User")
                         .size(11.0)

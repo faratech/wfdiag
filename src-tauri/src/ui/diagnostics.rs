@@ -1,6 +1,6 @@
 use crate::{ScanState, WfDiagApp};
 use eframe::egui::{self, Color32, Margin, RichText};
-use super::ai;
+use super::{ai, colors, components};
 
 /// Get icon for a diagnostic task
 fn get_task_icon(task_id: &str) -> &'static str {
@@ -150,7 +150,7 @@ fn render_list_panel(
                 ui.label(
                     RichText::new(format!("{} issues", failed))
                         .size(11.0)
-                        .color(Color32::from_rgb(220, 100, 100)),
+                        .color(colors::ERROR),
                 );
             }
         });
@@ -199,7 +199,7 @@ fn render_list_panel(
                         ui.label(
                             RichText::new(format!("• {}", cat_failed))
                                 .size(10.0)
-                                .color(Color32::from_rgb(220, 100, 100)),
+                                .color(colors::ERROR),
                         );
                     }
                 });
@@ -211,9 +211,9 @@ fn render_list_panel(
 
                     // Status indicator
                     let status_color = if item.success {
-                        Color32::from_rgb(80, 180, 80)
+                        colors::SUCCESS
                     } else {
-                        Color32::from_rgb(220, 80, 80)
+                        colors::ERROR
                     };
 
                     // Full-width clickable row
@@ -308,9 +308,9 @@ fn render_detail_panel(ui: &mut egui::Ui, item: &DiagnosticItem, app: &mut WfDia
             ui.label(RichText::new(&item.name).size(18.0).strong());
             ui.horizontal(|ui| {
                 let (status_text, status_color) = if item.success {
-                    ("Passed", Color32::from_rgb(80, 180, 80))
+                    ("Passed", colors::SUCCESS)
                 } else {
-                    ("Failed", Color32::from_rgb(220, 80, 80))
+                    ("Failed", colors::ERROR)
                 };
                 ui.label(RichText::new(status_text).size(12.0).color(status_color));
                 ui.label(RichText::new("•").size(12.0).weak());
@@ -356,7 +356,7 @@ fn render_detail_panel(ui: &mut egui::Ui, item: &DiagnosticItem, app: &mut WfDia
                             RichText::new("Error")
                                 .size(13.0)
                                 .strong()
-                                .color(Color32::from_rgb(220, 100, 100)),
+                                .color(colors::ERROR),
                         );
                         ui.add_space(4.0);
                         ui.label(
@@ -433,7 +433,7 @@ fn render_value_recursive(ui: &mut egui::Ui, value: &serde_json::Value, depth: u
         }
         serde_json::Value::Bool(b) => {
             let (text, color) = if *b {
-                ("True", Color32::from_rgb(80, 180, 80))
+                ("True", colors::SUCCESS)
             } else {
                 ("False", Color32::from_rgb(180, 100, 100))
             };
@@ -607,7 +607,7 @@ fn render_field_value(ui: &mut egui::Ui, key: &str, value: &serde_json::Value) {
     match value {
         serde_json::Value::Bool(b) => {
             let (text, color) = if *b {
-                ("Yes", Color32::from_rgb(80, 180, 80))
+                ("Yes", colors::SUCCESS)
             } else {
                 ("No", Color32::from_rgb(180, 100, 100))
             };
