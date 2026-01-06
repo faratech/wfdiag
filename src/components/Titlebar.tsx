@@ -33,6 +33,8 @@ const useStyles = makeStyles({
     height: '16px',
     ...shorthands.borderRadius('3px'),
     flexShrink: 0,
+    imageRendering: 'auto',
+    objectFit: 'contain',
   },
   title: {
     fontSize: tokens.fontSizeBase200,

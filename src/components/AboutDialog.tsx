@@ -160,7 +160,7 @@ export const AboutDialog: React.FC<AboutDialogProps> = ({ open, onOpenChange }) 
                 <img
                   src="/icon.png"
                   alt="WF Diagnostics"
-                  style={{ width: '60px', height: '60px' }}
+                  style={{ width: '60px', height: '60px', objectFit: 'contain' }}
                 />
               </div>
               <Text className={styles.title}>WindowsForum Diagnostics</Text>
