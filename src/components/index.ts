@@ -7,17 +7,8 @@ export { ErrorBoundary } from './ErrorBoundary'
 export { Titlebar } from './Titlebar'
 
 // Core UI Components
-export { MetricCard } from './MetricCard'
-export type { MetricCardProps } from './MetricCard'
-
 export { StatusCard } from './StatusCard'
 export type { StatusCardProps } from './StatusCard'
-
-export { ScanResultCard } from './ScanResultCard'
-export type { ScanResultCardProps } from './ScanResultCard'
-
-export { DiagnosticCard } from './DiagnosticCard'
-export type { DiagnosticCardProps } from './DiagnosticCard'
 
 export { ProcessTable } from './ProcessTable'
 export type { ProcessTableProps, ProcessInfo } from './ProcessTable'
@@ -74,7 +65,7 @@ export { CommandBar } from './CommandBar'
 export type { CommandBarProps } from './CommandBar'
 
 // Data Display Components
-export { DataRow, MetricCard as DataMetricCard, DataList, CodeDisplay, DataGrid } from './DataDisplay'
+export { DataRow, DataList, CodeDisplay, DataGrid } from './DataDisplay'
 
 // Compact Native-Style Components
 export { DiagnosticRow } from './DiagnosticRow'

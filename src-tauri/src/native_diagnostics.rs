@@ -1478,22 +1478,7 @@ impl NativeDiagnostics {
         }
     }
 
-    fn create_command(program: &str) -> std::process::Command {
-        // Create secure command - this just creates the command object
-        // Actual execution validation happens in execute_command
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            let mut cmd = std::process::Command::new(program);
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            cmd
-        }
-        #[cfg(not(windows))]
-        {
-            std::process::Command::new(program)
-        }
-    }
+
 
     /// Secure command execution with validation
     fn execute_secure_command(program: &str, args: &[&str]) -> Result<std::process::Output> {

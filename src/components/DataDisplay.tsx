@@ -5,19 +5,14 @@ import {
   tokens,
   Text,
   Caption1,
-  Caption2,
   Body1,
-  Tooltip,
-  ProgressBar
+  Tooltip
 } from '@fluentui/react-components'
 import {
   CheckmarkCircle12Regular,
   ErrorCircle12Regular,
   Warning12Regular,
-  Info12Regular,
-  ArrowUp12Regular,
-  ArrowDown12Regular,
-  ArrowRight12Regular
+  Info12Regular
 } from '@fluentui/react-icons'
 
 const useStyles = makeStyles({
@@ -206,61 +201,6 @@ export const DataRow: React.FC<DataRowProps> = ({ label, value, status, icon }) 
       {status && (
         <div className={styles.dataStatus}>
           {getStatusIcon()}
-        </div>
-      )}
-    </div>
-  )
-}
-
-interface MetricCardProps {
-  value: string | number
-  label: string
-  trend?: 'up' | 'down' | 'neutral'
-  trendValue?: string
-  progress?: number
-  color?: 'brand' | 'success' | 'warning' | 'error'
-}
-
-export const MetricCard: React.FC<MetricCardProps> = ({
-  value,
-  label,
-  trend,
-  trendValue,
-  progress,
-  color = 'brand'
-}) => {
-  const styles = useStyles()
-
-  const getTrendIcon = () => {
-    switch (trend) {
-      case 'up':
-        return <ArrowUp12Regular className={styles.trendUp} />
-      case 'down':
-        return <ArrowDown12Regular className={styles.trendDown} />
-      default:
-        return <ArrowRight12Regular className={styles.trendNeutral} />
-    }
-  }
-
-  return (
-    <div className={styles.metricCard}>
-      <div className={styles.metricValue}>{value}</div>
-      <Caption1 className={styles.metricLabel}>{label}</Caption1>
-
-      {trend && trendValue && (
-        <div className={styles.metricTrend}>
-          {getTrendIcon()}
-          <Caption2>{trendValue}</Caption2>
-        </div>
-      )}
-
-      {progress !== undefined && (
-        <div className={styles.progressContainer}>
-          <div className={styles.progressLabel}>
-            <Caption2>Progress</Caption2>
-            <Caption2>{Math.round(progress)}%</Caption2>
-          </div>
-          <ProgressBar value={progress / 100} color={color} thickness="medium" />
         </div>
       )}
     </div>

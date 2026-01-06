@@ -256,9 +256,6 @@ impl SendPtr {
     fn as_query(&self) -> PDH_HQUERY {
         PDH_HQUERY(self.0)
     }
-    fn as_counter(&self) -> PDH_HCOUNTER {
-        PDH_HCOUNTER(self.0)
-    }
 }
 
 struct PdhState {
