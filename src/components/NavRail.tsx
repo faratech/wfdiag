@@ -12,6 +12,7 @@ import {
 import {
   Stethoscope24Regular,
   ChartMultiple24Regular,
+  Apps24Regular,
   Brain24Regular,
   Warning24Regular,
   History24Regular,
@@ -302,6 +303,11 @@ export const NavRail: React.FC<NavRailProps> = ({
           animation: 'gentlePulse 2s ease-in-out infinite',
         }} />
       ) : undefined,
+    },
+    {
+      id: 'processes',
+      icon: <Apps24Regular />,
+      label: 'Processes',
     },
     {
       id: 'ai',

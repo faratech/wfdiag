@@ -183,14 +183,24 @@ export const useScanner = () => {
     clearAutoSaveTimeout
   ])
 
+  // Default Quick Scan task IDs (used when no custom list is configured)
+  const DEFAULT_QUICK_SCAN_TASKS = [
+    'comp_system', 'os_info', 'processor', 'physical_memory', 'disk_drive',
+    'logical_disk', 'network_adapter', 'systeminfo'
+  ]
+
   const runQuickScan = useCallback(async () => {
-    const quickTasks = availableTasks.filter(task =>
-      ['comp_system', 'os_info', 'processor', 'physical_memory', 'disk_drive',
-       'logical_disk', 'network_adapter', 'systeminfo'].includes(task.id)
-    ).map(t => t.id)
+    // Use custom quick scan tasks from settings, or fall back to defaults
+    const customTasks = settings.quickScanTasks
+    const taskIdsToRun = (customTasks && customTasks.length > 0) ? customTasks : DEFAULT_QUICK_SCAN_TASKS
+
+    // Filter to only tasks that exist in availableTasks
+    const quickTasks = availableTasks
+      .filter(task => taskIdsToRun.includes(task.id))
+      .map(t => t.id)
 
     await runDiagnostics(quickTasks)
-  }, [availableTasks, runDiagnostics])
+  }, [availableTasks, settings.quickScanTasks, runDiagnostics])
 
   const runFullScan = useCallback(async () => {
     const allTasks = availableTasks

@@ -9,8 +9,6 @@ mod issue_detector;
 mod issue_fixer;
 mod native_diagnostics;
 pub mod native_monitor;
-#[cfg(windows)]
-pub mod native_monitor_helpers;
 pub mod openai_integration;
 pub mod results_storage;
 mod security;
@@ -1313,6 +1311,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_shell::init())
+        .setup(|_app| {
+            // Pre-initialize NPU detection in background to avoid delay on first monitoring start
+            #[cfg(windows)]
+            std::thread::spawn(|| {
+                native_monitor::prewarm_npu_cache();
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             save_settings,
             load_settings,
