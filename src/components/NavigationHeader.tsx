@@ -136,7 +136,7 @@ export const NavigationHeader: React.FC<NavigationHeaderProps> = ({
           <img
             src="/icon.png"
             alt="WF Diagnostics"
-            style={{ width: '28px', height: '28px' }}
+            style={{ width: '28px', height: '28px', objectFit: 'contain' }}
           />
         </div>
 

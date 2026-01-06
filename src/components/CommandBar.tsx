@@ -1,3 +1,8 @@
+/**
+ * CommandBar - Full-featured toolbar with scan controls, export actions, and status
+ * Uses shared toolbar components for consistency with CompactToolbar
+ */
+
 import React from 'react'
 import {
   Toolbar,
@@ -16,20 +21,11 @@ import {
   Tooltip
 } from '@fluentui/react-components'
 import {
-  Play20Regular,
-  Stop20Regular,
   ArrowClockwise20Regular,
   Filter20Regular,
-  Save20Regular,
-  Copy20Regular,
   Share20Regular,
-  Delete20Regular,
-  History20Regular,
-  ChevronDown20Regular,
-  Search20Regular,
-  Flash20Regular,
-  CheckmarkCircle20Regular
 } from '@fluentui/react-icons'
+import { ScanActionButtons, ResultActionButtons, ScanStatusIndicator, ScanStatus } from './toolbar'
 
 const useStyles = makeStyles({
   toolbar: {
@@ -42,38 +38,17 @@ const useStyles = makeStyles({
     flexWrap: 'wrap',
     ...shorthands.gap('4px'),
   },
-
   toolbarGroup: {
     display: 'flex',
     alignItems: 'center',
     ...shorthands.gap('4px'),
     flexWrap: 'wrap',
   },
-
   secondaryActions: {
     '@media (max-width: 1024px)': {
       display: 'none',
     },
   },
-
-  statusIndicator: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    ...shorthands.gap('4px'),
-    ...shorthands.padding('2px', '8px'),
-    ...shorthands.borderRadius('4px'),
-    fontSize: '11px',
-  },
-
-  statusActive: {
-    backgroundColor: 'rgba(80, 180, 80, 0.2)',
-    color: 'rgb(80, 180, 80)',
-  },
-
-  statusInactive: {
-    backgroundColor: tokens.colorNeutralBackground3,
-    color: tokens.colorNeutralForeground3,
-  }
 })
 
 export interface CommandBarProps {
@@ -96,7 +71,7 @@ export interface CommandBarProps {
   onCompareScans?: () => void
 
   // Status
-  scanStatus?: 'idle' | 'scanning' | 'complete' | 'error'
+  scanStatus?: ScanStatus
   resultCount?: number
 }
 
@@ -117,40 +92,7 @@ export const CommandBar: React.FC<CommandBarProps> = ({
   resultCount = 0,
 }) => {
   const styles = useStyles()
-
-  const getScanStatusIndicator = () => {
-    switch (scanStatus) {
-      case 'scanning':
-        return (
-          <div className={`${styles.statusIndicator} ${styles.statusActive}`}>
-            <div style={{ animation: 'pulse 2s infinite' }}>●</div>
-            Scanning...
-          </div>
-        )
-      case 'complete':
-        return (
-          <div className={`${styles.statusIndicator} ${styles.statusActive}`}>
-            <CheckmarkCircle20Regular />
-            {resultCount} Results
-          </div>
-        )
-      case 'error':
-        return (
-          <div className={styles.statusIndicator} style={{
-            backgroundColor: 'rgba(239, 68, 68, 0.2)',
-            color: '#EF4444'
-          }}>
-            Error
-          </div>
-        )
-      default:
-        return (
-          <div className={`${styles.statusIndicator} ${styles.statusInactive}`}>
-            Ready
-          </div>
-        )
-    }
-  }
+  const hasResults = resultCount > 0
 
   return (
     <Toolbar
@@ -160,61 +102,13 @@ export const CommandBar: React.FC<CommandBarProps> = ({
     >
       <ToolbarGroup className={styles.toolbarGroup}>
         {/* Scan Actions */}
-        <Menu>
-          <MenuTrigger disableButtonEnhancement>
-            <ToolbarButton
-              appearance="primary"
-              icon={<Play20Regular />}
-              disabled={isScanning}
-            >
-              Start Scan
-              <ChevronDown20Regular style={{ marginLeft: tokens.spacingHorizontalXS }} />
-            </ToolbarButton>
-          </MenuTrigger>
-          <MenuPopover>
-            <MenuList>
-              <MenuItem
-                onClick={onQuickScan}
-                icon={<Flash20Regular />}
-                disabled={isScanning}
-              >
-                Quick Scan
-                <span style={{
-                  marginLeft: 'auto',
-                  fontSize: tokens.fontSizeBase100,
-                  color: tokens.colorNeutralForeground3
-                }}>
-                  ~30 sec
-                </span>
-              </MenuItem>
-              <MenuItem
-                onClick={onFullScan}
-                icon={<Search20Regular />}
-                disabled={isScanning}
-              >
-                Full Scan
-                <span style={{
-                  marginLeft: 'auto',
-                  fontSize: tokens.fontSizeBase100,
-                  color: tokens.colorNeutralForeground3
-                }}>
-                  3-5 min
-                </span>
-              </MenuItem>
-            </MenuList>
-          </MenuPopover>
-        </Menu>
-
-        {isScanning && (
-          <Tooltip content="Stop current scan" relationship="description">
-            <ToolbarButton
-              appearance="subtle"
-              icon={<Stop20Regular />}
-              onClick={onStopScan}
-              aria-label="Stop scan"
-            />
-          </Tooltip>
-        )}
+        <ScanActionButtons
+          onQuickScan={onQuickScan || (() => {})}
+          onFullScan={onFullScan || (() => {})}
+          onStop={onStopScan}
+          isScanning={isScanning}
+          variant="full"
+        />
 
         <Tooltip content="Refresh results" relationship="description">
           <ToolbarButton
@@ -240,47 +134,36 @@ export const CommandBar: React.FC<CommandBarProps> = ({
           </Tooltip>
         </span>
 
-        <Tooltip content="Compare with previous scan" relationship="description">
-          <ToolbarButton
-            appearance="subtle"
-            icon={<History20Regular />}
-            onClick={onCompareScans}
-            disabled={resultCount === 0}
-            aria-label="Compare scans"
-          />
-        </Tooltip>
+        {/* Result Actions */}
+        <ResultActionButtons
+          onCompare={onCompareScans}
+          disabled={!hasResults}
+          variant="full"
+        />
 
         <ToolbarDivider />
 
-        {/* Export Actions */}
-        <Tooltip content="Export results" relationship="description">
-          <ToolbarButton
-            appearance="subtle"
-            icon={<Save20Regular />}
-            onClick={onExport}
-            disabled={resultCount === 0}
-            aria-label="Export"
-          />
-        </Tooltip>
+        <ResultActionButtons
+          onExport={onExport}
+          disabled={!hasResults}
+          variant="full"
+        />
 
         <span className={styles.secondaryActions}>
-          <Tooltip content="Copy to clipboard" relationship="description">
-            <ToolbarButton
-              appearance="subtle"
-              icon={<Copy20Regular />}
-              onClick={onCopyToClipboard}
-              disabled={resultCount === 0}
-              aria-label="Copy"
-            />
-          </Tooltip>
+          <ResultActionButtons
+            onCopy={onCopyToClipboard}
+            disabled={!hasResults}
+            variant="full"
+          />
         </span>
 
+        {/* Share Menu */}
         <Menu>
           <MenuTrigger disableButtonEnhancement>
             <ToolbarButton
               appearance="subtle"
               icon={<Share20Regular />}
-              disabled={resultCount === 0}
+              disabled={!hasResults}
               aria-label="Share options"
             />
           </MenuTrigger>
@@ -303,20 +186,20 @@ export const CommandBar: React.FC<CommandBarProps> = ({
         <ToolbarDivider />
 
         {/* Clear */}
-        <Tooltip content="Clear results" relationship="description">
-          <ToolbarButton
-            appearance="subtle"
-            icon={<Delete20Regular />}
-            onClick={onClearResults}
-            disabled={resultCount === 0}
-            aria-label="Clear results"
-          />
-        </Tooltip>
+        <ResultActionButtons
+          onClear={onClearResults}
+          disabled={!hasResults}
+          variant="full"
+        />
       </ToolbarGroup>
 
       {/* Status Indicator */}
       <div style={{ marginLeft: 'auto' }}>
-        {getScanStatusIndicator()}
+        <ScanStatusIndicator
+          status={scanStatus}
+          resultCount={resultCount}
+          variant="full"
+        />
       </div>
     </Toolbar>
   )

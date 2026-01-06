@@ -79,6 +79,8 @@ const useStyles = makeStyles({
   logoImg: {
     width: '28px',
     height: '28px',
+    imageRendering: 'auto',
+    objectFit: 'contain',
   },
 
   brandText: {

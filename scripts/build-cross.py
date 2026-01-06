@@ -365,14 +365,19 @@ def get_version() -> str:
 
 
 def wslpath(path: Path) -> str:
-    """Convert Linux path to Windows path using wslpath."""
-    result = subprocess.run(
-        ["wslpath", "-w", str(path)],
-        capture_output=True,
-        text=True,
-        check=True
-    )
-    return result.stdout.strip()
+    """Convert Linux path to Windows path manually to avoid wslpath freezes."""
+    path_str = str(path.absolute())
+    if path_str.startswith("/mnt/"):
+        # Handle /mnt/c/... -> C:\...
+        parts = path_str.split('/')
+        if len(parts) >= 3:
+            drive = parts[2].upper()
+            remaining = "\\".join(parts[3:])
+            return f"{drive}:\\{remaining}"
+    
+    # Fallback for other paths - use forward slashes as most Windows APIs handle them
+    # or just return as-is if it's already a Windows-style path
+    return path_str.replace("/", "\\")
 
 
 def create_appx_manifest(target_name: str, version: str) -> str:
@@ -477,10 +482,12 @@ def build_msix(version: str) -> bool:
         if dist_src.exists():
             shutil.copytree(dist_src, target_dir / "dist")
 
-        # Copy icons
+        # Copy icons - use larger source images for better HiDPI scaling
+        # Windows scales down better than scaling up, so use oversized sources
         shutil.copy2(icons_dir / "icon.png", target_dir / "Logo.png")
-        shutil.copy2(icons_dir / "192x192.png", target_dir / "Square150x150Logo.png")
-        shutil.copy2(icons_dir / "44x44.png", target_dir / "Square44x44Logo.png")
+        shutil.copy2(icons_dir / "512x512.png", target_dir / "Square150x150Logo.png")
+        shutil.copy2(icons_dir / "256x256.png" if (icons_dir / "256x256.png").exists()
+                     else icons_dir / "128x128@2x.png", target_dir / "Square44x44Logo.png")
         shutil.copy2(icons_dir / "Wide310x150Logo.png", target_dir / "Wide310x150Logo.png")
 
         # Copy Windows App SDK AI DLLs if available
@@ -496,36 +503,6 @@ def build_msix(version: str) -> bool:
         manifest_content = create_appx_manifest(target_name, version)
         manifest_path = target_dir / "AppxManifest.xml"
         manifest_path.write_text(manifest_content, encoding="utf-8")
-
-    # Build and copy PhiSilicaHelper for each target
-    helper_src = SRC_TAURI / "resources" / "phi-silica-helper"
-    if (helper_src / "PhiSilicaHelper.csproj").exists():
-        print("\nBuilding PhiSilicaHelper for both architectures...")
-        for target_name in ["x64", "arm64"]:
-            target_dir = x64_dir if target_name == "x64" else arm64_dir
-            rid = "win-x64" if target_name == "x64" else "win-arm64"
-
-            # Build using powershell.exe to call dotnet on Windows
-            helper_win_path = wslpath(helper_src)
-            publish_dir = helper_src / "bin" / "Release" / "net8.0-windows10.0.22621.0" / rid / "publish"
-
-            print(f"\n  Building PhiSilicaHelper for {target_name}...")
-            ps_cmd = f'cd "{helper_win_path}"; dotnet publish -c Release -r {rid} --self-contained false -p:PublishSingleFile=false'
-            cmd = ["powershell.exe", "-Command", ps_cmd]
-            if run_command(cmd):
-                if publish_dir.exists():
-                    helper_target_dir = target_dir / "phi-silica-helper"
-                    helper_target_dir.mkdir(exist_ok=True)
-                    for f in publish_dir.iterdir():
-                        if f.is_file():
-                            shutil.copy2(f, helper_target_dir / f.name)
-                    print(f"    Copied helper to {target_name} package")
-                else:
-                    print(f"    Warning: Helper publish dir not found at {publish_dir}")
-            else:
-                print(f"    Warning: Failed to build PhiSilicaHelper for {target_name}")
-    else:
-        print("\nNote: PhiSilicaHelper not found, skipping helper build")
 
     print("\nCreating MSIX packages...")
 
