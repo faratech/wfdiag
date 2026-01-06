@@ -423,6 +423,58 @@ impl SystemMonitor {
         let npu_update_in_progress = Arc::clone(&self.npu_update_in_progress);
         let fast_update_in_progress = Arc::clone(&self.fast_update_in_progress);
 
+        // Pre-sample PDH to get accurate CPU% on first event
+        // PDH requires two samples to calculate delta, so we take the first sample here
+        // and wait briefly before starting the monitoring loop
+        {
+            let pdh_clone = Arc::clone(&self.pdh_state);
+            tokio::task::spawn_blocking(move || {
+                if let Ok(mut state) = pdh_clone.lock() {
+                    // Initialize PDH if needed and collect first sample
+                    if !state.initialized {
+                        unsafe {
+                            let mut query_handle: PDH_HQUERY = PDH_HQUERY::default();
+                            // PDH functions return 0 on success
+                            if PdhOpenQueryW(PCWSTR::null(), 0, &mut query_handle) == 0 {
+                                state.query = SendPtr(query_handle.0);
+                                let cpu_count = *CPU_COUNT.get_or_init(|| {
+                                    let mut sys_info = SYSTEM_INFO::default();
+                                    GetSystemInfo(&mut sys_info);
+                                    sys_info.dwNumberOfProcessors as usize
+                                });
+                                for i in 0..cpu_count {
+                                    let counter_path: Vec<u16> = format!("\\Processor({})\\% Processor Time\0", i)
+                                        .encode_utf16()
+                                        .collect();
+                                    let mut counter_handle: PDH_HCOUNTER = PDH_HCOUNTER::default();
+                                    // PDH functions return 0 on success
+                                    if PdhAddEnglishCounterW(
+                                        query_handle,
+                                        PCWSTR::from_raw(counter_path.as_ptr()),
+                                        0,
+                                        &mut counter_handle,
+                                    ) == 0 {
+                                        state.counters.push(SendPtr(counter_handle.0));
+                                    }
+                                }
+                                state.initialized = true;
+                            }
+                        }
+                    }
+                    // Collect first sample
+                    if state.initialized {
+                        unsafe {
+                            let _ = PdhCollectQueryData(state.query.as_query());
+                        }
+                        state.first_sample_done = true;
+                    }
+                }
+            }).await.ok();
+        }
+
+        // Wait briefly for meaningful delta between samples
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         tokio::spawn(async move {
             let interval_duration = *update_interval.lock().await;
             let mut interval = interval(interval_duration);
@@ -489,6 +541,29 @@ impl SystemMonitor {
 // ============================================================================
 // INITIALIZATION
 // ============================================================================
+
+/// Pre-warm NPU cache in background. Called from lib.rs setup hook.
+/// This prevents the 200-500ms delay on first monitoring start.
+pub fn prewarm_npu_cache() {
+    // Initialize NPU detection (can take 200-500ms for DXCore/WMI queries)
+    let npu_result = NPU_INFO.get_or_init(|| {
+        if let Some((name, _)) = detect_npu_dxcore() {
+            (true, Some(name))
+        } else {
+            let (available, name, _) = detect_npu_wmi_fallback();
+            (available, name)
+        }
+    });
+
+    // If NPU was detected, also discover LUID for utilization queries
+    if npu_result.0 {
+        if let Ok(wmi_con) = crate::wmi_native::WmiConnection::new() {
+            NPU_LUID.get_or_init(|| discover_npu_luid_with_wmi(&wmi_con));
+        }
+    } else {
+        NPU_LUID.get_or_init(|| None);
+    }
+}
 
 /// Pre-initialize all static caches. Call this at app startup for faster first display.
 /// Note: Caches are also initialized lazily on first access, so calling this is optional.

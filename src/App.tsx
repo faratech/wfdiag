@@ -4,10 +4,12 @@ import { OpenAIIntegration } from './OpenAIIntegration'
 import { ComparisonView } from './ComparisonView'
 import { DiagnosticsTab } from './tabs/DiagnosticsTab'
 import { IssuesTab } from './tabs/IssuesTab'
+import { ProcessesTab } from './tabs/ProcessesTab'
 import {
   NavRail,
   SettingsDialog,
   AboutDialog,
+  StatusBar,
   type SettingsData
 } from './components'
 import { AppProvider, useAppContext } from './contexts/AppContext'
@@ -86,10 +88,22 @@ const AppContent: React.FC = () => {
     sessionId,
     navRailCollapsed,
     setNavRailCollapsed,
+    results,
+    currentTaskName,
+    scanStartTime,
+    scanEndTime,
+    isRunning,
   } = useAppContext()
 
   const { detectIssues } = useDiagnostics()
-  const { runQuickScan, isRunning } = useScanner()
+  const { runQuickScan } = useScanner()
+
+  // Calculate status bar metrics from results
+  const resultValues = Object.values(results)
+  const passedCount = resultValues.filter(r => r.success).length
+  const failedCount = resultValues.filter(r => !r.success).length
+  const scanDuration = scanEndTime > 0 ? scanEndTime - scanStartTime :
+                       (isRunning ? Date.now() - scanStartTime : 0)
 
   // Track window width for responsive behavior
   const [isSmallScreen, setIsSmallScreen] = useState(false)
@@ -170,6 +184,7 @@ const AppContent: React.FC = () => {
                 onToggle={setIsMonitoringActive}
               />
             )}
+            {selectedTab === 'processes' && <ProcessesTab />}
             {selectedTab === 'ai' && (
               <OpenAIIntegration
                 sessionId={sessionId || ''}
@@ -183,6 +198,15 @@ const AppContent: React.FC = () => {
             )}
           </div>
         </div>
+
+        {/* Status Bar */}
+        <StatusBar
+          passed={passedCount}
+          failed={failedCount}
+          duration={scanDuration}
+          isAdmin={systemInfo?.is_admin}
+          currentTask={isRunning ? currentTaskName : undefined}
+        />
       </main>
 
       {/* Settings Dialog */}

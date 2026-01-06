@@ -71,7 +71,7 @@ const useStyles = makeStyles({
   }
 })
 
-export type TabValue = 'diagnostics' | 'monitoring' | 'ai' | 'issues' | 'history'
+export type TabValue = 'diagnostics' | 'monitoring' | 'processes' | 'ai' | 'issues' | 'history'
 
 export interface TabNavigationProps {
   selectedTab: TabValue

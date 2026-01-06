@@ -20,7 +20,8 @@ import {
   Divider,
   RadioGroup,
   Radio,
-  SpinButton
+  SpinButton,
+  Checkbox
 } from '@fluentui/react-components'
 import {
   Settings20Regular,
@@ -28,8 +29,10 @@ import {
   Dismiss20Regular,
   Key20Regular,
   Folder20Regular,
-  Sparkle20Regular
+  Sparkle20Regular,
+  PlayCircle20Regular
 } from '@fluentui/react-icons'
+import { useAppContext } from '../contexts/AppContext'
 
 const useStyles = makeStyles({
   surface: {
@@ -76,6 +79,21 @@ const useStyles = makeStyles({
   hint: {
     fontSize: tokens.fontSizeBase200,
     color: tokens.colorNeutralForeground3,
+  },
+
+  taskList: {
+    maxHeight: '200px',
+    overflowY: 'auto',
+    ...shorthands.padding(tokens.spacingVerticalS),
+    backgroundColor: tokens.colorNeutralBackground3,
+    ...shorthands.borderRadius(tokens.borderRadiusMedium),
+    ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke1),
+  },
+
+  taskItem: {
+    display: 'flex',
+    alignItems: 'center',
+    ...shorthands.padding(tokens.spacingVerticalXS, 0),
   }
 })
 
@@ -94,6 +112,8 @@ export interface SettingsData {
   aiEnabled?: boolean
   /** Preferred AI provider: auto-detect, openai, or phi_silica */
   preferredAIProvider?: 'auto' | 'openai' | 'phi_silica'
+  /** Custom task IDs for Quick Scan (if empty, uses default set) */
+  quickScanTasks?: string[]
 }
 
 export interface SettingsDialogProps {
@@ -104,6 +124,12 @@ export interface SettingsDialogProps {
   onOpenChange?: (open: boolean) => void
 }
 
+// Default Quick Scan task IDs
+const DEFAULT_QUICK_SCAN_TASKS = [
+  'comp_system', 'os_info', 'processor', 'physical_memory', 'disk_drive',
+  'logical_disk', 'network_adapter', 'systeminfo'
+]
+
 export const SettingsDialog: React.FC<SettingsDialogProps> = ({
   trigger,
   settings: initialSettings = {},
@@ -112,6 +138,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
   onOpenChange
 }) => {
   const styles = useStyles()
+  const { availableTasks } = useAppContext()
   const [settings, setSettings] = useState<SettingsData>({
     autoSave: true,
     scanOnStartup: false,
@@ -237,6 +264,45 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                 appearance="underline"
               />
             </Field>
+          </div>
+
+          <Divider />
+
+          {/* Quick Scan Tasks */}
+          <div className={styles.section}>
+            <Label className={styles.sectionTitle}>
+              <PlayCircle20Regular style={{ marginRight: tokens.spacingHorizontalXS, verticalAlign: 'middle' }} />
+              Quick Scan Tasks
+            </Label>
+            <Caption1 className={styles.hint}>
+              Select which diagnostics to include in Quick Scan:
+            </Caption1>
+
+            <div className={styles.taskList}>
+              {availableTasks.map(task => {
+                const currentTasks = settings.quickScanTasks ?? DEFAULT_QUICK_SCAN_TASKS
+                const isChecked = currentTasks.includes(task.id)
+
+                return (
+                  <div key={task.id} className={styles.taskItem}>
+                    <Checkbox
+                      label={task.name}
+                      checked={isChecked}
+                      onChange={(_, data) => {
+                        const newTasks = data.checked
+                          ? [...currentTasks, task.id]
+                          : currentTasks.filter(id => id !== task.id)
+                        updateSetting('quickScanTasks', newTasks)
+                      }}
+                    />
+                  </div>
+                )
+              })}
+            </div>
+
+            <Caption1 className={styles.hint} style={{ marginTop: tokens.spacingVerticalS }}>
+              {(settings.quickScanTasks ?? DEFAULT_QUICK_SCAN_TASKS).length} tasks selected
+            </Caption1>
           </div>
 
           <Divider />

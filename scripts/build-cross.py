@@ -247,25 +247,23 @@ def ensure_targets() -> bool:
     return True
 
 
-def get_build_output_path(target_name: str, release: bool = True, egui: bool = False) -> Path:
+def get_build_output_path(target_name: str, release: bool = True) -> Path:
     """Get the path to the built executable in the target directory."""
     target = TARGETS[target_name]
     triple = target["triple"]
     profile = "release" if release else "debug"
-    exe_name = "wfdiag.exe" if egui else "wfdiag-tauri.exe"
-    return TARGET_DIR / triple / profile / exe_name
+    return TARGET_DIR / triple / profile / "wfdiag-tauri.exe"
 
 
-def get_final_output_path(target_name: str, egui: bool = False) -> Path:
+def get_final_output_path(target_name: str) -> Path:
     """Get the final output path on Windows drive."""
-    suffix = "-egui" if egui else ""
-    return OUTPUT_DIR / f"wfdiag-{target_name}{suffix}.exe"
+    return OUTPUT_DIR / f"wfdiag-{target_name}.exe"
 
 
-def copy_to_output(target_name: str, release: bool = True, egui: bool = False) -> Path | None:
+def copy_to_output(target_name: str, release: bool = True) -> Path | None:
     """Copy the built executable to the output directory."""
-    build_path = get_build_output_path(target_name, release, egui)
-    final_path = get_final_output_path(target_name, egui)
+    build_path = get_build_output_path(target_name, release)
+    final_path = get_final_output_path(target_name)
 
     if not build_path.exists():
         print(f"Error: Built executable not found at {build_path}")
@@ -281,7 +279,7 @@ def copy_to_output(target_name: str, release: bool = True, egui: bool = False) -
     return final_path
 
 
-def build_target(target_name: str, release: bool = True, jobs: int = None, use_sccache: bool = False, egui: bool = False) -> bool:
+def build_target(target_name: str, release: bool = True, jobs: int = None, use_sccache: bool = False) -> bool:
     """Build for a specific target.
 
     Args:
@@ -289,7 +287,6 @@ def build_target(target_name: str, release: bool = True, jobs: int = None, use_s
         release: Whether to build in release mode
         jobs: Number of parallel jobs (defaults to CPU count)
         use_sccache: Whether to use sccache for compilation caching
-        egui: Whether to build the egui version (native GUI) instead of Tauri
     """
     target = TARGETS[target_name]
     triple = target["triple"]
@@ -297,9 +294,8 @@ def build_target(target_name: str, release: bool = True, jobs: int = None, use_s
     # Use all CPU cores by default
     num_jobs = jobs if jobs is not None else CPU_COUNT
 
-    build_type = "egui (native)" if egui else "Tauri (web)"
     print(f"\n{'='*60}")
-    print(f"Building {build_type} for {target_name} ({triple})")
+    print(f"Building for {target_name} ({triple})")
     print(f"Using {num_jobs} parallel jobs")
     if use_sccache:
         print("Using sccache for compilation caching")
@@ -326,8 +322,6 @@ def build_target(target_name: str, release: bool = True, jobs: int = None, use_s
     cmd = ["cargo", "build", "--target", triple, "-j", str(num_jobs)]
     if release:
         cmd.append("--release")
-    if egui:
-        cmd.extend(["--bin", "wfdiag"])
 
     return run_command(cmd, env=env, cwd=SRC_TAURI)
 
@@ -430,73 +424,10 @@ def create_appx_manifest(target_name: str, version: str) -> str:
 '''
 
 
-def create_egui_appx_manifest(target_name: str, version: str) -> str:
-    """Generate AppxManifest.xml content for egui version."""
-    arch = target_name
-    return f'''<?xml version="1.0" encoding="utf-8"?>
-<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
-         xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
-         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-         xmlns:systemai="http://schemas.microsoft.com/appx/manifest/systemai/windows10"
-         IgnorableNamespaces="uap rescap mp systemai">
-
-  <Identity
-    Name="32827MikeFara.WindowsForumDiagnostics"
-    Publisher="{PUBLISHER}"
-    Version="{version}.0"
-    ProcessorArchitecture="{arch}" />
-
-  <mp:PhoneIdentity PhoneProductId="32827e7c-77d2-43e5-ab82-9cdb9daa11b3" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
-
-  <Properties>
-    <DisplayName>WindowsForum Diagnostics</DisplayName>
-    <PublisherDisplayName>Mike Fara</PublisherDisplayName>
-    <Logo>Logo.png</Logo>
-  </Properties>
-
-  <Dependencies>
-    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26226.0" />
-    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26226.0" />
-    <PackageDependency Name="Microsoft.WindowsAppRuntime.2.0-experimental3"
-                       MinVersion="0.676.658.0"
-                       Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
-  </Dependencies>
-
-  <Resources>
-    <Resource Language="en-US"/>
-  </Resources>
-
-  <Applications>
-    <Application Id="App" Executable="{PROJECT_NAME}.exe" EntryPoint="Windows.FullTrustApplication">
-      <uap:VisualElements
-        DisplayName="WindowsForum Diagnostics"
-        Description="Professional Windows System Diagnostic Tool"
-        BackgroundColor="transparent"
-        Square150x150Logo="Square150x150Logo.png"
-        Square44x44Logo="Square44x44Logo.png">
-        <uap:DefaultTile Wide310x150Logo="Wide310x150Logo.png" />
-      </uap:VisualElements>
-    </Application>
-  </Applications>
-
-  <Capabilities>
-    <Capability Name="internetClient" />
-    <Capability Name="internetClientServer" />
-    <Capability Name="privateNetworkClientServer" />
-    <rescap:Capability Name="runFullTrust" />
-    <systemai:Capability Name="systemAIModels"/>
-  </Capabilities>
-
-</Package>
-'''
-
-
-def build_msix(version: str, egui: bool = False) -> bool:
+def build_msix(version: str) -> bool:
     """Build MSIX packages and bundle for both architectures."""
-    build_type = "egui" if egui else "Tauri"
     print(f"\n{'='*60}")
-    print(f"Building MSIX Packages ({build_type})")
+    print("Building MSIX Packages")
     print(f"{'='*60}")
 
     # Check Windows SDK exists
@@ -508,8 +439,7 @@ def build_msix(version: str, egui: bool = False) -> bool:
 
     # Use Windows-accessible temp directory for MSIX building
     # MakeAppx.exe has permission issues with WSL paths
-    dir_suffix = "-egui-build" if egui else "-build"
-    win_msix_dir = OUTPUT_DIR / f"msix{dir_suffix}"
+    win_msix_dir = OUTPUT_DIR / "msix-build"
 
     # Clean and create MSIX directories
     if win_msix_dir.exists():
@@ -534,8 +464,7 @@ def build_msix(version: str, egui: bool = False) -> bool:
         print(f"\nPreparing {target_name} package...")
 
         # Copy executable
-        exe_name = "wfdiag.exe" if egui else "wfdiag-tauri.exe"
-        exe_src = TARGET_DIR / triple / "release" / exe_name
+        exe_src = TARGET_DIR / triple / "release" / "wfdiag-tauri.exe"
         exe_dst = target_dir / f"{PROJECT_NAME}.exe"
         if not exe_src.exists():
             print(f"Error: Built executable not found at {exe_src}")
@@ -543,11 +472,10 @@ def build_msix(version: str, egui: bool = False) -> bool:
             return False
         shutil.copy2(exe_src, exe_dst)
 
-        # Copy dist folder (only for Tauri, not egui)
-        if not egui:
-            dist_src = PROJECT_DIR / "dist"
-            if dist_src.exists():
-                shutil.copytree(dist_src, target_dir / "dist")
+        # Copy dist folder (Tauri web assets)
+        dist_src = PROJECT_DIR / "dist"
+        if dist_src.exists():
+            shutil.copytree(dist_src, target_dir / "dist")
 
         # Copy icons
         shutil.copy2(icons_dir / "icon.png", target_dir / "Logo.png")
@@ -565,44 +493,39 @@ def build_msix(version: str, egui: bool = False) -> bool:
             print(f"  Note: No AI SDK DLLs found for {target_name} at {ai_sdk_dir}")
 
         # Create AppxManifest.xml
-        if egui:
-            manifest_content = create_egui_appx_manifest(target_name, version)
-        else:
-            manifest_content = create_appx_manifest(target_name, version)
+        manifest_content = create_appx_manifest(target_name, version)
         manifest_path = target_dir / "AppxManifest.xml"
         manifest_path.write_text(manifest_content, encoding="utf-8")
 
-    # Build and copy PhiSilicaHelper for each target (only for Tauri version, not egui)
-    if not egui:
-        # Build and copy PhiSilicaHelper for each target (only for Tauri version)
-        helper_src = SRC_TAURI / "resources" / "phi-silica-helper"
-        if (helper_src / "PhiSilicaHelper.csproj").exists():
-            print("\nBuilding PhiSilicaHelper for both architectures...")
-            for target_name in ["x64", "arm64"]:
-                target_dir = x64_dir if target_name == "x64" else arm64_dir
-                rid = "win-x64" if target_name == "x64" else "win-arm64"
+    # Build and copy PhiSilicaHelper for each target
+    helper_src = SRC_TAURI / "resources" / "phi-silica-helper"
+    if (helper_src / "PhiSilicaHelper.csproj").exists():
+        print("\nBuilding PhiSilicaHelper for both architectures...")
+        for target_name in ["x64", "arm64"]:
+            target_dir = x64_dir if target_name == "x64" else arm64_dir
+            rid = "win-x64" if target_name == "x64" else "win-arm64"
 
-                # Build using powershell.exe to call dotnet on Windows
-                helper_win_path = wslpath(helper_src)
-                publish_dir = helper_src / "bin" / "Release" / "net8.0-windows10.0.22621.0" / rid / "publish"
+            # Build using powershell.exe to call dotnet on Windows
+            helper_win_path = wslpath(helper_src)
+            publish_dir = helper_src / "bin" / "Release" / "net8.0-windows10.0.22621.0" / rid / "publish"
 
-                print(f"\n  Building PhiSilicaHelper for {target_name}...")
-                ps_cmd = f'cd "{helper_win_path}"; dotnet publish -c Release -r {rid} --self-contained false -p:PublishSingleFile=false'
-                cmd = ["powershell.exe", "-Command", ps_cmd]
-                if run_command(cmd):
-                    if publish_dir.exists():
-                        helper_target_dir = target_dir / "phi-silica-helper"
-                        helper_target_dir.mkdir(exist_ok=True)
-                        for f in publish_dir.iterdir():
-                            if f.is_file():
-                                shutil.copy2(f, helper_target_dir / f.name)
-                        print(f"    Copied helper to {target_name} package")
-                    else:
-                        print(f"    Warning: Helper publish dir not found at {publish_dir}")
+            print(f"\n  Building PhiSilicaHelper for {target_name}...")
+            ps_cmd = f'cd "{helper_win_path}"; dotnet publish -c Release -r {rid} --self-contained false -p:PublishSingleFile=false'
+            cmd = ["powershell.exe", "-Command", ps_cmd]
+            if run_command(cmd):
+                if publish_dir.exists():
+                    helper_target_dir = target_dir / "phi-silica-helper"
+                    helper_target_dir.mkdir(exist_ok=True)
+                    for f in publish_dir.iterdir():
+                        if f.is_file():
+                            shutil.copy2(f, helper_target_dir / f.name)
+                    print(f"    Copied helper to {target_name} package")
                 else:
-                    print(f"    Warning: Failed to build PhiSilicaHelper for {target_name}")
-        else:
-            print("\nNote: PhiSilicaHelper not found, skipping helper build")
+                    print(f"    Warning: Helper publish dir not found at {publish_dir}")
+            else:
+                print(f"    Warning: Failed to build PhiSilicaHelper for {target_name}")
+    else:
+        print("\nNote: PhiSilicaHelper not found, skipping helper build")
 
     print("\nCreating MSIX packages...")
 
@@ -624,8 +547,7 @@ def build_msix(version: str, egui: bool = False) -> bool:
 
     # Create MSIX bundle
     print("\nCreating MSIX bundle...")
-    bundle_suffix = "_egui" if egui else ""
-    bundle_path = win_msix_dir / f"{PROJECT_NAME}{bundle_suffix}_{version}.msixbundle"
+    bundle_path = win_msix_dir / f"{PROJECT_NAME}_{version}.msixbundle"
     cmd = [
         str(makeappx),
         "bundle",
@@ -638,7 +560,7 @@ def build_msix(version: str, egui: bool = False) -> bool:
         return False
 
     print(f"\n{'='*60}")
-    print(f"MSIX Build Complete ({build_type})")
+    print("MSIX Build Complete")
     print(f"{'='*60}")
     print(f"  x64 MSIX:    {bundle_dir / f'{PROJECT_NAME}_{version}_x64.msix'}")
     print(f"  ARM64 MSIX:  {bundle_dir / f'{PROJECT_NAME}_{version}_arm64.msix'}")
@@ -647,7 +569,7 @@ def build_msix(version: str, egui: bool = False) -> bool:
     return True
 
 
-def sign_msix(version: str, egui: bool = False) -> bool:
+def sign_msix(version: str) -> bool:
     """Sign the MSIX bundle using signtool and self-signed certificate.
 
     This function calls a PowerShell script on Windows to:
@@ -655,9 +577,8 @@ def sign_msix(version: str, egui: bool = False) -> bool:
     2. Install certificate to Trusted Root (requires admin on first run)
     3. Sign the MSIX bundle
     """
-    build_type = "egui" if egui else "Tauri"
     print(f"\n{'='*60}")
-    print(f"Signing MSIX Bundle ({build_type})")
+    print("Signing MSIX Bundle")
     print(f"{'='*60}")
 
     # Check signtool exists
@@ -667,10 +588,8 @@ def sign_msix(version: str, egui: bool = False) -> bool:
         return False
 
     # Bundle path
-    dir_suffix = "-egui-build" if egui else "-build"
-    win_msix_dir = OUTPUT_DIR / f"msix{dir_suffix}"
-    bundle_suffix = "_egui" if egui else ""
-    bundle_path = win_msix_dir / f"{PROJECT_NAME}{bundle_suffix}_{version}.msixbundle"
+    win_msix_dir = OUTPUT_DIR / "msix-build"
+    bundle_path = win_msix_dir / f"{PROJECT_NAME}_{version}.msixbundle"
 
     if not bundle_path.exists():
         print(f"Error: Bundle not found at {bundle_path}")
@@ -815,25 +734,11 @@ def main():
         action="store_true",
         help="Disable sccache (enabled by default if available)"
     )
-    parser.add_argument(
-        "--frontend",
-        choices=["react", "egui"],
-        default="react",
-        help="Frontend to build: 'react' (Tauri/web, default) or 'egui' (native Rust GUI)"
-    )
-    parser.add_argument(
-        "--egui",
-        action="store_true",
-        help="Shorthand for --frontend egui"
-    )
 
     args = parser.parse_args()
     release = not args.debug
     jobs = args.jobs
     skip_frontend = args.skip_frontend
-
-    # Determine frontend type (--egui is shorthand for --frontend egui)
-    egui = args.egui or args.frontend == "egui"
 
     # Determine sccache usage - enabled by default if available
     if args.no_sccache:
@@ -851,7 +756,6 @@ def main():
         print(f"  Total RAM: {mem_gb:.1f} GB")
     print(f"  Parallel jobs: {jobs if jobs else CPU_COUNT}")
     print(f"  Build mode: {'Debug' if args.debug else 'Release'}")
-    print(f"  Build type: {'egui (native)' if egui else 'Tauri (web)'}")
     print(f"  sccache: {'enabled' if use_sccache else 'disabled'}")
 
     # Check prerequisites
@@ -867,10 +771,8 @@ def main():
         print(f"\n✓ {args.target} check passed!")
 
     elif args.action == "build":
-        # Build frontend first (unless skipped or building egui)
-        if egui:
-            print("\nSkipping frontend build (egui version)")
-        elif not skip_frontend:
+        # Build frontend first (unless skipped)
+        if not skip_frontend:
             if not build_frontend():
                 print("Frontend build failed!")
                 sys.exit(1)
@@ -880,24 +782,22 @@ def main():
         # Build single target
         if not ensure_targets():
             sys.exit(1)
-        if not build_target(args.target, release, jobs, use_sccache, egui):
+        if not build_target(args.target, release, jobs, use_sccache):
             sys.exit(1)
 
         # Copy to output directory
-        output = copy_to_output(args.target, release, egui)
+        output = copy_to_output(args.target, release)
         if output:
             print(f"\n✓ Build successful!")
             print(f"  Output: {output}")
         else:
-            build_path = get_build_output_path(args.target, release, egui)
+            build_path = get_build_output_path(args.target, release)
             print(f"\n✗ Build completed but output not found at {build_path}")
             sys.exit(1)
 
     elif args.action == "build-all":
-        # Build frontend first (only once for all targets, unless skipped or building egui)
-        if egui:
-            print("\nSkipping frontend build (egui version)")
-        elif not skip_frontend:
+        # Build frontend first (only once for all targets, unless skipped)
+        if not skip_frontend:
             if not build_frontend():
                 print("Frontend build failed!")
                 sys.exit(1)
@@ -913,7 +813,7 @@ def main():
 
         results = {}
         for target_name in TARGETS:
-            results[target_name] = build_target(target_name, release, jobs, use_sccache, egui)
+            results[target_name] = build_target(target_name, release, jobs, use_sccache)
 
         print(f"\n{'='*60}")
         print("Build Summary")
@@ -922,7 +822,7 @@ def main():
         all_success = True
         for target_name, success in results.items():
             if success:
-                output = copy_to_output(target_name, release, egui)
+                output = copy_to_output(target_name, release)
                 if output:
                     print(f"  ✓ {target_name}: {output}")
                 else:
@@ -938,21 +838,19 @@ def main():
         # Build MSIX if requested
         if args.build_msix:
             version = get_version()
-            if not build_msix(version, egui):
+            if not build_msix(version):
                 print("MSIX build failed!")
                 sys.exit(1)
 
             # Sign if requested
             if args.sign:
-                if not sign_msix(version, egui):
+                if not sign_msix(version):
                     print("MSIX signing failed!")
                     sys.exit(1)
 
             # Copy bundle to output directory
-            dir_suffix = "-egui-build" if egui else "-build"
-            bundle_suffix = "_egui" if egui else ""
-            win_msix_dir = OUTPUT_DIR / f"msix{dir_suffix}"
-            bundle_name = f"{PROJECT_NAME}{bundle_suffix}_{version}.msixbundle"
+            win_msix_dir = OUTPUT_DIR / "msix-build"
+            bundle_name = f"{PROJECT_NAME}_{version}.msixbundle"
             bundle_src = win_msix_dir / bundle_name
             bundle_dst = OUTPUT_DIR / bundle_name
             if bundle_src.exists():
@@ -962,24 +860,21 @@ def main():
     elif args.action == "build-msix":
         # Build MSIX packages only (requires binaries to already exist)
         version = get_version()
-        build_type = "egui" if egui else "Tauri"
-        print(f"\nBuilding MSIX bundle v{version} ({build_type})...")
+        print(f"\nBuilding MSIX bundle v{version}...")
 
-        if not build_msix(version, egui):
+        if not build_msix(version):
             print("MSIX build failed!")
             sys.exit(1)
 
         # Sign if requested
         if args.sign:
-            if not sign_msix(version, egui):
+            if not sign_msix(version):
                 print("MSIX signing failed!")
                 sys.exit(1)
 
         # Copy bundle to output directory
-        dir_suffix = "-egui-build" if egui else "-build"
-        bundle_suffix = "_egui" if egui else ""
-        win_msix_dir = OUTPUT_DIR / f"msix{dir_suffix}"
-        bundle_name = f"{PROJECT_NAME}{bundle_suffix}_{version}.msixbundle"
+        win_msix_dir = OUTPUT_DIR / "msix-build"
+        bundle_name = f"{PROJECT_NAME}_{version}.msixbundle"
         bundle_src = win_msix_dir / bundle_name
         bundle_dst = OUTPUT_DIR / bundle_name
         if bundle_src.exists():

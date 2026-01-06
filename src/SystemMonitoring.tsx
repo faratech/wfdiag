@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import {
   ProgressBar,
   Text,
@@ -18,6 +18,7 @@ import { useAI } from './hooks/useAI';
 import * as logger from './utils/logger';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import type { SystemStats, NetworkConnection } from './types/monitoring';
 
 const useStyles = makeStyles({
   container: {
@@ -78,61 +79,7 @@ ChartJS.register(
   Filler
 );
 
-interface DiskInfo {
-  name: string;
-  mount_point: string;
-  total_gb: number;
-  used_gb: number;
-  available_gb: number;
-  utilization: number;
-  file_system: string;
-  disk_type: string;
-}
-
-interface SystemStats {
-  cpu_utilization: number;
-  per_cpu_utilization: number[];
-  cpu_frequency: number;
-  memory_total_gb: number;
-  memory_used_gb: number;
-  memory_available_gb: number;
-  memory_utilization: number;
-  swap_total_gb: number;
-  swap_used_gb: number;
-  swap_utilization: number;
-  disk_utilization: number;
-  disk_read_bytes: number;
-  disk_write_bytes: number;
-  disks: DiskInfo[];
-  network_upload_kb: number;
-  network_download_kb: number;
-  npu_available: boolean;
-  npu_name: string | null;
-  npu_utilization: number | null;
-  top_processes: ProcessInfo[];
-  timestamp: number;
-}
-
-interface ProcessInfo {
-  pid: number;
-  name: string;
-  cpu_percent: number;
-  memory_percent: number;
-  memory_mb: number;
-  virtual_memory_mb: number;
-  disk_read_bytes: number;
-  disk_write_bytes: number;
-  status: string;
-  start_time: number;
-  command: string;
-}
-
-interface NetworkConnection {
-  protocol: string;
-  local_addr: string;
-  remote_addr: string;
-  status: string;
-}
+// Types imported from ./types/monitoring
 
 interface SystemMonitoringProps {
   isActive: boolean;
@@ -140,15 +87,6 @@ interface SystemMonitoringProps {
 }
 
 const MAX_DATA_POINTS = 60; // 60 seconds of history (1 second intervals)
-
-// Helper function to format bytes
-const formatBytes = (bytes: number): string => {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-};
 
 export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, onToggle }) => {
   const styles = useStyles();
@@ -160,10 +98,6 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
     getCachedMonitoringAnalysis,
     isMonitoringAnalysisLoading,
     getMonitoringAnalysisError,
-    requestProcessAnalysis,
-    getCachedProcessAnalysis,
-    isProcessAnalysisLoading,
-    getProcessAnalysisError,
   } = useAI();
   const [cpuHistory, setCpuHistory] = useState<number[]>([]);
   const [memoryHistory, setMemoryHistory] = useState<number[]>([]);
@@ -213,23 +147,6 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
     }, null, 2);
     requestMonitoringAnalysis(statsJson);
   }, [stats, requestMonitoringAnalysis]);
-
-  const handleProcessAnalysis = useCallback(() => {
-    if (!stats?.top_processes?.length) return;
-    const processesJson = JSON.stringify(
-      stats.top_processes.slice(0, 15).map(p => ({
-        pid: p.pid,
-        name: p.name,
-        cpu_percent: p.cpu_percent,
-        memory_mb: p.memory_mb,
-        memory_percent: p.memory_percent,
-        status: p.status,
-      })),
-      null,
-      2
-    );
-    requestProcessAnalysis(processesJson);
-  }, [stats, requestProcessAnalysis]);
 
   // Stop monitoring and clear data when page becomes hidden
   useEffect(() => {
@@ -349,7 +266,8 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
     };
   }, [isActive, onToggle]);
 
-  const cpuChartData = sanitizeChartData({
+  // Memoize chart data to prevent unnecessary re-renders
+  const cpuChartData = useMemo(() => sanitizeChartData({
     labels: timeLabels,
     datasets: [
       {
@@ -361,9 +279,9 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
         tension: 0.4,
       },
     ],
-  });
+  }), [timeLabels, cpuHistory]);
 
-  const memoryChartData = sanitizeChartData({
+  const memoryChartData = useMemo(() => sanitizeChartData({
     labels: timeLabels,
     datasets: [
       {
@@ -375,9 +293,9 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
         tension: 0.4,
       },
     ],
-  });
+  }), [timeLabels, memoryHistory]);
 
-  const networkChartData = sanitizeChartData({
+  const networkChartData = useMemo(() => sanitizeChartData({
     labels: timeLabels,
     datasets: [
       {
@@ -397,9 +315,9 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
         tension: 0.4,
       },
     ],
-  });
+  }), [timeLabels, networkUploadHistory, networkDownloadHistory]);
 
-  const cpuCoreData = sanitizeChartData({
+  const cpuCoreData = useMemo(() => sanitizeChartData({
     labels: stats?.per_cpu_utilization.map((_, i) => `Core ${i}`) || [],
     datasets: [
       {
@@ -418,17 +336,18 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
         borderWidth: 1,
       },
     ],
-  });
+  }), [stats?.per_cpu_utilization]);
 
-  // Get computed theme colors for charts
-  const getThemeColor = (varName: string, fallback: string) => {
+  // Get computed theme colors for charts - memoized to avoid repeated DOM queries
+  const getThemeColor = useCallback((varName: string, fallback: string) => {
     if (typeof document !== 'undefined') {
       return getComputedStyle(document.documentElement).getPropertyValue(varName).trim() || fallback;
     }
     return fallback;
-  };
+  }, []);
 
-  const chartOptions = {
+  // Memoize chart options to prevent unnecessary re-renders
+  const chartOptions = useMemo(() => ({
     responsive: true,
     maintainAspectRatio: false,
     interaction: {
@@ -474,9 +393,9 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
         },
       },
     },
-  };
+  }), [getThemeColor]);
 
-  const networkChartOptions = {
+  const networkChartOptions = useMemo(() => ({
     ...chartOptions,
     scales: {
       ...chartOptions.scales,
@@ -486,7 +405,7 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
         max: undefined,
       },
     },
-  };
+  }), [chartOptions]);
 
   const headerActions = (
     <div className={styles.headerActions}>
@@ -909,120 +828,6 @@ export const SystemMonitoring: React.FC<SystemMonitoringProps> = ({ isActive, on
           )}
         </div>
 
-        {/* Top Processes */}
-        <div className="glass-card" style={{ gridColumn: '1 / -1', padding: 20 }}>
-          <Text size={400} weight="semibold" style={{ marginBottom: 16, color: 'var(--theme-foreground)', display: 'block' }}>
-            <i className="fas fa-list-ul" style={{ marginRight: 8, color: '#8b5cf6' }}></i>
-            Top Processes (by CPU Usage)
-          </Text>
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid var(--theme-stroke-2)', color: 'var(--theme-foreground-2)' }}>PID</th>
-                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid var(--theme-stroke-2)', color: 'var(--theme-foreground-2)' }}>Name</th>
-                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid var(--theme-stroke-2)', color: 'var(--theme-foreground-2)' }}>Status</th>
-                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid var(--theme-stroke-2)', color: 'var(--theme-foreground-2)' }}>CPU %</th>
-                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid var(--theme-stroke-2)', color: 'var(--theme-foreground-2)' }}>Memory</th>
-                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid var(--theme-stroke-2)', color: 'var(--theme-foreground-2)' }}>Disk I/O</th>
-                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid var(--theme-stroke-2)', color: 'var(--theme-foreground-2)', maxWidth: 300 }}>Command</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stats.top_processes.map((process) => (
-                  <tr key={process.pid}>
-                    <td style={{ padding: 8, borderBottom: '1px solid var(--theme-stroke-2)', color: 'var(--theme-foreground)', fontSize: 12 }}>
-                      {process.pid}
-                    </td>
-                    <td style={{ padding: 8, borderBottom: '1px solid var(--theme-stroke-2)', color: 'var(--theme-foreground)', fontSize: 12 }} title={process.name}>
-                      {process.name.length > 20 ? process.name.substring(0, 20) + '...' : process.name}
-                    </td>
-                    <td style={{ padding: 8, borderBottom: '1px solid var(--theme-stroke-2)' }}>
-                      <Badge 
-                        appearance="tint" 
-                        size="small"
-                        style={{
-                          background: process.status === 'Running' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(148, 163, 184, 0.1)',
-                          color: process.status === 'Running' ? '#10b981' : '#94a3b8',
-                        }}
-                      >
-                        {process.status}
-                      </Badge>
-                    </td>
-                    <td style={{ padding: 8, borderBottom: '1px solid var(--theme-stroke-2)' }}>
-                      <Badge 
-                        appearance="filled"
-                        style={{
-                          background: process.cpu_percent > 50 ? '#ef4444' : 
-                                     process.cpu_percent > 20 ? '#f59e0b' : '#10b981',
-                        }}
-                      >
-                        {process.cpu_percent.toFixed(1)}%
-                      </Badge>
-                    </td>
-                    <td style={{ padding: 8, borderBottom: '1px solid var(--theme-stroke-2)' }}>
-                      <div>
-                        <Text size={200} style={{ color: 'var(--theme-foreground)' }}>{process.memory_mb.toFixed(1)} MB</Text>
-                        <Badge 
-                          appearance="tint" 
-                          size="small"
-                          style={{
-                            marginLeft: 8,
-                            background: process.memory_percent > 50 ? 'rgba(239, 68, 68, 0.1)' : 
-                                       process.memory_percent > 20 ? 'rgba(245, 158, 11, 0.1)' : 
-                                       'rgba(59, 130, 246, 0.1)',
-                            color: process.memory_percent > 50 ? '#ef4444' : 
-                                  process.memory_percent > 20 ? '#f59e0b' : '#3b82f6',
-                          }}
-                        >
-                          {process.memory_percent.toFixed(1)}%
-                        </Badge>
-                      </div>
-                    </td>
-                    <td style={{ padding: 8, borderBottom: '1px solid var(--theme-stroke-2)', fontSize: 11, color: 'var(--theme-foreground-2)' }}>
-                      {process.disk_read_bytes > 0 || process.disk_write_bytes > 0 ? (
-                        <>
-                          <div>R: {formatBytes(process.disk_read_bytes)}</div>
-                          <div>W: {formatBytes(process.disk_write_bytes)}</div>
-                        </>
-                      ) : (
-                        <Text size={100} style={{ color: 'var(--theme-foreground-3)' }}>-</Text>
-                      )}
-                    </td>
-                    <td style={{ 
-                      padding: 8, 
-                      borderBottom: '1px solid var(--theme-stroke-2)', 
-                      maxWidth: 300, 
-                      overflow: 'hidden', 
-                      textOverflow: 'ellipsis', 
-                      whiteSpace: 'nowrap',
-                      color: 'var(--theme-foreground-2)',
-                      fontSize: 11
-                    }} title={process.command}>
-                      {process.command}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* AI Process Analysis */}
-        <div style={{ gridColumn: '1 / -1' }}>
-          <AIAnalysisPanel
-            cacheKey="__process_analysis__"
-            title="AI Process Analysis"
-            hasData={!!stats?.top_processes?.length}
-            cachedResult={getCachedProcessAnalysis()}
-            isLoading={isProcessAnalysisLoading()}
-            error={getProcessAnalysisError()}
-            onAnalyze={handleProcessAnalysis}
-            analyzeButtonText="Analyze Processes"
-            noDataMessage="No process data available to analyze."
-            readyMessage="Click to get AI-powered analysis of running processes, resource usage, and optimization suggestions."
-          />
-        </div>
       </div>
     </div>
   );

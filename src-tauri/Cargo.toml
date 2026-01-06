@@ -19,11 +19,6 @@ path = "src/main_tauri.rs"
 name = "debug_diagnostics"
 path = "src/bin/debug_diagnostics.rs"
 
-# Standalone egui native app
-[[bin]]
-name = "wfdiag"
-path = "src/main.rs"
-
 [build-dependencies]
 tauri-build = { version = "2.5", features = [] }
 
@@ -37,15 +32,7 @@ tauri-plugin-dialog = "2.4"
 tauri-plugin-clipboard-manager = "2.3"
 tauri-plugin-shell = "2.3"
 
-# egui for native GUI
-eframe = { version = "0.33.3", default-features = false, features = [
-    "default_fonts",
-    "glow",
-    "persistence",
-] }
-egui_extras = { version = "0.33.3", features = ["all_loaders", "image"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
-arboard = "3.6.1"
+# Date/time utilities
 chrono = "0.4"
 
 # Async runtime

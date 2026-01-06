@@ -1,0 +1,174 @@
+/**
+ * Shared monitoring hook for system stats and process data
+ * Consolidates lifecycle management from SystemMonitoring.tsx and ProcessesTab.tsx
+ */
+
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import { listen, UnlistenFn } from '@tauri-apps/api/event'
+import type { SystemStats, ProcessInfo } from '../types/monitoring'
+import * as logger from '../utils/logger'
+
+export interface UseMonitoringOptions {
+  /** Auto-start monitoring when hook mounts (default: false) */
+  autoStart?: boolean
+  /** Callback when new stats are received */
+  onStats?: (stats: SystemStats) => void
+  /** Component name for logging */
+  componentName?: string
+}
+
+export interface UseMonitoringResult {
+  /** Whether monitoring is currently active */
+  isActive: boolean
+  /** Latest system stats (null if not yet received) */
+  stats: SystemStats | null
+  /** All processes from latest stats */
+  processes: ProcessInfo[]
+  /** Whether the hook is loading/initializing */
+  isLoading: boolean
+  /** Start monitoring */
+  start: () => Promise<void>
+  /** Stop monitoring */
+  stop: () => Promise<void>
+  /** Toggle monitoring on/off */
+  toggle: () => Promise<void>
+  /** Manually refresh stats */
+  refresh: () => Promise<void>
+}
+
+export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoringResult {
+  const { autoStart = false, onStats, componentName = 'useMonitoring' } = options
+
+  const [isActive, setIsActive] = useState(false)
+  const [stats, setStats] = useState<SystemStats | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+
+  // Refs for cleanup and preventing double-initialization
+  const unlistenRef = useRef<UnlistenFn | null>(null)
+  const hasAutoStarted = useRef(false)
+  const isMountedRef = useRef(true)
+
+  // Start monitoring
+  const start = useCallback(async () => {
+    if (isActive) return
+
+    try {
+      setIsLoading(true)
+      await invoke('start_monitoring')
+
+      if (!isMountedRef.current) {
+        // Component unmounted during async call
+        await invoke('stop_monitoring').catch(err =>
+          logger.error(componentName, 'Failed to stop monitoring after unmount', err)
+        )
+        return
+      }
+
+      // Set up event listener
+      const unlisten = await listen<SystemStats>('system-stats', (event) => {
+        if (!isMountedRef.current) return
+
+        const newStats = event.payload
+        setStats(newStats)
+        onStats?.(newStats)
+      })
+
+      unlistenRef.current = unlisten
+      setIsActive(true)
+    } catch (error) {
+      logger.error(componentName, 'Failed to start monitoring', error)
+    } finally {
+      if (isMountedRef.current) {
+        setIsLoading(false)
+      }
+    }
+  }, [isActive, onStats, componentName])
+
+  // Stop monitoring
+  const stop = useCallback(async () => {
+    if (!isActive) return
+
+    // Clean up event listener
+    if (unlistenRef.current) {
+      unlistenRef.current()
+      unlistenRef.current = null
+    }
+
+    try {
+      await invoke('stop_monitoring')
+    } catch (error) {
+      logger.error(componentName, 'Failed to stop monitoring', error)
+    }
+
+    if (isMountedRef.current) {
+      setIsActive(false)
+    }
+  }, [isActive, componentName])
+
+  // Toggle monitoring
+  const toggle = useCallback(async () => {
+    if (isActive) {
+      await stop()
+    } else {
+      await start()
+    }
+  }, [isActive, start, stop])
+
+  // Manually refresh stats
+  const refresh = useCallback(async () => {
+    try {
+      const currentStats = await invoke<SystemStats>('get_current_stats')
+      if (currentStats && isMountedRef.current) {
+        setStats(currentStats)
+        onStats?.(currentStats)
+      }
+    } catch (error) {
+      logger.debug(componentName, 'Could not fetch stats', error)
+    }
+  }, [onStats, componentName])
+
+  // Auto-start on mount if requested
+  useEffect(() => {
+    if (autoStart && !hasAutoStarted.current) {
+      hasAutoStarted.current = true
+      start()
+    }
+  }, [autoStart, start])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    isMountedRef.current = true
+
+    return () => {
+      isMountedRef.current = false
+
+      // Clean up event listener
+      if (unlistenRef.current) {
+        unlistenRef.current()
+        unlistenRef.current = null
+      }
+
+      // Stop monitoring if active
+      invoke('stop_monitoring').catch(error =>
+        logger.error(componentName, 'Failed to stop monitoring on cleanup', error)
+      )
+    }
+  }, [componentName])
+
+  // Extract processes from stats
+  const processes = stats?.top_processes ?? []
+
+  return {
+    isActive,
+    stats,
+    processes,
+    isLoading,
+    start,
+    stop,
+    toggle,
+    refresh,
+  }
+}
+
+export default useMonitoring
