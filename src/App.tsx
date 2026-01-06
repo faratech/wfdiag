@@ -14,7 +14,7 @@ import {
 } from './components'
 import { AppProvider, useAppContext } from './contexts/AppContext'
 import { AIProvider } from './contexts/AIContext'
-import { ToastProvider } from './contexts/ToastContext'
+import { ToastProvider, useToast } from './contexts/ToastContext'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { useDiagnostics } from './hooks/useDiagnostics'
 import { useScanner } from './hooks/useScanner'
@@ -97,6 +97,7 @@ const AppContent: React.FC = () => {
 
   const { detectIssues } = useDiagnostics()
   const { runQuickScan } = useScanner()
+  const { showSuccess, showError } = useToast()
 
   // Calculate status bar metrics from results
   const resultValues = Object.values(results)
@@ -148,9 +149,10 @@ const AppContent: React.FC = () => {
     try {
       await saveSettings(newSettings)
       setShowSettings(false)
+      showSuccess('Settings Saved', 'Your preferences have been updated.')
     } catch (error) {
       console.error('Failed to save settings:', error)
-      // Settings dialog will remain open if save fails
+      showError('Save Failed', 'Could not save settings. Please try again.')
     }
   }
 
