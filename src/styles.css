@@ -79,15 +79,6 @@ body {
   }
 }
 
-@keyframes badgePulse {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.15); }
-}
-
-@keyframes meterFillIn {
-  from { width: 0; }
-}
-
 @keyframes gentlePulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }

@@ -33,6 +33,7 @@ import { useComparison, ComparisonFilter } from './hooks/useComparison'
 import { useJsonDiff } from './hooks/useJsonDiff'
 import { useToast } from './contexts/ToastContext'
 import * as logger from './utils/logger'
+import { formatDuration } from './utils/formatters'
 import './styles.css'
 
 const useStyles = makeStyles({
@@ -164,14 +165,6 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({ onClose }) => {
 
   const formatTimestamp = (timestamp: string) => {
     return new Date(timestamp).toLocaleString()
-  }
-
-  const formatDuration = (durationMs: number) => {
-    const seconds = Math.round(durationMs / 1000)
-    if (seconds < 60) return `${seconds}s`
-    const minutes = Math.floor(seconds / 60)
-    const remainingSeconds = seconds % 60
-    return `${minutes}m ${remainingSeconds}s`
   }
 
   const getChangeIcon = (change: any) => {

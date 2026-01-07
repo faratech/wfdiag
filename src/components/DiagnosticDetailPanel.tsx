@@ -5,6 +5,7 @@ import { DiagnosticItem } from './DiagnosticListPanel'
 import { StatusBadge } from './StatusBadge'
 import { JsonRenderer, parseJsonSafe } from './JsonRenderer'
 import { EGUI_COLORS, TASK_ICONS } from '../theme'
+import { formatDuration } from '../utils/formatters'
 
 interface DiagnosticDetailPanelProps {
   item: DiagnosticItem | null
@@ -140,15 +141,6 @@ const useStyles = makeStyles({
     letterSpacing: '0.5px',
   },
 })
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  const seconds = ms / 1000
-  if (seconds < 60) return `${seconds.toFixed(1)}s`
-  const minutes = Math.floor(seconds / 60)
-  const remainingSeconds = seconds % 60
-  return `${minutes}m ${remainingSeconds.toFixed(0)}s`
-}
 
 export const DiagnosticDetailPanel: React.FC<DiagnosticDetailPanelProps> = ({
   item,
