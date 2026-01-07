@@ -45,10 +45,6 @@ export type { EmptyStateProps } from './EmptyState'
 export { LoadingSkeleton, CardSkeleton, TableRowSkeleton, MetricSkeleton } from './LoadingSkeleton'
 export type { LoadingSkeletonProps } from './LoadingSkeleton'
 
-export { HealthModel } from './HealthModel'
-export { SystemSummary } from './SystemSummary'
-export { InsightPanel } from './InsightPanel'
-
 // Action Components
 export { QuickActionPanel } from './QuickActionPanel'
 export type { QuickActionPanelProps } from './QuickActionPanel'

@@ -11,6 +11,7 @@ import {
   Warning12Filled,
   Clock12Regular
 } from '@fluentui/react-icons'
+import { formatDuration } from '../utils/formatters'
 
 const useStyles = makeStyles({
   statusBar: {
@@ -63,14 +64,6 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   currentTask
 }) => {
   const styles = useStyles()
-
-  const formatDuration = (ms: number) => {
-    const seconds = Math.round(ms / 1000)
-    if (seconds < 60) return `${seconds}s`
-    const minutes = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return `${minutes}m ${secs}s`
-  }
 
   return (
     <div className={styles.statusBar}>

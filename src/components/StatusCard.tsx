@@ -13,12 +13,9 @@ import {
   Body1,
   Title3
 } from '@fluentui/react-components'
-import {
-  CheckmarkCircle20Regular,
-  ErrorCircle20Regular,
-  Warning20Regular,
-  Info20Regular
-} from '@fluentui/react-icons'
+import { Info20Regular } from '@fluentui/react-icons'
+import { getStatusIcon } from '../utils/statusHelpers'
+import { getStatusBadgeColor, StatusVariant } from '../types/status'
 
 const useStyles = makeStyles({
   card: {
@@ -68,7 +65,7 @@ const useStyles = makeStyles({
 export interface StatusCardProps {
   title: string
   description?: string
-  status: 'success' | 'warning' | 'error' | 'info'
+  status: StatusVariant
   details?: string[]
   actions?: Array<{
     label: string
@@ -91,41 +88,17 @@ export const StatusCard: React.FC<StatusCardProps> = ({
 }) => {
   const styles = useStyles()
 
-  const getStatusIcon = () => {
-    switch (status) {
-      case 'success':
-        return <CheckmarkCircle20Regular primaryFill={tokens.colorPaletteGreenForeground1} />
-      case 'warning':
-        return <Warning20Regular primaryFill={tokens.colorPaletteYellowForeground1} />
-      case 'error':
-        return <ErrorCircle20Regular primaryFill={tokens.colorPaletteRedForeground1} />
-      case 'info':
-      default:
-        return <Info20Regular primaryFill={tokens.colorPaletteBlueForeground2} />
-    }
-  }
-
-  const getStatusColor = (): any => {
-    switch (status) {
-      case 'success': return 'success'
-      case 'warning': return 'warning'
-      case 'error': return 'danger'
-      case 'info':
-      default: return 'informative'
-    }
-  }
-
   return (
     <Card className={styles.card}>
       <div className={styles.header}>
         <div className={styles.statusIcon}>
-          {getStatusIcon()}
+          {getStatusIcon(status)}
           <Title3>{title}</Title3>
         </div>
         {badge && (
           <Badge
             appearance="filled"
-            color={getStatusColor()}
+            color={getStatusBadgeColor(status)}
             size="medium"
           >
             {badge}
