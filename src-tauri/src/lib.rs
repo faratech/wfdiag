@@ -1,7 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod architecture;
+mod commands;
 pub mod diagnostics;
+pub mod error;
+pub mod state;
 #[cfg(windows)]
 mod dpapi;
 mod encrypted_storage;
@@ -28,308 +31,22 @@ mod ai_prompts;
 mod ai_service;
 
 use crate::diagnostics::{DiagnosticTask, TaskResult};
+use crate::error::DiagError;
 use crate::issue_detector::Issue;
 use native_monitor::{NetworkConnection, SystemMonitor};
 use results_storage::{ComparisonResult, ScanRecord, ScanStorage, ScanSummary};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
 use tauri::Emitter;
 use tauri::State;
-use tokio::sync::Mutex;
 
-/// Application settings that persist across sessions
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct AppSettings {
-    #[serde(default)]
-    pub auto_save: bool,
-    #[serde(default)]
-    pub scan_on_startup: bool,
-    #[serde(default = "default_max_concurrent")]
-    pub max_concurrent_tasks: u32,
-    #[serde(default = "default_export_format")]
-    pub export_format: String,
-    #[serde(default = "default_theme")]
-    pub theme: String,
-    #[serde(default = "default_true")]
-    pub show_notifications: bool,
-    #[serde(default)]
-    pub custom_export_path: Option<String>,
-    #[serde(default = "default_true")]
-    pub retain_history: bool,
-    #[serde(default = "default_history_limit")]
-    pub history_limit: u32,
-    // AI settings
-    #[serde(default = "default_true")]
-    pub ai_enabled: bool,
-    #[serde(default = "default_ai_provider", rename = "preferredAIProvider")]
-    pub preferred_ai_provider: String,
-    // API key - stored in keyring, included in frontend response
-    #[serde(default)]
-    pub open_ai_api_key: Option<String>,
-}
+// Re-export settings types from commands module
+pub use commands::AppSettings;
 
-fn default_max_concurrent() -> u32 {
-    5
-}
-fn default_export_format() -> String {
-    "text".to_string()
-}
-fn default_theme() -> String {
-    "dark".to_string()
-}
-fn default_true() -> bool {
-    true
-}
-fn default_history_limit() -> u32 {
-    30
-}
-fn default_ai_provider() -> String {
-    "auto".to_string()
-}
+// Use state types from state module
+use state::{AppState, DiagnosticSession, SystemInfo};
 
-/// Get the settings file path
-fn get_settings_path() -> Result<PathBuf, String> {
-    let app_data =
-        dirs::config_dir().ok_or_else(|| "Could not find config directory".to_string())?;
-    let settings_dir = app_data.join("com.windowsforum.diagnostics");
-
-    // Create directory if it doesn't exist
-    if !settings_dir.exists() {
-        std::fs::create_dir_all(&settings_dir)
-            .map_err(|e| format!("Failed to create settings directory: {}", e))?;
-    }
-
-    Ok(settings_dir.join("settings.json"))
-}
-
-#[tauri::command]
-async fn save_settings(settings: AppSettings) -> Result<(), String> {
-    let path = get_settings_path()?;
-
-    // If API key is provided, store it securely (separate from settings file)
-    if let Some(ref api_key) = settings.open_ai_api_key {
-        #[cfg(windows)]
-        {
-            if !api_key.is_empty() {
-                match dpapi::store_api_key(api_key) {
-                    Ok(_) => println!("API key stored with DPAPI"),
-                    Err(e) => println!("Warning: Failed to store API key with DPAPI: {}", e),
-                }
-            } else {
-                // Empty string means clear the key
-                let _ = dpapi::clear_api_key();
-                println!("API key cleared from DPAPI storage");
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            if !api_key.is_empty() {
-                if let Ok(entry) = Entry::new("wfdiag-tauri", "openai_api_key") {
-                    match entry.set_password(api_key) {
-                        Ok(_) => println!("API key stored in keyring"),
-                        Err(e) => println!("Warning: Failed to store API key in keyring: {}", e),
-                    }
-                }
-            } else {
-                if let Ok(entry) = Entry::new("wfdiag-tauri", "openai_api_key") {
-                    let _ = entry.delete_credential();
-                    println!("API key cleared from keyring");
-                }
-            }
-        }
-    }
-
-    // Create a copy without the API key for file storage (security: don't write key to file)
-    let mut settings_for_file = settings.clone();
-    settings_for_file.open_ai_api_key = None;
-
-    let json = serde_json::to_string_pretty(&settings_for_file)
-        .map_err(|e| format!("Failed to serialize settings: {}", e))?;
-    std::fs::write(&path, json).map_err(|e| format!("Failed to write settings file: {}", e))?;
-
-    // Sync AI preference to in-memory state
-    let pref = match settings.preferred_ai_provider.to_lowercase().as_str() {
-        "openai" => ai_service::AIProviderPreference::OpenAI,
-        "phi_silica" | "phisilica" => ai_service::AIProviderPreference::PhiSilica,
-        _ => ai_service::AIProviderPreference::Auto,
-    };
-    ai_service::set_user_preference(pref);
-
-    println!("Settings saved to {:?}", path);
-    Ok(())
-}
-
-#[tauri::command]
-async fn load_settings() -> Result<AppSettings, String> {
-    let path = get_settings_path()?;
-
-    let mut settings = if !path.exists() {
-        println!("No settings file found, returning defaults");
-        AppSettings::default()
-    } else {
-        let json = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read settings file: {}", e))?;
-        serde_json::from_str(&json).map_err(|e| format!("Failed to parse settings: {}", e))?
-    };
-
-    // Sync loaded AI preference to in-memory state
-    let pref = match settings.preferred_ai_provider.to_lowercase().as_str() {
-        "openai" => ai_service::AIProviderPreference::OpenAI,
-        "phi_silica" | "phisilica" => ai_service::AIProviderPreference::PhiSilica,
-        _ => ai_service::AIProviderPreference::Auto,
-    };
-    ai_service::set_user_preference(pref);
-
-    // Load API key from keyring and include in response
-    if let Some(api_key) = load_api_key_internal().await {
-        settings.open_ai_api_key = Some(api_key);
-    }
-
-    println!("Settings loaded from {:?}", path);
-    Ok(settings)
-}
-
-// Helper function to format JSON values into readable text
-fn format_json_value(value: &serde_json::Value, indent_level: usize) -> String {
-    let indent = "  ".repeat(indent_level);
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut result = String::new();
-            for (key, val) in map {
-                let formatted_key = key
-                    .replace('_', " ")
-                    .split_whitespace()
-                    .map(|word| {
-                        let mut chars = word.chars();
-                        match chars.next() {
-                            None => String::new(),
-                            Some(first) => first.to_uppercase().chain(chars).collect(),
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-
-                match val {
-                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                        result.push_str(&format!("{}{}:\n", indent, formatted_key));
-                        result.push_str(&format_json_value(val, indent_level + 1));
-                    }
-                    serde_json::Value::Null => {
-                        // Skip null values
-                    }
-                    _ => {
-                        result.push_str(&format!(
-                            "{}{} : {}
-",
-                            indent,
-                            formatted_key,
-                            val.as_str().unwrap_or(&val.to_string())
-                        ));
-                    }
-                }
-            }
-            result
-        }
-        serde_json::Value::Array(arr) => {
-            let mut result = String::new();
-            for (i, val) in arr.iter().enumerate() {
-                if i > 0 {
-                    result.push_str(&format!("{}---\n", indent));
-                }
-                result.push_str(&format_json_value(val, indent_level));
-            }
-            result
-        }
-        _ => format!(
-            "{}{}\n",
-            indent,
-            value.as_str().unwrap_or(&value.to_string())
-        ),
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SystemInfo {
-    computer_name: String,
-    os_version: String,
-    is_admin: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DiagnosticSession {
-    session_id: String,
-    start_time: std::time::SystemTime,
-    selected_tasks: Vec<String>,
-    results: HashMap<String, TaskResult>,
-}
-
-struct AppState {
-    current_session: Arc<Mutex<Option<DiagnosticSession>>>,
-    system_monitor: Arc<Mutex<Option<SystemMonitor>>>,
-    scan_storage: Arc<Mutex<Option<ScanStorage>>>,
-    scan_storage_error: Arc<Mutex<Option<String>>>,
-}
-
-#[tauri::command]
-async fn store_api_key(key: String) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        dpapi::store_api_key(&key)
-    }
-    #[cfg(not(windows))]
-    {
-        // Fallback to keyring on non-Windows
-        let entry = Entry::new("wfdiag-tauri", "openai_api_key")
-            .map_err(|e| format!("Failed to access keyring entry: {e}"))?;
-        entry
-            .set_password(&key)
-            .map_err(|e| format!("Failed to store API key: {e}"))?;
-        Ok(())
-    }
-}
-
-#[tauri::command]
-async fn load_api_key() -> Result<String, String> {
-    load_api_key_internal()
-        .await
-        .ok_or_else(|| "No API key set".to_string())
-}
-
-/// Internal function for loading API key (used by ai_service)
-pub(crate) async fn load_api_key_internal() -> Option<String> {
-    #[cfg(windows)]
-    {
-        dpapi::load_api_key().ok().flatten()
-    }
-    #[cfg(not(windows))]
-    {
-        let entry = Entry::new("wfdiag-tauri", "openai_api_key").ok()?;
-        match entry.get_password() {
-            Ok(pwd) if !pwd.is_empty() => Some(pwd),
-            _ => None,
-        }
-    }
-}
-
-#[tauri::command]
-async fn clear_api_key() -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        dpapi::clear_api_key()
-    }
-    #[cfg(not(windows))]
-    {
-        let entry = Entry::new("wfdiag-tauri", "openai_api_key")
-            .map_err(|e| format!("Failed to access keyring entry: {e}"))?;
-        match entry.delete_credential() {
-            Ok(_) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(e) => Err(format!("Failed to clear API key: {e}")),
-        }
-    }
-}
+// Re-export load_api_key_internal for ai_service module
+pub(crate) use commands::settings::load_api_key_internal;
 
 /// Get detailed Windows version information from registry
 #[cfg(windows)]
@@ -471,7 +188,7 @@ async fn start_diagnostics(
         .collect();
 
     if valid_task_ids.is_empty() {
-        return Err("No valid tasks provided".to_string());
+        return Err(DiagError::NoValidTasks.into());
     }
 
     println!(
@@ -506,7 +223,7 @@ async fn run_diagnostic_task(
     let task = tasks
         .iter()
         .find(|t| t.id == task_id)
-        .ok_or_else(|| format!("Task not found: {}", task_id))?;
+        .ok_or_else(|| DiagError::TaskNotFound { task_id: task_id.clone() })?;
 
     // Emit progress event
     window
@@ -518,7 +235,7 @@ async fn run_diagnostic_task(
                 "task_name": &task.name,
             }),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| DiagError::internal(format!("Failed to emit event: {}", e)))?;
 
     // Run the diagnostic task
     let result = diagnostics::run_diagnostic_task(&task_id).await;
@@ -539,7 +256,7 @@ async fn run_diagnostic_task(
                 "success": result.success,
             }),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| DiagError::internal(format!("Failed to emit event: {}", e)))?;
 
     Ok(result)
 }
@@ -569,7 +286,7 @@ async fn run_diagnostics_parallel(
                 let task = tasks_ref
                     .iter()
                     .find(|t| t.id == task_id)
-                    .ok_or_else(|| format!("Task not found: {}", task_id))?;
+                    .ok_or_else(|| DiagError::TaskNotFound { task_id: task_id.clone() })?;
 
                 // Emit progress event
                 window_clone
@@ -581,7 +298,7 @@ async fn run_diagnostics_parallel(
                             "task_name": &task.name,
                         }),
                     )
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| DiagError::internal(format!("Failed to emit event: {}", e)))?;
 
                 // Run the diagnostic task
                 let result = diagnostics::run_diagnostic_task(&task_id).await;
@@ -602,7 +319,7 @@ async fn run_diagnostics_parallel(
                             "success": result.success,
                         }),
                     )
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| DiagError::internal(format!("Failed to emit event: {}", e)))?;
 
                 Ok::<(String, TaskResult), String>((task_id, result))
             }
@@ -637,299 +354,15 @@ async fn get_session_results(
         if session.session_id == session_id {
             Ok(session.results.clone())
         } else {
-            Err("Session ID mismatch".to_string())
+            Err(DiagError::SessionMismatch {
+                expected: session.session_id.clone(),
+                actual: session_id,
+            }
+            .into())
         }
     } else {
-        Err("No active session".to_string())
+        Err(DiagError::NoActiveSession.into())
     }
-}
-
-#[tauri::command]
-async fn export_results(
-    format: String,
-    _include_raw: bool,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    let current = state.current_session.lock().await;
-    if let Some(ref session) = *current {
-        // Get all available tasks to map IDs to names
-        let all_tasks = diagnostics::get_all_tasks();
-        let task_map: std::collections::HashMap<String, &DiagnosticTask> =
-            all_tasks.iter().map(|t| (t.id.clone(), t)).collect();
-
-        match format.as_str() {
-            "json" => {
-                let json =
-                    serde_json::to_string_pretty(&session.results).map_err(|e| e.to_string())?;
-                Ok(json)
-            }
-            "text" => {
-                let mut text = String::new();
-
-                // Group results by category
-                let mut results_by_category: std::collections::HashMap<
-                    String,
-                    Vec<(&String, &diagnostics::TaskResult)>,
-                > = std::collections::HashMap::new();
-
-                for (task_id, result) in &session.results {
-                    if let Some(task) = task_map.get(task_id) {
-                        results_by_category
-                            .entry(task.category.clone())
-                            .or_default()
-                            .push((task_id, result));
-                    }
-                }
-
-                // Sort categories for consistent output
-                let mut categories: Vec<_> = results_by_category.keys().cloned().collect();
-                categories.sort();
-
-                // Write results organized by category
-                for category in categories {
-                    text.push_str(&format!("\n=== {} ===\n\n", category));
-
-                    if let Some(results) = results_by_category.get(&category) {
-                        for (task_id, result) in results {
-                            if let Some(task) = task_map.get(*task_id) {
-                                text.push_str(&format!("{}:\n", task.name));
-
-                                if result.success {
-                                    // Parse and format the output
-                                    if let Ok(parsed) =
-                                        serde_json::from_str::<serde_json::Value>(&result.output)
-                                    {
-                                        text.push_str(&format_json_value(&parsed, 1));
-                                    } else {
-                                        // Raw text output
-                                        text.push_str(&result.output);
-                                    }
-                                } else if let Some(error) = &result.error {
-                                    text.push_str(&format!("  Error: {}\n", error));
-                                }
-
-                                text.push('\n');
-                            }
-                        }
-                    }
-                }
-
-                Ok(text)
-            }
-            "html" => {
-                let mut html = String::new();
-                html.push_str("<!DOCTYPE html>\n<html>\n<head>\n");
-                html.push_str("<meta charset=\"UTF-8\">\n");
-                html.push_str("<title>WindowsForum Diagnostic Report</title>\n");
-                html.push_str("<style>\n");
-                html.push_str("body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #1a1a2e; color: #eee; }\n");
-                html.push_str("h1 { color: #60a5fa; border-bottom: 2px solid #3b82f6; padding-bottom: 10px; }\n");
-                html.push_str("h2 { color: #93c5fd; margin-top: 30px; }\n");
-                html.push_str(".task { background: #16213e; border-radius: 8px; padding: 15px; margin: 10px 0; border-left: 4px solid #3b82f6; }\n");
-                html.push_str(".task.error { border-left-color: #ef4444; }\n");
-                html.push_str(
-                    ".task-name { font-weight: bold; color: #60a5fa; margin-bottom: 8px; }\n",
-                );
-                html.push_str(".output { white-space: pre-wrap; font-family: 'Consolas', 'Monaco', monospace; font-size: 13px; background: #0f0f1a; padding: 10px; border-radius: 4px; overflow-x: auto; }\n");
-                html.push_str(".error-msg { color: #f87171; }\n");
-                html.push_str(".meta { color: #9ca3af; font-size: 12px; margin-top: 20px; }\n");
-                html.push_str("</style>\n</head>\n<body>\n");
-                html.push_str("<h1>WindowsForum Diagnostic Report</h1>\n");
-                // Format date using JavaScript in the HTML
-                html.push_str("<p class=\"meta\">Generated: <span id=\"gendate\"></span></p>\n");
-                html.push_str("<script>document.getElementById('gendate').textContent = new Date().toLocaleString();</script>\n");
-
-                // Group results by category
-                let mut results_by_category: std::collections::HashMap<
-                    String,
-                    Vec<(&String, &diagnostics::TaskResult)>,
-                > = std::collections::HashMap::new();
-
-                for (task_id, result) in &session.results {
-                    if let Some(task) = task_map.get(task_id) {
-                        results_by_category
-                            .entry(task.category.clone())
-                            .or_default()
-                            .push((task_id, result));
-                    }
-                }
-
-                let mut categories: Vec<_> = results_by_category.keys().cloned().collect();
-                categories.sort();
-
-                for category in categories {
-                    html.push_str(&format!("<h2>{}</h2>\n", html_escape(&category)));
-
-                    if let Some(results) = results_by_category.get(&category) {
-                        for (task_id, result) in results {
-                            if let Some(task) = task_map.get(*task_id) {
-                                let class = if result.success { "task" } else { "task error" };
-                                html.push_str(&format!("<div class=\"{}\">\n", class));
-                                html.push_str(&format!(
-                                    "<div class=\"task-name\">{}</div>\n",
-                                    html_escape(&task.name)
-                                ));
-
-                                if result.success {
-                                    html.push_str("<div class=\"output\">");
-                                    if let Ok(parsed) =
-                                        serde_json::from_str::<serde_json::Value>(&result.output)
-                                    {
-                                        html.push_str(&html_escape(&format_json_value(&parsed, 0)));
-                                    } else {
-                                        html.push_str(&html_escape(&result.output));
-                                    }
-                                    html.push_str("</div>\n");
-                                } else if let Some(error) = &result.error {
-                                    html.push_str(&format!(
-                                        "<div class=\"error-msg\">Error: {}</div>\n",
-                                        html_escape(error)
-                                    ));
-                                }
-
-                                html.push_str("</div>\n");
-                            }
-                        }
-                    }
-                }
-
-                html.push_str(
-                    "<p class=\"meta\">Generated using WindowsForum Diagnostics Tool</p>\n",
-                );
-                html.push_str("</body>\n</html>");
-                Ok(html)
-            }
-            _ => Err("Unsupported format".to_string()),
-        }
-    } else {
-        Err("No active session".to_string())
-    }
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-/// Get list of allowed directories for file saves (matching Tauri capabilities)
-fn get_allowed_save_paths() -> Vec<std::path::PathBuf> {
-    let mut paths = Vec::new();
-
-    // $APPDATA/wfdiag-tauri/ (config dir)
-    if let Some(appdata) = dirs::config_dir() {
-        paths.push(appdata.join("wfdiag-tauri"));
-        paths.push(appdata.join("com.windowsforum.diagnostics"));
-    }
-
-    // $HOME/Documents/
-    if let Some(docs) = dirs::document_dir() {
-        paths.push(docs);
-    }
-
-    // $HOME/Desktop/
-    if let Some(desktop) = dirs::desktop_dir() {
-        paths.push(desktop);
-    }
-
-    // $HOME/Downloads/
-    if let Some(downloads) = dirs::download_dir() {
-        paths.push(downloads);
-    }
-
-    // $TEMP directory (with pattern restriction enforced in validate_save_path)
-    if let Ok(temp) = std::env::var("TEMP") {
-        paths.push(std::path::PathBuf::from(temp));
-    } else if let Ok(tmp) = std::env::var("TMP") {
-        paths.push(std::path::PathBuf::from(tmp));
-    }
-
-    paths
-}
-
-/// Validate that the save path is within allowed scopes (security)
-fn validate_save_path(path: &str) -> Result<(), String> {
-    use std::path::Path;
-
-    let path = Path::new(path);
-
-    // Get the path to validate (canonicalize parent for new files)
-    let path_to_check = if path.exists() {
-        path.canonicalize()
-            .map_err(|e| format!("Invalid path: {}", e))?
-    } else {
-        // For new files, check the parent directory exists and is allowed
-        let parent = path
-            .parent()
-            .ok_or_else(|| "Invalid path: no parent directory".to_string())?;
-        if !parent.exists() {
-            return Err("Parent directory does not exist".to_string());
-        }
-        let canonical_parent = parent
-            .canonicalize()
-            .map_err(|e| format!("Invalid parent path: {}", e))?;
-        canonical_parent.join(path.file_name().unwrap_or_default())
-    };
-
-    let allowed_paths = get_allowed_save_paths();
-
-    // Check if path falls within any allowed scope
-    for allowed in &allowed_paths {
-        // Canonicalize allowed path for comparison (skip if it doesn't exist)
-        let canonical_allowed = match allowed.canonicalize() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-
-        if path_to_check.starts_with(&canonical_allowed) {
-            // Additional check for TEMP directory: filename must match wfdiag_* pattern
-            if let Ok(temp) = std::env::var("TEMP").or_else(|_| std::env::var("TMP")) {
-                let temp_path = std::path::PathBuf::from(&temp);
-                if let Ok(canonical_temp) = temp_path.canonicalize() {
-                    if path_to_check.starts_with(&canonical_temp)
-                        && !path_to_check.starts_with(canonical_allowed.clone())
-                    {
-                        // This is in TEMP but matched a different allowed path, continue checking
-                        continue;
-                    }
-                    if path_to_check.starts_with(&canonical_temp) {
-                        // Enforce wfdiag_*.txt or wfdiag_*.html pattern for temp files
-                        if let Some(filename) = path_to_check.file_name().and_then(|f| f.to_str()) {
-                            if !filename.starts_with("wfdiag_") {
-                                return Err(
-                                    "Temp files must have filename starting with 'wfdiag_'"
-                                        .to_string(),
-                                );
-                            }
-                            if !filename.ends_with(".txt") && !filename.ends_with(".html") {
-                                return Err(
-                                    "Temp files must have .txt or .html extension".to_string()
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            return Ok(());
-        }
-    }
-
-    Err(
-        "Path not in allowed scope. Allowed: Documents, Desktop, Downloads, AppData, or Temp (wfdiag_*.txt/html only)"
-            .to_string(),
-    )
-}
-
-#[tauri::command]
-async fn save_results_to_file(path: String, content: String) -> Result<(), String> {
-    use std::fs;
-
-    // Validate path is within allowed scopes (security fix)
-    validate_save_path(&path)?;
-
-    fs::write(&path, content).map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 #[tauri::command]
@@ -961,7 +394,10 @@ async fn get_uptime() -> Result<serde_json::Value, String> {
 #[tauri::command]
 async fn fix_issue(issue_id: String) -> Result<issue_fixer::FixResult, String> {
     let fixer = issue_fixer::IssueFixer::new();
-    fixer.fix_issue(&issue_id).await.map_err(|e| e.to_string())
+    fixer
+        .fix_issue(&issue_id)
+        .await
+        .map_err(|e| DiagError::task_failed(format!("fix_{}", issue_id), e.to_string()).into())
 }
 
 #[tauri::command]
@@ -974,7 +410,8 @@ async fn restart_as_admin() -> Result<(), String> {
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
         use windows::core::PCWSTR;
 
-        let exe_path = env::current_exe().map_err(|e| e.to_string())?;
+        let exe_path = env::current_exe()
+            .map_err(|e| DiagError::internal(format!("Failed to get exe path: {}", e)))?;
 
         // Convert path to wide string for Windows API
         let exe_path_str = exe_path.to_string_lossy().to_string();
@@ -997,10 +434,11 @@ async fn restart_as_admin() -> Result<(), String> {
 
             // ShellExecuteW returns a value > 32 on success
             if result.0 as i32 <= 32 {
-                return Err(format!(
+                return Err(DiagError::internal(format!(
                     "Failed to restart with elevation. Error code: {}",
                     result.0 as i32
-                ));
+                ))
+                .into());
             }
         }
 
@@ -1013,7 +451,10 @@ async fn restart_as_admin() -> Result<(), String> {
 
     #[cfg(not(windows))]
     {
-        Err("Administrator restart is only supported on Windows".to_string())
+        Err(DiagError::PlatformNotSupported {
+            operation: "Administrator restart".to_string(),
+        }
+        .into())
     }
 }
 
@@ -1034,7 +475,7 @@ async fn start_monitoring(
         monitor.start_monitoring().await;
         Ok(())
     } else {
-        Err("Failed to create system monitor".to_string())
+        Err(DiagError::monitor_failed("Failed to create system monitor").into())
     }
 }
 
@@ -1046,7 +487,7 @@ async fn stop_monitoring(state: State<'_, AppState>) -> Result<(), String> {
         monitor.stop_monitoring().await;
         Ok(())
     } else {
-        Err("No active monitoring session".to_string())
+        Err(DiagError::NoActiveMonitoring.into())
     }
 }
 
@@ -1059,7 +500,7 @@ async fn get_current_stats(
     if let Some(monitor) = monitor_opt.as_ref() {
         Ok(monitor.get_current_stats().await)
     } else {
-        Err("No active monitoring session".to_string())
+        Err(DiagError::NoActiveMonitoring.into())
     }
 }
 
@@ -1109,14 +550,15 @@ async fn save_current_scan(
             }
             None => {
                 let error = state.scan_storage_error.lock().await;
-                Err(format!(
-                    "Scan history unavailable: {}",
-                    error.as_deref().unwrap_or("Storage initialization failed")
-                ))
+                Err(DiagError::storage(
+                    "save_scan",
+                    error.as_deref().unwrap_or("Storage initialization failed"),
+                )
+                .into())
             }
         }
     } else {
-        Err("No active session to save".to_string())
+        Err(DiagError::NoActiveSession.into())
     }
 }
 
@@ -1143,10 +585,11 @@ async fn list_scan_history(state: State<'_, AppState>) -> Result<Vec<ScanSummary
         },
         None => {
             let error = state.scan_storage_error.lock().await;
-            Err(format!(
-                "Scan history unavailable: {}",
-                error.as_deref().unwrap_or("Storage initialization failed")
-            ))
+            Err(DiagError::storage(
+                "list_scans",
+                error.as_deref().unwrap_or("Storage initialization failed"),
+            )
+            .into())
         }
     }
 }
@@ -1159,10 +602,11 @@ async fn load_scan(state: State<'_, AppState>, scan_id: String) -> Result<ScanRe
         Some(storage) => storage.load_scan(&scan_id),
         None => {
             let error = state.scan_storage_error.lock().await;
-            Err(format!(
-                "Scan history unavailable: {}",
-                error.as_deref().unwrap_or("Storage initialization failed")
-            ))
+            Err(DiagError::storage(
+                "load_scan",
+                error.as_deref().unwrap_or("Storage initialization failed"),
+            )
+            .into())
         }
     }
 }
@@ -1199,10 +643,11 @@ async fn compare_scans(
         },
         None => {
             let error = state.scan_storage_error.lock().await;
-            Err(format!(
-                "Scan history unavailable: {}",
-                error.as_deref().unwrap_or("Storage initialization failed")
-            ))
+            Err(DiagError::storage(
+                "compare_scans",
+                error.as_deref().unwrap_or("Storage initialization failed"),
+            )
+            .into())
         }
     }
 }
@@ -1225,10 +670,11 @@ async fn clear_scan_history(state: State<'_, AppState>) -> Result<String, String
         },
         None => {
             let error = state.scan_storage_error.lock().await;
-            Err(format!(
-                "Scan history unavailable: {}",
-                error.as_deref().unwrap_or("Storage initialization failed")
-            ))
+            Err(DiagError::storage(
+                "clear_history",
+                error.as_deref().unwrap_or("Storage initialization failed"),
+            )
+            .into())
         }
     }
 }
@@ -1241,7 +687,7 @@ async fn detect_issues(state: State<'_, AppState>) -> Result<Vec<Issue>, String>
         let issues = issue_detector.detect_issues(&session.results);
         Ok(issues)
     } else {
-        Err("No active session".to_string())
+        Err(DiagError::NoActiveSession.into())
     }
 }
 
@@ -1258,13 +704,16 @@ async fn open_url(url: String) -> Result<(), String> {
                 &format!("Start-Process '{}'", url.replace("'", "''")),
             ])
             .spawn()
-            .map_err(|e| format!("Failed to open URL: {}", e))?;
+            .map_err(|e| DiagError::internal(format!("Failed to open URL: {}", e)))?;
     }
 
     #[cfg(not(target_os = "windows"))]
     {
         // For non-Windows systems, we'd need the opener crate
-        return Err("URL opening is only supported on Windows currently".to_string());
+        return Err(DiagError::PlatformNotSupported {
+            operation: "URL opening".to_string(),
+        }
+        .into());
     }
 
     Ok(())
@@ -1273,15 +722,15 @@ async fn open_url(url: String) -> Result<(), String> {
 #[tauri::command]
 async fn copy_minidumps_to_desktop() -> Result<serde_json::Value, String> {
     let diagnostics = native_diagnostics::NativeDiagnostics::new()
-        .map_err(|e| format!("Failed to initialize diagnostics: {}", e))?;
+        .map_err(|e| DiagError::internal(format!("Failed to initialize diagnostics: {}", e)))?;
     diagnostics
         .copy_minidumps_to_desktop()
-        .map_err(|e| e.to_string())
+        .map_err(|e| DiagError::internal(e.to_string()).into())
 }
 
 #[tauri::command]
 async fn get_architecture_info() -> Result<serde_json::Value, String> {
-    architecture::get_architecture_json().map_err(|e| e.to_string())
+    architecture::get_architecture_json().map_err(|e| DiagError::internal(e.to_string()).into())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1298,12 +747,7 @@ pub fn run() {
         }
     };
 
-    let app_state = AppState {
-        current_session: Arc::new(Mutex::new(None)),
-        system_monitor: Arc::new(Mutex::new(None)),
-        scan_storage: Arc::new(Mutex::new(scan_storage)),
-        scan_storage_error: Arc::new(Mutex::new(scan_storage_error)),
-    };
+    let app_state = AppState::new(scan_storage, scan_storage_error);
 
     tauri::Builder::default()
         .manage(app_state)
@@ -1320,11 +764,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            save_settings,
-            load_settings,
-            store_api_key,
-            load_api_key,
-            clear_api_key,
+            commands::settings::save_settings,
+            commands::settings::load_settings,
+            commands::settings::store_api_key,
+            commands::settings::load_api_key,
+            commands::settings::clear_api_key,
             get_system_info,
             get_architecture_info,
             get_available_tasks,
@@ -1332,8 +776,8 @@ pub fn run() {
             run_diagnostic_task,
             run_diagnostics_parallel,
             get_session_results,
-            export_results,
-            save_results_to_file,
+            commands::export::export_results,
+            commands::export::save_results_to_file,
             get_uptime,
             fix_issue,
             restart_as_admin,

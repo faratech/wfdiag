@@ -17,16 +17,18 @@ use windows::{
 use std::path::PathBuf;
 use std::fs;
 
+use crate::error::DiagError;
+
 /// Get the path to the encrypted credentials file
 fn get_credentials_path() -> Result<PathBuf, String> {
     let app_data = dirs::data_local_dir()
-        .ok_or_else(|| "Could not find local app data directory".to_string())?;
+        .ok_or_else(|| DiagError::internal("Could not find local app data directory"))?;
     let creds_dir = app_data.join("WFDiag");
 
     // Create directory if it doesn't exist
     if !creds_dir.exists() {
         fs::create_dir_all(&creds_dir)
-            .map_err(|e| format!("Failed to create credentials directory: {}", e))?;
+            .map_err(|e| DiagError::file(creds_dir.display().to_string(), e.to_string()))?;
     }
 
     Ok(creds_dir.join("credentials.bin"))
@@ -70,7 +72,7 @@ fn dpapi_encrypt(data: &str) -> Result<Vec<u8>, String> {
     };
 
     if result.is_err() {
-        return Err(format!("DPAPI encryption failed: {:?}", result));
+        return Err(DiagError::api_key("encrypt", format!("DPAPI encryption failed: {:?}", result)).into());
     }
 
     // Copy encrypted data to Vec
@@ -116,7 +118,7 @@ fn dpapi_decrypt(encrypted: &[u8]) -> Result<String, String> {
     };
 
     if result.is_err() {
-        return Err(format!("DPAPI decryption failed: {:?}", result));
+        return Err(DiagError::api_key("decrypt", format!("DPAPI decryption failed: {:?}", result)).into());
     }
 
     // Convert decrypted bytes to string
@@ -136,12 +138,18 @@ fn dpapi_decrypt(encrypted: &[u8]) -> Result<String, String> {
 // Non-Windows stubs for cross-compilation
 #[cfg(not(windows))]
 fn dpapi_encrypt(_data: &str) -> Result<Vec<u8>, String> {
-    Err("DPAPI is only available on Windows".to_string())
+    Err(DiagError::PlatformNotSupported {
+        operation: "DPAPI encryption".to_string(),
+    }
+    .into())
 }
 
 #[cfg(not(windows))]
 fn dpapi_decrypt(_encrypted: &[u8]) -> Result<String, String> {
-    Err("DPAPI is only available on Windows".to_string())
+    Err(DiagError::PlatformNotSupported {
+        operation: "DPAPI decryption".to_string(),
+    }
+    .into())
 }
 
 /// Store the API key securely using DPAPI
@@ -154,7 +162,7 @@ pub fn store_api_key(key: &str) -> Result<(), String> {
     let path = get_credentials_path()?;
 
     fs::write(&path, encrypted)
-        .map_err(|e| format!("Failed to write encrypted credentials: {}", e))?;
+        .map_err(|e| DiagError::file(path.display().to_string(), e.to_string()))?;
 
     println!("API key stored securely with DPAPI at {:?}", path);
     Ok(())
@@ -169,7 +177,7 @@ pub fn load_api_key() -> Result<Option<String>, String> {
     }
 
     let encrypted = fs::read(&path)
-        .map_err(|e| format!("Failed to read credentials file: {}", e))?;
+        .map_err(|e| DiagError::file(path.display().to_string(), e.to_string()))?;
 
     if encrypted.is_empty() {
         return Ok(None);
@@ -197,7 +205,7 @@ pub fn clear_api_key() -> Result<(), String> {
 
     if path.exists() {
         fs::remove_file(&path)
-            .map_err(|e| format!("Failed to remove credentials file: {}", e))?;
+            .map_err(|e| DiagError::file(path.display().to_string(), e.to_string()))?;
         println!("API key cleared from DPAPI storage");
     }
 
