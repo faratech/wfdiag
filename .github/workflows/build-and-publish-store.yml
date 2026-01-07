@@ -370,10 +370,33 @@ jobs:
             --clientId ${{ secrets.AZURE_CLIENT_ID }} `
             --clientSecret ${{ secrets.AZURE_CLIENT_SECRET }}
 
+      - name: List bundle directory contents
+        shell: pwsh
+        run: |
+          Write-Host "Contents of bundle directory:"
+          Get-ChildItem -Path bundle -Recurse | ForEach-Object { Write-Host "  $($_.FullName) - $($_.Length) bytes" }
+
       - name: Publish to Microsoft Store
         shell: pwsh
         run: |
-          msstore publish -i bundle -id 9NJ59RH053PV -v
+          $version = "${{ needs.build-x64.outputs.version }}"
+          $bundleFile = "bundle/${{ env.PROJECT_NAME }}_${version}.msixbundle"
+
+          Write-Host "Looking for bundle: $bundleFile"
+
+          if (-not (Test-Path $bundleFile)) {
+            Write-Host "Bundle not found at expected path, searching..."
+            $found = Get-ChildItem -Path bundle -Filter "*.msixbundle" | Select-Object -First 1
+            if ($found) {
+              $bundleFile = $found.FullName
+              Write-Host "Found bundle: $bundleFile"
+            } else {
+              throw "No msixbundle file found in bundle directory!"
+            }
+          }
+
+          Write-Host "Publishing bundle: $bundleFile"
+          msstore publish -i $bundleFile -id 9NJ59RH053PV -v
 
   # =============================================================================
   # Generate Attestations for all artifacts
