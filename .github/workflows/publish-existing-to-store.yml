@@ -1,0 +1,76 @@
+name: Publish Existing Release to Microsoft Store
+
+# Manual trigger only - publishes an existing GitHub release to the Store
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., 2.1.9) - must have existing GitHub release'
+        required: true
+
+env:
+  PROJECT_NAME: WindowsForum_Diagnostics
+
+permissions:
+  contents: read
+
+jobs:
+  publish-to-store:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release asset from GitHub
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          $bundleName = "${{ env.PROJECT_NAME }}_${version}.msixbundle"
+
+          Write-Host "Downloading $bundleName from GitHub release v$version..."
+
+          # Create bundle directory
+          New-Item -ItemType Directory -Force -Path bundle
+
+          # Download using gh CLI
+          gh release download "v$version" --pattern "*.msixbundle" --dir bundle
+
+          # Verify download
+          $downloaded = Get-ChildItem -Path bundle -Filter "*.msixbundle"
+          if ($downloaded) {
+            Write-Host "Downloaded: $($downloaded.FullName) ($($downloaded.Length) bytes)"
+          } else {
+            throw "Failed to download msixbundle from release v$version"
+          }
+
+      - name: Setup Microsoft Store CLI
+        uses: microsoft/setup-msstore-cli@v1
+
+      - name: Configure Store credentials
+        shell: pwsh
+        run: |
+          msstore reconfigure `
+            --tenantId ${{ secrets.AZURE_TENANT_ID }} `
+            --sellerId ${{ secrets.STORE_SELLER_ID }} `
+            --clientId ${{ secrets.AZURE_CLIENT_ID }} `
+            --clientSecret ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: List bundle directory contents
+        shell: pwsh
+        run: |
+          Write-Host "Contents of bundle directory:"
+          Get-ChildItem -Path bundle -Recurse | ForEach-Object { Write-Host "  $($_.FullName) - $($_.Length) bytes" }
+
+      - name: Publish to Microsoft Store
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          $bundleFile = Get-ChildItem -Path bundle -Filter "*.msixbundle" | Select-Object -First 1
+
+          if (-not $bundleFile) {
+            throw "No msixbundle file found in bundle directory!"
+          }
+
+          Write-Host "Publishing bundle: $($bundleFile.FullName)"
+          msstore publish -i $bundleFile.FullName -id 9NJ59RH053PV -v
