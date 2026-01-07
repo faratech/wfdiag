@@ -1,6 +1,8 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::error::DiagError;
+
 /// A simple UTC timestamp that serializes to ISO 8601 format for compatibility with chrono
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Timestamp {
@@ -103,15 +105,15 @@ impl Timestamp {
 
         // Parse components
         if s.len() < 19 {
-            return Err(format!("Invalid ISO 8601 format: {}", s));
+            return Err(DiagError::internal(format!("Invalid ISO 8601 format: {}", s)).into());
         }
 
-        let year: i32 = s[0..4].parse().map_err(|_| "Invalid year")?;
-        let month: u32 = s[5..7].parse().map_err(|_| "Invalid month")?;
-        let day: u32 = s[8..10].parse().map_err(|_| "Invalid day")?;
-        let hour: u32 = s[11..13].parse().map_err(|_| "Invalid hour")?;
-        let minute: u32 = s[14..16].parse().map_err(|_| "Invalid minute")?;
-        let second: u32 = s[17..19].parse().map_err(|_| "Invalid second")?;
+        let year: i32 = s[0..4].parse().map_err(|_| DiagError::internal("Invalid year"))?;
+        let month: u32 = s[5..7].parse().map_err(|_| DiagError::internal("Invalid month"))?;
+        let day: u32 = s[8..10].parse().map_err(|_| DiagError::internal("Invalid day"))?;
+        let hour: u32 = s[11..13].parse().map_err(|_| DiagError::internal("Invalid hour"))?;
+        let minute: u32 = s[14..16].parse().map_err(|_| DiagError::internal("Invalid minute"))?;
+        let second: u32 = s[17..19].parse().map_err(|_| DiagError::internal("Invalid second"))?;
 
         // Convert to Unix timestamp
         let days = ymd_to_days(year, month, day);

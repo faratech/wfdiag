@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
+use crate::error::DiagError;
+
 /// AI Provider options
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -163,7 +165,7 @@ pub async fn analyze_system_with_ai(
     // Validate API key is not empty
     let api_key = api_key.trim().to_string();
     if api_key.is_empty() {
-        return Err("OpenAI API key is empty. Please enter your API key in Settings.".to_string());
+        return Err(DiagError::api_key("validate", "OpenAI API key is empty. Please enter your API key in Settings.").into());
     }
 
     // Log key prefix for debugging (masked)
@@ -210,7 +212,9 @@ pub async fn analyze_system_with_ai(
             "required": ["task_id", "reason"]
         }))
         .build()
-        .map_err(|e| format!("Failed to build tool: {}", e))?;
+        .map_err(|e| DiagError::AiAnalysisFailed {
+            reason: format!("Failed to build tool: {}", e),
+        })?;
 
     // System instructions with clear behavior rules
     let instructions = format!("You are a Windows system diagnostic assistant that TAKES IMMEDIATE ACTION.
@@ -408,7 +412,11 @@ pub async fn analyze_system_with_phi_silica(
 ) -> Result<Value, String> {
     // First check if Phi Silica server is available
     if !check_phi_silica_available().await {
-        return Err("Phi Silica is not available. Please ensure WindowsCopilotRuntimeServer is running on your Copilot+ PC. You can download it from https://github.com/sykuang/WindowsCopilotRuntimeServer".to_string());
+        return Err(DiagError::ai_unavailable(
+            "phi_silica",
+            "Phi Silica is not available on this device",
+        )
+        .into());
     }
 
     // Create client configured for local Phi Silica server
@@ -497,7 +505,7 @@ pub async fn analyze_system_with_ai_provider(
         "phi_silica" => analyze_system_with_phi_silica(prompt, app_handle).await,
         _ => {
             // Default to OpenAI
-            let key = api_key.ok_or("OpenAI API key is required")?;
+            let key = api_key.ok_or_else(|| DiagError::api_key("validate", "OpenAI API key is required"))?;
             analyze_system_with_ai(key, prompt, app_handle).await
         }
     }

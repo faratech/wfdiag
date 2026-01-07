@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 
 use crate::ai_cache::AICache;
 use crate::ai_prompts;
+use crate::error::DiagError;
 use crate::openai_integration::OPENAI_MODEL;
 
 /// AI Provider enumeration
@@ -292,7 +293,11 @@ pub async fn analyze(
             analyze_with_phi_silica(&prompt).await
         }
         AIProvider::None => {
-            Err("No AI provider available. Configure OpenAI API key in Settings or use a Copilot+ PC.".to_string())
+            Err(DiagError::ai_unavailable(
+                "none",
+                "No AI provider available. Configure OpenAI API key in Settings or use a Copilot+ PC.",
+            )
+            .into())
         }
     };
 
@@ -323,9 +328,9 @@ async fn analyze_with_openai(prompt: &str, api_key: Option<String>) -> Result<St
     // Use provided key or load from storage
     let api_key = match api_key {
         Some(key) if !key.is_empty() => key,
-        _ => crate::load_api_key_internal()
-            .await
-            .ok_or("OpenAI API key not configured. Please enter your API key in Settings.")?,
+        _ => crate::load_api_key_internal().await.ok_or_else(|| {
+            DiagError::api_key("load", "OpenAI API key not configured. Please enter your API key in Settings.")
+        })?,
     };
 
     let config = OpenAIConfig::new().with_api_key(api_key);
@@ -337,7 +342,9 @@ async fn analyze_with_openai(prompt: &str, api_key: Option<String>) -> Result<St
         .model(OPENAI_MODEL)
         .input(InputParam::Text(full_prompt))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| DiagError::AiAnalysisFailed {
+            reason: format!("Failed to build request: {}", e),
+        })?;
 
     let response = client
         .responses()
@@ -345,7 +352,9 @@ async fn analyze_with_openai(prompt: &str, api_key: Option<String>) -> Result<St
         .await
         .map_err(|e| {
             eprintln!("OpenAI API error in ai_service: {:?}", e);
-            format!("OpenAI API error: {}", e)
+            DiagError::AiAnalysisFailed {
+                reason: format!("OpenAI API error: {}", e),
+            }
         })?;
 
     Ok(response.output_text().unwrap_or_default())

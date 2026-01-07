@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use crate::timestamp::Timestamp;
 use crate::diagnostics::TaskResult;
 use crate::encrypted_storage::EncryptedStorage;
+use crate::error::DiagError;
+use crate::timestamp::Timestamp;
 
 // Simplified scan record for storage
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,15 +70,15 @@ pub struct ScanStorage {
 impl ScanStorage {
     pub fn new() -> Result<Self, String> {
         let storage_dir = Self::get_storage_directory()?;
-        
+
         // Create directory if it doesn't exist
         if let Err(e) = fs::create_dir_all(&storage_dir) {
-            return Err(format!("Failed to create storage directory: {}", e));
+            return Err(DiagError::file(storage_dir.display().to_string(), e.to_string()).into());
         }
-        
+
         // Initialize encrypted storage
         let encrypted_storage = EncryptedStorage::new(storage_dir.clone())
-            .map_err(|e| format!("Failed to initialize encrypted storage: {}", e))?;
+            .map_err(|e| DiagError::storage("init_encrypted_storage", e.to_string()))?;
         
         println!("Scan storage initialized at: {:?}", storage_dir);
         
@@ -90,8 +91,8 @@ impl ScanStorage {
     
     fn get_storage_directory() -> Result<PathBuf, String> {
         let app_data = std::env::var("APPDATA")
-            .map_err(|_| "Failed to get APPDATA directory")?;
-        
+            .map_err(|_| DiagError::internal("Failed to get APPDATA directory"))?;
+
         Ok(PathBuf::from(app_data)
             .join("wfdiag-tauri")
             .join("scans"))
@@ -99,19 +100,19 @@ impl ScanStorage {
     
     pub fn save_scan(&self, scan: &ScanRecord) -> Result<(), String> {
         println!("Saving encrypted scan {}", scan.id);
-        
+
         // Validate scan data
         if scan.id.is_empty() {
-            return Err("Scan ID cannot be empty".to_string());
+            return Err(DiagError::storage("save_scan", "Scan ID cannot be empty").into());
         }
-        
+
         if scan.results.is_empty() {
-            return Err("Scan must have at least one result".to_string());
+            return Err(DiagError::storage("save_scan", "Scan must have at least one result").into());
         }
-        
+
         // Store using encrypted storage
         self.encrypted_storage.store(&scan.id, scan)
-            .map_err(|e| format!("Failed to save encrypted scan: {}", e))?;
+            .map_err(|e| DiagError::storage("save_encrypted_scan", e.to_string()))?;
         
         println!("Successfully saved encrypted scan {}", scan.id);
         
@@ -123,17 +124,21 @@ impl ScanStorage {
     
     pub fn load_scan(&self, scan_id: &str) -> Result<ScanRecord, String> {
         if !self.encrypted_storage.exists(scan_id) {
-            return Err(format!("Encrypted scan '{}' not found", scan_id));
+            return Err(DiagError::storage("load_scan", format!("Encrypted scan '{}' not found", scan_id)).into());
         }
-        
+
         println!("Loading encrypted scan {}", scan_id);
-        
+
         let scan: ScanRecord = self.encrypted_storage.load(scan_id)
-            .map_err(|e| format!("Failed to load encrypted scan: {}", e))?;
-        
+            .map_err(|e| DiagError::storage("load_encrypted_scan", e.to_string()))?;
+
         // Validate loaded scan
         if scan.id != scan_id {
-            return Err(format!("Scan ID mismatch: expected '{}', found '{}'", scan_id, scan.id));
+            return Err(DiagError::SessionMismatch {
+                expected: scan_id.to_string(),
+                actual: scan.id.clone(),
+            }
+            .into());
         }
         
         println!("Successfully loaded encrypted scan {} with {} results", scan.id, scan.results.len());
@@ -143,11 +148,11 @@ impl ScanStorage {
     
     pub fn list_scans(&self) -> Result<Vec<ScanSummary>, String> {
         let mut summaries = Vec::new();
-        
+
         println!("Listing encrypted scans");
-        
+
         let scan_ids = self.encrypted_storage.list_files()
-            .map_err(|e| format!("Failed to list encrypted scans: {}", e))?;
+            .map_err(|e| DiagError::storage("list_scans", e.to_string()))?;
         
         for scan_id in scan_ids {
             println!("Found encrypted scan: {}", scan_id);
@@ -182,9 +187,9 @@ impl ScanStorage {
     
     pub fn compare_scans(&self, current_id: &str, previous_id: &str) -> Result<ComparisonResult, String> {
         println!("Comparing scans: '{}' vs '{}'", current_id, previous_id);
-        
+
         if current_id == previous_id {
-            return Err("Cannot compare scan with itself".to_string());
+            return Err(DiagError::storage("compare_scans", "Cannot compare scan with itself").into());
         }
         
         // Load both scans
@@ -442,7 +447,11 @@ impl ScanStorage {
         println!("Clear history completed: {} deleted, {} failed", deleted_count, failed_count);
 
         if failed_count > 0 {
-            Err(format!("Cleared {} scans, but {} failed to delete", deleted_count, failed_count))
+            Err(DiagError::storage(
+                "clear_history",
+                format!("Cleared {} scans, but {} failed to delete", deleted_count, failed_count),
+            )
+            .into())
         } else {
             Ok(())
         }

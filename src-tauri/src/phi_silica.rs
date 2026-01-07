@@ -12,6 +12,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::DiagError;
+
 /// LAF constants for Phi Silica access
 #[cfg(windows)]
 const LAF_FEATURE_ID: &str = "com.microsoft.windows.ai.languagemodel";
@@ -234,7 +236,7 @@ fn try_direct_dll_activation() -> Result<(), String> {
 
     // Get app directory where bundled DLLs are
     let app_dir = get_app_directory()
-        .ok_or_else(|| "Failed to get app directory".to_string())?;
+        .ok_or_else(|| DiagError::ai_unavailable("phi_silica", "Failed to get app directory"))?;
 
     log_phi_silica(&format!("App directory: {:?}", app_dir));
 
@@ -291,7 +293,7 @@ fn create_language_model_direct() -> Result<crate::windows_ai_bindings::Language
     try_direct_dll_activation()?;
 
     let module = unsafe { AI_TEXT_DLL_MODULE }
-        .ok_or_else(|| "AI Text DLL not loaded".to_string())?;
+        .ok_or_else(|| DiagError::ai_unavailable("phi_silica", "AI Text DLL not loaded"))?;
 
     // DllGetActivationFactory signature:
     // HRESULT DllGetActivationFactory(HSTRING classId, IActivationFactory** factory)
@@ -308,7 +310,7 @@ fn create_language_model_direct() -> Result<crate::windows_ai_bindings::Language
                 DllGetActivationFactoryFn
             >(p)
         },
-        None => return Err("DllGetActivationFactory not found in DLL".to_string()),
+        None => return Err(DiagError::ai_unavailable("phi_silica", "DllGetActivationFactory not found in DLL").into()),
     };
 
     log_phi_silica("Got DllGetActivationFactory");
@@ -327,11 +329,11 @@ fn create_language_model_direct() -> Result<crate::windows_ai_bindings::Language
 
     if hr.is_err() {
         log_phi_silica(&format!("DllGetActivationFactory failed: 0x{:08X}", hr.0 as u32));
-        return Err(format!("DllGetActivationFactory failed: 0x{:08X}", hr.0 as u32));
+        return Err(DiagError::ai_unavailable("phi_silica", format!("DllGetActivationFactory failed: 0x{:08X}", hr.0 as u32)).into());
     }
 
     if factory_ptr.is_null() {
-        return Err("DllGetActivationFactory returned null factory".to_string());
+        return Err(DiagError::ai_unavailable("phi_silica", "DllGetActivationFactory returned null factory").into());
     }
 
     log_phi_silica("Got activation factory, querying for ILanguageModelStatics...");
@@ -356,7 +358,7 @@ fn create_language_model_direct() -> Result<crate::windows_ai_bindings::Language
         );
         if hr.is_err() {
             log_phi_silica(&format!("CreateAsync call failed: 0x{:08X}", hr.0 as u32));
-            return Err(format!("CreateAsync failed: 0x{:08X}", hr.0 as u32));
+            return Err(DiagError::ai_unavailable("phi_silica", format!("CreateAsync failed: 0x{:08X}", hr.0 as u32)).into());
         }
         windows_future::IAsyncOperation::<LanguageModel>::from_raw(result)
     };
@@ -508,17 +510,17 @@ where
             }
             AsyncStatus::Error => {
                 let hr = info.ErrorCode().map_err(|e| format!("Failed to get error: {}", e.message()))?;
-                return Err(format!("Async operation failed: 0x{:08X}", hr.0 as u32));
+                return Err(DiagError::ai_unavailable("phi_silica", format!("Async operation failed: 0x{:08X}", hr.0 as u32)).into());
             }
             AsyncStatus::Canceled => {
-                return Err("Async operation was canceled".to_string());
+                return Err(DiagError::ai_unavailable("phi_silica", "Async operation was canceled").into());
             }
             AsyncStatus::Started => {
                 // Still running, wait a bit
                 sleep(Duration::from_millis(10));
             }
             _ => {
-                return Err(format!("Unknown async status: {:?}", status));
+                return Err(DiagError::ai_unavailable("phi_silica", format!("Unknown async status: {:?}", status)).into());
             }
         }
     }
@@ -547,17 +549,17 @@ where
             }
             AsyncStatus::Error => {
                 let hr = info.ErrorCode().map_err(|e| format!("Failed to get error: {}", e.message()))?;
-                return Err(format!("Async operation failed: 0x{:08X}", hr.0 as u32));
+                return Err(DiagError::ai_unavailable("phi_silica", format!("Async operation failed: 0x{:08X}", hr.0 as u32)).into());
             }
             AsyncStatus::Canceled => {
-                return Err("Async operation was canceled".to_string());
+                return Err(DiagError::ai_unavailable("phi_silica", "Async operation was canceled").into());
             }
             AsyncStatus::Started => {
                 // Still running, wait a bit
                 sleep(Duration::from_millis(10));
             }
             _ => {
-                return Err(format!("Unknown async status: {:?}", status));
+                return Err(DiagError::ai_unavailable("phi_silica", format!("Unknown async status: {:?}", status)).into());
             }
         }
     }
@@ -604,7 +606,10 @@ pub async fn ensure_phi_silica_ready() -> Result<(), String> {
 
 #[cfg(not(windows))]
 pub async fn ensure_phi_silica_ready() -> Result<(), String> {
-    Err("Phi Silica is only available on Windows".to_string())
+    Err(DiagError::PlatformNotSupported {
+        operation: "Phi Silica".to_string(),
+    }
+    .into())
 }
 
 /// Generate a response using Phi Silica
@@ -644,22 +649,40 @@ pub async fn generate_response(prompt: &str) -> Result<String, String> {
                 Ok(text.to_string())
             }
             s if s == LanguageModelResponseStatus::BlockedByPolicy => {
-                Err("Response blocked by policy".to_string())
+                Err(DiagError::AiAnalysisFailed {
+                    reason: "Response blocked by policy".to_string(),
+                }
+                .into())
             }
             s if s == LanguageModelResponseStatus::PromptBlockedByContentModeration => {
-                Err("Prompt blocked by content moderation".to_string())
+                Err(DiagError::AiAnalysisFailed {
+                    reason: "Prompt blocked by content moderation".to_string(),
+                }
+                .into())
             }
             s if s == LanguageModelResponseStatus::ResponseBlockedByContentModeration => {
-                Err("Response blocked by content moderation".to_string())
+                Err(DiagError::AiAnalysisFailed {
+                    reason: "Response blocked by content moderation".to_string(),
+                }
+                .into())
             }
             s if s == LanguageModelResponseStatus::PromptLargerThanContext => {
-                Err("Prompt is too large for the model context".to_string())
+                Err(DiagError::AiAnalysisFailed {
+                    reason: "Prompt is too large for the model context".to_string(),
+                }
+                .into())
             }
             s if s == LanguageModelResponseStatus::Error => {
-                Err("An error occurred during generation".to_string())
+                Err(DiagError::AiAnalysisFailed {
+                    reason: "An error occurred during generation".to_string(),
+                }
+                .into())
             }
             _ => {
-                Err(format!("Unknown response status: {:?}", status))
+                Err(DiagError::AiAnalysisFailed {
+                    reason: format!("Unknown response status: {:?}", status),
+                }
+                .into())
             }
         }
     })
@@ -669,7 +692,10 @@ pub async fn generate_response(prompt: &str) -> Result<String, String> {
 
 #[cfg(not(windows))]
 pub async fn generate_response(_prompt: &str) -> Result<String, String> {
-    Err("Phi Silica is only available on Windows".to_string())
+    Err(DiagError::PlatformNotSupported {
+        operation: "Phi Silica".to_string(),
+    }
+    .into())
 }
 
 /// Tauri command to check Phi Silica availability
@@ -703,7 +729,10 @@ pub async fn check_phi_silica_updates() -> Result<String, String> {
 #[tauri::command]
 #[cfg(not(windows))]
 pub async fn check_phi_silica_updates() -> Result<String, String> {
-    Err("Windows Update is only available on Windows".to_string())
+    Err(DiagError::PlatformNotSupported {
+        operation: "Windows Update".to_string(),
+    }
+    .into())
 }
 
 /// Build a compact list of available diagnostics for Phi Silica
