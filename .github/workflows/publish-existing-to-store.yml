@@ -66,11 +66,16 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.event.inputs.version }}"
-          $bundleFile = Get-ChildItem -Path bundle -Filter "*.msixbundle" | Select-Object -First 1
+          $bundleDir = Resolve-Path "bundle"
+          $bundleFile = Get-ChildItem -Path $bundleDir -Filter "*.msixbundle" | Select-Object -First 1
 
           if (-not $bundleFile) {
             throw "No msixbundle file found in bundle directory!"
           }
 
-          Write-Host "Publishing bundle: $($bundleFile.FullName)"
-          msstore publish -i $bundleFile.FullName -id 9NJ59RH053PV -v
+          Write-Host "Bundle directory: $bundleDir"
+          Write-Host "Bundle file: $($bundleFile.FullName)"
+          Write-Host "Working directory: $(Get-Location)"
+
+          # -i expects a directory containing the msix/msixbundle (use absolute path)
+          msstore publish -i "$bundleDir" -id 9NJ59RH053PV -v
