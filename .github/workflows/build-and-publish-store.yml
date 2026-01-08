@@ -350,13 +350,14 @@ jobs:
     runs-on: windows-latest
     if: needs.build-x64.outputs.publish_to_store == 'true'
     steps:
-      - uses: actions/checkout@v4
-
+      # Don't checkout source code - msstore CLI auto-detects package.json
+      # as Electron project and ignores the -i input directory
       - name: Download bundle
         uses: actions/download-artifact@v4
         with:
           name: msixbundle-unsigned
-          path: bundle
+          # Download directly to working directory, not a subdirectory
+          path: .
 
       - name: Setup Microsoft Store CLI
         uses: microsoft/setup-msstore-cli@v1
@@ -370,33 +371,28 @@ jobs:
             --clientId ${{ secrets.AZURE_CLIENT_ID }} `
             --clientSecret ${{ secrets.AZURE_CLIENT_SECRET }}
 
-      - name: List bundle directory contents
+      - name: List working directory contents
         shell: pwsh
         run: |
-          Write-Host "Contents of bundle directory:"
-          Get-ChildItem -Path bundle -Recurse | ForEach-Object { Write-Host "  $($_.FullName) - $($_.Length) bytes" }
+          Write-Host "Contents of working directory:"
+          Get-ChildItem -Recurse | ForEach-Object { Write-Host "  $($_.FullName) - $($_.Length) bytes" }
 
       - name: Publish to Microsoft Store
         shell: pwsh
         run: |
           $version = "${{ needs.build-x64.outputs.version }}"
-          $bundleFile = "bundle/${{ env.PROJECT_NAME }}_${version}.msixbundle"
+          $workDir = Get-Location
+          $bundleFile = Get-ChildItem -Filter "*.msixbundle" | Select-Object -First 1
 
-          Write-Host "Looking for bundle: $bundleFile"
-
-          if (-not (Test-Path $bundleFile)) {
-            Write-Host "Bundle not found at expected path, searching..."
-            $found = Get-ChildItem -Path bundle -Filter "*.msixbundle" | Select-Object -First 1
-            if ($found) {
-              $bundleFile = $found.FullName
-              Write-Host "Found bundle: $bundleFile"
-            } else {
-              throw "No msixbundle file found in bundle directory!"
-            }
+          if (-not $bundleFile) {
+            throw "No msixbundle file found!"
           }
 
-          Write-Host "Publishing bundle: $bundleFile"
-          msstore publish -i $bundleFile -id 9NJ59RH053PV -v
+          Write-Host "Working directory: $workDir"
+          Write-Host "Bundle file: $($bundleFile.FullName)"
+
+          # Run from clean directory with only the msixbundle (no package.json)
+          msstore publish -i "$workDir" -id 9NJ59RH053PV -v
 
   # =============================================================================
   # Generate Attestations for all artifacts

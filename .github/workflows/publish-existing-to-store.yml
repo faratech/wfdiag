@@ -18,8 +18,7 @@ jobs:
   publish-to-store:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-
+      # Don't checkout - we don't want the source code confusing msstore CLI
       - name: Download release asset from GitHub
         shell: pwsh
         env:
@@ -30,14 +29,11 @@ jobs:
 
           Write-Host "Downloading $bundleName from GitHub release v$version..."
 
-          # Create bundle directory
-          New-Item -ItemType Directory -Force -Path bundle
-
-          # Download using gh CLI
-          gh release download "v$version" --pattern "*.msixbundle" --dir bundle
+          # Download using gh CLI (use repo flag since we didn't checkout)
+          gh release download "v$version" --repo ${{ github.repository }} --pattern "*.msixbundle"
 
           # Verify download
-          $downloaded = Get-ChildItem -Path bundle -Filter "*.msixbundle"
+          $downloaded = Get-ChildItem -Filter "*.msixbundle"
           if ($downloaded) {
             Write-Host "Downloaded: $($downloaded.FullName) ($($downloaded.Length) bytes)"
           } else {
@@ -56,26 +52,25 @@ jobs:
             --clientId ${{ secrets.AZURE_CLIENT_ID }} `
             --clientSecret ${{ secrets.AZURE_CLIENT_SECRET }}
 
-      - name: List bundle directory contents
+      - name: List working directory contents
         shell: pwsh
         run: |
-          Write-Host "Contents of bundle directory:"
-          Get-ChildItem -Path bundle -Recurse | ForEach-Object { Write-Host "  $($_.FullName) - $($_.Length) bytes" }
+          Write-Host "Contents of working directory:"
+          Get-ChildItem -Recurse | ForEach-Object { Write-Host "  $($_.FullName) - $($_.Length) bytes" }
 
       - name: Publish to Microsoft Store
         shell: pwsh
         run: |
           $version = "${{ github.event.inputs.version }}"
-          $bundleDir = Resolve-Path "bundle"
-          $bundleFile = Get-ChildItem -Path $bundleDir -Filter "*.msixbundle" | Select-Object -First 1
+          $workDir = Get-Location
+          $bundleFile = Get-ChildItem -Filter "*.msixbundle" | Select-Object -First 1
 
           if (-not $bundleFile) {
-            throw "No msixbundle file found in bundle directory!"
+            throw "No msixbundle file found!"
           }
 
-          Write-Host "Bundle directory: $bundleDir"
+          Write-Host "Working directory: $workDir"
           Write-Host "Bundle file: $($bundleFile.FullName)"
-          Write-Host "Working directory: $(Get-Location)"
 
-          # -i expects a directory containing the msix/msixbundle (use absolute path)
-          msstore publish -i "$bundleDir" -id 9NJ59RH053PV -v
+          # Run from the directory containing only the msixbundle (no package.json to confuse CLI)
+          msstore publish -i "$workDir" -id 9NJ59RH053PV -v
