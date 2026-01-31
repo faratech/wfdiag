@@ -2,6 +2,22 @@ use std::collections::HashMap;
 use std::process::Command;
 use anyhow::Result;
 
+/// Decode Windows command output from OEM code page to UTF-8
+///
+/// Windows command-line tools (dism, verifier, etc.) output text in the OEM code page,
+/// which is typically Windows-1252 or similar on Western systems. This function:
+/// 1. First tries to decode as UTF-8 (for modern commands)
+/// 2. Falls back to Windows-1252 for OEM code page output
+#[cfg(windows)]
+pub fn decode_windows_output(bytes: &[u8]) -> String {
+    // Try UTF-8 first (modern tools may output UTF-8)
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    // Fall back to Windows-1252 for OEM code page output
+    encoding_rs::WINDOWS_1252.decode(bytes).0.into_owned()
+}
+
 /// Secure command execution with strict whitelisting
 pub struct SecureCommandExecutor {
     allowed_commands: HashMap<String, CommandConfig>,
