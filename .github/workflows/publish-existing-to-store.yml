@@ -62,15 +62,13 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.event.inputs.version }}"
-          $workDir = Get-Location
           $bundleFile = Get-ChildItem -Filter "*.msixbundle" | Select-Object -First 1
 
           if (-not $bundleFile) {
             throw "No msixbundle file found!"
           }
 
-          Write-Host "Working directory: $workDir"
           Write-Host "Bundle file: $($bundleFile.FullName)"
 
-          # Run from the directory containing only the msixbundle (no package.json to confuse CLI)
-          msstore publish -i "$workDir" -id 9NJ59RH053PV -v
+          # Pass the msixbundle file path directly (not directory)
+          msstore publish -i "$($bundleFile.FullName)" -id 9NJ59RH053PV -v
