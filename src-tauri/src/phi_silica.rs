@@ -715,13 +715,29 @@ pub async fn ensure_phi_silica() -> Result<String, String> {
 #[tauri::command]
 #[cfg(windows)]
 pub async fn check_phi_silica_updates() -> Result<String, String> {
-    use std::process::Command;
+    use std::ptr;
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-    // Open Windows Update settings
-    Command::new("cmd")
-        .args(["/c", "start", "ms-settings:windowsupdate"])
-        .spawn()
-        .map_err(|e| format!("Failed to open Windows Update: {}", e))?;
+    let uri = HSTRING::from("ms-settings:windowsupdate");
+    let open = HSTRING::from("open");
+
+    unsafe {
+        let result = ShellExecuteW(
+            None,
+            PCWSTR(open.as_ptr()),
+            PCWSTR(uri.as_ptr()),
+            PCWSTR(ptr::null()),
+            PCWSTR(ptr::null()),
+            SW_SHOWNORMAL,
+        );
+
+        // ShellExecuteW returns a value > 32 on success
+        if result.0 as i32 <= 32 {
+            return Err(format!("Failed to open Windows Update: error code {}", result.0 as i32));
+        }
+    }
 
     Ok("Opening Windows Update. Check for updates to install Phi Silica component.".to_string())
 }

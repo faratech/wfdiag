@@ -1672,11 +1672,34 @@ fn detect_npu_dxcore() -> Option<(String, u32)> {
 
     // Known non-NPU device names to filter out
     const EXCLUDED_NAMES: &[&str] = &[
+        // Virtual/emulated devices
         "umbus",
         "enumerator",
         "virtual",
         "microsoft basic",
         "remote desktop",
+        // USB/HID/Input devices (Issue #10)
+        "usb",
+        "hid",
+        "input device",
+        "keyboard",
+        "mouse",
+        "touchpad",
+        "touchscreen",
+        "gamepad",
+        "joystick",
+        "controller",
+        // Storage/Network (sometimes have compute caps)
+        "storage",
+        "ahci",
+        "nvme controller",
+        "sata",
+        "raid",
+        "ethernet",
+        "wifi",
+        "wireless",
+        "network adapter",
+        "bluetooth",
     ];
 
     // Known NPU identifiers
@@ -1745,12 +1768,18 @@ fn detect_npu_dxcore() -> Option<(String, u32)> {
             }
 
             // Check if it's an NPU by:
-            // 1. Has CORE_COMPUTE but NOT GRAPHICS (definite NPU)
-            // 2. OR name contains NPU identifiers
-            let is_npu_by_caps = has_compute && !has_graphics;
+            // 1. Name contains NPU identifiers (highest confidence)
+            // 2. OR has CORE_COMPUTE but NOT GRAPHICS AND is from a known NPU vendor
             let is_npu_by_name = NPU_IDENTIFIERS.iter().any(|id| name_lower.contains(id));
+            let is_npu_by_caps = has_compute && !has_graphics;
 
-            if is_npu_by_caps || is_npu_by_name {
+            // Require known vendor match for capability-only detection to avoid false positives (Issue #10)
+            let is_known_npu_vendor = name_lower.contains("qualcomm")
+                || name_lower.contains("intel")
+                || name_lower.contains("amd")
+                || name_lower.contains("microsoft");
+
+            if is_npu_by_name || (is_npu_by_caps && is_known_npu_vendor) {
                 return Some((name, 1));
             }
         }

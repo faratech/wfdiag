@@ -22,7 +22,7 @@
                                }
                },
     "productName":  "WindowsForum Diagnostics",
-    "version": "2.1.9",
+    "version": "2.2.0",
     "identifier":  "com.windowsforum.diagnostics",
     "plugins":  {
 

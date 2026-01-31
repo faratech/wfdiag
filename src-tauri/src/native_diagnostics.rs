@@ -536,8 +536,8 @@ impl NativeDiagnostics {
         let output = Self::execute_secure_command("dism", &["/online", "/cleanup-image", "/checkhealth"])?;
         
         if output.status.success() {
-            let output_str = String::from_utf8_lossy(&output.stdout);
-            
+            let output_str = crate::security::decode_windows_output(&output.stdout);
+
             // Parse DISM output
             let mut health_info = json!({
                 "raw_output": output_str.to_string(),
@@ -565,9 +565,9 @@ impl NativeDiagnostics {
                 
             if let Ok(scan) = scan_output
                 && scan.status.success() {
-                    let scan_str = String::from_utf8_lossy(&scan.stdout);
-                    health_info["scan_output"] = json!(scan_str.to_string());
-                    
+                    let scan_str = crate::security::decode_windows_output(&scan.stdout);
+                    health_info["scan_output"] = json!(scan_str.clone());
+
                     // Extract percentage if available
                     if let Some(percent_pos) = scan_str.find("The component store is") {
                         let relevant_text = &scan_str[percent_pos..];
@@ -579,14 +579,14 @@ impl NativeDiagnostics {
             
             Ok(health_info)
         } else {
-            let error_str = String::from_utf8_lossy(&output.stderr);
-            
+            let error_str = crate::security::decode_windows_output(&output.stderr);
+
             // Check if it's an elevation error
             if error_str.contains("Error: 740") || error_str.contains("elevation required") {
                 Ok(json!({
                     "error": "DISM requires administrator privileges",
                     "suggestion": "Please run as administrator to check Windows image health",
-                    "raw_error": error_str.to_string()
+                    "raw_error": error_str.clone()
                 }))
             } else {
                 Err(anyhow::anyhow!("DISM health check failed: {}", error_str))
@@ -1410,7 +1410,7 @@ impl NativeDiagnostics {
         let output = Self::execute_secure_command("verifier", &["/querysettings"])?;
 
         if output.status.success() {
-            let output_str = String::from_utf8_lossy(&output.stdout);
+            let output_str = crate::security::decode_windows_output(&output.stdout);
 
             // Parse verifier flags
             let mut verifier_flags: u32 = 0;
@@ -1469,16 +1469,15 @@ impl NativeDiagnostics {
             }))
         } else {
             // Verifier might require admin privileges
+            let error_str = crate::security::decode_windows_output(&output.stderr);
             Ok(json!({
                 "enabled": false,
                 "status": "Unable to query",
                 "error": "Failed to query driver verifier settings. Administrator privileges may be required.",
-                "raw_error": String::from_utf8_lossy(&output.stderr).to_string()
+                "raw_error": error_str
             }))
         }
     }
-
-
 
     /// Secure command execution with validation
     fn execute_secure_command(program: &str, args: &[&str]) -> Result<std::process::Output> {
