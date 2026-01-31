@@ -343,55 +343,23 @@ jobs:
           path: msix-build/*.msixbundle
 
   # =============================================================================
-  # Publish to Microsoft Store
+  # Publish to Microsoft Store (triggers separate workflow after release)
   # =============================================================================
   publish-to-store:
-    needs: [build-x64, create-msix-bundle]
-    runs-on: windows-latest
-    if: needs.build-x64.outputs.publish_to_store == 'true'
+    needs: [build-x64, create-release]
+    runs-on: ubuntu-latest
+    if: needs.build-x64.outputs.publish_to_store == 'true' && needs.create-release.result == 'success'
     steps:
-      # Don't checkout source code - msstore CLI auto-detects package.json
-      # as Electron project and ignores the -i input directory
-      - name: Download bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: msixbundle-unsigned
-          # Download directly to working directory, not a subdirectory
-          path: .
-
-      - name: Setup Microsoft Store CLI
-        uses: microsoft/setup-msstore-cli@v1
-
-      - name: Configure Store credentials
-        shell: pwsh
+      - name: Trigger Store publish workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          msstore reconfigure `
-            --tenantId ${{ secrets.AZURE_TENANT_ID }} `
-            --sellerId ${{ secrets.STORE_SELLER_ID }} `
-            --clientId ${{ secrets.AZURE_CLIENT_ID }} `
-            --clientSecret ${{ secrets.AZURE_CLIENT_SECRET }}
-
-      - name: List working directory contents
-        shell: pwsh
-        run: |
-          Write-Host "Contents of working directory:"
-          Get-ChildItem -Recurse | ForEach-Object { Write-Host "  $($_.FullName) - $($_.Length) bytes" }
-
-      - name: Publish to Microsoft Store
-        shell: pwsh
-        run: |
-          $version = "${{ needs.build-x64.outputs.version }}"
-          $bundleFile = Get-ChildItem -Filter "*.msixbundle" | Select-Object -First 1
-
-          if (-not $bundleFile) {
-            throw "No msixbundle file found!"
-          }
-
-          Write-Host "Bundle file: $($bundleFile.FullName)"
-
-          # Use the bundle file as the positional argument (pathOrUrl)
-          # The --appId flag specifies the Store app ID to bypass project detection
-          msstore publish "$($bundleFile.FullName)" --appId 9NJ59RH053PV --verbose
+          VERSION="${{ needs.build-x64.outputs.version }}"
+          echo "Triggering publish-existing-to-store workflow for v$VERSION..."
+          gh workflow run publish-existing-to-store.yml \
+            --repo ${{ github.repository }} \
+            -f version="$VERSION"
+          echo "Store publish workflow triggered successfully"
 
   # =============================================================================
   # Generate Attestations for all artifacts
