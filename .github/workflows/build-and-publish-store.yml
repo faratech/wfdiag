@@ -389,8 +389,9 @@ jobs:
 
           Write-Host "Bundle file: $($bundleFile.FullName)"
 
-          # Pass the msixbundle file path directly (not directory)
-          msstore publish -i "$($bundleFile.FullName)" -id 9NJ59RH053PV -v
+          # Use the bundle file as the positional argument (pathOrUrl)
+          # The --appId flag specifies the Store app ID to bypass project detection
+          msstore publish "$($bundleFile.FullName)" --appId 9NJ59RH053PV --verbose
 
   # =============================================================================
   # Generate Attestations for all artifacts
