@@ -3,7 +3,8 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::responses::{
-        CreateResponseArgs, InputParam, FunctionToolArgs,
+        CreateResponseArgs, InputParam, FunctionToolArgs, Tool,
+        OutputItem, InputItem, Item, FunctionCallOutputItemParam, FunctionCallOutput,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -168,13 +169,9 @@ pub async fn analyze_system_with_ai(
         return Err(DiagError::api_key("validate", "OpenAI API key is empty. Please enter your API key in Settings.").into());
     }
 
-    // Log key prefix for debugging (masked)
-    let key_preview = if api_key.len() > 8 {
-        format!("{}...{}", &api_key[..4], &api_key[api_key.len() - 4..])
-    } else {
-        "****".to_string()
-    };
-    println!("Using API key: {}", key_preview);
+    // Never echo any characters of the API key. In debug builds, log only its presence.
+    #[cfg(debug_assertions)]
+    eprintln!("OpenAI API key present (len={})", api_key.len());
 
     // Create the OpenAI client
     let config = OpenAIConfig::new().with_api_key(api_key);
@@ -246,12 +243,15 @@ FORMATTING:
 REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAGNOSTICS IMMEDIATELY.",
         task_list.iter().map(|t| format!("- {}: {}", t["name"], t["description"])).collect::<Vec<_>>().join("\n"));
 
+    // Reusable tool set (cloned into each turn of the tool-calling loop below).
+    let tools: Vec<Tool> = vec![diagnostic_tool.into()];
+
     // Create request with tools
     let request = CreateResponseArgs::default()
         .model(OPENAI_MODEL)
-        .instructions(instructions)
+        .instructions(instructions.clone())
         .input(InputParam::Text(prompt.clone()))
-        .tools(vec![diagnostic_tool.into()])
+        .tools(tools.clone())
         .build()
         .map_err(|e| format!("Failed to build request: {}", e))?;
 
@@ -261,7 +261,7 @@ REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAG
         available_tasks.iter().map(|t| &t.id).collect::<Vec<_>>()
     );
 
-    let response = client.responses().create(request).await.map_err(|e| {
+    let mut response = client.responses().create(request).await.map_err(|e| {
         eprintln!("OpenAI API error details: {:?}", e);
         let error_msg = format!("{:?}", e);
         if error_msg.contains("401") || error_msg.contains("Unauthorized") {
@@ -287,46 +287,79 @@ REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAG
     let mut diagnostics_run = Vec::new();
     let mut diagnostic_results = HashMap::new();
 
-    // Check for function calls in the output
-    for item in response.output.iter() {
-        if let async_openai::types::responses::OutputItem::FunctionCall(func_call) = item {
-            // Parse the arguments JSON string
-            let args: Value = serde_json::from_str(&func_call.arguments)
-                .unwrap_or_else(|_| json!({}));
+    // Tool-calling loop: the model responds with function calls, we execute the requested
+    // diagnostics, feed their outputs back via a follow-up request, and let the model
+    // produce its FINAL analysis. Without this second turn, `analysis` would be whatever
+    // (usually empty) text the model emitted BEFORE it ever saw any diagnostic data.
+    const MAX_TOOL_ITERATIONS: usize = 5;
+    for _ in 0..MAX_TOOL_ITERATIONS {
+        // Collect and execute the function calls in this turn, building the tool outputs
+        // to send back, each keyed by the model's call_id.
+        let mut tool_outputs: Vec<InputItem> = Vec::new();
+        for item in response.output.iter() {
+            if let OutputItem::FunctionCall(func_call) = item {
+                let args: Value = serde_json::from_str(&func_call.arguments)
+                    .unwrap_or_else(|_| json!({}));
+                let task_id = args.get("task_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if task_id.is_empty() {
+                    continue;
+                }
 
-            let task_id = args.get("task_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-
-            if !task_id.is_empty() {
                 diagnostics_run.push(task_id.to_string());
-
-                // Run the diagnostic
                 let result = match crate::diagnostics::run_diagnostic_task_sync(task_id) {
-                    Ok(task_result) => {
-                        json!({
-                            "task_id": task_id,
-                            "status": "completed",
-                            "output": task_result.output,
-                            "error": task_result.error,
-                            "success": task_result.error.is_none()
-                        })
-                    }
-                    Err(e) => {
-                        json!({
-                            "task_id": task_id,
-                            "status": "failed",
-                            "error": format!("Failed to run diagnostic: {}", e),
-                            "success": false
-                        })
-                    }
+                    Ok(task_result) => json!({
+                        "task_id": task_id,
+                        "status": "completed",
+                        "output": task_result.output,
+                        "error": task_result.error,
+                        "success": task_result.error.is_none()
+                    }),
+                    Err(e) => json!({
+                        "task_id": task_id,
+                        "status": "failed",
+                        "error": format!("Failed to run diagnostic: {}", e),
+                        "success": false
+                    }),
                 };
+
+                tool_outputs.push(InputItem::Item(Item::FunctionCallOutput(
+                    FunctionCallOutputItemParam {
+                        call_id: func_call.call_id.clone(),
+                        output: FunctionCallOutput::Text(result.to_string()),
+                        id: None,
+                        status: None,
+                    },
+                )));
                 diagnostic_results.insert(task_id.to_string(), result);
             }
         }
+
+        // No tool calls this turn → the model has produced its final text answer.
+        if tool_outputs.is_empty() {
+            break;
+        }
+
+        // Send the diagnostic results back (chained via previous_response_id) and ask the
+        // model to continue. Re-pass instructions/tools since they don't carry over.
+        let follow_up = CreateResponseArgs::default()
+            .model(OPENAI_MODEL)
+            .instructions(instructions.clone())
+            .previous_response_id(response.id.clone())
+            .input(InputParam::Items(tool_outputs))
+            .tools(tools.clone())
+            .build()
+            .map_err(|e| format!("Failed to build follow-up request: {}", e))?;
+
+        response = client
+            .responses()
+            .create(follow_up)
+            .await
+            .map_err(|e| format!("OpenAI API error on follow-up request: {:?}", e))?;
     }
 
-    // Get the text analysis
+    // Now that the model has seen the diagnostic results, take its final text analysis.
     let analysis = response.output_text().unwrap_or_default();
     let (findings, recommendations) = parse_analysis(&analysis);
 

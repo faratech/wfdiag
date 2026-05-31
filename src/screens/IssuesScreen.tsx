@@ -1,8 +1,11 @@
-import React from 'react'
+import React, { useState, useEffect } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useAppContext } from '../contexts/AppContext'
 import { useDiagnostics } from '../hooks/useDiagnostics'
 import { useToast } from '../contexts/ToastContext'
+import * as logger from '../utils/logger'
+
+interface FixResult { success: boolean; message?: string }
 
 const sevClass = (s: string) =>
   ({ critical: 'critical', warning: 'warning', info: 'info', ok: 'ok' } as Record<string, string>)[s.toLowerCase()] || 'info'
@@ -10,7 +13,16 @@ const sevClass = (s: string) =>
 export const IssuesScreen: React.FC = () => {
   const { issues, fixingIssue, setFixingIssue } = useAppContext()
   const { detectIssues, restartAsAdmin } = useDiagnostics()
-  const { showSuccess, showError } = useToast()
+  const { showInfo, showWarning, showError } = useToast()
+
+  // IDs the backend can actually fix — used to gate the "Fix" button so it never appears
+  // for issues with no fixer (which would silently no-op while showing a false success).
+  const [fixableIds, setFixableIds] = useState<string[]>([])
+  useEffect(() => {
+    invoke<string[]>('get_fixable_issue_ids')
+      .then(setFixableIds)
+      .catch(error => logger.error('IssuesScreen', 'Failed to load fixable issue ids', error))
+  }, [])
 
   const detected = issues.filter(i => i.detected)
   const critical = issues.filter(i => i.severity.toLowerCase() === 'critical').length
@@ -18,12 +30,31 @@ export const IssuesScreen: React.FC = () => {
 
   const handleFix = async (id: string) => {
     setFixingIssue(id)
+
+    let result: FixResult
     try {
-      await invoke('fix_issue', { issueId: id })
-      showSuccess('Fix applied', 'Re-running issue detection…')
+      result = await invoke<FixResult>('fix_issue', { issueId: id })
+    } catch (e) {
+      logger.error('IssuesScreen', 'Failed to fix issue', e)
+      showError('Fix failed', e instanceof Error ? e.message : String(e))
+      setFixingIssue(null)
+      return
+    }
+
+    if (!result.success) {
+      // Surface the failure instead of falsely reporting success (the old behavior).
+      showWarning('No automated fix', result.message || 'This issue cannot be fixed automatically.')
+      setFixingIssue(null)
+      return
+    }
+
+    // Fix launched. Most detectors re-read the stored scan snapshot rather than live state,
+    // so advise a re-scan; keep the spinner until re-detection completes.
+    showInfo('Fix applied', result.message || 'Re-run a diagnostic scan to verify the issue is resolved.')
+    try {
       await detectIssues()
     } catch (e) {
-      showError('Fix failed', String(e))
+      logger.error('IssuesScreen', 'Failed to detect issues', e)
     } finally {
       setFixingIssue(null)
     }
@@ -83,15 +114,15 @@ export const IssuesScreen: React.FC = () => {
                 )}
               </div>
               <div className="actions">
-                {issue.id ? (
+                {issue.id && fixableIds.includes(issue.id) ? (
                   <button className="btn primary" disabled={fixingIssue === issue.id} onClick={() => handleFix(issue.id!)}>
                     {fixingIssue === issue.id
                       ? <><i className="fa-solid fa-spinner fa-spin" /> Fixing…</>
                       : <><i className="fa-solid fa-wand-magic-sparkles" /> Fix</>}
                   </button>
-                ) : (
+                ) : !issue.id ? (
                   <button className="btn" onClick={() => restartAsAdmin()}><i className="fa-solid fa-shield-halved" /> Restart as Admin</button>
-                )}
+                ) : null}
               </div>
             </div>
           )

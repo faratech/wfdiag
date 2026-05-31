@@ -253,39 +253,15 @@ impl ScanStorage {
                         status_unchanged.push(change);
                     }
                 }
-                (Some(current), None) => {
-                    // Task only in current scan
-                    let change = TaskChange {
-                        task_id: task_id.clone(),
-                        task_name,
-                        category,
-                        current_success: current.success,
-                        previous_success: false, // Didn't exist
-                        current_output: current.output.clone(),
-                        previous_output: "Task not run".to_string(),
-                        output_changed: true,
-                    };
-                    
-                    if current.success {
-                        new_successes.push(change);
-                    } else {
-                        new_failures.push(change);
-                    }
-                }
-                (None, Some(previous)) => {
-                    // Task only in previous scan
-                    let change = TaskChange {
-                        task_id: task_id.clone(),
-                        task_name,
-                        category,
-                        current_success: false, // Doesn't exist
-                        previous_success: previous.success,
-                        current_output: "Task not run".to_string(),
-                        previous_output: previous.output.clone(),
-                        output_changed: true,
-                    };
-                    
-                    new_failures.push(change);
+                (Some(_), None) | (None, Some(_)) => {
+                    // Task present in only ONE scan (different task selections between
+                    // runs — e.g. a full scan vs a partial scan). There is no before/after
+                    // to compare, so this is not a status transition. Previously the
+                    // (None, Some) case pushed EVERY not-re-run task into `new_failures`
+                    // with current_success=false, raising a false "these just broke" alarm
+                    // and inflating total_changes. Skip non-intersection tasks entirely.
+                    let _ = (task_name, category);
+                    continue;
                 }
                 (None, None) => {
                     // This shouldn't happen due to how we build the set

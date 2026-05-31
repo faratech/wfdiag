@@ -338,8 +338,15 @@ impl IssueDetector {
             && result.success
                 && let Ok(firewalls) = serde_json::from_str::<Vec<serde_json::Value>>(&result.output) {
                     for firewall in &firewalls {
-                        if let Some(product_state) = firewall["productState"].as_u64()
-                            && product_state == 262144 {
+                        // Windows Security Center productState is a packed bitfield, NOT a
+                        // single enum value. The enabled/disabled state is the second byte
+                        // (bits 8-15): the 0x10 bit set => ON; 0x00/0x01 => OFF. The old
+                        // `== 262144` exact match missed most real disabled states (which
+                        // vary by provider and Windows version).
+                        if let Some(product_state) = firewall["productState"].as_u64() {
+                            let enabled_byte = (product_state >> 8) & 0xFF;
+                            let firewall_on = (enabled_byte & 0x10) != 0;
+                            if !firewall_on {
                                 return Issue {
                                     id: "firewall_disabled".to_string(),
                                     category: "Security".to_string(),
@@ -350,6 +357,7 @@ impl IssueDetector {
                                     detected: true,
                                 };
                             }
+                        }
                     }
                 }
         Issue {

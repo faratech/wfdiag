@@ -51,14 +51,16 @@ export function formatUptime(seconds: number): string {
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`
 
-  const seconds = Math.floor(ms / 1000)
-  if (seconds < 60) {
-    const decimal = (ms % 1000) / 1000
-    return `${(seconds + decimal).toFixed(1)}s`
+  // Round to deciseconds BEFORE choosing the branch, so a value that rounds up to 60.0s
+  // rolls into the minutes branch ("1m 0s") instead of displaying "60.0s".
+  const deciseconds = Math.round(ms / 100)
+  if (deciseconds < 600) {
+    return `${(deciseconds / 10).toFixed(1)}s`
   }
 
-  const mins = Math.floor(seconds / 60)
-  const remainingSecs = seconds % 60
+  const totalSecs = Math.round(deciseconds / 10)
+  const mins = Math.floor(totalSecs / 60)
+  const remainingSecs = totalSecs % 60
   return `${mins}m ${remainingSecs}s`
 }
 

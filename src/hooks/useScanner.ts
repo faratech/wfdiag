@@ -4,6 +4,12 @@ import { listen } from '@tauri-apps/api/event'
 import { useAppContext, type TaskResult } from '../contexts/AppContext'
 import * as logger from '../utils/logger'
 
+// Module-level guard shared across ALL useScanner instances. App.tsx (startup scan) and
+// DiagnosticsTab.tsx (manual scan) each call useScanner() independently, so a per-instance
+// ref cannot block a scan started by the other instance. This synchronous flag closes that
+// cross-instance race (they share session/results via context).
+let scanInProgress = false
+
 export const useScanner = () => {
   const {
     availableTasks,
@@ -16,7 +22,6 @@ export const useScanner = () => {
     setIsRunning,
     setCurrentProgress,
     setCurrentTaskName,
-    scanStartTime,
     setScanStartTime,
     setScanEndTime,
     settings,
@@ -41,8 +46,8 @@ export const useScanner = () => {
   const runDiagnostics = useCallback(async (taskIds: string[]) => {
     if (taskIds.length === 0) return
 
-    // Prevent concurrent scans - race condition guard
-    if (isRunningRef.current) {
+    // Prevent concurrent scans - race condition guard (per-instance AND cross-instance)
+    if (isRunningRef.current || scanInProgress) {
       logger.warn('useScanner', 'Scan already in progress, ignoring new scan request')
       return
     }
@@ -51,10 +56,15 @@ export const useScanner = () => {
     clearAutoSaveTimeout()
 
     isRunningRef.current = true
+    scanInProgress = true
     setIsRunning(true)
     setCurrentProgress(0)
     setResults({})
-    setScanStartTime(Date.now())
+    // Capture the start time in a local so the auto-save timeout below uses THIS scan's
+    // start, not the stale `scanStartTime` from a prior render's closure (which made the
+    // first scan's duration ~the full epoch and later scans include all idle time).
+    const startedAt = Date.now()
+    setScanStartTime(startedAt)
     setScanEndTime(0) // Reset end time for new scan
 
     let unlisten: (() => void) | null = null
@@ -92,7 +102,8 @@ export const useScanner = () => {
       try {
         const scanResults = await invoke<Array<[string, TaskResult]>>('run_diagnostics_parallel', {
           taskIds,
-          maxConcurrent: settings.maxConcurrentTasks || 5
+          maxConcurrent: settings.maxConcurrentTasks || 5,
+          sessionId: newSessionId
         })
 
         // Verify this is still the current session before updating results
@@ -126,7 +137,7 @@ export const useScanner = () => {
             return
           }
 
-          const scanDuration = Date.now() - scanStartTime
+          const scanDuration = Date.now() - startedAt
           try {
             const savedScanId = await invoke<string>('save_current_scan', {
               durationMs: scanDuration,
@@ -138,6 +149,8 @@ export const useScanner = () => {
           } finally {
             // Clear the ref since timeout completed
             autoSaveTimeoutRef.current = null
+            // Always release the cross-instance lock when the scan's auto-save finishes.
+            scanInProgress = false
 
             // Only update state if this is still the current session
             if (currentSessionRef.current === newSessionId) {
@@ -150,6 +163,7 @@ export const useScanner = () => {
       } else {
         setScanEndTime(Date.now())
         isRunningRef.current = false
+        scanInProgress = false
         setIsRunning(false)
       }
     } catch (error) {
@@ -165,12 +179,12 @@ export const useScanner = () => {
 
       setScanEndTime(Date.now())
       isRunningRef.current = false
+      scanInProgress = false
       setIsRunning(false)
       currentSessionRef.current = null
     }
   }, [
     availableTasks.length,
-    scanStartTime,
     setCurrentProgress,
     setCurrentTaskName,
     setIsRunning,
