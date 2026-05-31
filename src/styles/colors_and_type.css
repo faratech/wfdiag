@@ -1,0 +1,274 @@
+/* =============================================================
+   WindowsForum.com — Design Tokens
+   Light + Dark/OLED in strict 1:1 parity.
+   Source: source/DESIGN.md, source/tokens.css, source/design-tokens.json
+   (XenForo style "windowsForum v3", style_id 40)
+   ============================================================= */
+
+/* -------- Font face: Inter as Segoe UI substitute on web -------- */
+/* Inter is the Google Fonts substitute when Segoe UI isn't available.
+   Imported in HTML via <link rel="stylesheet">; weights 300/400/500/700. */
+
+:root {
+  /* ============ Brand palette ============ */
+  --wf-paletteAccent1: #115ea3;       /* darker brand blue, used for CTA + accents */
+  --wf-paletteColor1:  #0f6cbd;       /* dominant brand blue — header, primary buttons, links */
+  --wf-paletteColor2:  #0078d4;       /* secondary interactive blue */
+  --wf-paletteColor3:  #07426f;       /* deep navy — pressed / emphasis */
+  --wf-paletteColor4:  #ebebeb;       /* hairline border / divider */
+  --wf-paletteColor5:  #f8fafb;       /* alt surface — block headers, subtle fills */
+
+  --wf-paletteNeutral1: #ffffff;      /* primary surface */
+  --wf-paletteNeutral2: #5f6060;      /* muted text */
+  --wf-paletteNeutral3: #1a1b1b;      /* primary text */
+
+  /* ============ Semantic — surface ============ */
+  --wf-page-bg:            #eff5f6;   /* outer page (behind frosted panel) */
+  --wf-content-bg:         #ffffff;   /* primary content surface */
+  --wf-content-alt-bg:     #f8fafb;   /* alt surface (table-row bands, block headers) */
+  --wf-content-accent-bg:  #115ea3;   /* deep brand accent fill */
+  --wf-content-highlight:  #0f6cbd;   /* highlighted region fill */
+  --wf-frosted-bg:         rgba(255,255,255,0.85);  /* translucent panel over wallpaper */
+  --wf-frosted-bg-strong:  rgba(255,255,255,0.92);
+
+  /* ============ Semantic — text ============ */
+  --wf-text:                #1a1b1b;
+  --wf-text-muted:          #5f6060;
+  --wf-text-dimmed:         #1a1b1b;
+  --wf-text-on-accent:      #fefefe;
+  --wf-text-feature:        #0f6cbd;     /* feature/emphasis text */
+  --wf-link:                #1a1b1b;
+  --wf-link-hover:          #0f6cbd;
+  --wf-link-ugc:            #0f6cbd;     /* user-generated content links */
+  --wf-link-ugc-hover:      #115ea3;
+
+  /* ============ Semantic — borders ============ */
+  --wf-border:              #ebebeb;
+  --wf-border-heavy:        #ebebeb;
+  --wf-border-feature:      #0f6cbd;
+  --wf-border-highlight:    #0f6cbd;
+  --wf-border-accent:       #115ea3;
+
+  /* ============ Semantic — chrome / header ============ */
+  --wf-chrome-bg:           #0f6cbd;     /* top navigation header */
+  --wf-chrome-text:         #fefefe;
+  --wf-meta-theme-color:    #0f6cbd;     /* matches manifest theme_color */
+
+  /* ============ Semantic — buttons ============ */
+  --wf-button-bg:           #ffffff;
+  --wf-button-text:         #1a1b1b;
+  --wf-button-primary-bg:   #0f6cbd;
+  --wf-button-primary-text: #fefefe;
+  --wf-button-cta-bg:       #115ea3;
+  --wf-button-cta-text:     #fefefe;
+  --wf-button-hover:        #0c5aa0;     /* darker for hover */
+  --wf-button-pressed:      #07426f;     /* deep navy on press */
+
+  /* ============ Semantic — inputs ============ */
+  --wf-input-bg:            #ffffff;
+  --wf-input-focus-bg:      #ffffff;
+  --wf-input-border:        #ebebeb;
+  --wf-input-focus-border:  #0f6cbd;
+
+  /* ============ Semantic — selection / active ============ */
+  --wf-selected-bg:         #115ea3;
+  --wf-selected-border:     #115ea3;
+  --wf-selected-text:       #fefefe;
+
+  /* ============ Semantic — status colors ============ */
+  --wf-error-bg:            #fff5f8;
+  --wf-error:               #f1416c;
+  --wf-error-feature:       #d9214e;
+
+  --wf-success-bg:          #e8fff3;
+  --wf-success:             #50cd89;
+  --wf-success-feature:     #47be7d;
+
+  --wf-warning-bg:          #fff8dd;
+  --wf-warning:             #ffc700;
+  --wf-warning-feature:     #f1bc00;
+  --wf-warning-5xx:         #e65100;     /* amber accent reserved for 5xx error pages */
+
+  --wf-star-empty:          #ebebeb;
+  --wf-star-full:            #f9c479;
+
+  /* ============ Typography ============ */
+  --wf-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Segoe UI Variable", Roboto, "Helvetica Neue", Arial, "Inter", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+  --wf-font-mono: Consolas, "Lucida Console", ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+
+  /* 7-step type scale (px) */
+  --wf-fs-smallest: 11px;
+  --wf-fs-smaller:  12px;
+  --wf-fs-small:    13px;
+  --wf-fs-normal:   15px;       /* body default */
+  --wf-fs-large:    17px;
+  --wf-fs-larger:   20px;       /* block-header */
+  --wf-fs-largest:  24px;       /* page title */
+
+  --wf-fw-light:    300;
+  --wf-fw-normal:   400;
+  --wf-fw-medium:   500;        /* slight extension for UI affordances */
+  --wf-fw-heavy:    700;
+
+  --wf-lh-tight:   1.25;
+  --wf-lh-normal:  1.45;
+  --wf-lh-relaxed: 1.6;
+
+  /* ============ Layout ============ */
+  --wf-page-width-max:        1580px;
+  --wf-sidebar-width:         280px;
+  --wf-sidebar-spacer:        30px;
+  --wf-nav-collapse-width:    1190px;
+  --wf-message-user-width:    150px;
+
+  /* Padding scale */
+  --wf-pad-small:    3px;
+  --wf-pad-medium:   6px;
+  --wf-pad-large:    10px;
+  --wf-pad-largest: 15px;
+
+  /* ============ Radius ============ */
+  --wf-radius-block:  8px;      /* cards, blocks, primary buttons */
+  --wf-radius-menu:   4px;      /* menus, dropdowns, error-detail boxes */
+  --wf-radius-pill:   999px;    /* badges, prefixes */
+
+  /* ============ Elevation — signature Fluent two-layer shadow ============ */
+  --wf-shadow-block:
+    rgba(0,0,0,0.132) 0 1.6px 3.6px 0,
+    rgba(0,0,0,0.11)  0 0.3px 0.9px 0;
+  --wf-shadow-menu:
+    rgba(0,0,0,0.18) 0 4px 12px 0,
+    rgba(0,0,0,0.10) 0 1px 3px 0;
+  --wf-shadow-focus-ring: 0 0 0 2px rgba(15,108,189,0.35);
+
+  /* ============ Wallpaper backdrop ============ */
+  --wf-wallpaper: url("/wf-ds/bg-24H4_50.webp");
+}
+
+/* ============================================================
+   Dark / OLED theme — strict 1:1 parity
+   Activated via prefers-color-scheme OR html.is-dark / html.dk
+   ============================================================ */
+@media (prefers-color-scheme: dark) {
+  :root:not(.is-light) {
+    --wf-paletteColor4:    #272729;
+    --wf-paletteColor5:    #383a3a;
+    --wf-paletteNeutral1:  #292929;
+    --wf-paletteNeutral2:  #cfcfcf;
+    --wf-paletteNeutral3:  #ffffff;
+
+    --wf-page-bg:          #1f2021;     /* OLED outer (allows pure-black accents nearby) */
+    --wf-content-bg:       #292929;
+    --wf-content-alt-bg:   #383a3a;
+    --wf-frosted-bg:        rgba(41,41,41,0.85);
+    --wf-frosted-bg-strong: rgba(41,41,41,0.92);
+
+    --wf-text:             #ffffff;
+    --wf-text-muted:       #cfcfcf;
+    --wf-text-dimmed:      #ffffff;
+    --wf-link:             #ffffff;
+
+    --wf-border:           #272729;
+    --wf-border-heavy:     #272729;
+
+    --wf-button-bg:        #292929;
+    --wf-button-text:      #ffffff;
+
+    --wf-input-bg:         #292929;
+    --wf-input-focus-bg:   #292929;
+    --wf-input-border:     #272729;
+
+    --wf-star-empty:       #272729;
+
+    --wf-wallpaper: url("/wf-ds/bg-24H4-oled_50.webp");
+  }
+}
+
+/* Manual dark override (matches the error pages' .is-dark / .dk pattern) */
+html.is-dark,
+html.dk {
+  --wf-paletteColor4:    #272729;
+  --wf-paletteColor5:    #383a3a;
+  --wf-paletteNeutral1:  #292929;
+  --wf-paletteNeutral2:  #cfcfcf;
+  --wf-paletteNeutral3:  #ffffff;
+
+  --wf-page-bg:          #1f2021;
+  --wf-content-bg:       #292929;
+  --wf-content-alt-bg:   #383a3a;
+  --wf-frosted-bg:        rgba(41,41,41,0.85);
+  --wf-frosted-bg-strong: rgba(41,41,41,0.92);
+
+  --wf-text:             #ffffff;
+  --wf-text-muted:       #cfcfcf;
+  --wf-text-dimmed:      #ffffff;
+  --wf-link:             #ffffff;
+
+  --wf-border:           #272729;
+  --wf-border-heavy:     #272729;
+
+  --wf-button-bg:        #292929;
+  --wf-button-text:      #ffffff;
+
+  --wf-input-bg:         #292929;
+  --wf-input-focus-bg:   #292929;
+  --wf-input-border:     #272729;
+
+  --wf-star-empty:       #272729;
+
+  --wf-wallpaper: url("/wf-ds/bg-24H4-oled_50.webp");
+}
+
+/* ============================================================
+   Element defaults — drop-in body / heading styles
+   ============================================================ */
+html, body {
+  background: var(--wf-page-bg);
+  color: var(--wf-text);
+  font-family: var(--wf-font-family);
+  font-size: var(--wf-fs-normal);
+  line-height: var(--wf-lh-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body.wf-wallpaper {
+  background: var(--wf-page-bg) var(--wf-wallpaper) no-repeat fixed center top / cover;
+}
+
+a {
+  color: var(--wf-link);
+  text-decoration: none;
+}
+a:hover { color: var(--wf-link-hover); text-decoration: underline; }
+
+/* Heading scale — quiet, bold-when-needed, never display-serif */
+h1, .wf-h1 { font-size: var(--wf-fs-largest); font-weight: var(--wf-fw-heavy); line-height: var(--wf-lh-tight); letter-spacing: -0.01em; }
+h2, .wf-h2 { font-size: var(--wf-fs-larger);  font-weight: var(--wf-fw-heavy); line-height: var(--wf-lh-tight); }
+h3, .wf-h3 { font-size: var(--wf-fs-large);   font-weight: var(--wf-fw-heavy); line-height: var(--wf-lh-tight); }
+h4, .wf-h4 { font-size: var(--wf-fs-normal);  font-weight: var(--wf-fw-heavy); line-height: var(--wf-lh-normal); }
+
+p, .wf-body { font-size: var(--wf-fs-normal); line-height: var(--wf-lh-relaxed); }
+small, .wf-small { font-size: var(--wf-fs-small); color: var(--wf-text-muted); }
+.wf-tiny { font-size: var(--wf-fs-smallest); color: var(--wf-text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+
+code, kbd, samp, pre, .wf-mono { font-family: var(--wf-font-mono); font-size: 0.92em; }
+
+/* Block-header pattern used throughout XenForo */
+.wf-block-header {
+  font-size: var(--wf-fs-larger);
+  font-weight: var(--wf-fw-heavy);
+  padding: var(--wf-pad-largest);
+  background: var(--wf-content-alt-bg);
+  border-bottom: 1px solid var(--wf-border);
+  border-top-left-radius: var(--wf-radius-block);
+  border-top-right-radius: var(--wf-radius-block);
+}
+
+/* The signature card */
+.wf-block {
+  background: var(--wf-content-bg);
+  border-radius: var(--wf-radius-block);
+  box-shadow: var(--wf-shadow-block);
+  overflow: hidden;
+}

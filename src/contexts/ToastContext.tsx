@@ -1,15 +1,13 @@
-import React, { createContext, useContext, useCallback, ReactNode } from 'react'
-import {
-  Toaster,
-  useToastController,
-  ToastTitle,
-  ToastBody,
-  Toast,
-  ToastIntent,
-  useId,
-} from '@fluentui/react-components'
+import React, { createContext, useContext, useCallback, useState, ReactNode } from 'react'
 
 export type ToastType = 'success' | 'error' | 'warning' | 'info'
+
+interface ToastItem {
+  id: number
+  title: string
+  message?: string
+  type: ToastType
+}
 
 interface ToastContextType {
   showToast: (title: string, message?: string, type?: ToastType) => void
@@ -29,64 +27,61 @@ export const useToast = () => {
   return context
 }
 
+const ICONS: Record<ToastType, string> = {
+  success: 'fa-circle-check',
+  error: 'fa-circle-xmark',
+  warning: 'fa-triangle-exclamation',
+  info: 'fa-circle-info',
+}
+
 interface ToastProviderProps {
   children: ReactNode
 }
 
+let nextId = 1
+
 export const ToastProvider: React.FC<ToastProviderProps> = ({ children }) => {
-  const toasterId = useId('toaster')
-  const { dispatchToast } = useToastController(toasterId)
+  const [toasts, setToasts] = useState<ToastItem[]>([])
+
+  const remove = useCallback((id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id))
+  }, [])
 
   const showToast = useCallback(
     (title: string, message?: string, type: ToastType = 'info') => {
-      const intent: ToastIntent = type === 'error' ? 'error'
-        : type === 'success' ? 'success'
-        : type === 'warning' ? 'warning'
-        : 'info'
-
-      dispatchToast(
-        <Toast>
-          <ToastTitle>{title}</ToastTitle>
-          {message && <ToastBody>{message}</ToastBody>}
-        </Toast>,
-        { intent, timeout: type === 'error' ? 8000 : 5000 }
-      )
+      const id = nextId++
+      setToasts(prev => [...prev, { id, title, message, type }])
+      window.setTimeout(() => remove(id), type === 'error' ? 8000 : 5000)
     },
-    [dispatchToast]
+    [remove]
   )
 
-  const showSuccess = useCallback(
-    (title: string, message?: string) => showToast(title, message, 'success'),
-    [showToast]
-  )
+  const showSuccess = useCallback((t: string, m?: string) => showToast(t, m, 'success'), [showToast])
+  const showError = useCallback((t: string, m?: string) => showToast(t, m, 'error'), [showToast])
+  const showWarning = useCallback((t: string, m?: string) => showToast(t, m, 'warning'), [showToast])
+  const showInfo = useCallback((t: string, m?: string) => showToast(t, m, 'info'), [showToast])
 
-  const showError = useCallback(
-    (title: string, message?: string) => showToast(title, message, 'error'),
-    [showToast]
-  )
-
-  const showWarning = useCallback(
-    (title: string, message?: string) => showToast(title, message, 'warning'),
-    [showToast]
-  )
-
-  const showInfo = useCallback(
-    (title: string, message?: string) => showToast(title, message, 'info'),
-    [showToast]
-  )
-
-  const value: ToastContextType = {
-    showToast,
-    showSuccess,
-    showError,
-    showWarning,
-    showInfo,
-  }
+  const value: ToastContextType = { showToast, showSuccess, showError, showWarning, showInfo }
 
   return (
     <ToastContext.Provider value={value}>
-      <Toaster toasterId={toasterId} position="top-end" />
       {children}
+      <div className="toast-stack">
+        {toasts.map((t, i) => (
+          <div
+            key={t.id}
+            className={`toast toast-${t.type}`}
+            style={{ bottom: 36 + i * 56 }}
+            onClick={() => remove(t.id)}
+          >
+            <i className={`fa-solid ${ICONS[t.type]}`} />
+            <div>
+              <strong>{t.title}</strong>
+              {t.message && <div style={{ opacity: 0.85, fontSize: 12 }}>{t.message}</div>}
+            </div>
+          </div>
+        ))}
+      </div>
     </ToastContext.Provider>
   )
 }
