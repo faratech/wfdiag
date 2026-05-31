@@ -265,6 +265,7 @@ async fn run_diagnostic_task(
 async fn run_diagnostics_parallel(
     task_ids: Vec<String>,
     max_concurrent: Option<usize>,
+    session_id: String,
     window: tauri::Window,
     state: State<'_, AppState>,
 ) -> Result<Vec<(String, TaskResult)>, String> {
@@ -280,13 +281,29 @@ async fn run_diagnostics_parallel(
             let window_clone = window.clone();
             let state_clone = state.inner();
             let tasks_ref = tasks.clone(); // Arc clone is cheap
+            let session_id = session_id.clone();
 
             async move {
                 // Find task details
-                let task = tasks_ref
-                    .iter()
-                    .find(|t| t.id == task_id)
-                    .ok_or_else(|| DiagError::TaskNotFound { task_id: task_id.clone() })?;
+                let task = match tasks_ref.iter().find(|t| t.id == task_id) {
+                    Some(task) => task,
+                    None => {
+                        // Emit a terminal event so the frontend's completed/total progress
+                        // counter doesn't stall below 100% for an unknown task id (which
+                        // would otherwise return before emitting any "completed" event).
+                        let _ = window_clone.emit(
+                            "task-progress",
+                            serde_json::json!({
+                                "task_id": &task_id,
+                                "status": "completed",
+                                "success": false,
+                            }),
+                        );
+                        return Err::<(String, TaskResult), String>(
+                            DiagError::TaskNotFound { task_id: task_id.clone() }.into(),
+                        );
+                    }
+                };
 
                 // Emit progress event
                 window_clone
@@ -303,10 +320,17 @@ async fn run_diagnostics_parallel(
                 // Run the diagnostic task
                 let result = diagnostics::run_diagnostic_task(&task_id).await;
 
-                // Store result
-                let mut current = state_clone.current_session.lock().await;
-                if let Some(ref mut session) = *current {
-                    session.results.insert(task_id.clone(), result.clone());
+                // Store result ONLY if the active session is still the one this run
+                // belongs to. Without this, a scan started while a prior parallel run is
+                // still draining would have the prior run's in-flight tasks write into the
+                // NEW session, mixing two scans' results.
+                {
+                    let mut current = state_clone.current_session.lock().await;
+                    if let Some(ref mut session) = *current {
+                        if session.session_id == session_id {
+                            session.results.insert(task_id.clone(), result.clone());
+                        }
+                    }
                 }
 
                 // Emit completion event
@@ -398,6 +422,14 @@ async fn fix_issue(issue_id: String) -> Result<issue_fixer::FixResult, String> {
         .fix_issue(&issue_id)
         .await
         .map_err(|e| DiagError::task_failed(format!("fix_{}", issue_id), e.to_string()).into())
+}
+
+#[tauri::command]
+fn get_fixable_issue_ids() -> Result<Vec<String>, String> {
+    Ok(issue_fixer::fixable_issue_ids()
+        .iter()
+        .map(|s| s.to_string())
+        .collect())
 }
 
 #[tauri::command]
@@ -805,6 +837,7 @@ pub fn run() {
             ai_service::ai_set_preference,
             ai_service::ai_clear_cache,
             detect_issues,
+            get_fixable_issue_ids,
             copy_minidumps_to_desktop,
             open_url,
         ])

@@ -51,6 +51,10 @@ pub struct AppSettings {
     // API key - stored in keyring, included in frontend response
     #[serde(default)]
     pub open_ai_api_key: Option<String>,
+    // User-customized Quick Scan task IDs. camelCase rename => "quickScanTasks" to match
+    // the TS SettingsData field; #[serde(default)] keeps old settings files loadable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quick_scan_tasks: Option<Vec<String>>,
 }
 
 fn default_max_concurrent() -> u32 {
@@ -97,10 +101,11 @@ pub async fn save_settings(settings: AppSettings) -> Result<(), String> {
         #[cfg(windows)]
         {
             if !api_key.is_empty() {
-                match crate::dpapi::store_api_key(api_key) {
-                    Ok(_) => println!("API key stored with DPAPI"),
-                    Err(e) => println!("Warning: Failed to store API key with DPAPI: {}", e),
-                }
+                // Propagate (don't swallow) failures: otherwise save_settings returns Ok,
+                // the UI believes the key persisted, and it silently vanishes on restart.
+                crate::dpapi::store_api_key(api_key)
+                    .map_err(|e| DiagError::api_key("store", e.to_string()))?;
+                println!("API key stored with DPAPI");
             } else {
                 // Empty string means clear the key
                 let _ = crate::dpapi::clear_api_key();
@@ -110,17 +115,15 @@ pub async fn save_settings(settings: AppSettings) -> Result<(), String> {
         #[cfg(not(windows))]
         {
             if !api_key.is_empty() {
-                if let Ok(entry) = Entry::new("wfdiag-tauri", "openai_api_key") {
-                    match entry.set_password(api_key) {
-                        Ok(_) => println!("API key stored in keyring"),
-                        Err(e) => println!("Warning: Failed to store API key in keyring: {}", e),
-                    }
-                }
-            } else {
-                if let Ok(entry) = Entry::new("wfdiag-tauri", "openai_api_key") {
-                    let _ = entry.delete_credential();
-                    println!("API key cleared from keyring");
-                }
+                let entry = Entry::new("wfdiag-tauri", "openai_api_key")
+                    .map_err(|e| DiagError::api_key("store", e.to_string()))?;
+                entry
+                    .set_password(api_key)
+                    .map_err(|e| DiagError::api_key("store", e.to_string()))?;
+                println!("API key stored in keyring");
+            } else if let Ok(entry) = Entry::new("wfdiag-tauri", "openai_api_key") {
+                let _ = entry.delete_credential();
+                println!("API key cleared from keyring");
             }
         }
     }

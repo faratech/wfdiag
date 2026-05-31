@@ -63,10 +63,13 @@ impl NativeDiagnostics {
             // Get the index to match with adapter
             let index = config.get("Index").and_then(|v| v.as_u64()).map(|u| u as u32);
 
-            // Find matching adapter info
+            // Find matching adapter info.
+            // Match on Win32_NetworkAdapter.Index (a uint32 that equals the config's
+            // Index), NOT DeviceID. DeviceID is a CIM_STRING, so as_u64() always returned
+            // None and the enrichment (Name/Speed/MAC/Manufacturer/...) never merged.
             if let Some(idx) = index {
                 for adapter in &adapter_results {
-                    if let Some(adapter_idx) = adapter.get("DeviceID").and_then(|v| v.as_u64()).map(|u| u as u32) {
+                    if let Some(adapter_idx) = adapter.get("Index").and_then(|v| v.as_u64()).map(|u| u as u32) {
                         if adapter_idx == idx {
                             // Add adapter-specific info
                             for (key, value) in adapter {
@@ -686,7 +689,10 @@ impl NativeDiagnostics {
 
                 match Self::execute_secure_command("defrag", &[drive_letter, "/A"]) {
                     Ok(output) => {
-                        let output_str = String::from_utf8_lossy(&output.stdout);
+                        // Use the OEM-codepage decoder like every other command consumer
+                        // in this file; defrag emits OEM text, which from_utf8_lossy would
+                        // corrupt to U+FFFD on non-English systems.
+                        let output_str = crate::security::decode_windows_output(&output.stdout);
                         result_info["raw_output"] = json!(output_str.to_string());
 
                         if output.status.success() {
@@ -697,7 +703,7 @@ impl NativeDiagnostics {
                                 result_info["status"] = json!("Analysis failed: Could not parse output");
                             }
                         } else {
-                            let error_str = String::from_utf8_lossy(&output.stderr);
+                            let error_str = crate::security::decode_windows_output(&output.stderr);
                             result_info["status"] = json!(format!("Analysis failed: {}", error_str));
                         }
                     },
@@ -970,22 +976,26 @@ impl NativeDiagnostics {
                 b_time.cmp(&a_time)
             });
 
-            // Process only the 10 most recent files
-            for entry in all_entries.into_iter().take(10) {
-                if let Ok(metadata) = entry.metadata()
-                    && entry.path().extension().and_then(|s| s.to_str()) == Some("dmp") {
-                        dumps.push(json!({
-                            "filename": entry.file_name().to_string_lossy(),
-                            "size": metadata.len(),
-                            "created": metadata.created().ok().map(|t| {
-                                match t.duration_since(std::time::UNIX_EPOCH) {
-                                    Ok(d) => d.as_secs(),
-                                    Err(_) => 0
-                                }
-                            }).unwrap_or(0),
-                            "path": entry.path().to_string_lossy()
-                        }));
-                    }
+            // Filter to .dmp files BEFORE taking the 10 most recent, so stray non-.dmp
+            // entries don't consume slots and cause real minidumps to be under-reported.
+            for entry in all_entries
+                .into_iter()
+                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("dmp"))
+                .take(10)
+            {
+                if let Ok(metadata) = entry.metadata() {
+                    dumps.push(json!({
+                        "filename": entry.file_name().to_string_lossy(),
+                        "size": metadata.len(),
+                        "created": metadata.created().ok().map(|t| {
+                            match t.duration_since(std::time::UNIX_EPOCH) {
+                                Ok(d) => d.as_secs(),
+                                Err(_) => 0
+                            }
+                        }).unwrap_or(0),
+                        "path": entry.path().to_string_lossy()
+                    }));
+                }
             }
         }
 

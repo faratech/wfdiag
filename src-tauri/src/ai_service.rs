@@ -369,12 +369,12 @@ const PHI_SILICA_MAX_PROMPT_CHARS: usize = 2500;
 /// Note: ai_prompts.rs already converts JSON to readable text and truncates
 /// This is a final safety check
 async fn analyze_with_phi_silica(prompt: &str) -> Result<String, String> {
-    // Final safety truncation if prompt is still too large
-    let final_prompt = if prompt.len() > PHI_SILICA_MAX_PROMPT_CHARS {
-        format!(
-            "{}... [input truncated]",
-            &prompt[..PHI_SILICA_MAX_PROMPT_CHARS - 25]
-        )
+    // Final safety truncation if prompt is still too large. Count and slice by CHARACTER,
+    // not byte index, so a multi-byte UTF-8 char at the boundary can't panic (and with
+    // panic = "abort" in release, abort the whole process).
+    let final_prompt = if prompt.chars().count() > PHI_SILICA_MAX_PROMPT_CHARS {
+        let head: String = prompt.chars().take(PHI_SILICA_MAX_PROMPT_CHARS - 25).collect();
+        format!("{}... [input truncated]", head)
     } else {
         prompt.to_string()
     };

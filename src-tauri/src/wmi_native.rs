@@ -16,7 +16,7 @@ use windows::Win32::System::Wmi::{
     WBEM_INFINITE,
 };
 use windows::Win32::System::Variant::{
-    VARIANT, VT_BOOL, VT_BSTR, VT_I1, VT_I2, VT_I4, VT_I8, VT_NULL, VT_EMPTY,
+    VARIANT, VariantClear, VT_BOOL, VT_BSTR, VT_I1, VT_I2, VT_I4, VT_I8, VT_NULL, VT_EMPTY,
     VT_UI1, VT_UI2, VT_UI4, VT_UI8, VT_R4, VT_R8, VT_ARRAY, VT_DATE,
 };
 
@@ -208,6 +208,12 @@ impl WmiConnection {
 
                 let json_value = self.variant_to_json(&value);
                 props.insert(prop_name, json_value);
+
+                // Free the VARIANT's heap payload (BSTR / SAFEARRAY / COM ref). windows
+                // 0.62's VARIANT has no Drop, so without this every string/array-valued
+                // WMI property leaks for the life of the process. `value` is re-zeroed by
+                // VARIANT::default() at the top of the next iteration.
+                let _ = VariantClear(&mut value);
             }
 
             obj.EndEnumeration().ok();

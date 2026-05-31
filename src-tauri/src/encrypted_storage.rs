@@ -121,7 +121,28 @@ impl EncryptedStorage {
     }
 
     /// Encrypt and store data
+    /// Validate a caller-supplied filename (e.g. a frontend-supplied scan id) before it
+    /// is used to build a path. Rejects anything that could escape the storage directory
+    /// — path separators, parent refs (`..`), drive letters — by requiring a conservative
+    /// token charset. Scan ids and internal names ("scan_...", UUIDs, "credentials") all
+    /// satisfy this; an attacker-controlled "../../secret" does not.
+    fn validate_filename(filename: &str) -> Result<()> {
+        let valid = !filename.is_empty()
+            && !filename.contains("..")
+            && filename
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        if !valid {
+            return Err(anyhow!(
+                "Invalid storage id '{}': only [A-Za-z0-9._-] are allowed and '..' is forbidden",
+                filename
+            ));
+        }
+        Ok(())
+    }
+
     pub fn store<T: Serialize>(&self, filename: &str, data: &T) -> Result<()> {
+        Self::validate_filename(filename)?;
         // Serialize data to JSON
         let json_data =
             serde_json::to_vec(data).map_err(|e| anyhow!("Failed to serialize data: {}", e))?;
@@ -171,6 +192,7 @@ impl EncryptedStorage {
 
     /// Load and decrypt data
     pub fn load<T: for<'de> Deserialize<'de>>(&self, filename: &str) -> Result<T> {
+        Self::validate_filename(filename)?;
         let file_path = self.storage_path.join(format!("{}.enc", filename));
 
         let file_data =
@@ -231,12 +253,16 @@ impl EncryptedStorage {
 
     /// Check if encrypted file exists
     pub fn exists(&self, filename: &str) -> bool {
+        if Self::validate_filename(filename).is_err() {
+            return false;
+        }
         let file_path = self.storage_path.join(format!("{}.enc", filename));
         file_path.exists()
     }
 
     /// Delete encrypted file
     pub fn delete(&self, filename: &str) -> Result<()> {
+        Self::validate_filename(filename)?;
         let file_path = self.storage_path.join(format!("{}.enc", filename));
         if file_path.exists() {
             fs::remove_file(file_path)

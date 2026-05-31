@@ -57,7 +57,10 @@ fn render_json_value(value: &serde_json::Value, depth: usize) -> String {
             // Skip empty or very long strings
             if s.is_empty() || s.len() > 200 {
                 if s.len() > 200 {
-                    format!("{}...", &s[..100])
+                    // Slice on a char boundary: &s[..100] panics if byte 100 splits a
+                    // multi-byte UTF-8 char (localized strings, accented device names).
+                    let head: String = s.chars().take(100).collect();
+                    format!("{}...", head)
                 } else {
                     String::new()
                 }
@@ -213,6 +216,9 @@ Status (healthy/needs attention/critical), key findings (2-3 points), recommenda
 
 /// Generate prompt for health score explanation
 pub fn health_explanation_prompt(metrics_data: &str) -> String {
+    // Bound the (otherwise unbounded) caller-supplied metrics so this prompt stays
+    // within context limits like the sibling builders. truncate_output is char-safe.
+    let metrics_data = truncate_output(metrics_data, 1500);
     format!(
         r#"Explain these Windows system health metrics to a user.
 
@@ -243,15 +249,20 @@ Rank by priority, brief reason each, which to fix first. Under 100 words."#,
     )
 }
 
-/// Truncate output to fit within context limits
+/// Truncate output to fit within context limits.
+/// Truncates by CHARACTER count (not byte index) so a multi-byte UTF-8 sequence at
+/// the boundary can never trigger a "byte index is not a char boundary" panic. With
+/// `panic = "abort"` in release this would otherwise crash the whole process.
 fn truncate_output(output: &str, max_chars: usize) -> String {
-    if output.len() <= max_chars {
+    let total = output.chars().count();
+    if total <= max_chars {
         output.to_string()
     } else {
+        let head: String = output.chars().take(max_chars).collect();
         format!(
             "{}... [truncated, {} more characters]",
-            &output[..max_chars],
-            output.len() - max_chars
+            head,
+            total - max_chars
         )
     }
 }
@@ -272,10 +283,12 @@ pub fn compress_for_phi_silica(output: &str, max_chars: usize) -> String {
     if compressed.len() <= max_chars {
         compressed
     } else {
-        // Try to keep first part (usually headers/summary) and last part (usually important)
+        // Try to keep first part (usually headers/summary) and last part (usually
+        // important). Slice by char count, not byte index, to avoid a char-boundary panic.
         let half = max_chars / 2;
-        let first_part = &compressed[..half];
-        let last_part = &compressed[compressed.len() - half..];
+        let total = compressed.chars().count();
+        let first_part: String = compressed.chars().take(half).collect();
+        let last_part: String = compressed.chars().skip(total.saturating_sub(half)).collect();
 
         format!(
             "{}\n... [content truncated] ...\n{}",
@@ -296,8 +309,24 @@ mod tests {
 
         let long = "a".repeat(200);
         let truncated = truncate_output(&long, 100);
-        assert!(truncated.len() < 200);
+        assert!(truncated.chars().count() < 200);
         assert!(truncated.contains("[truncated"));
+    }
+
+    #[test]
+    fn test_truncate_output_multibyte_no_panic() {
+        // Regression: byte-index slicing panicked when the cut landed inside a
+        // multi-byte UTF-8 char. Each 'é' is 2 bytes, so a byte slice at 100 would
+        // split a char. Char-based truncation must keep exactly `max_chars` chars.
+        let multibyte = "é".repeat(200);
+        let truncated = truncate_output(&multibyte, 100);
+        assert!(truncated.starts_with(&"é".repeat(100)));
+        assert!(truncated.contains("[truncated, 100 more characters]"));
+
+        // Emoji are 4 bytes; truncating right at a boundary must also not panic.
+        let emoji = "🚀".repeat(50);
+        let _ = truncate_output(&emoji, 25);
+        let _ = render_json_value(&serde_json::Value::String("界".repeat(300)), 0);
     }
 
     #[test]

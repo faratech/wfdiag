@@ -12,6 +12,27 @@ pub struct FixResult {
 
 pub struct IssueFixer;
 
+/// Issue IDs that have a real automated fix (must mirror the `fix_issue` match arms).
+/// Exposed so the UI can show the "Fix Issue" button ONLY for issues we can actually
+/// fix, instead of offering it for every detected issue and silently no-op'ing. Note
+/// the detector emits `pending_windows_updates` (not in this list) while the fixer
+/// handles `windows_update_service`; gating on this list correctly hides the button for
+/// the former until that id mismatch is reconciled.
+pub fn fixable_issue_ids() -> &'static [&'static str] {
+    &[
+        "disk_fragmentation",
+        "temp_files",
+        "windows_update_service",
+        "dns_cache",
+        "icon_cache",
+        "prefetch_files",
+        "recycle_bin",
+        "stopped_services",
+        "high_cpu_usage",
+        "high_memory_usage",
+    ]
+}
+
 impl IssueFixer {
     pub fn new() -> Self {
         Self
@@ -357,37 +378,28 @@ impl IssueFixer {
     }
 
     async fn fix_high_memory_usage(&self) -> Result<FixResult> {
+        // NOTE: Previously this ran `[System.GC]::Collect()` in a throwaway PowerShell
+        // process (which only collects that process's own heap, freeing nothing in the
+        // high-usage processes) and `echo off | clip` (which destructively wiped the
+        // user's clipboard). Both were removed: they freed no memory and lost user data.
+        // High memory usage requires the user to identify and close offending processes,
+        // so we launch Task Manager for manual triage, mirroring fix_high_cpu_usage.
         let mut actions = Vec::new();
-
-        // Clear working sets to free up memory
-        let _ = Command::new("powershell")
-            .args(["-Command", "[System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers(); [System.GC]::Collect()"])
-            .output();
-        actions.push("Triggered garbage collection".to_string());
-
-        // Empty working sets
-        let _ = Command::new("cmd")
-            .args(["/c", "echo off | clip"])
-            .output();
-        actions.push("Cleared clipboard to free memory".to_string());
-
-        // Launch Task Manager for manual intervention
-        let output = Command::new("taskmgr.exe")
-            .spawn();
+        let output = Command::new("taskmgr.exe").spawn();
 
         if output.is_ok() {
             actions.push("Launched Task Manager".to_string());
             Ok(FixResult {
                 success: true,
-                message: "Cleared some memory and launched Task Manager. Check Memory column to identify high-usage processes.".to_string(),
+                message: "Task Manager launched. Check the Memory column to identify and close high-usage processes.".to_string(),
                 actions_taken: actions,
                 requires_restart: false,
             })
         } else {
             Ok(FixResult {
-                success: true,
-                message: "Cleared some memory. Press Ctrl+Shift+Esc to open Task Manager and check memory usage.".to_string(),
-                actions_taken: actions,
+                success: false,
+                message: "Failed to launch Task Manager. Press Ctrl+Shift+Esc to open it manually and check memory usage.".to_string(),
+                actions_taken: vec![],
                 requires_restart: false,
             })
         }

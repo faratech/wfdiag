@@ -375,7 +375,11 @@ fn create_language_model_direct() -> Result<crate::windows_ai_bindings::Language
 
 /// Check Phi Silica availability using GetReadyState (like AI Dev Gallery does)
 #[cfg(windows)]
-fn check_phi_silica_safe() -> (bool, String, Option<String>) {
+// Returns (available, message, ready_state, error_code). ready_state carries the
+// AIFeatureReadyState on the success path; error_code carries the HRESULT/LAF string on
+// the failure path. They are kept SEPARATE so the frontend's PhiSilicaStatus.error_code
+// is populated correctly instead of error info being mislabeled into ready_state.
+fn check_phi_silica_safe() -> (bool, String, Option<String>, Option<String>) {
     use crate::windows_ai_bindings::{LanguageModel, AIFeatureReadyState};
 
     log_phi_silica("=== check_phi_silica_safe called ===");
@@ -414,7 +418,7 @@ fn check_phi_silica_safe() -> (bool, String, Option<String>) {
         return (false, format!(
             "Phi Silica requires Windows 11 24H2 or later (build 26100+). Current build: {}",
             build
-        ), None);
+        ), None, None);
     }
 
     // Use GetReadyState() like AI Dev Gallery does - this is the correct way to check
@@ -422,22 +426,49 @@ fn check_phi_silica_safe() -> (bool, String, Option<String>) {
     match LanguageModel::GetReadyState() {
         Ok(state) => {
             log_phi_silica(&format!("GetReadyState succeeded: state={:?}", state.0));
+            // GetReadyState succeeded → these are READY STATES, not errors (error_code None).
             if state == AIFeatureReadyState::Ready {
-                (true, format!("Phi Silica is ready. Build: {}", build), Some("Ready".to_string()))
+                (true, format!("Phi Silica is ready. Build: {}", build), Some("Ready".to_string()), None)
             } else if state == AIFeatureReadyState::NotReady {
                 // Model needs to be downloaded/initialized
-                (true, format!("Phi Silica available but not ready. Build: {}", build), Some("NotReady".to_string()))
+                (true, format!("Phi Silica available but not ready. Build: {}", build), Some("NotReady".to_string()), None)
             } else if state == AIFeatureReadyState::DisabledByUser {
-                (false, format!("Phi Silica disabled by user. Build: {}", build), Some("DisabledByUser".to_string()))
+                (false, format!("Phi Silica disabled by user. Build: {}", build), Some("DisabledByUser".to_string()), None)
             } else if state == AIFeatureReadyState::NotSupportedOnCurrentSystem {
-                (false, format!("Phi Silica not supported on this system (requires Copilot+ PC with NPU). Build: {}", build), Some("NotSupportedOnCurrentSystem".to_string()))
+                (false, format!("Phi Silica not supported on this system (requires Copilot+ PC with NPU). Build: {}", build), Some("NotSupportedOnCurrentSystem".to_string()), None)
             } else {
-                (false, format!("Phi Silica unknown state: {:?}. Build: {}", state.0, build), Some(format!("Unknown({})", state.0)))
+                (false, format!("Phi Silica unknown state: {:?}. Build: {}", state.0, build), Some(format!("Unknown({})", state.0)), None)
             }
         }
         Err(e) => {
+            // GetReadyState failed → carry the HRESULT/LAF in error_code, ready_state None.
             let code = e.code().0 as u32;
             log_phi_silica(&format!("GetReadyState FAILED: 0x{:08X} {}", code, e.message()));
+
+            // GetReadyState() resolves its factory through RoGetActivationFactory, which is
+            // blocked for third-party apps and returns exactly these HRESULTs — yet real
+            // inference (generate_response) uses the bundled-DLL DllGetActivationFactory
+            // path instead. Before declaring Phi Silica unavailable, fall back to that same
+            // direct path so the availability gate matches what inference can actually do
+            // (otherwise we false-negative on working Copilot+ PCs).
+            if code == 0x80040154 || code == 0x80070005 {
+                log_phi_silica("GetReadyState blocked (Ro path); attempting direct DLL activation...");
+                match create_language_model_direct() {
+                    Ok(_) => {
+                        log_phi_silica("Direct DLL activation succeeded — Phi Silica IS available");
+                        return (
+                            true,
+                            format!("Phi Silica is ready (via direct DLL activation). Build: {}", build),
+                            Some("Ready".to_string()),
+                            None,
+                        );
+                    }
+                    Err(direct_err) => {
+                        log_phi_silica(&format!("Direct DLL activation also failed: {}", direct_err));
+                    }
+                }
+            }
+
             if code == 0x80040154 {
                 // CLASS_E_CLASSNOTREGISTERED - API not available
                 // This happens when the Windows AI runtime is not present
@@ -445,18 +476,18 @@ fn check_phi_silica_safe() -> (bool, String, Option<String>) {
                     "Phi Silica API not registered (0x{:08X}). Build: {}. \
                      Requires Copilot+ PC with Windows AI features enabled.",
                     code, build
-                ), Some(format!("0x{:08X}", code)))
+                ), None, Some(format!("0x{:08X}", code)))
             } else if code == 0x80070005 {
                 // E_ACCESSDENIED - LAF unlock may have failed
                 (false, format!(
                     "Phi Silica access denied (0x80070005). {}. Build: {}.",
                     laf_status_str, build
-                ), Some(format!("LAF_REQUIRED ({})", laf_status_str)))
+                ), None, Some(format!("LAF_REQUIRED ({})", laf_status_str)))
             } else {
                 (false, format!(
                     "Failed to check Phi Silica: 0x{:08X}: {}. {}. Build: {}",
                     code, e.message(), laf_status_str, build
-                ), Some(format!("0x{:08X}", code)))
+                ), None, Some(format!("0x{:08X}", code)))
             }
         }
     }
@@ -466,12 +497,12 @@ fn check_phi_silica_safe() -> (bool, String, Option<String>) {
 #[cfg(windows)]
 pub fn is_phi_silica_available() -> PhiSilicaStatus {
     let build = get_windows_build();
-    let (available, message, ready_state) = check_phi_silica_safe();
+    let (available, message, ready_state, error_code) = check_phi_silica_safe();
 
     PhiSilicaStatus {
         available,
         message,
-        error_code: None,
+        error_code,
         windows_build: build,
         ready_state,
     }

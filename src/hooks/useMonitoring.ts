@@ -74,6 +74,17 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
         onStats?.(newStats)
       })
 
+      // The component may have unmounted while listen() was in flight. If so, cleanup
+      // already ran and saw a null ref — tear the listener down here so it doesn't leak
+      // and keep firing on an unmounted view.
+      if (!isMountedRef.current) {
+        unlisten()
+        return
+      }
+      // Defensively drop any previous listener before overwriting the ref.
+      if (unlistenRef.current) {
+        unlistenRef.current()
+      }
       unlistenRef.current = unlisten
       setIsActive(true)
     } catch (error) {

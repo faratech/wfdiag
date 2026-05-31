@@ -93,7 +93,10 @@ pub struct SystemStats {
     pub npu_name: Option<String>,
     pub npu_utilization: Option<f32>,
     pub top_processes: Vec<ProcessInfo>,
-    /// All processes (for htop-like full process list view)
+    /// All processes (kept for internal use). No frontend consumer reads this, so it is
+    /// NOT serialized — otherwise the full process list would be encoded into every
+    /// `system-stats` event (~1 Hz) and transferred/parsed for nothing.
+    #[serde(skip)]
     pub all_processes: Vec<ProcessInfo>,
     pub timestamp: i64,
 }
@@ -348,6 +351,11 @@ pub struct SystemMonitor {
     disk_update_in_progress: Arc<std::sync::atomic::AtomicBool>,
     npu_update_in_progress: Arc<std::sync::atomic::AtomicBool>,
     fast_update_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    // Single-owner monitoring loop: handle to the currently-spawned loop (for immediate
+    // abort on stop/restart) and a generation token so a superseded loop self-terminates
+    // on its next tick even if the shared `monitoring` flag has been re-armed.
+    monitor_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    generation: Arc<AtomicU64>,
 }
 
 impl SystemMonitor {
@@ -398,16 +406,32 @@ impl SystemMonitor {
             disk_update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             npu_update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fast_update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            monitor_task: Arc::new(Mutex::new(None)),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub async fn start_monitoring(&self) {
+        // Single-owner: supersede any previously-running loop. Bump the generation so a
+        // still-running old loop exits on its next tick even if `monitoring` is re-armed
+        // below, and abort its task handle for immediate teardown. This makes repeated
+        // start_monitoring calls (rapid tab toggles, two monitoring components mounted at
+        // once) idempotent instead of accumulating duplicate emission loops.
+        let my_gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        {
+            let mut task = self.monitor_task.lock().await;
+            if let Some(old) = task.take() {
+                old.abort();
+            }
+        }
+
         let mut monitoring = self.monitoring.lock().await;
         *monitoring = true;
         drop(monitoring);
 
         let app_handle = self.app_handle.clone();
         let monitoring_flag = Arc::clone(&self.monitoring);
+        let generation = Arc::clone(&self.generation);
         let pdh_state = Arc::clone(&self.pdh_state);
         let previous_network = Arc::clone(&self.previous_network);
         let previous_processes = Arc::clone(&self.previous_processes);
@@ -472,7 +496,24 @@ impl SystemMonitor {
         // Wait briefly for meaningful delta between samples
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        tokio::spawn(async move {
+        // Seed the fast-stats cache synchronously so the FIRST emitted frame carries real
+        // data. Without this, the interval's immediate first tick reads an empty cache and
+        // emits an all-zeros sample (0% CPU, 0 GB, no processes).
+        {
+            let pdh_clone = Arc::clone(&self.pdh_state);
+            let net_clone = Arc::clone(&self.previous_network);
+            let proc_clone = Arc::clone(&self.previous_processes);
+            let initial = tokio::task::spawn_blocking(move || {
+                compute_fast_stats(&pdh_clone, &net_clone, &proc_clone)
+            })
+            .await
+            .ok();
+            if let Some(initial) = initial {
+                *self.cached_fast_stats.lock().await = Some(initial);
+            }
+        }
+
+        let handle = tokio::spawn(async move {
             let interval_duration = *update_interval.lock().await;
             let mut interval = interval(interval_duration);
 
@@ -484,6 +525,11 @@ impl SystemMonitor {
                     break;
                 }
                 drop(monitoring);
+
+                // Superseded by a newer start_monitoring → this loop is stale, exit.
+                if generation.load(Ordering::SeqCst) != my_gen {
+                    break;
+                }
 
                 let tick = tick_count.fetch_add(1, Ordering::Relaxed);
 
@@ -504,11 +550,23 @@ impl SystemMonitor {
                 let _ = app_handle.emit("system-stats", &stats);
             }
         });
+
+        // Record the loop handle so stop/restart can abort it immediately.
+        *self.monitor_task.lock().await = Some(handle);
     }
 
     pub async fn stop_monitoring(&self) {
         let mut monitoring = self.monitoring.lock().await;
         *monitoring = false;
+        drop(monitoring);
+
+        // Bump the generation (so any loop that wakes between now and abort exits) and
+        // abort the spawned task for immediate teardown rather than waiting up to one tick.
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let mut task = self.monitor_task.lock().await;
+        if let Some(handle) = task.take() {
+            handle.abort();
+        }
     }
 
     pub async fn get_current_stats(&self) -> SystemStats {
@@ -733,6 +791,61 @@ async fn collect_stats_optimized(
     }
 }
 
+/// Compute a fresh FastStats snapshot synchronously. Must be called from a blocking
+/// context (it uses block_on for the async network/process helpers). Shared by the
+/// async cache-populate path and the synchronous pre-loop seeding in start_monitoring.
+fn compute_fast_stats(
+    pdh_state: &Arc<std::sync::Mutex<PdhState>>,
+    previous_network: &Arc<Mutex<NetworkState>>,
+    previous_processes: &Arc<Mutex<ProcessCpuTimes>>,
+) -> FastStats {
+    // 1. CPU & Swap (PDH)
+    let cpu_count = *CPU_COUNT.get_or_init(|| unsafe {
+        let mut sys_info = SYSTEM_INFO::default();
+        GetSystemInfo(&mut sys_info);
+        sys_info.dwNumberOfProcessors as usize
+    });
+    let (cpu_utilization, per_cpu_utilization, swap_utilization) = get_pdh_stats(pdh_state, cpu_count);
+    let cpu_frequency = *CPU_FREQUENCY.get_or_init(get_cpu_frequency_uncached);
+
+    // 2. Memory. swap_used comes straight from get_memory_info so it shares the same
+    // (commit-charge) denominator as swap_total instead of being recomputed from the
+    // page-file-relative PDH "% Usage" counter.
+    let (memory_total, memory_used, memory_available, swap_total, swap_used) = get_memory_info();
+    let _ = swap_utilization;
+
+    // 3. Network
+    // Need to lock async mutex in blocking context - use block_on
+    let (network_upload_kb, network_download_kb) = tauri::async_runtime::block_on(async {
+        get_network_stats(previous_network).await
+    });
+
+    // 4. Processes (returns all processes sorted by CPU)
+    let (all_procs, disk_read_bytes, disk_write_bytes) = tauri::async_runtime::block_on(async {
+        get_top_processes_optimized(memory_total, previous_processes).await
+    });
+
+    // Top processes are the first 15 sorted by CPU usage
+    let top_processes: Vec<ProcessInfo> = all_procs.iter().take(15).cloned().collect();
+
+    FastStats {
+        cpu_utilization,
+        per_cpu_utilization,
+        cpu_frequency,
+        memory_total,
+        memory_used,
+        memory_available,
+        swap_total,
+        swap_used,
+        network_upload_kb,
+        network_download_kb,
+        top_processes,
+        all_processes: all_procs,
+        disk_read_bytes,
+        disk_write_bytes,
+    }
+}
+
 async fn get_fast_stats_cached(
     pdh_state: &Arc<std::sync::Mutex<PdhState>>,
     previous_network: &Arc<Mutex<NetworkState>>,
@@ -750,55 +863,7 @@ async fn get_fast_stats_cached(
 
         tokio::spawn(async move {
             let stats = tokio::task::spawn_blocking(move || {
-                // 1. CPU & Swap (PDH)
-                let cpu_count = *CPU_COUNT.get_or_init(|| unsafe {
-                    let mut sys_info = SYSTEM_INFO::default();
-                    GetSystemInfo(&mut sys_info);
-                    sys_info.dwNumberOfProcessors as usize
-                });
-                let (cpu_utilization, per_cpu_utilization, swap_utilization) = get_pdh_stats(&pdh_clone, cpu_count);
-                let cpu_frequency = *CPU_FREQUENCY.get_or_init(get_cpu_frequency_uncached);
-
-                // 2. Memory
-                let (memory_total, memory_used, memory_available, swap_total, _) = get_memory_info();
-                
-                // Calculate swap used based on PDH utilization if available
-                let swap_used = if swap_total > 0 {
-                    (swap_total as f32 * (swap_utilization / 100.0)) as u64
-                } else {
-                    0
-                };
-
-                // 3. Network
-                // Need to lock async mutex in blocking context - use block_on
-                let (network_upload_kb, network_download_kb) = tauri::async_runtime::block_on(async {
-                     get_network_stats(&net_clone).await
-                });
-
-                // 4. Processes (returns all processes sorted by CPU)
-                let (all_procs, disk_read_bytes, disk_write_bytes) = tauri::async_runtime::block_on(async {
-                    get_top_processes_optimized(memory_total, &proc_clone).await
-                });
-
-                // Top processes are the first 15 sorted by CPU usage
-                let top_processes: Vec<ProcessInfo> = all_procs.iter().take(15).cloned().collect();
-
-                FastStats {
-                    cpu_utilization,
-                    per_cpu_utilization,
-                    cpu_frequency,
-                    memory_total,
-                    memory_used,
-                    memory_available,
-                    swap_total,
-                    swap_used,
-                    network_upload_kb,
-                    network_download_kb,
-                    top_processes,
-                    all_processes: all_procs,
-                    disk_read_bytes,
-                    disk_write_bytes,
-                }
+                compute_fast_stats(&pdh_clone, &net_clone, &proc_clone)
             })
             .await
             .ok();

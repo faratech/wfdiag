@@ -98,9 +98,22 @@ pub fn get_architecture_info() -> Result<ArchitectureInfo> {
             });
         }
 
-        // Convert IMAGE_FILE_MACHINE to ProcessorArchitecture
-        let process_arch = machine_to_architecture(process_machine);
+        // Convert IMAGE_FILE_MACHINE to ProcessorArchitecture.
+        //
+        // Per MSDN, IsWow64Process2 sets pProcessMachine to IMAGE_FILE_MACHINE_UNKNOWN
+        // (0x0000) when the process is NOT running under WOW64 — i.e. it is native. That
+        // is the common case (native x64-on-x64, native ARM64-on-ARM64). Feeding 0x0000
+        // to machine_to_architecture yields Unknown, which previously made every native
+        // machine report process_arch=Unknown and is_emulated=true (the opposite of
+        // reality). 0x0001 (IMAGE_FILE_MACHINE_TARGET_HOST) likewise means "not a WOW64
+        // guest". Treat both as native execution.
         let native_arch = machine_to_architecture(native_machine);
+        let is_wow64 = is_wow64_machine(process_machine.0);
+        let process_arch = if is_wow64 {
+            machine_to_architecture(process_machine)
+        } else {
+            native_arch
+        };
 
         // Get system info for page size and processor count
         let mut system_info = SYSTEM_INFO::default();
@@ -109,7 +122,7 @@ pub fn get_architecture_info() -> Result<ArchitectureInfo> {
         Ok(ArchitectureInfo {
             process_arch,
             native_arch,
-            is_emulated: process_arch != native_arch,
+            is_emulated: is_wow64,
             process_arch_name: process_arch.name().to_string(),
             native_arch_name: native_arch.name().to_string(),
             page_size: system_info.dwPageSize,
@@ -130,6 +143,14 @@ pub fn get_architecture_info() -> Result<ArchitectureInfo> {
         page_size: 4096,
         processor_count: 1,
     })
+}
+
+/// Whether a `pProcessMachine` value from `IsWow64Process2` means the process is
+/// running under WOW64 (i.e. emulated). `IMAGE_FILE_MACHINE_UNKNOWN` (0x0000) and
+/// `IMAGE_FILE_MACHINE_TARGET_HOST` (0x0001) both mean "not a WOW64 guest" => native.
+#[cfg(windows)]
+fn is_wow64_machine(process_machine: u16) -> bool {
+    !matches!(process_machine, 0x0000 | 0x0001)
 }
 
 /// Convert IMAGE_FILE_MACHINE to ProcessorArchitecture
@@ -188,5 +209,23 @@ mod tests {
     fn test_get_architecture_info() {
         let result = get_architecture_info();
         assert!(result.is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_wow64_native_detection() {
+        use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE;
+        // A native process (not under WOW64) reports process_machine = UNKNOWN(0) /
+        // TARGET_HOST(1); these must be treated as native, NOT emulated.
+        assert!(!is_wow64_machine(0x0000));
+        assert!(!is_wow64_machine(0x0001));
+        // Genuine WOW64 guests (e.g. x86/x64 process under ARM64) report a real machine.
+        assert!(is_wow64_machine(0x014c)); // I386
+        assert!(is_wow64_machine(0x8664)); // AMD64
+        // And native x64-on-x64 must resolve to Amd64, is_emulated=false.
+        assert_eq!(
+            machine_to_architecture(IMAGE_FILE_MACHINE(0x8664)),
+            ProcessorArchitecture::Amd64
+        );
     }
 }

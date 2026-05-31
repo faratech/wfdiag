@@ -2,6 +2,17 @@ import React, { createContext, useContext, useState, useEffect, useCallback, Rea
 import { invoke } from '@tauri-apps/api/core'
 import { useAppContext } from './AppContext'
 
+// Stable, fast (djb2) hash of the analyzed content. Folded into AI cache keys so that a
+// re-scan producing different output for the same task/section yields a NEW key and is
+// re-analyzed, instead of returning the previous scan's stale interpretation.
+function hashContent(input: string): string {
+  let hash = 5381
+  for (let i = 0; i < input.length; i++) {
+    hash = ((hash << 5) + hash + input.charCodeAt(i)) | 0
+  }
+  return (hash >>> 0).toString(36)
+}
+
 // Types matching the Rust backend
 export type AIProvider = 'none' | 'openai' | 'phi_silica'
 export type AIProviderPreference = 'auto' | 'openai' | 'phi_silica'
@@ -206,8 +217,9 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       return ''
     }
 
-    // Check if already cached
-    const cacheKey = `diagnostic:${taskId}`
+    // Check if already cached (key includes a hash of the output so a re-scan with
+    // different data for the same task does not return a stale interpretation).
+    const cacheKey = `diagnostic:${taskId}:${hashContent(output)}`
     if (interpretations[cacheKey]) {
       return interpretations[cacheKey]
     }
@@ -248,7 +260,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       return ''
     }
 
-    const cacheKey = `section:${sectionName}`
+    const cacheKey = `section:${sectionName}:${hashContent(sectionData)}`
     if (interpretations[cacheKey]) {
       return interpretations[cacheKey]
     }
@@ -284,7 +296,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       return ''
     }
 
-    const cacheKey = 'health:explanation'
+    const cacheKey = `health:${hashContent(metricsData)}`
     if (interpretations[cacheKey]) {
       return interpretations[cacheKey]
     }
