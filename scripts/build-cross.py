@@ -560,6 +560,14 @@ def build_sparse(version: str, sign: bool = False) -> bool:
                 print(f"Failed to sign {msix_path.name}")
                 return False
 
+    # Copy next to the loose exes under the stable names the app probes for at
+    # startup (sparse_identity.rs self-registers wfdiag-sparse-<arch>.msix —
+    # no PowerShell needed once the signing cert is trusted)
+    for target_name, msix_path in zip(["x64", "arm64"], packages):
+        dst = OUTPUT_DIR / f"wfdiag-sparse-{target_name}.msix"
+        shutil.copy2(msix_path, dst)
+        print(f"  Copied for self-registration: {dst}")
+
     # Installer/uninstaller helper next to the loose exes
     install_script = OUTPUT_DIR / "Install-SparseIdentity.ps1"
     install_script.write_text(f'''# Registers the WindowsForum Diagnostics sparse identity package so the loose

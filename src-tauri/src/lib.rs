@@ -14,6 +14,8 @@ pub mod native_monitor;
 pub mod openai_integration;
 pub mod results_storage;
 mod security;
+#[cfg(windows)]
+mod sparse_identity;
 pub mod state;
 pub mod timestamp;
 mod windows_native;
@@ -803,6 +805,38 @@ async fn get_architecture_info() -> Result<serde_json::Value, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Self-register the sparse identity package (if shipped next to the exe)
+    // so the loose exe gains package identity + systemAIModels for Phi Silica
+    // without any PowerShell step. Must run before the UI: identity attaches
+    // at process creation, so a successful registration relaunches the app.
+    #[cfg(windows)]
+    {
+        use sparse_identity::IdentityOutcome;
+        match sparse_identity::ensure_sparse_identity() {
+            IdentityOutcome::RelaunchPending => {
+                println!("Sparse identity registered; relaunching with package identity");
+                return;
+            }
+            IdentityOutcome::AlreadyPackaged => {
+                println!("Package identity: present");
+            }
+            IdentityOutcome::NotAvailable => {
+                println!(
+                    "Package identity: none (no sparse package found — Phi Silica via Windows AI APIs unavailable)"
+                );
+            }
+            IdentityOutcome::RelaunchDidNotAttach => {
+                eprintln!(
+                    "Sparse identity: registered but identity did not attach after relaunch — \
+                     check that the package arch/publisher match this exe"
+                );
+            }
+            IdentityOutcome::Failed(reason) => {
+                eprintln!("Sparse identity registration failed: {}", reason);
+            }
+        }
+    }
+
     // Initialize scan storage gracefully - don't crash if it fails
     let (scan_storage, scan_storage_error) = match ScanStorage::new() {
         Ok(storage) => (Some(storage), None),
