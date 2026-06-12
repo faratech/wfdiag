@@ -36,10 +36,12 @@ PUBLISHER = "CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4"
 # the Store identity so both can be installed side by side.
 SPARSE_PACKAGE_NAME = "WindowsForum.Diagnostics.Sparse"
 
-# Whether to ship Windows App SDK AI DLLs next to the loose exe. Off by
-# default — with package identity the framework package provides them. Set by
-# the --bundle-ai-dlls flag for machines that lack the framework.
-BUNDLE_AI_DLLS = False
+# Whether to ship Windows App SDK AI DLLs next to the loose exe. ON by default:
+# the bundled 2.0-experimental DLLs bypass the LAF enforcement that the stable
+# framework applies at generation, which the sparse/loose identity cannot
+# unlock (its token is bound to the Store package family name). Disable with
+# --no-bundle-ai-dlls for an identity that CAN unlock LAF (e.g. the Store app).
+BUNDLE_AI_DLLS = True
 
 # Certificate configuration for self-signing
 CERT_PATH = OUTPUT_DIR / "wfdiag-selfsign.pfx"
@@ -922,10 +924,11 @@ def main():
         help="Disable sccache (enabled by default if available)"
     )
     parser.add_argument(
-        "--bundle-ai-dlls",
+        "--no-bundle-ai-dlls",
         action="store_true",
-        help="Ship Windows App SDK AI DLLs next to the loose exe (default: off; "
-             "the installed framework package provides them under package identity)"
+        help="Do NOT ship Windows App SDK AI DLLs next to the loose exe "
+             "(default: bundled — they bypass the LAF enforcement the loose "
+             "identity cannot unlock)"
     )
 
     args = parser.parse_args()
@@ -934,7 +937,7 @@ def main():
     skip_frontend = args.skip_frontend
 
     global BUNDLE_AI_DLLS
-    BUNDLE_AI_DLLS = args.bundle_ai_dlls
+    BUNDLE_AI_DLLS = not args.no_bundle_ai_dlls
 
     # Determine sccache usage - enabled by default if available
     if args.no_sccache:
