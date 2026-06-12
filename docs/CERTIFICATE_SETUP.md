@@ -35,7 +35,7 @@ Add this as a secret named `CERTIFICATE_PASSWORD`.
 
 ## What the Workflow Does
 
-The `sign-with-certificate.yml` workflow will:
+The `release-signed.yml` workflow (which replaced the standalone `sign-with-certificate.yml`) will:
 
 1. ✅ **Find existing binaries** (*.exe, *.msi, *.msix) - no building
 2. ✅ **Windows Code Signing**: Embeds digital signature in files using the PFX certificate
