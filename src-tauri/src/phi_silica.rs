@@ -230,6 +230,28 @@ fn get_app_directory() -> Option<std::path::PathBuf> {
         .map(|p| p.to_path_buf())
 }
 
+#[cfg(all(windows, target_arch = "x86_64"))]
+const DLL_ARCH: &str = "x64";
+#[cfg(all(windows, target_arch = "aarch64"))]
+const DLL_ARCH: &str = "arm64";
+#[cfg(all(windows, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
+const DLL_ARCH: &str = "unknown";
+
+/// Candidate directories for the bundled Windows App SDK AI DLLs, in priority
+/// order: next to the exe (MSIX layout bundles them there), then the
+/// arch-specific subdirectories used by the loose layout, where x64 and arm64
+/// DLLs share filenames and therefore cannot live in the exe dir together.
+#[cfg(windows)]
+fn dll_search_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(app_dir) = get_app_directory() {
+        dirs.push(app_dir.clone());
+        dirs.push(app_dir.join("ai-sdk-dlls").join(DLL_ARCH));
+        dirs.push(app_dir.join("ai-sdk").join(DLL_ARCH));
+    }
+    dirs
+}
+
 /// Cached state for DLL loading
 #[cfg(windows)]
 static AI_TEXT_DLL_LOADED: std::sync::atomic::AtomicBool =
@@ -239,38 +261,46 @@ static AI_TEXT_DLL_LOADED: std::sync::atomic::AtomicBool =
 #[cfg(windows)]
 static mut AI_TEXT_DLL_MODULE: Option<windows::Win32::Foundation::HMODULE> = None;
 
-/// Try to load the AI DLL from our app's bundled directory
+/// Try to load the AI DLL from the app dir or its arch-specific subdirectories
 #[cfg(windows)]
 fn try_direct_dll_activation() -> Result<(), String> {
     use std::sync::atomic::Ordering;
-    use windows::Win32::System::LibraryLoader::LoadLibraryW;
+    use windows::Win32::System::LibraryLoader::{LOAD_WITH_ALTERED_SEARCH_PATH, LoadLibraryExW};
     use windows_core::PCWSTR;
 
-    // Only load once
+    // Only load once (the flag is set only on success, so a missing DLL can
+    // be dropped in later and picked up on the next attempt)
     if AI_TEXT_DLL_LOADED.load(Ordering::SeqCst) {
         return Ok(());
     }
 
     log_phi_silica("Attempting to load bundled AI DLLs...");
 
-    // Get app directory where bundled DLLs are
-    let app_dir = get_app_directory()
-        .ok_or_else(|| DiagError::ai_unavailable("phi_silica", "Failed to get app directory"))?;
+    let search_dirs = dll_search_dirs();
+    if search_dirs.is_empty() {
+        return Err(DiagError::ai_unavailable("phi_silica", "Failed to get app directory").into());
+    }
+    log_phi_silica(&format!("DLL search dirs: {:?}", search_dirs));
 
-    log_phi_silica(&format!("App directory: {:?}", app_dir));
-
-    // Load the DLLs in dependency order
+    // Load the DLLs in dependency order. WindowsAppRuntime first: once it is
+    // in the loaded-module list, the Text DLL's static import of it resolves
+    // regardless of directory.
     let dlls = [
         "Microsoft.WindowsAppRuntime.dll",
         "Microsoft.Windows.AI.Text.dll",
     ];
 
+    let mut text_dll_loaded = false;
+
     for dll_name in &dlls {
-        let dll_path = app_dir.join(dll_name);
-        if !dll_path.exists() {
-            log_phi_silica(&format!("DLL not found: {:?}", dll_path));
+        let Some(dll_path) = search_dirs
+            .iter()
+            .map(|dir| dir.join(dll_name))
+            .find(|path| path.exists())
+        else {
+            log_phi_silica(&format!("DLL not found in any search dir: {}", dll_name));
             continue;
-        }
+        };
 
         log_phi_silica(&format!("Loading: {:?}", dll_path));
 
@@ -281,11 +311,19 @@ fn try_direct_dll_activation() -> Result<(), String> {
             .collect();
 
         unsafe {
-            match LoadLibraryW(PCWSTR::from_raw(dll_path_wide.as_ptr())) {
+            // LOAD_WITH_ALTERED_SEARCH_PATH: resolve the DLL's own static
+            // imports from ITS directory first — required when loading from
+            // an ai-sdk-dlls/<arch> subdirectory rather than the exe dir
+            match LoadLibraryExW(
+                PCWSTR::from_raw(dll_path_wide.as_ptr()),
+                None,
+                LOAD_WITH_ALTERED_SEARCH_PATH,
+            ) {
                 Ok(module) => {
                     log_phi_silica(&format!("Loaded: {}", dll_name));
                     if dll_name == &"Microsoft.Windows.AI.Text.dll" {
                         AI_TEXT_DLL_MODULE = Some(module);
+                        text_dll_loaded = true;
                     }
                 }
                 Err(e) => log_phi_silica(&format!("Failed to load {}: {}", dll_name, e.message())),
@@ -293,10 +331,21 @@ fn try_direct_dll_activation() -> Result<(), String> {
         }
     }
 
-    AI_TEXT_DLL_LOADED.store(true, Ordering::SeqCst);
-    log_phi_silica("Bundled DLLs loaded");
-
-    Ok(())
+    if text_dll_loaded {
+        AI_TEXT_DLL_LOADED.store(true, Ordering::SeqCst);
+        log_phi_silica("Bundled DLLs loaded");
+        Ok(())
+    } else {
+        Err(DiagError::ai_unavailable(
+            "phi_silica",
+            format!(
+                "Microsoft.Windows.AI.Text.dll not found next to the exe or in \
+                 ai-sdk-dlls\\{}",
+                DLL_ARCH
+            ),
+        )
+        .into())
+    }
 }
 
 /// Create LanguageModel via standard WinRT activation (RoGetActivationFactory).
@@ -318,26 +367,33 @@ fn create_language_model_winrt() -> Result<crate::windows_ai_bindings::LanguageM
     wait_for_async_blocking(op)
 }
 
-/// Create a LanguageModel, preferring standard WinRT activation (works with
-/// package identity from full MSIX or the sparse package) and falling back to
-/// DllGetActivationFactory on bundled DLLs (MSIX layout ships them next to
-/// the exe; loose installs normally rely on the WinRT path instead).
+/// Create a LanguageModel, preferring DllGetActivationFactory on the bundled
+/// DLLs and falling back to standard WinRT activation.
+///
+/// The direct-DLL path goes FIRST deliberately: the WinAppSDK runtime
+/// enforces Phi Silica as a Limited Access Feature on the Ro activation path
+/// (model creation succeeds but GenerateResponseAsync is denied with
+/// 0x80070005 when the LAF token is unapproved — ours returns "Unavailable"),
+/// while the direct factory from the bundled DLLs bypasses that enforcement.
+/// This is the configuration the MSIX build has always shipped. The WinRT
+/// fallback covers installs without bundled DLLs where identity +
+/// an approved LAF make the supported path work.
 #[cfg(windows)]
 fn create_language_model() -> Result<crate::windows_ai_bindings::LanguageModel, String> {
-    match create_language_model_winrt() {
+    match create_language_model_direct() {
         Ok(model) => {
-            log_phi_silica("LanguageModel created via WinRT activation");
+            log_phi_silica("LanguageModel created via direct DLL activation");
             Ok(model)
         }
-        Err(winrt_err) => {
+        Err(direct_err) => {
             log_phi_silica(&format!(
-                "WinRT activation failed ({}); falling back to direct DLL activation",
-                winrt_err
+                "Direct DLL activation failed ({}); falling back to WinRT activation",
+                direct_err
             ));
-            create_language_model_direct().map_err(|direct_err| {
+            create_language_model_winrt().map_err(|winrt_err| {
                 format!(
-                    "Phi Silica model creation failed. WinRT path: {} | Direct DLL path: {}",
-                    winrt_err, direct_err
+                    "Phi Silica model creation failed. Direct DLL path: {} | WinRT path: {}",
+                    direct_err, winrt_err
                 )
             })
         }
