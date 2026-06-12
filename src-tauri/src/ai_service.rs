@@ -117,6 +117,22 @@ pub struct AIResponse {
     pub error: Option<String>,
 }
 
+/// Per-provider status row (settings badges, provider pickers).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderInfo {
+    pub id: AIProvider,
+    /// Usable right now (key stored / endpoint reachable)
+    pub available: bool,
+    /// User has done the setup (no network validation)
+    pub configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    pub supports_tools: bool,
+    pub supports_streaming: bool,
+}
+
 /// Full status of AI providers
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AIProviderStatus {
@@ -131,6 +147,9 @@ pub struct AIProviderStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foundry_local_endpoint: Option<String>,
     pub active_provider: AIProvider,
+    /// One row per real provider, in Auto routing order
+    #[serde(default)]
+    pub providers: Vec<ProviderInfo>,
 }
 
 /// Global AI service state
@@ -339,25 +358,128 @@ pub async fn determine_active_provider_with_key(
     route_provider(pref, avail)
 }
 
+fn provider_info(
+    id: AIProvider,
+    available: bool,
+    configured: bool,
+    model: Option<String>,
+    endpoint: Option<String>,
+) -> ProviderInfo {
+    let caps = crate::ai_providers::capabilities(id);
+    ProviderInfo {
+        id,
+        available,
+        configured,
+        model: model.filter(|m| !m.trim().is_empty()),
+        endpoint,
+        supports_tools: caps.supports_tools,
+        supports_streaming: caps.supports_streaming,
+    }
+}
+
 /// Get current AI provider status
 pub async fn get_ai_status() -> AIProviderStatus {
     let pref = get_user_preference();
+    let settings = crate::commands::settings::read_settings_from_disk().unwrap_or_default();
     let openai_available = check_openai_available().await;
     let (phi_available, phi_ready, phi_message) = check_phi_silica_available();
     let foundry_endpoint = check_foundry_local_available().await;
+    let ollama_endpoint = check_ollama_available().await;
+    let custom_endpoint = check_custom_available().await;
+    let anthropic_available = check_anthropic_available().await;
+    let gemini_available = check_gemini_available().await;
     // Status reports ALL providers, so every availability is gathered (no
     // lazy short-circuit here) and routing reuses the same snapshot instead
     // of re-probing via determine_active_provider
     let avail = ProviderAvailability {
         phi: phi_available,
         foundry: foundry_endpoint.is_some(),
-        ollama: check_ollama_available().await.is_some(),
-        custom: check_custom_available().await.is_some(),
+        ollama: ollama_endpoint.is_some(),
+        custom: custom_endpoint.is_some(),
         openai: openai_available,
-        anthropic: check_anthropic_available().await,
-        gemini: check_gemini_available().await,
+        anthropic: anthropic_available,
+        gemini: gemini_available,
     };
     let active = route_provider(pref, avail);
+
+    let custom_configured = settings
+        .custom_endpoint
+        .as_deref()
+        .is_some_and(|e| !e.trim().is_empty())
+        && settings
+            .custom_model
+            .as_deref()
+            .is_some_and(|m| !m.trim().is_empty());
+
+    // In Auto routing order, which is also a sensible display order
+    let providers = vec![
+        provider_info(
+            AIProvider::PhiSilica,
+            phi_available,
+            phi_available,
+            None,
+            None,
+        ),
+        provider_info(
+            AIProvider::FoundryLocal,
+            foundry_endpoint.is_some(),
+            foundry_endpoint.is_some(),
+            Some(crate::openai_integration::FOUNDRY_LOCAL_MODEL.to_string()),
+            foundry_endpoint.clone(),
+        ),
+        provider_info(
+            AIProvider::Ollama,
+            ollama_endpoint.is_some(),
+            // Works with zero config when the default endpoint answers
+            true,
+            settings.ollama_model.clone(),
+            ollama_endpoint,
+        ),
+        provider_info(
+            AIProvider::CustomOpenAI,
+            custom_endpoint.is_some(),
+            custom_configured,
+            settings.custom_model.clone(),
+            custom_endpoint.or_else(|| settings.custom_endpoint.clone()),
+        ),
+        provider_info(
+            AIProvider::OpenAI,
+            openai_available,
+            openai_available,
+            Some(crate::openai_integration::OPENAI_MODEL.to_string()),
+            None,
+        ),
+        provider_info(
+            AIProvider::Anthropic,
+            anthropic_available,
+            anthropic_available,
+            Some(
+                settings
+                    .anthropic_model
+                    .clone()
+                    .filter(|m| !m.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        crate::ai_providers::anthropic::ANTHROPIC_DEFAULT_MODEL.to_string()
+                    }),
+            ),
+            None,
+        ),
+        provider_info(
+            AIProvider::Gemini,
+            gemini_available,
+            gemini_available,
+            Some(
+                settings
+                    .gemini_model
+                    .clone()
+                    .filter(|m| !m.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        crate::ai_providers::gemini::GEMINI_DEFAULT_MODEL.to_string()
+                    }),
+            ),
+            None,
+        ),
+    ];
 
     AIProviderStatus {
         preferred_provider: active,
@@ -369,6 +491,7 @@ pub async fn get_ai_status() -> AIProviderStatus {
         foundry_local_available: foundry_endpoint.is_some(),
         foundry_local_endpoint: foundry_endpoint,
         active_provider: active,
+        providers,
     }
 }
 

@@ -1,9 +1,52 @@
 import React, { useState, useRef, useEffect } from 'react'
-import { useAIContext } from '../contexts/AIContext'
+import { useAIContext, type AIProvider, type ProviderInfo } from '../contexts/AIContext'
 import { useAppContext } from '../contexts/AppContext'
 import { renderMarkdownLite } from '../utils/markdownLite'
 
 interface Msg { role: 'user' | 'bot'; text: string }
+
+export const PROVIDER_LABELS: Record<Exclude<AIProvider, 'none'>, string> = {
+  phi_silica: 'Phi Silica (on-device NPU)',
+  foundry_local: 'Foundry Local (local server)',
+  ollama: 'Ollama (local server)',
+  custom_openai: 'Custom endpoint',
+  openai: 'OpenAI (cloud)',
+  anthropic: 'Anthropic Claude (cloud)',
+  gemini: 'Google Gemini (cloud)',
+}
+
+const PROVIDER_TAGS: Record<AIProvider, string> = {
+  none: 'no provider',
+  phi_silica: 'on-device · Phi Silica',
+  foundry_local: 'local · Foundry Local',
+  ollama: 'local · Ollama',
+  custom_openai: 'custom endpoint',
+  openai: 'cloud · OpenAI',
+  anthropic: 'cloud · Claude',
+  gemini: 'cloud · Gemini',
+}
+
+/** Status line for one provider row in the Models panel */
+function providerDetail(p: ProviderInfo, phiMessage?: string): string {
+  if (p.available) {
+    const parts: string[] = []
+    if (p.model) parts.push(p.model)
+    if (p.endpoint) parts.push(p.endpoint)
+    return parts.length > 0 ? parts.join(' · ') : 'Ready'
+  }
+  switch (p.id) {
+    case 'phi_silica':
+      return phiMessage || 'Unavailable'
+    case 'foundry_local':
+      return 'Not detected — install with: winget install Microsoft.FoundryLocal'
+    case 'ollama':
+      return 'Not detected — install from ollama.com'
+    case 'custom_openai':
+      return p.configured ? 'Configured but unreachable' : 'Set endpoint and model in Settings'
+    default:
+      return 'No API key — add one in Settings'
+  }
+}
 
 export const AIScreen: React.FC = () => {
   const { analyzeGeneric, aiStatus, isAIAvailable, activeProvider, sessionId, interpretations } = useAIContext()
@@ -20,7 +63,7 @@ export const AIScreen: React.FC = () => {
     setTranscript(t => [...t, { role: 'user', text }])
     setInput('')
     if (!isAIAvailable) {
-      setTranscript(t => [...t, { role: 'bot', text: 'No AI provider is available. Configure an OpenAI API key in Settings, install Foundry Local (winget install Microsoft.FoundryLocal), or run on a Copilot+ PC for on-device Phi Silica.' }])
+      setTranscript(t => [...t, { role: 'bot', text: 'No AI provider is available. Add an API key (OpenAI, Anthropic or Gemini) in Settings, install Foundry Local (winget install Microsoft.FoundryLocal) or Ollama for local AI, or run the Microsoft Store version on a Copilot+ PC for on-device Phi Silica.' }])
       return
     }
     setThinking(true)
@@ -49,7 +92,7 @@ export const AIScreen: React.FC = () => {
           <img src="/wf-ds/chatgpt-bot-avatar.webp" alt="" style={{ width: 24, height: 24, borderRadius: '50%' }} />
           <span>WindowsForum AI Assistant</span>
           <span className="count">
-            <span className="tag"><span className="status-dot success" style={{ boxShadow: 'none' }} /> {activeProvider === 'phi_silica' ? 'on-device · Phi Silica' : activeProvider === 'foundry_local' ? 'local · Foundry Local' : activeProvider === 'openai' ? 'cloud · OpenAI' : 'no provider'}</span>
+            <span className="tag"><span className="status-dot success" style={{ boxShadow: 'none' }} /> {PROVIDER_TAGS[activeProvider]}</span>
           </span>
         </header>
         <div className="chat-shell" style={{ minHeight: 360 }}>
@@ -101,20 +144,21 @@ export const AIScreen: React.FC = () => {
         <div className="wf-block">
           <header className="wf-block-header"><span className="accent-bar" /><span>Models</span></header>
           <div style={{ padding: 12, fontSize: 13 }}>
-            {([
-              ['Phi Silica (on-device NPU)', aiStatus?.phi_silica_available ? (aiStatus.phi_silica_ready ? 'Ready' : (aiStatus.phi_silica_message || 'Available')) : (aiStatus?.phi_silica_message || 'Unavailable'), 'var(--wf-success-feature)', activeProvider === 'phi_silica'],
-              ['Foundry Local (local server)', aiStatus?.foundry_local_available ? `Running at ${aiStatus.foundry_local_endpoint || 'local endpoint'}` : 'Not detected — install with: winget install Microsoft.FoundryLocal', '#c98a00', activeProvider === 'foundry_local'],
-              ['OpenAI (cloud)', aiStatus?.openai_api_key_set ? 'API key configured' : 'Not configured', 'var(--wf-paletteColor1)', activeProvider === 'openai'],
-            ] as const).map((m, i, arr) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: i < arr.length - 1 ? '1px solid var(--hairline)' : 'none' }}>
-                <span className="status-dot" style={{ background: m[2], boxShadow: 'none' }} />
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600 }}>{m[0]}</div>
-                  <div style={{ fontSize: 11, color: 'var(--wf-text-muted)' }}>{m[1]}</div>
+            {(aiStatus?.providers ?? []).map((p, i, arr) => (
+              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: i < arr.length - 1 ? '1px solid var(--hairline)' : 'none' }}>
+                <span className="status-dot" style={{ background: p.available ? 'var(--wf-success-feature)' : 'var(--wf-text-muted)', boxShadow: 'none' }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600 }}>{PROVIDER_LABELS[p.id]}</div>
+                  <div style={{ fontSize: 11, color: 'var(--wf-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {providerDetail(p, aiStatus?.phi_silica_message)}
+                  </div>
                 </div>
-                {m[3] && <span className="tag">Active</span>}
+                {activeProvider === p.id && <span className="tag">Active</span>}
               </div>
             ))}
+            {!aiStatus?.providers?.length && (
+              <div style={{ color: 'var(--wf-text-muted)', fontSize: 12, padding: '4px 0' }}>Checking providers…</div>
+            )}
             <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setShowSettings(true)}><i className="fa-solid fa-gear" /> AI settings</button>
           </div>
         </div>
