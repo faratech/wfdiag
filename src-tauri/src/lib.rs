@@ -931,6 +931,7 @@ pub fn run() {
             clear_scan_history,
             update_scan_tags,
             get_task_trends,
+            ai_providers::ollama::ai_list_ollama_models,
             openai_integration::analyze_with_openai,
             openai_integration::analyze_system_with_ai,
             openai_integration::get_ai_provider_status,

@@ -10,8 +10,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ai_cache::AICache;
 use crate::ai_prompts;
-use crate::error::DiagError;
-use crate::openai_integration::OPENAI_MODEL;
 
 /// AI Provider enumeration.
 ///
@@ -430,29 +428,10 @@ pub async fn analyze(
         ContextType::GeneralAnalysis => request.data.clone(),
     };
 
-    // Call the appropriate provider
-    let result = match provider {
-        AIProvider::OpenAI => analyze_with_openai(&prompt, api_key).await,
-        AIProvider::PhiSilica => analyze_with_phi_silica(&prompt).await,
-        AIProvider::FoundryLocal => analyze_with_foundry_local(&prompt).await,
-        // Wired up in the provider-client phase of 2.5.0; routing only returns
-        // these when the user has configured them.
-        AIProvider::Ollama
-        | AIProvider::CustomOpenAI
-        | AIProvider::Anthropic
-        | AIProvider::Gemini => Err(DiagError::ai_unavailable(
-            provider.to_string(),
-            "This AI provider is not available in this build yet.",
-        )
-        .into()),
-        AIProvider::None => Err(DiagError::ai_unavailable(
-            "none",
-            "No AI provider available. Configure an API key (OpenAI, Anthropic or Gemini) in \
-             Settings, install Foundry Local (winget install Microsoft.FoundryLocal) or Ollama \
-             for local AI, or use the Microsoft Store version on a Copilot+ PC for on-device \
-             Phi Silica.",
-        )
-        .into()),
+    // Resolve config (keys/endpoint/model) and call the provider client
+    let result = match crate::ai_providers::resolve_config(provider, api_key).await {
+        Ok(cfg) => crate::ai_providers::one_shot(provider, &cfg, SYSTEM_PROMPT, &prompt).await,
+        Err(e) => Err(e),
     };
 
     // Cache successful results
@@ -468,122 +447,6 @@ pub async fn analyze(
         cached: false,
         error: None,
     })
-}
-
-/// Analyze using OpenAI Responses API
-/// If api_key is provided, uses it directly; otherwise loads from DPAPI storage
-async fn analyze_with_openai(prompt: &str, api_key: Option<String>) -> Result<String, String> {
-    use async_openai::{
-        Client,
-        config::OpenAIConfig,
-        types::responses::{CreateResponseArgs, InputParam},
-    };
-
-    // Use provided key or load from storage
-    let api_key = match api_key {
-        Some(key) if !key.is_empty() => key,
-        _ => crate::load_api_key_internal().await.ok_or_else(|| {
-            DiagError::api_key(
-                "load",
-                "OpenAI API key not configured. Please enter your API key in Settings.",
-            )
-        })?,
-    };
-
-    let config = OpenAIConfig::new().with_api_key(api_key);
-    let client = Client::with_config(config);
-
-    let full_prompt = format!("{}\n\n{}", SYSTEM_PROMPT, prompt);
-
-    let request = CreateResponseArgs::default()
-        .model(OPENAI_MODEL)
-        .input(InputParam::Text(full_prompt))
-        .build()
-        .map_err(|e| DiagError::AiAnalysisFailed {
-            reason: format!("Failed to build request: {}", e),
-        })?;
-
-    let response = client.responses().create(request).await.map_err(|e| {
-        eprintln!("OpenAI API error in ai_service: {:?}", e);
-        DiagError::AiAnalysisFailed {
-            reason: format!("OpenAI API error: {}", e),
-        }
-    })?;
-
-    Ok(response.output_text().unwrap_or_default())
-}
-
-/// Maximum prompt size for Phi Silica
-/// Phi Silica has 4k token context (~4 chars/token = ~16k chars max)
-/// Use 2500 chars for prompt to leave room for output (~1500 chars)
-const PHI_SILICA_MAX_PROMPT_CHARS: usize = 2500;
-
-/// Analyze using Phi Silica
-/// Note: ai_prompts.rs already converts JSON to readable text and truncates
-/// This is a final safety check
-async fn analyze_with_phi_silica(prompt: &str) -> Result<String, String> {
-    // Final safety truncation if prompt is still too large. Count and slice by CHARACTER,
-    // not byte index, so a multi-byte UTF-8 char at the boundary can't panic (and with
-    // panic = "abort" in release, abort the whole process).
-    let final_prompt = if prompt.chars().count() > PHI_SILICA_MAX_PROMPT_CHARS {
-        let head: String = prompt
-            .chars()
-            .take(PHI_SILICA_MAX_PROMPT_CHARS - 25)
-            .collect();
-        format!("{}... [input truncated]", head)
-    } else {
-        prompt.to_string()
-    };
-
-    crate::phi_silica::generate_response(&final_prompt).await
-}
-
-/// Analyze using a local OpenAI-compatible endpoint (Foundry Local).
-/// The endpoint is resolved dynamically — its port must not be hardcoded.
-async fn analyze_with_foundry_local(prompt: &str) -> Result<String, String> {
-    use async_openai::{
-        Client,
-        config::OpenAIConfig,
-        types::responses::{CreateResponseArgs, InputParam},
-    };
-
-    let endpoint = check_foundry_local_available().await.ok_or_else(|| {
-        DiagError::ai_unavailable(
-            "foundry_local",
-            "No local AI endpoint available. Install Foundry Local and run 'foundry service \
-             start', or configure an endpoint in Settings.",
-        )
-    })?;
-
-    let config = OpenAIConfig::new()
-        .with_api_base(format!("{}/v1", endpoint))
-        .with_api_key("not-needed");
-    let client = Client::with_config(config);
-
-    let full_prompt = format!("{}\n\n{}", SYSTEM_PROMPT, prompt);
-
-    let request = CreateResponseArgs::default()
-        .model(crate::openai_integration::FOUNDRY_LOCAL_MODEL)
-        .input(InputParam::Text(full_prompt))
-        .build()
-        .map_err(|e| DiagError::AiAnalysisFailed {
-            reason: format!("Failed to build request: {}", e),
-        })?;
-
-    let response = client.responses().create(request).await.map_err(|e| {
-        eprintln!("Foundry Local API error in ai_service: {:?}", e);
-        DiagError::AiAnalysisFailed {
-            reason: format!(
-                "Foundry Local error: {}. Ensure the service is running and the model '{}' \
-                 is loaded (foundry model run {}).",
-                e,
-                crate::openai_integration::FOUNDRY_LOCAL_MODEL,
-                crate::openai_integration::FOUNDRY_LOCAL_MODEL
-            ),
-        }
-    })?;
-
-    Ok(response.output_text().unwrap_or_default())
 }
 
 /// Clear AI cache for a session or all
