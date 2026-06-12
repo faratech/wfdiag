@@ -395,3 +395,83 @@ impl IssueFixer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixable_ids_have_no_duplicates() {
+        let ids = fixable_issue_ids();
+        let mut sorted = ids.to_vec();
+        sorted.sort_unstable();
+        let len_before = sorted.len();
+        sorted.dedup();
+        assert_eq!(sorted.len(), len_before);
+    }
+
+    #[tokio::test]
+    async fn unknown_issue_id_is_a_safe_no_op() {
+        // Must not run any command, must report failure honestly
+        let result = IssueFixer::new()
+            .fix_issue("definitely_not_real")
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.actions_taken.is_empty());
+        assert!(result.message.contains("No automated fix"));
+    }
+
+    /// The "Fix" button only appears when the detector emits an id that is in
+    /// fixable_issue_ids(). This pins the intersection so renames on either
+    /// side fail loudly instead of silently orphaning a fix or a detection.
+    #[test]
+    fn fixer_and_detector_ids_stay_in_sync() {
+        let detector_ids: Vec<String> = crate::issue_detector::IssueDetector::new()
+            .detect_issues(&std::collections::HashMap::new())
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+
+        // Fixable ids the detector can actually surface
+        let expected_active = [
+            "disk_fragmentation",
+            "temp_files",
+            "dns_cache",
+            "stopped_services",
+            "high_cpu_usage",
+            "high_memory_usage",
+        ];
+        // Fixable ids with NO corresponding detector today (manual-only fixes,
+        // reachable only if a future detector emits them). windows_update_service
+        // is the known id mismatch: the detector emits pending_windows_updates.
+        let known_orphans = [
+            "windows_update_service",
+            "icon_cache",
+            "prefetch_files",
+            "recycle_bin",
+        ];
+
+        for id in fixable_issue_ids() {
+            let detectable = detector_ids.iter().any(|d| d == id);
+            if expected_active.contains(id) {
+                assert!(
+                    detectable,
+                    "fixable id '{}' no longer emitted by the detector",
+                    id
+                );
+            } else {
+                assert!(
+                    known_orphans.contains(id),
+                    "new fixable id '{}' — classify it here",
+                    id
+                );
+                assert!(
+                    !detectable,
+                    "'{}' is now detectable — move it to expected_active",
+                    id
+                );
+            }
+        }
+    }
+}

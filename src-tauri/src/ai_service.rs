@@ -166,47 +166,56 @@ pub async fn check_foundry_local_available() -> Option<String> {
     crate::openai_integration::local_ai_endpoint().await
 }
 
-/// Determine the active provider based on preference and availability
-pub async fn determine_active_provider(pref: AIProviderPreference) -> AIProvider {
+/// Pure routing decision: which provider serves a request given the user's
+/// preference and what's available. Auto prefers on-device Phi Silica (NPU,
+/// no model download), then a local Foundry Local endpoint (still on this
+/// machine, no identity needed), then cloud OpenAI. An explicit preference
+/// never falls back to a different provider.
+pub fn route_provider(
+    pref: AIProviderPreference,
+    phi_available: bool,
+    foundry_available: bool,
+    openai_available: bool,
+) -> AIProvider {
     match pref {
-        AIProviderPreference::OpenAI => {
-            if check_openai_available().await {
-                AIProvider::OpenAI
-            } else {
-                AIProvider::None
-            }
-        }
-        AIProviderPreference::PhiSilica => {
-            let (available, _, _) = check_phi_silica_available();
-            if available {
-                AIProvider::PhiSilica
-            } else {
-                AIProvider::None
-            }
-        }
-        AIProviderPreference::FoundryLocal => {
-            if check_foundry_local_available().await.is_some() {
-                AIProvider::FoundryLocal
-            } else {
-                AIProvider::None
-            }
-        }
         AIProviderPreference::Auto => {
-            // Prefer on-device Phi Silica (NPU, no model download), then a
-            // local Foundry Local endpoint (still on this machine, no
-            // identity needed), then cloud OpenAI
-            let (phi_available, _, _) = check_phi_silica_available();
             if phi_available {
                 AIProvider::PhiSilica
-            } else if check_foundry_local_available().await.is_some() {
+            } else if foundry_available {
                 AIProvider::FoundryLocal
-            } else if check_openai_available().await {
+            } else if openai_available {
                 AIProvider::OpenAI
             } else {
                 AIProvider::None
             }
         }
+        AIProviderPreference::OpenAI if openai_available => AIProvider::OpenAI,
+        AIProviderPreference::PhiSilica if phi_available => AIProvider::PhiSilica,
+        AIProviderPreference::FoundryLocal if foundry_available => AIProvider::FoundryLocal,
+        _ => AIProvider::None,
     }
+}
+
+/// Determine the active provider based on preference and availability.
+/// Probes lazily in preference order — the Foundry probe shells out / opens
+/// a socket, so it must not run when an earlier provider already won.
+pub async fn determine_active_provider(pref: AIProviderPreference) -> AIProvider {
+    let (phi, foundry, openai) = match pref {
+        AIProviderPreference::OpenAI => (false, false, check_openai_available().await),
+        AIProviderPreference::PhiSilica => (check_phi_silica_available().0, false, false),
+        AIProviderPreference::FoundryLocal => (
+            false,
+            check_foundry_local_available().await.is_some(),
+            false,
+        ),
+        AIProviderPreference::Auto => {
+            let phi = check_phi_silica_available().0;
+            let foundry = !phi && check_foundry_local_available().await.is_some();
+            let openai = !phi && !foundry && check_openai_available().await;
+            (phi, foundry, openai)
+        }
+    };
+    route_provider(pref, phi, foundry, openai)
 }
 
 /// Get current AI provider status
@@ -215,7 +224,14 @@ pub async fn get_ai_status() -> AIProviderStatus {
     let openai_available = check_openai_available().await;
     let (phi_available, phi_ready, phi_message) = check_phi_silica_available();
     let foundry_endpoint = check_foundry_local_available().await;
-    let active = determine_active_provider(pref).await;
+    // Route from the availability just gathered instead of re-probing every
+    // provider a second time via determine_active_provider
+    let active = route_provider(
+        pref,
+        phi_available,
+        foundry_endpoint.is_some(),
+        openai_available,
+    );
 
     AIProviderStatus {
         preferred_provider: active,
@@ -559,3 +575,87 @@ Guidelines:
 - Mention any anomalies or concerns
 - Keep responses under 150 words
 - Use technical but accessible language"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_prefers_phi_silica_over_everything() {
+        assert_eq!(
+            route_provider(AIProviderPreference::Auto, true, true, true),
+            AIProvider::PhiSilica
+        );
+    }
+
+    #[test]
+    fn auto_falls_back_to_foundry_then_openai() {
+        assert_eq!(
+            route_provider(AIProviderPreference::Auto, false, true, true),
+            AIProvider::FoundryLocal
+        );
+        assert_eq!(
+            route_provider(AIProviderPreference::Auto, false, false, true),
+            AIProvider::OpenAI
+        );
+        assert_eq!(
+            route_provider(AIProviderPreference::Auto, false, false, false),
+            AIProvider::None
+        );
+    }
+
+    #[test]
+    fn explicit_preference_wins_when_available() {
+        assert_eq!(
+            route_provider(AIProviderPreference::OpenAI, true, true, true),
+            AIProvider::OpenAI
+        );
+        assert_eq!(
+            route_provider(AIProviderPreference::FoundryLocal, true, true, true),
+            AIProvider::FoundryLocal
+        );
+        assert_eq!(
+            route_provider(AIProviderPreference::PhiSilica, true, true, true),
+            AIProvider::PhiSilica
+        );
+    }
+
+    #[test]
+    fn explicit_preference_never_falls_back() {
+        // An unavailable explicit choice yields None rather than silently
+        // routing to a provider the user did not pick
+        assert_eq!(
+            route_provider(AIProviderPreference::PhiSilica, false, true, true),
+            AIProvider::None
+        );
+        assert_eq!(
+            route_provider(AIProviderPreference::FoundryLocal, true, false, true),
+            AIProvider::None
+        );
+        assert_eq!(
+            route_provider(AIProviderPreference::OpenAI, true, true, false),
+            AIProvider::None
+        );
+    }
+
+    #[test]
+    fn provider_serializes_snake_case_for_frontend() {
+        // The frontend AIProvider union type depends on these exact strings
+        assert_eq!(
+            serde_json::to_string(&AIProvider::PhiSilica).unwrap(),
+            "\"phi_silica\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AIProvider::FoundryLocal).unwrap(),
+            "\"foundry_local\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AIProvider::None).unwrap(),
+            "\"none\""
+        );
+        assert_eq!(
+            serde_json::from_str::<AIProviderPreference>("\"foundry_local\"").unwrap(),
+            AIProviderPreference::FoundryLocal
+        );
+    }
+}

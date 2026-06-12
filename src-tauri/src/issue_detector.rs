@@ -475,3 +475,169 @@ impl IssueDetector {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn ok_result(output: &str) -> TaskResult {
+        TaskResult {
+            success: true,
+            output: output.to_string(),
+            error: None,
+            duration_ms: 1,
+        }
+    }
+
+    fn results_with(task_id: &str, output: &str) -> HashMap<String, TaskResult> {
+        HashMap::from([(task_id.to_string(), ok_result(output))])
+    }
+
+    #[test]
+    fn low_disk_space_detected_below_ten_percent() {
+        let results = results_with(
+            "logical_disk",
+            r#"[{"Name": "C:", "FreeSpace": 5000000000, "Size": 100000000000}]"#,
+        );
+        let issue = IssueDetector::new().check_disk_space(&results);
+        assert!(issue.detected);
+        assert!(matches!(issue.severity, IssueSeverity::Critical));
+        assert!(issue.description.contains("C:"));
+    }
+
+    #[test]
+    fn adequate_disk_space_not_flagged() {
+        let results = results_with(
+            "logical_disk",
+            r#"[{"Name": "C:", "FreeSpace": 50000000000, "Size": 100000000000}]"#,
+        );
+        let issue = IssueDetector::new().check_disk_space(&results);
+        assert!(!issue.detected);
+    }
+
+    #[test]
+    fn malformed_disk_output_does_not_false_positive() {
+        let results = results_with("logical_disk", "not json at all");
+        assert!(!IssueDetector::new().check_disk_space(&results).detected);
+        // Zero-size disk must not divide by zero or flag
+        let results = results_with(
+            "logical_disk",
+            r#"[{"Name": "X:", "FreeSpace": 0, "Size": 0}]"#,
+        );
+        assert!(!IssueDetector::new().check_disk_space(&results).detected);
+    }
+
+    #[test]
+    fn stopped_auto_service_detected() {
+        let results = results_with(
+            "services",
+            r#"[{"Name": "wuauserv", "State": "Stopped", "StartMode": "Auto"},
+                {"Name": "Spooler", "State": "Running", "StartMode": "Auto"}]"#,
+        );
+        let issue = IssueDetector::new().check_stopped_services(&results);
+        assert!(issue.detected);
+        assert!(issue.description.contains('1'));
+    }
+
+    #[test]
+    fn manual_stopped_service_not_flagged() {
+        let results = results_with(
+            "services",
+            r#"[{"Name": "Fax", "State": "Stopped", "StartMode": "Manual"}]"#,
+        );
+        assert!(
+            !IssueDetector::new()
+                .check_stopped_services(&results)
+                .detected
+        );
+    }
+
+    #[test]
+    fn high_memory_usage_threshold() {
+        // 95% used -> flagged
+        let results = results_with(
+            "performance",
+            r#"{"memory_performance": {"TotalVisibleMemorySize": 100, "FreePhysicalMemory": 5}}"#,
+        );
+        assert!(
+            IssueDetector::new()
+                .check_high_memory_usage(&results)
+                .detected
+        );
+        // 50% used -> fine
+        let results = results_with(
+            "performance",
+            r#"{"memory_performance": {"TotalVisibleMemorySize": 100, "FreePhysicalMemory": 50}}"#,
+        );
+        assert!(
+            !IssueDetector::new()
+                .check_high_memory_usage(&results)
+                .detected
+        );
+    }
+
+    #[test]
+    fn high_cpu_usage_threshold() {
+        let results = results_with(
+            "performance",
+            r#"{"cpu_performance": {"PercentProcessorTime": 97}}"#,
+        );
+        assert!(IssueDetector::new().check_high_cpu_usage(&results).detected);
+        let results = results_with(
+            "performance",
+            r#"{"cpu_performance": {"PercentProcessorTime": 40}}"#,
+        );
+        assert!(!IssueDetector::new().check_high_cpu_usage(&results).detected);
+    }
+
+    #[test]
+    fn firewall_product_state_bitfield() {
+        // Second byte 0x10 bit set => firewall ON (e.g. 0x1000 = 4096)
+        let results = results_with(
+            "firewall_status",
+            r#"[{"displayName": "Windows Firewall", "productState": 4096}]"#,
+        );
+        assert!(
+            !IssueDetector::new()
+                .check_firewall_status(&results)
+                .detected
+        );
+        // 0x0100: second byte 0x01 => OFF
+        let results = results_with(
+            "firewall_status",
+            r#"[{"displayName": "Windows Firewall", "productState": 256}]"#,
+        );
+        let issue = IssueDetector::new().check_firewall_status(&results);
+        assert!(issue.detected);
+        assert!(matches!(issue.severity, IssueSeverity::Critical));
+    }
+
+    #[test]
+    fn parse_windows_date_formats() {
+        assert!(IssueDetector::parse_windows_date("6/12/2026").is_some());
+        assert!(IssueDetector::parse_windows_date("12/31/2025").is_some());
+        assert!(IssueDetector::parse_windows_date("2026-06-12").is_none());
+        assert!(IssueDetector::parse_windows_date("garbage").is_none());
+        assert!(IssueDetector::parse_windows_date("6/12").is_none());
+    }
+
+    #[test]
+    fn empty_results_yield_no_detections() {
+        let issues = IssueDetector::new().detect_issues(&HashMap::new());
+        // temp_files probes the real temp dir, so exclude it from the assertion
+        for issue in issues.iter().filter(|i| i.id != "temp_files") {
+            assert!(
+                !issue.detected,
+                "issue '{}' detected on an empty result set",
+                issue.id
+            );
+        }
+        // Every detector reports exactly once
+        let mut ids: Vec<_> = issues.iter().map(|i| i.id.as_str()).collect();
+        ids.sort_unstable();
+        let len_before = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), len_before, "duplicate issue ids emitted");
+    }
+}
