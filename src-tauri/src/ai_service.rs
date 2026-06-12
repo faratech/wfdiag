@@ -211,11 +211,8 @@ fn generate_cache_key(request: &AIRequest, session_id: &str) -> String {
     let content_hash = hasher.finish();
 
     format!(
-        "{}:{}:{}:{:x}",
-        session_id,
-        format!("{:?}", request.context_type),
-        request.context_id,
-        content_hash
+        "{}:{:?}:{}:{:x}",
+        session_id, request.context_type, request.context_id, content_hash
     )
 }
 
@@ -228,15 +225,15 @@ pub async fn analyze(
 ) -> Result<AIResponse, String> {
     // Check cache first
     let cache_key = generate_cache_key(&request, session_id);
-    if let Ok(cache) = get_cache().lock() {
-        if let Some(cached) = cache.get(&cache_key) {
-            return Ok(AIResponse {
-                interpretation: cached.clone(),
-                provider_used: AIProvider::OpenAI, // Assume OpenAI for cached results
-                cached: true,
-                error: None,
-            });
-        }
+    if let Ok(cache) = get_cache().lock()
+        && let Some(cached) = cache.get(&cache_key)
+    {
+        return Ok(AIResponse {
+            interpretation: cached.clone(),
+            provider_used: AIProvider::OpenAI, // Assume OpenAI for cached results
+            cached: true,
+            error: None,
+        });
     }
 
     // Determine provider - if api_key is provided, we can use OpenAI
@@ -286,10 +283,10 @@ pub async fn analyze(
     };
 
     // Cache successful results
-    if let Ok(ref interpretation) = result {
-        if let Ok(mut cache) = get_cache().lock() {
-            cache.insert(cache_key, interpretation.clone());
-        }
+    if let Ok(ref interpretation) = result
+        && let Ok(mut cache) = get_cache().lock()
+    {
+        cache.insert(cache_key, interpretation.clone());
     }
 
     result.map(|interpretation| AIResponse {

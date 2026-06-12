@@ -314,7 +314,7 @@ mod wmi_helper {
                     }
                     VT_BSTR => {
                         let bstr = &variant.Anonymous.Anonymous.Anonymous.bstrVal;
-                        if bstr.len() == 0 {
+                        if bstr.is_empty() {
                             json!("")
                         } else {
                             json!(bstr.to_string())
@@ -383,24 +383,23 @@ fn enumerate_gpu_engines() {
     for (idx, counter) in results.iter().enumerate() {
         if let Some(name) = counter.get("Name").and_then(|v| v.as_str()) {
             // Parse LUID and engine type
-            if let Some(luid_start) = name.find("luid_") {
-                if let Some(phys_start) = name.find("_phys_") {
-                    let luid = &name[luid_start..phys_start];
+            if let Some(luid_start) = name.find("luid_")
+                && let Some(phys_start) = name.find("_phys_")
+            {
+                let luid = &name[luid_start..phys_start];
 
-                    if let Some(engtype_start) = name.find("_engtype_") {
-                        let engtype = &name[engtype_start + 9..];
-                        luid_engines
-                            .entry(luid.to_string())
-                            .or_default()
-                            .insert(engtype.to_string());
+                if let Some(engtype_start) = name.find("_engtype_") {
+                    let engtype = &name[engtype_start + 9..];
+                    luid_engines
+                        .entry(luid.to_string())
+                        .or_default()
+                        .insert(engtype.to_string());
 
-                        // Also track utilization
-                        if let Some(util) = counter.get("UtilizationPercentage") {
-                            let util_val =
-                                util.as_u64().or_else(|| util.as_i64().map(|i| i as u64));
-                            if let Some(u) = util_val {
-                                luid_utils.entry(luid.to_string()).or_default().push(u);
-                            }
+                    // Also track utilization
+                    if let Some(util) = counter.get("UtilizationPercentage") {
+                        let util_val = util.as_u64().or_else(|| util.as_i64().map(|i| i as u64));
+                        if let Some(u) = util_val {
+                            luid_utils.entry(luid.to_string()).or_default().push(u);
                         }
                     }
                 }
@@ -456,18 +455,17 @@ fn discover_npu_luid() -> Option<String> {
     let mut luid_engines: HashMap<String, HashSet<String>> = HashMap::new();
 
     for counter in &results {
-        if let Some(name) = counter.get("Name").and_then(|v| v.as_str()) {
-            if let Some(luid_start) = name.find("luid_") {
-                if let Some(phys_start) = name.find("_phys_") {
-                    let luid = &name[luid_start..phys_start];
-                    if let Some(engtype_start) = name.find("_engtype_") {
-                        let engtype = &name[engtype_start + 9..];
-                        luid_engines
-                            .entry(luid.to_string())
-                            .or_default()
-                            .insert(engtype.to_string());
-                    }
-                }
+        if let Some(name) = counter.get("Name").and_then(|v| v.as_str())
+            && let Some(luid_start) = name.find("luid_")
+            && let Some(phys_start) = name.find("_phys_")
+        {
+            let luid = &name[luid_start..phys_start];
+            if let Some(engtype_start) = name.find("_engtype_") {
+                let engtype = &name[engtype_start + 9..];
+                luid_engines
+                    .entry(luid.to_string())
+                    .or_default()
+                    .insert(engtype.to_string());
             }
         }
     }

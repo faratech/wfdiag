@@ -362,10 +362,10 @@ async fn run_diagnostics_parallel(
                 // NEW session, mixing two scans' results.
                 {
                     let mut current = state_clone.current_session.lock().await;
-                    if let Some(ref mut session) = *current {
-                        if session.session_id == session_id {
-                            session.results.insert(task_id.clone(), result.clone());
-                        }
+                    if let Some(ref mut session) = *current
+                        && session.session_id == session_id
+                    {
+                        session.results.insert(task_id.clone(), result.clone());
                     }
                 }
 

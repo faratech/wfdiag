@@ -1,0 +1,246 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { renderHook, act, waitFor } from '@testing-library/react'
+
+// The module-level scan lock in useScanner is shared across hook instances,
+// so each test reloads the module via vi.resetModules() + dynamic import to
+// start from a clean lock.
+
+const invokeMock = vi.fn()
+const listenMock = vi.fn()
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...args: unknown[]) => invokeMock(...args),
+}))
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: (...args: unknown[]) => listenMock(...args),
+}))
+
+interface MockContext {
+  settings: { autoSave: boolean; maxConcurrentTasks: number; quickScanTasks?: string[] }
+  [key: string]: unknown
+}
+
+let contextValue: MockContext
+
+vi.mock('../contexts/AppContext', () => ({
+  useAppContext: () => contextValue,
+}))
+
+function makeContext(overrides: Partial<MockContext> = {}): MockContext {
+  return {
+    availableTasks: [{ id: 'os_info', name: 'OS Info', admin_required: false }],
+    systemInfo: { is_admin: true },
+    sessionId: null,
+    setSessionId: vi.fn(),
+    results: {},
+    setResults: vi.fn(),
+    isRunning: false,
+    setIsRunning: vi.fn(),
+    setCurrentProgress: vi.fn(),
+    setCurrentTaskName: vi.fn(),
+    setScanStartTime: vi.fn(),
+    setScanEndTime: vi.fn(),
+    settings: { autoSave: false, maxConcurrentTasks: 2 },
+    searchQuery: '',
+    setFilteredResults: vi.fn(),
+    ...overrides,
+  }
+}
+
+function deferred<T>() {
+  let resolve!: (v: T) => void
+  let reject!: (e: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+async function loadHook() {
+  vi.resetModules()
+  const mod = await import('./useScanner')
+  return mod.useScanner
+}
+
+function startCalls() {
+  return invokeMock.mock.calls.filter(c => c[0] === 'start_diagnostics')
+}
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  contextValue = makeContext()
+  listenMock.mockResolvedValue(vi.fn())
+})
+
+describe('useScanner scan lock', () => {
+  it('ignores a second scan started while one is running', async () => {
+    const parallel = deferred<Array<[string, unknown]>>()
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'session-1'
+      if (cmd === 'run_diagnostics_parallel') return parallel.promise
+      return undefined
+    })
+
+    const useScanner = await loadHook()
+    const { result } = renderHook(() => useScanner())
+
+    let p1!: Promise<void>
+    let p2!: Promise<void>
+    act(() => {
+      p1 = result.current.runQuickScan()
+      p2 = result.current.runQuickScan()
+    })
+
+    parallel.resolve([])
+    await act(async () => {
+      await Promise.all([p1, p2])
+    })
+
+    expect(startCalls()).toHaveLength(1)
+  })
+
+  it('releases the lock after a completed scan', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'session-1'
+      if (cmd === 'run_diagnostics_parallel') return []
+      return undefined
+    })
+
+    const useScanner = await loadHook()
+    const { result } = renderHook(() => useScanner())
+
+    await act(async () => {
+      await result.current.runQuickScan()
+    })
+    await act(async () => {
+      await result.current.runQuickScan()
+    })
+
+    expect(startCalls()).toHaveLength(2)
+  })
+
+  it('releases the lock when the scan fails', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') throw new Error('backend down')
+      return undefined
+    })
+
+    const useScanner = await loadHook()
+    const { result } = renderHook(() => useScanner())
+
+    await act(async () => {
+      await result.current.runQuickScan()
+    })
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'session-2'
+      if (cmd === 'run_diagnostics_parallel') return []
+      return undefined
+    })
+
+    await act(async () => {
+      await result.current.runQuickScan()
+    })
+
+    expect(startCalls()).toHaveLength(2)
+  })
+
+  it('allows a new scan after stopScan (deadlock regression)', async () => {
+    const parallel = deferred<Array<[string, unknown]>>()
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'session-1'
+      if (cmd === 'run_diagnostics_parallel') return parallel.promise
+      return undefined
+    })
+
+    const useScanner = await loadHook()
+    const { result } = renderHook(() => useScanner())
+
+    let p1!: Promise<void>
+    act(() => {
+      p1 = result.current.runQuickScan()
+    })
+
+    // Wait for the scan to reach the parallel-run stage before stopping
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.some(c => c[0] === 'run_diagnostics_parallel')).toBe(true)
+    })
+
+    act(() => {
+      result.current.stopScan()
+    })
+
+    // stopScan requests backend cancellation for the active session
+    expect(invokeMock).toHaveBeenCalledWith('cancel_diagnostics', { sessionId: 'session-1' })
+
+    // Backend resolves (quickly, since queued tasks are skipped); the scan's
+    // finally must release the lock even though the session was abandoned
+    parallel.resolve([])
+    await act(async () => {
+      await p1
+    })
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'session-2'
+      if (cmd === 'run_diagnostics_parallel') return []
+      return undefined
+    })
+
+    await act(async () => {
+      await result.current.runQuickScan()
+    })
+
+    expect(startCalls()).toHaveLength(2)
+  })
+
+  it('cancels a pending auto-save when stopped and still releases the lock', async () => {
+    contextValue = makeContext({ settings: { autoSave: true, maxConcurrentTasks: 2 } })
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'session-1'
+      if (cmd === 'run_diagnostics_parallel') return []
+      if (cmd === 'save_current_scan') return 'saved-id'
+      return undefined
+    })
+
+    const useScanner = await loadHook()
+    const { result } = renderHook(() => useScanner())
+
+    let p1!: Promise<void>
+    act(() => {
+      p1 = result.current.runQuickScan()
+    })
+
+    // Let the scan complete and enter the awaited 500ms auto-save delay
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.some(c => c[0] === 'run_diagnostics_parallel')).toBe(true)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    // stopScan resolves the pending delay early; the awaited runDiagnostics
+    // body unwinds without waiting out the timer and without saving
+    act(() => {
+      result.current.stopScan()
+    })
+    await act(async () => {
+      await p1
+    })
+
+    expect(invokeMock.mock.calls.some(c => c[0] === 'save_current_scan')).toBe(false)
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'session-2'
+      if (cmd === 'run_diagnostics_parallel') return []
+      if (cmd === 'save_current_scan') return 'saved-id'
+      return undefined
+    })
+
+    await act(async () => {
+      await result.current.runQuickScan()
+    })
+
+    expect(startCalls()).toHaveLength(2)
+  })
+})

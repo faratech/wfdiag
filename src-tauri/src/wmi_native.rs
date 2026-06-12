@@ -240,7 +240,7 @@ impl WmiConnection {
                     // Use the windows crate's safe BSTR handling
                     let bstr = &variant.Anonymous.Anonymous.Anonymous.bstrVal;
                     // BSTR len() returns 0 for null/empty, and to_string() is safe
-                    if bstr.len() == 0 {
+                    if bstr.is_empty() {
                         json!("")
                     } else {
                         json!(bstr.to_string())
@@ -249,7 +249,7 @@ impl WmiConnection {
 
                 VT_I1 => {
                     let i = variant.Anonymous.Anonymous.Anonymous.cVal;
-                    json!(i as i8)
+                    json!(i)
                 }
 
                 VT_I2 => {
@@ -344,7 +344,7 @@ impl WmiConnection {
             let mut arr = Vec::new();
 
             for i in lbound..=ubound {
-                let idx = i as i32;
+                let idx = i;
 
                 if base_vt == VT_BSTR.0 {
                     // SafeArrayGetElement for BSTR returns a copy that we own

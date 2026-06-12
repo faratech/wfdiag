@@ -31,11 +31,11 @@ fn json_to_readable_text(output: &str, max_chars: usize) -> String {
     let trimmed = output.trim();
 
     // If it's JSON, convert to readable format
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            let text = render_json_value(&json, 0);
-            return truncate_output(&text, max_chars);
-        }
+    if (trimmed.starts_with('{') || trimmed.starts_with('['))
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        let text = render_json_value(&json, 0);
+        return truncate_output(&text, max_chars);
     }
 
     // Not JSON, just truncate the raw text
