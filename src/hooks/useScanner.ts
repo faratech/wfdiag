@@ -1,8 +1,41 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow, ProgressBarStatus } from '@tauri-apps/api/window'
+import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
 import { useAppContext, type TaskResult } from '../contexts/AppContext'
 import * as logger from '../utils/logger'
+
+// Mirror scan progress onto the Windows taskbar button. All calls are
+// best-effort: failures (missing permission, non-Tauri dev context) must
+// never affect the scan itself.
+function setTaskbarProgress(progress: number | null) {
+  if (!('__TAURI_INTERNALS__' in window)) return
+  const state = progress === null
+    ? { status: ProgressBarStatus.None }
+    : { status: ProgressBarStatus.Normal, progress: Math.round(progress) }
+  getCurrentWindow().setProgressBar(state).catch(() => {})
+}
+
+// Fire a native Windows toast when a scan finishes while the app is in the
+// background. Best-effort; gated on the user's showNotifications setting.
+async function notifyScanComplete(passed: number, failed: number) {
+  if (!('__TAURI_INTERNALS__' in window) || document.hasFocus()) return
+  try {
+    let granted = await isPermissionGranted()
+    if (!granted) {
+      granted = (await requestPermission()) === 'granted'
+    }
+    if (granted) {
+      sendNotification({
+        title: 'Diagnostics complete',
+        body: failed > 0 ? `${passed} passed, ${failed} failed` : `All ${passed} checks passed`,
+      })
+    }
+  } catch (error) {
+    logger.warn('useScanner', 'Failed to send scan notification', error)
+  }
+}
 
 // Module-level lock shared across ALL useScanner instances. App.tsx (startup scan) and
 // DiagnosticsTab.tsx (manual scan) each call useScanner() independently, so a per-instance
@@ -85,6 +118,7 @@ export const useScanner = () => {
     setCurrentProgress(0)
     setResults({})
     setTaskStatuses({})
+    setTaskbarProgress(0)
     // Capture the start time in a local so the auto-save timeout below uses THIS scan's
     // start, not the stale `scanStartTime` from a prior render's closure (which made the
     // first scan's duration ~the full epoch and later scans include all idle time).
@@ -123,6 +157,7 @@ export const useScanner = () => {
           completedTasks++
           setCurrentProgress((completedTasks / totalTasks) * 100)
           setTaskStatuses(prev => ({ ...prev, [event.payload.task_id]: 'done' }))
+          setTaskbarProgress((completedTasks / totalTasks) * 100)
         }
       })
 
@@ -145,6 +180,12 @@ export const useScanner = () => {
         }, {} as Record<string, TaskResult>)
 
         setResults(resultsObj)
+
+        const resultList = Object.values(resultsObj)
+        const passedCount = resultList.filter(r => r.success).length
+        if (settings.showNotifications) {
+          notifyScanComplete(passedCount, resultList.length - passedCount)
+        }
       } finally {
         // Always cleanup listener
         if (unlisten) {
@@ -154,6 +195,7 @@ export const useScanner = () => {
       }
 
       setCurrentProgress(100)
+      setTaskbarProgress(null)
 
       if (settings.autoSave) {
         // Awaited (not fire-and-forget) so the scan lock is held through the
@@ -197,6 +239,7 @@ export const useScanner = () => {
 
       setScanEndTime(Date.now())
       setIsRunning(false)
+      setTaskbarProgress(null)
       currentSessionRef.current = null
     } finally {
       isRunningRef.current = false
@@ -216,6 +259,7 @@ export const useScanner = () => {
     setSessionId,
     settings.autoSave,
     settings.maxConcurrentTasks,
+    settings.showNotifications,
     clearAutoSaveTimeout,
     waitAutoSaveDelay,
     setTaskStatuses
@@ -265,6 +309,7 @@ export const useScanner = () => {
     setIsRunning(false)
     setCurrentProgress(0)
     setCurrentTaskName('')
+    setTaskbarProgress(null)
   }, [setIsRunning, setCurrentProgress, setCurrentTaskName, clearAutoSaveTimeout])
 
   const clearResults = useCallback(() => {
