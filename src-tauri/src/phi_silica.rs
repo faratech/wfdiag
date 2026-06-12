@@ -299,6 +299,51 @@ fn try_direct_dll_activation() -> Result<(), String> {
     Ok(())
 }
 
+/// Create LanguageModel via standard WinRT activation (RoGetActivationFactory).
+/// This is the supported path and works whenever the process has package
+/// identity — full MSIX install OR the self-registered sparse package — with
+/// the Windows App SDK framework resolvable.
+#[cfg(windows)]
+fn create_language_model_winrt() -> Result<crate::windows_ai_bindings::LanguageModel, String> {
+    use crate::windows_ai_bindings::LanguageModel;
+
+    log_phi_silica("Creating LanguageModel via standard WinRT activation...");
+    let op = LanguageModel::CreateAsync().map_err(|e| {
+        format!(
+            "CreateAsync (WinRT path) failed: 0x{:08X} {}",
+            e.code().0 as u32,
+            e.message()
+        )
+    })?;
+    wait_for_async_blocking(op)
+}
+
+/// Create a LanguageModel, preferring standard WinRT activation (works with
+/// package identity from full MSIX or the sparse package) and falling back to
+/// DllGetActivationFactory on bundled DLLs (MSIX layout ships them next to
+/// the exe; loose installs normally rely on the WinRT path instead).
+#[cfg(windows)]
+fn create_language_model() -> Result<crate::windows_ai_bindings::LanguageModel, String> {
+    match create_language_model_winrt() {
+        Ok(model) => {
+            log_phi_silica("LanguageModel created via WinRT activation");
+            Ok(model)
+        }
+        Err(winrt_err) => {
+            log_phi_silica(&format!(
+                "WinRT activation failed ({}); falling back to direct DLL activation",
+                winrt_err
+            ));
+            create_language_model_direct().map_err(|direct_err| {
+                format!(
+                    "Phi Silica model creation failed. WinRT path: {} | Direct DLL path: {}",
+                    winrt_err, direct_err
+                )
+            })
+        }
+    }
+}
+
 /// Create LanguageModel using DllGetActivationFactory from bundled DLL
 /// This bypasses RoGetActivationFactory entirely, like CsWinRT does
 #[cfg(windows)]
@@ -812,12 +857,15 @@ pub async fn generate_response(prompt: &str) -> Result<String, String> {
         use crate::windows_ai_bindings::LanguageModelResponseStatus;
         use windows_core::HSTRING;
 
-        // Ensure WinRT is initialized and LAF is unlocked
+        // Ensure WinRT is initialized, the App SDK bootstrapper has been
+        // attempted (needed for unpackaged/sparse processes), and LAF is unlocked
         ensure_winrt_initialized();
+        let _ = init_windows_app_sdk();
         let _ = try_unlock_laf();
 
-        // Create model using direct DLL activation
-        let model = create_language_model_direct()?;
+        // Create model: WinRT activation first (package identity), bundled
+        // DLL fallback second (MSIX layout)
+        let model = create_language_model()?;
 
         // Generate response
         let prompt_hstring = HSTRING::from(prompt_owned.as_str());
