@@ -22,6 +22,6 @@
   -->
   <msix xmlns="urn:schemas-microsoft-com:msix.v1"
         publisher="CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4"
-        packageName="WindowsForum.Diagnostics.Sparse"
+        packageName="32827MikeFara.WindowsForumDiagnostics"
         applicationId="App" />
 </assembly>
