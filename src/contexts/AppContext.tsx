@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { type TabValue, type SettingsData } from '../components'
+import * as logger from '../utils/logger'
 
 export interface SystemInfo {
   computer_name: string
@@ -166,9 +167,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       try {
         const savedSettings = await invoke<SettingsData>('load_settings')
         setSettings(prev => ({ ...prev, ...savedSettings }))
-        console.log('Settings loaded from backend:', savedSettings)
+        // Don't log the settings object itself — it can contain the API key
+        logger.debug('AppContext', 'Settings loaded from backend')
       } catch (error) {
-        console.error('Failed to load settings:', error)
+        logger.error('AppContext', 'Failed to load settings', String(error))
       } finally {
         setSettingsLoaded(true)
       }
@@ -185,25 +187,25 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       if (newSettings.openAiApiKey) {
         try {
           await invoke('store_api_key', { key: newSettings.openAiApiKey })
-          console.log('API key stored in keyring')
+          logger.debug('AppContext', 'API key stored in keyring')
         } catch (keyError) {
-          console.warn('Failed to store API key in keyring:', keyError)
+          logger.warn('AppContext', 'Failed to store API key in keyring', String(keyError))
           // Don't throw - settings are still saved, just keyring failed
         }
       } else if (settings.openAiApiKey && !newSettings.openAiApiKey) {
         // API key was cleared
         try {
           await invoke('clear_api_key')
-          console.log('API key cleared from keyring')
+          logger.debug('AppContext', 'API key cleared from keyring')
         } catch (keyError) {
-          console.warn('Failed to clear API key from keyring:', keyError)
+          logger.warn('AppContext', 'Failed to clear API key from keyring', String(keyError))
         }
       }
 
       setSettings(newSettings)
-      console.log('Settings saved to backend:', newSettings)
+      logger.debug('AppContext', 'Settings saved to backend')
     } catch (error) {
-      console.error('Failed to save settings:', error)
+      logger.error('AppContext', 'Failed to save settings', String(error))
       throw error
     }
   }
