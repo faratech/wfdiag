@@ -680,6 +680,7 @@ pub fn initialize_static_caches() {
 // OPTIMIZED STATS COLLECTION
 // ============================================================================
 
+#[allow(clippy::too_many_arguments)]
 async fn collect_stats_optimized(
     pdh_state: &Arc<std::sync::Mutex<PdhState>>,
     previous_network: &Arc<Mutex<NetworkState>>,
@@ -735,7 +736,7 @@ async fn collect_stats_optimized(
         info.clone()
     } else {
         // First time - run detection in spawn_blocking since DXCore/WMI need proper thread context
-        let detected = tokio::task::spawn_blocking(|| {
+        tokio::task::spawn_blocking(|| {
             let result = NPU_INFO
                 .get_or_init(|| {
                     // Try DXCore first
@@ -760,8 +761,7 @@ async fn collect_stats_optimized(
             result
         })
         .await
-        .unwrap_or((false, None));
-        detected
+        .unwrap_or((false, None))
     };
     let npu_utilization = if npu_available {
         get_npu_util_cached(cached_npu_util, npu_update_in_progress, tick).await
@@ -967,25 +967,23 @@ async fn get_npu_util_cached(
         None => true,
     };
 
-    if should_refresh {
-        if !update_in_progress.swap(true, std::sync::atomic::Ordering::Acquire) {
-            let cached_clone = Arc::clone(cached);
-            let update_flag = Arc::clone(update_in_progress);
+    if should_refresh && !update_in_progress.swap(true, std::sync::atomic::Ordering::Acquire) {
+        let cached_clone = Arc::clone(cached);
+        let update_flag = Arc::clone(update_in_progress);
 
-            tokio::spawn(async move {
-                let util = tokio::task::spawn_blocking(get_npu_utilization)
-                    .await
-                    .unwrap_or(None);
+        tokio::spawn(async move {
+            let util = tokio::task::spawn_blocking(get_npu_utilization)
+                .await
+                .unwrap_or(None);
 
-                let mut cache_lock = cached_clone.lock().await;
-                *cache_lock = Some(CachedNpuUtilization {
-                    utilization: util,
-                    last_update: Instant::now(),
-                });
-
-                update_flag.store(false, std::sync::atomic::Ordering::Release);
+            let mut cache_lock = cached_clone.lock().await;
+            *cache_lock = Some(CachedNpuUtilization {
+                utilization: util,
+                last_update: Instant::now(),
             });
-        }
+
+            update_flag.store(false, std::sync::atomic::Ordering::Release);
+        });
     }
 
     match &*cache_guard {
@@ -1886,41 +1884,38 @@ fn detect_npu_wmi_fallback() -> (bool, Option<String>, Option<f32>) {
              Name LIKE '%Hexagon%' OR \
              Description LIKE '%Neural Processing%' OR \
              DeviceID LIKE '%NPU%'",
-        ) {
-            if let Some(device) = results.first()
-                && let Some(name) = device.get("Name").and_then(|v| v.as_str())
-            {
-                return (true, Some(name.to_string()), None);
-            }
+        ) && let Some(device) = results.first()
+            && let Some(name) = device.get("Name").and_then(|v| v.as_str())
+        {
+            return (true, Some(name.to_string()), None);
         }
 
-        if let Ok(cpu_results) = wmi_con.query("SELECT Name FROM Win32_Processor") {
-            if let Some(cpu) = cpu_results.first()
-                && let Some(name) = cpu.get("Name").and_then(|v| v.as_str())
+        if let Ok(cpu_results) = wmi_con.query("SELECT Name FROM Win32_Processor")
+            && let Some(cpu) = cpu_results.first()
+            && let Some(name) = cpu.get("Name").and_then(|v| v.as_str())
+        {
+            let name_lower = name.to_lowercase();
+
+            if name_lower.contains("core ultra")
+                || name_lower.contains("meteor lake")
+                || name_lower.contains("arrow lake")
+                || name_lower.contains("lunar lake")
             {
-                let name_lower = name.to_lowercase();
+                return (true, Some(format!("{} (Intel NPU)", name)), None);
+            }
 
-                if name_lower.contains("core ultra")
-                    || name_lower.contains("meteor lake")
-                    || name_lower.contains("arrow lake")
-                    || name_lower.contains("lunar lake")
-                {
-                    return (true, Some(format!("{} (Intel NPU)", name)), None);
-                }
+            if name_lower.contains("ryzen ai")
+                || name_lower.contains("ryzen 8000")
+                || name_lower.contains("ryzen 9000")
+            {
+                return (true, Some(format!("{} (AMD XDNA NPU)", name)), None);
+            }
 
-                if name_lower.contains("ryzen ai")
-                    || name_lower.contains("ryzen 8000")
-                    || name_lower.contains("ryzen 9000")
-                {
-                    return (true, Some(format!("{} (AMD XDNA NPU)", name)), None);
-                }
-
-                if name_lower.contains("snapdragon")
-                    || name_lower.contains("x elite")
-                    || name_lower.contains("x plus")
-                {
-                    return (true, Some(format!("{} (Qualcomm Hexagon NPU)", name)), None);
-                }
+            if name_lower.contains("snapdragon")
+                || name_lower.contains("x elite")
+                || name_lower.contains("x plus")
+            {
+                return (true, Some(format!("{} (Qualcomm Hexagon NPU)", name)), None);
             }
         }
     }

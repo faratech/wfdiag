@@ -325,7 +325,7 @@ impl IssueDetector {
             for update in updates {
                 if let Some(installed_on_str) = update["InstalledOn"].as_str()
                     && let Some(ts) = Self::parse_windows_date(installed_on_str)
-                    && most_recent_update.map_or(true, |t| ts > t)
+                    && most_recent_update.is_none_or(|t| ts > t)
                 {
                     most_recent_update = Some(ts);
                 }

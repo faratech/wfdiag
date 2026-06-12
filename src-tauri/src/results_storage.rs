@@ -191,7 +191,7 @@ impl ScanStorage {
         }
 
         // Sort by timestamp (newest first)
-        summaries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        summaries.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
 
         println!("Successfully loaded {} scan summaries", summaries.len());
 

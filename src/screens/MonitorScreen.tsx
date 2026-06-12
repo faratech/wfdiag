@@ -1,4 +1,4 @@
-import React, { useRef, useState, useCallback } from 'react'
+import React, { useState, useCallback } from 'react'
 import { useMonitoring } from '../hooks/useMonitoring'
 import type { SystemStats } from '../types/monitoring'
 import { ChartCard } from './ChartCard'
@@ -9,10 +9,12 @@ interface Series { cpu: number[]; mem: number[]; disk: number[]; net: number[]; 
 
 export const MonitorScreen: React.FC = () => {
   const [series, setSeries] = useState<Series>({ cpu: [], mem: [], disk: [], net: [], npu: [] })
-  const lastRef = useRef<SystemStats | null>(null)
+  // Last non-null sample, kept so the header/cards don't blank out when the
+  // monitoring hook momentarily reports null stats (e.g. while paused)
+  const [lastStats, setLastStats] = useState<SystemStats | null>(null)
 
   const onStats = useCallback((s: SystemStats) => {
-    lastRef.current = s
+    setLastStats(s)
     const push = (arr: number[], v: number) => {
       const next = [...arr, v]
       return next.length > HISTORY ? next.slice(next.length - HISTORY) : next
@@ -28,7 +30,7 @@ export const MonitorScreen: React.FC = () => {
 
   const { isActive, stats, toggle, refresh } = useMonitoring({ autoStart: true, onStats, componentName: 'MonitorScreen' })
 
-  const last = stats || lastRef.current
+  const last = stats || lastStats
   const netMax = Math.max(2, ...series.net) * 1.2 || 2
 
   return (

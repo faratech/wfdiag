@@ -47,7 +47,7 @@ fn dpapi_encrypt(data: &str) -> Result<Vec<u8>, String> {
 
     // Create mutable copy to avoid undefined behavior from const-to-mut cast
     let mut data_bytes = data.as_bytes().to_vec();
-    let mut data_in = CRYPT_INTEGER_BLOB {
+    let data_in = CRYPT_INTEGER_BLOB {
         cbData: data_bytes.len() as u32,
         pbData: data_bytes.as_mut_ptr(),
     };
@@ -60,7 +60,7 @@ fn dpapi_encrypt(data: &str) -> Result<Vec<u8>, String> {
     // Encrypt with DPAPI - UI_FORBIDDEN prevents prompts in background
     let result = unsafe {
         CryptProtectData(
-            &mut data_in,
+            &data_in,
             PCWSTR::null(),            // No description
             None,                      // No additional entropy
             None,                      // Reserved
@@ -97,7 +97,7 @@ fn dpapi_decrypt(encrypted: &[u8]) -> Result<String, String> {
 
     // Create mutable copy to avoid undefined behavior from const-to-mut cast
     let mut encrypted_copy = encrypted.to_vec();
-    let mut data_in = CRYPT_INTEGER_BLOB {
+    let data_in = CRYPT_INTEGER_BLOB {
         cbData: encrypted_copy.len() as u32,
         pbData: encrypted_copy.as_mut_ptr(),
     };
@@ -109,7 +109,7 @@ fn dpapi_decrypt(encrypted: &[u8]) -> Result<String, String> {
 
     let result = unsafe {
         CryptUnprotectData(
-            &mut data_in,
+            &data_in,
             None, // Don't need description
             None, // No additional entropy
             None, // Reserved

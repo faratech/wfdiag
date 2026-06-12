@@ -1106,12 +1106,12 @@ fn extract_ram_essentials(text: &str) -> String {
         // Fallback: try to extract just capacity values from raw text
         let mut capacities = Vec::new();
         for line in text.lines() {
-            if line.contains("Capacity") {
-                if let Some(val) = line.split(':').nth(1).or_else(|| line.split('=').nth(1)) {
-                    let val = val.trim();
-                    if let Ok(bytes) = val.parse::<u64>() {
-                        capacities.push(bytes / (1024 * 1024 * 1024));
-                    }
+            if line.contains("Capacity")
+                && let Some(val) = line.split(':').nth(1).or_else(|| line.split('=').nth(1))
+            {
+                let val = val.trim();
+                if let Ok(bytes) = val.parse::<u64>() {
+                    capacities.push(bytes / (1024 * 1024 * 1024));
                 }
             }
         }

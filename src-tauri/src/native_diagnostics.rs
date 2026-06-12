@@ -78,16 +78,15 @@ impl NativeDiagnostics {
                         .get("Index")
                         .and_then(|v| v.as_u64())
                         .map(|u| u as u32)
+                        && adapter_idx == idx
                     {
-                        if adapter_idx == idx {
-                            // Add adapter-specific info
-                            for (key, value) in adapter {
-                                if !adapter_info.contains_key(key) {
-                                    adapter_info.insert(key.clone(), value.clone());
-                                }
+                        // Add adapter-specific info
+                        for (key, value) in adapter {
+                            if !adapter_info.contains_key(key) {
+                                adapter_info.insert(key.clone(), value.clone());
                             }
-                            break;
                         }
+                        break;
                     }
                 }
             }
@@ -1195,10 +1194,10 @@ impl NativeDiagnostics {
 
         for package in packages {
             // Skip framework packages
-            if let Ok(is_framework) = package.IsFramework() {
-                if is_framework {
-                    continue;
-                }
+            if let Ok(is_framework) = package.IsFramework()
+                && is_framework
+            {
+                continue;
             }
 
             let mut app_info = serde_json::Map::new();
@@ -1305,16 +1304,15 @@ impl NativeDiagnostics {
         if let Ok(wmi_con) = WmiConnection::new() {
             if let Ok(cpu_results) = wmi_con.query(
                 "SELECT Name, LoadPercentage, NumberOfCores, MaxClockSpeed FROM Win32_Processor",
-            ) {
-                if let Some(result) = cpu_results.into_iter().next() {
-                    let cpu_info: serde_json::Map<String, Value> = result.into_iter().collect();
-                    // Merge with existing cpu_performance
-                    if let Some(existing) = perf_data.get_mut("cpu_performance") {
-                        if let Some(obj) = existing.as_object_mut() {
-                            for (k, v) in cpu_info {
-                                obj.insert(k, v);
-                            }
-                        }
+            ) && let Some(result) = cpu_results.into_iter().next()
+            {
+                let cpu_info: serde_json::Map<String, Value> = result.into_iter().collect();
+                // Merge with existing cpu_performance
+                if let Some(existing) = perf_data.get_mut("cpu_performance")
+                    && let Some(obj) = existing.as_object_mut()
+                {
+                    for (k, v) in cpu_info {
+                        obj.insert(k, v);
                     }
                 }
             }
@@ -1380,66 +1378,58 @@ impl NativeDiagnostics {
 
                 unsafe {
                     // Get tasks in this folder
-                    if let Ok(task_collection) = folder.GetTasks(0) {
-                        if let Ok(count) = task_collection.Count() {
-                            for i in 1..=count {
-                                let idx = VARIANT::from(i);
-                                if let Ok(task) = task_collection.get_Item(&idx) {
-                                    let mut task_info = serde_json::Map::new();
+                    if let Ok(task_collection) = folder.GetTasks(0)
+                        && let Ok(count) = task_collection.Count()
+                    {
+                        for i in 1..=count {
+                            let idx = VARIANT::from(i);
+                            if let Ok(task) = task_collection.get_Item(&idx) {
+                                let mut task_info = serde_json::Map::new();
 
-                                    if let Ok(name) = task.Name() {
-                                        task_info.insert(
-                                            "TaskName".to_string(),
-                                            json!(name.to_string()),
-                                        );
-                                    }
-                                    if let Ok(path) = task.Path() {
-                                        task_info.insert(
-                                            "TaskPath".to_string(),
-                                            json!(path.to_string()),
-                                        );
-                                    }
-                                    if let Ok(state) = task.State() {
-                                        let state_str = match state {
-                                            TASK_STATE_DISABLED => "Disabled",
-                                            TASK_STATE_QUEUED => "Queued",
-                                            TASK_STATE_READY => "Ready",
-                                            TASK_STATE_RUNNING => "Running",
-                                            _ => "Unknown",
-                                        };
-                                        task_info.insert("State".to_string(), json!(state_str));
-                                    }
-                                    if let Ok(enabled) = task.Enabled() {
-                                        task_info.insert(
-                                            "Enabled".to_string(),
-                                            json!(enabled.as_bool()),
-                                        );
-                                    }
-                                    if let Ok(last_run) = task.LastRunTime() {
-                                        task_info
-                                            .insert("LastRunTime".to_string(), json!(last_run));
-                                    }
-                                    if let Ok(next_run) = task.NextRunTime() {
-                                        task_info
-                                            .insert("NextRunTime".to_string(), json!(next_run));
-                                    }
+                                if let Ok(name) = task.Name() {
+                                    task_info
+                                        .insert("TaskName".to_string(), json!(name.to_string()));
+                                }
+                                if let Ok(path) = task.Path() {
+                                    task_info
+                                        .insert("TaskPath".to_string(), json!(path.to_string()));
+                                }
+                                if let Ok(state) = task.State() {
+                                    let state_str = match state {
+                                        TASK_STATE_DISABLED => "Disabled",
+                                        TASK_STATE_QUEUED => "Queued",
+                                        TASK_STATE_READY => "Ready",
+                                        TASK_STATE_RUNNING => "Running",
+                                        _ => "Unknown",
+                                    };
+                                    task_info.insert("State".to_string(), json!(state_str));
+                                }
+                                if let Ok(enabled) = task.Enabled() {
+                                    task_info
+                                        .insert("Enabled".to_string(), json!(enabled.as_bool()));
+                                }
+                                if let Ok(last_run) = task.LastRunTime() {
+                                    task_info.insert("LastRunTime".to_string(), json!(last_run));
+                                }
+                                if let Ok(next_run) = task.NextRunTime() {
+                                    task_info.insert("NextRunTime".to_string(), json!(next_run));
+                                }
 
-                                    if task_info.contains_key("TaskName") {
-                                        tasks.push(Value::Object(task_info));
-                                    }
+                                if task_info.contains_key("TaskName") {
+                                    tasks.push(Value::Object(task_info));
                                 }
                             }
                         }
                     }
 
                     // Enumerate subfolders
-                    if let Ok(folders) = folder.GetFolders(0) {
-                        if let Ok(count) = folders.Count() {
-                            for i in 1..=count {
-                                let idx = VARIANT::from(i);
-                                if let Ok(subfolder) = folders.get_Item(&idx) {
-                                    enumerate_folder(&subfolder, tasks, depth + 1);
-                                }
+                    if let Ok(folders) = folder.GetFolders(0)
+                        && let Ok(count) = folders.Count()
+                    {
+                        for i in 1..=count {
+                            let idx = VARIANT::from(i);
+                            if let Ok(subfolder) = folders.get_Item(&idx) {
+                                enumerate_folder(&subfolder, tasks, depth + 1);
                             }
                         }
                     }
@@ -1491,18 +1481,17 @@ impl NativeDiagnostics {
         // Try to get update history from Windows Update namespace
         if let Ok(wmi_update) =
             WmiConnection::with_namespace(r"root\CCM\SoftwareUpdates\UpdatesStore")
+            && let Ok(updates) = wmi_update.query("SELECT * FROM CCM_UpdateStatus")
         {
-            if let Ok(updates) = wmi_update.query("SELECT * FROM CCM_UpdateStatus") {
-                let update_history: Vec<Value> = updates
-                    .into_iter()
-                    .map(|r| {
-                        let obj: serde_json::Map<String, Value> = r.into_iter().collect();
-                        Value::Object(obj)
-                    })
-                    .collect();
-                if !update_history.is_empty() {
-                    update_info["update_history"] = json!(update_history);
-                }
+            let update_history: Vec<Value> = updates
+                .into_iter()
+                .map(|r| {
+                    let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                    Value::Object(obj)
+                })
+                .collect();
+            if !update_history.is_empty() {
+                update_info["update_history"] = json!(update_history);
             }
         }
 
@@ -1526,19 +1515,18 @@ impl NativeDiagnostics {
                 let line = line.trim();
 
                 // Parse "Verifier Flags: 0x00000000"
-                if line.starts_with("Verifier Flags:") {
-                    if let Some(hex) = line.split("0x").nth(1) {
-                        if let Ok(val) = u32::from_str_radix(hex.trim(), 16) {
-                            verifier_flags = val;
-                        }
-                    }
+                if line.starts_with("Verifier Flags:")
+                    && let Some(hex) = line.split("0x").nth(1)
+                    && let Ok(val) = u32::from_str_radix(hex.trim(), 16)
+                {
+                    verifier_flags = val;
                 }
 
                 // Parse enabled flags marked with [X]
-                if line.starts_with("[X]") {
-                    if let Some(flag_desc) = line.strip_prefix("[X]").map(|s| s.trim()) {
-                        enabled_flags.push(flag_desc.to_string());
-                    }
+                if line.starts_with("[X]")
+                    && let Some(flag_desc) = line.strip_prefix("[X]").map(|s| s.trim())
+                {
+                    enabled_flags.push(flag_desc.to_string());
                 }
 
                 // Parse boot mode
