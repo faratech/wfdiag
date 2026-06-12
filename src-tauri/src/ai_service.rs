@@ -13,17 +13,37 @@ use crate::ai_prompts;
 use crate::error::DiagError;
 use crate::openai_integration::OPENAI_MODEL;
 
-/// AI Provider enumeration
+/// AI Provider enumeration.
+///
+/// Wire strings are pinned EXPLICITLY per variant (not `rename_all`): serde's
+/// snake_case rule turns `OpenAI` into `"open_a_i"`, which the frontend union
+/// type never matched — a latent bug fixed in 2.5.0. The alias tolerates any
+/// legacy string still in flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
 pub enum AIProvider {
     #[default]
+    #[serde(rename = "none")]
     None,
+    #[serde(rename = "openai", alias = "open_a_i")]
     OpenAI,
     /// On-device Phi Silica via the Windows AI APIs (needs package identity)
+    #[serde(rename = "phi_silica")]
     PhiSilica,
     /// Local OpenAI-compatible server (Foundry Local), no identity required
+    #[serde(rename = "foundry_local")]
     FoundryLocal,
+    /// Local Ollama server (OpenAI-compatible API at /v1)
+    #[serde(rename = "ollama")]
+    Ollama,
+    /// User-configured OpenAI-compatible endpoint (OpenRouter, Groq, …)
+    #[serde(rename = "custom_openai")]
+    CustomOpenAI,
+    /// Anthropic Claude via the native Messages API
+    #[serde(rename = "anthropic")]
+    Anthropic,
+    /// Google Gemini via the native generateContent API
+    #[serde(rename = "gemini")]
+    Gemini,
 }
 
 impl std::fmt::Display for AIProvider {
@@ -33,19 +53,34 @@ impl std::fmt::Display for AIProvider {
             AIProvider::OpenAI => write!(f, "openai"),
             AIProvider::PhiSilica => write!(f, "phi_silica"),
             AIProvider::FoundryLocal => write!(f, "foundry_local"),
+            AIProvider::Ollama => write!(f, "ollama"),
+            AIProvider::CustomOpenAI => write!(f, "custom_openai"),
+            AIProvider::Anthropic => write!(f, "anthropic"),
+            AIProvider::Gemini => write!(f, "gemini"),
         }
     }
 }
 
 /// User preference for AI provider
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
 pub enum AIProviderPreference {
     #[default]
+    #[serde(rename = "auto")]
     Auto,
+    #[serde(rename = "openai", alias = "open_a_i")]
     OpenAI,
+    #[serde(rename = "phi_silica")]
     PhiSilica,
+    #[serde(rename = "foundry_local")]
     FoundryLocal,
+    #[serde(rename = "ollama")]
+    Ollama,
+    #[serde(rename = "custom_openai")]
+    CustomOpenAI,
+    #[serde(rename = "anthropic")]
+    Anthropic,
+    #[serde(rename = "gemini")]
+    Gemini,
 }
 
 /// Context type for different AI analysis scenarios
@@ -166,56 +201,144 @@ pub async fn check_foundry_local_available() -> Option<String> {
     crate::openai_integration::local_ai_endpoint().await
 }
 
+/// Check if an Ollama server is reachable. Returns the base URL when available.
+pub async fn check_ollama_available() -> Option<String> {
+    let configured =
+        crate::commands::settings::read_settings_from_disk().and_then(|s| s.ollama_endpoint);
+    crate::ai_providers::ollama::discover_endpoint(configured.as_deref()).await
+}
+
+/// Check if the custom OpenAI-compatible endpoint is usable: endpoint and
+/// model configured, and the endpoint reachable. The API key is optional —
+/// local proxies often don't need one.
+pub async fn check_custom_available() -> Option<String> {
+    let settings = crate::commands::settings::read_settings_from_disk()?;
+    settings
+        .custom_model
+        .as_deref()
+        .filter(|m| !m.trim().is_empty())?;
+    let endpoint = settings
+        .custom_endpoint
+        .as_deref()
+        .and_then(crate::ai_providers::discovery::normalize_base_url)?;
+    if crate::ai_providers::discovery::probe_endpoint_async(&endpoint).await {
+        Some(endpoint)
+    } else {
+        None
+    }
+}
+
+/// Check if Anthropic is available (API key stored)
+pub async fn check_anthropic_available() -> bool {
+    crate::commands::settings::load_provider_key_internal(crate::dpapi::ProviderKeyId::Anthropic)
+        .await
+        .is_some()
+}
+
+/// Check if Gemini is available (API key stored)
+pub async fn check_gemini_available() -> bool {
+    crate::commands::settings::load_provider_key_internal(crate::dpapi::ProviderKeyId::Gemini)
+        .await
+        .is_some()
+}
+
+/// Snapshot of which providers could serve a request right now.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderAvailability {
+    pub phi: bool,
+    pub foundry: bool,
+    pub ollama: bool,
+    /// Custom endpoint configured (endpoint + model) AND reachable
+    pub custom: bool,
+    pub openai: bool,
+    pub anthropic: bool,
+    pub gemini: bool,
+}
+
 /// Pure routing decision: which provider serves a request given the user's
-/// preference and what's available. Auto prefers on-device Phi Silica (NPU,
-/// no model download), then a local Foundry Local endpoint (still on this
-/// machine, no identity needed), then cloud OpenAI. An explicit preference
-/// never falls back to a different provider.
-pub fn route_provider(
-    pref: AIProviderPreference,
-    phi_available: bool,
-    foundry_available: bool,
-    openai_available: bool,
-) -> AIProvider {
+/// preference and what's available.
+///
+/// Auto is local-first: on-device Phi Silica (NPU, no server), then Foundry
+/// Local (Microsoft's local server — before Ollama so pre-2.5 setups see no
+/// behavior change), then Ollama, then a configured custom endpoint
+/// (configuring one is a deliberate act), then cloud keys in the order
+/// OpenAI → Anthropic → Gemini (OpenAI first strictly for backward
+/// compatibility; the cloud tiebreak is pinned by test and moot in practice —
+/// multiple-key users set an explicit preference).
+///
+/// An explicit preference never falls back to a different provider.
+pub fn route_provider(pref: AIProviderPreference, avail: ProviderAvailability) -> AIProvider {
     match pref {
         AIProviderPreference::Auto => {
-            if phi_available {
+            if avail.phi {
                 AIProvider::PhiSilica
-            } else if foundry_available {
+            } else if avail.foundry {
                 AIProvider::FoundryLocal
-            } else if openai_available {
+            } else if avail.ollama {
+                AIProvider::Ollama
+            } else if avail.custom {
+                AIProvider::CustomOpenAI
+            } else if avail.openai {
                 AIProvider::OpenAI
+            } else if avail.anthropic {
+                AIProvider::Anthropic
+            } else if avail.gemini {
+                AIProvider::Gemini
             } else {
                 AIProvider::None
             }
         }
-        AIProviderPreference::OpenAI if openai_available => AIProvider::OpenAI,
-        AIProviderPreference::PhiSilica if phi_available => AIProvider::PhiSilica,
-        AIProviderPreference::FoundryLocal if foundry_available => AIProvider::FoundryLocal,
+        AIProviderPreference::OpenAI if avail.openai => AIProvider::OpenAI,
+        AIProviderPreference::PhiSilica if avail.phi => AIProvider::PhiSilica,
+        AIProviderPreference::FoundryLocal if avail.foundry => AIProvider::FoundryLocal,
+        AIProviderPreference::Ollama if avail.ollama => AIProvider::Ollama,
+        AIProviderPreference::CustomOpenAI if avail.custom => AIProvider::CustomOpenAI,
+        AIProviderPreference::Anthropic if avail.anthropic => AIProvider::Anthropic,
+        AIProviderPreference::Gemini if avail.gemini => AIProvider::Gemini,
         _ => AIProvider::None,
     }
 }
 
 /// Determine the active provider based on preference and availability.
-/// Probes lazily in preference order — the Foundry probe shells out / opens
-/// a socket, so it must not run when an earlier provider already won.
-pub async fn determine_active_provider(pref: AIProviderPreference) -> AIProvider {
-    let (phi, foundry, openai) = match pref {
-        AIProviderPreference::OpenAI => (false, false, check_openai_available().await),
-        AIProviderPreference::PhiSilica => (check_phi_silica_available().0, false, false),
-        AIProviderPreference::FoundryLocal => (
-            false,
-            check_foundry_local_available().await.is_some(),
-            false,
-        ),
-        AIProviderPreference::Auto => {
-            let phi = check_phi_silica_available().0;
-            let foundry = !phi && check_foundry_local_available().await.is_some();
-            let openai = !phi && !foundry && check_openai_available().await;
-            (phi, foundry, openai)
+/// Probes lazily in priority order — the Foundry probe shells out and the
+/// Ollama/custom probes open sockets, so none of them run once an earlier
+/// provider has already won. `frontend_openai_key` marks an OpenAI key passed
+/// per-call from the frontend (counts as OpenAI availability, nothing more).
+pub async fn determine_active_provider_with_key(
+    pref: AIProviderPreference,
+    frontend_openai_key: bool,
+) -> AIProvider {
+    let mut avail = ProviderAvailability::default();
+    match pref {
+        AIProviderPreference::OpenAI => {
+            avail.openai = frontend_openai_key || check_openai_available().await;
         }
-    };
-    route_provider(pref, phi, foundry, openai)
+        AIProviderPreference::PhiSilica => avail.phi = check_phi_silica_available().0,
+        AIProviderPreference::FoundryLocal => {
+            avail.foundry = check_foundry_local_available().await.is_some();
+        }
+        AIProviderPreference::Ollama => avail.ollama = check_ollama_available().await.is_some(),
+        AIProviderPreference::CustomOpenAI => {
+            avail.custom = check_custom_available().await.is_some();
+        }
+        AIProviderPreference::Anthropic => avail.anthropic = check_anthropic_available().await,
+        AIProviderPreference::Gemini => avail.gemini = check_gemini_available().await,
+        AIProviderPreference::Auto => {
+            avail.phi = check_phi_silica_available().0;
+            avail.foundry = !avail.phi && check_foundry_local_available().await.is_some();
+            let local_won = avail.phi || avail.foundry;
+            avail.ollama = !local_won && check_ollama_available().await.is_some();
+            let won = local_won || avail.ollama;
+            avail.custom = !won && check_custom_available().await.is_some();
+            let won = won || avail.custom;
+            avail.openai = !won && (frontend_openai_key || check_openai_available().await);
+            let won = won || avail.openai;
+            avail.anthropic = !won && check_anthropic_available().await;
+            let won = won || avail.anthropic;
+            avail.gemini = !won && check_gemini_available().await;
+        }
+    }
+    route_provider(pref, avail)
 }
 
 /// Get current AI provider status
@@ -224,14 +347,19 @@ pub async fn get_ai_status() -> AIProviderStatus {
     let openai_available = check_openai_available().await;
     let (phi_available, phi_ready, phi_message) = check_phi_silica_available();
     let foundry_endpoint = check_foundry_local_available().await;
-    // Route from the availability just gathered instead of re-probing every
-    // provider a second time via determine_active_provider
-    let active = route_provider(
-        pref,
-        phi_available,
-        foundry_endpoint.is_some(),
-        openai_available,
-    );
+    // Status reports ALL providers, so every availability is gathered (no
+    // lazy short-circuit here) and routing reuses the same snapshot instead
+    // of re-probing via determine_active_provider
+    let avail = ProviderAvailability {
+        phi: phi_available,
+        foundry: foundry_endpoint.is_some(),
+        ollama: check_ollama_available().await.is_some(),
+        custom: check_custom_available().await.is_some(),
+        openai: openai_available,
+        anthropic: check_anthropic_available().await,
+        gemini: check_gemini_available().await,
+    };
+    let active = route_provider(pref, avail);
 
     AIProviderStatus {
         preferred_provider: active,
@@ -246,8 +374,10 @@ pub async fn get_ai_status() -> AIProviderStatus {
     }
 }
 
-/// Generate cache key for a request
-fn generate_cache_key(request: &AIRequest, session_id: &str) -> String {
+/// Generate cache key for a request. The provider is part of the key so a
+/// response truncated for one provider's budget is never served for another,
+/// and a hit always reports the provider that actually produced it.
+fn generate_cache_key(request: &AIRequest, session_id: &str, provider: AIProvider) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -256,57 +386,34 @@ fn generate_cache_key(request: &AIRequest, session_id: &str) -> String {
     let content_hash = hasher.finish();
 
     format!(
-        "{}:{:?}:{}:{:x}",
-        session_id, request.context_type, request.context_id, content_hash
+        "{}:{:?}:{}:{}:{:x}",
+        session_id, request.context_type, request.context_id, provider, content_hash
     )
 }
 
 /// Analyze with the appropriate provider
-/// If api_key is provided, it will be used for OpenAI calls directly
+/// If api_key is provided, it counts as OpenAI availability for routing
 pub async fn analyze(
     request: AIRequest,
     session_id: &str,
     api_key: Option<String>,
 ) -> Result<AIResponse, String> {
-    // Check cache first
-    let cache_key = generate_cache_key(&request, session_id);
+    // Determine the provider first — it is part of the cache key
+    let pref = get_user_preference();
+    let frontend_key = api_key.as_deref().is_some_and(|k| !k.is_empty());
+    let provider = determine_active_provider_with_key(pref, frontend_key).await;
+
+    let cache_key = generate_cache_key(&request, session_id, provider);
     if let Ok(cache) = get_cache().lock()
         && let Some(cached) = cache.get(&cache_key)
     {
         return Ok(AIResponse {
             interpretation: cached.clone(),
-            provider_used: AIProvider::OpenAI, // Assume OpenAI for cached results
+            provider_used: provider,
             cached: true,
             error: None,
         });
     }
-
-    // Determine provider - if api_key is provided, we can use OpenAI
-    let pref = get_user_preference();
-    let provider = if api_key.is_some() {
-        // An API key from the frontend makes OpenAI the fallback, but an
-        // explicit local preference still wins when that provider is up
-        match pref {
-            AIProviderPreference::PhiSilica => {
-                let (phi_available, _, _) = check_phi_silica_available();
-                if phi_available {
-                    AIProvider::PhiSilica
-                } else {
-                    AIProvider::OpenAI
-                }
-            }
-            AIProviderPreference::FoundryLocal => {
-                if check_foundry_local_available().await.is_some() {
-                    AIProvider::FoundryLocal
-                } else {
-                    AIProvider::OpenAI
-                }
-            }
-            _ => AIProvider::OpenAI, // Use OpenAI with provided key
-        }
-    } else {
-        determine_active_provider(pref).await
-    };
 
     // Generate prompt based on context type
     let prompt = match request.context_type {
@@ -328,11 +435,22 @@ pub async fn analyze(
         AIProvider::OpenAI => analyze_with_openai(&prompt, api_key).await,
         AIProvider::PhiSilica => analyze_with_phi_silica(&prompt).await,
         AIProvider::FoundryLocal => analyze_with_foundry_local(&prompt).await,
+        // Wired up in the provider-client phase of 2.5.0; routing only returns
+        // these when the user has configured them.
+        AIProvider::Ollama
+        | AIProvider::CustomOpenAI
+        | AIProvider::Anthropic
+        | AIProvider::Gemini => Err(DiagError::ai_unavailable(
+            provider.to_string(),
+            "This AI provider is not available in this build yet.",
+        )
+        .into()),
         AIProvider::None => Err(DiagError::ai_unavailable(
             "none",
-            "No AI provider available. Configure an OpenAI API key in Settings, install \
-             Foundry Local (winget install Microsoft.FoundryLocal) for local AI, or use \
-             the Microsoft Store version on a Copilot+ PC for on-device Phi Silica.",
+            "No AI provider available. Configure an API key (OpenAI, Anthropic or Gemini) in \
+             Settings, install Foundry Local (winget install Microsoft.FoundryLocal) or Ollama \
+             for local AI, or use the Microsoft Store version on a Copilot+ PC for on-device \
+             Phi Silica.",
         )
         .into()),
     };
@@ -553,6 +671,10 @@ pub async fn ai_set_preference(preference: String) -> Result<(), String> {
         "openai" => AIProviderPreference::OpenAI,
         "phi_silica" | "phisilica" => AIProviderPreference::PhiSilica,
         "foundry_local" | "foundrylocal" => AIProviderPreference::FoundryLocal,
+        "ollama" => AIProviderPreference::Ollama,
+        "custom_openai" | "custom" => AIProviderPreference::CustomOpenAI,
+        "anthropic" => AIProviderPreference::Anthropic,
+        "gemini" => AIProviderPreference::Gemini,
         _ => AIProviderPreference::Auto,
     };
     set_user_preference(pref);
@@ -580,82 +702,167 @@ Guidelines:
 mod tests {
     use super::*;
 
+    /// Everything available
+    fn all() -> ProviderAvailability {
+        ProviderAvailability {
+            phi: true,
+            foundry: true,
+            ollama: true,
+            custom: true,
+            openai: true,
+            anthropic: true,
+            gemini: true,
+        }
+    }
+
     #[test]
-    fn auto_prefers_phi_silica_over_everything() {
+    fn auto_walks_the_priority_chain_link_by_link() {
+        // Local-first chain: phi → foundry → ollama → custom → openai →
+        // anthropic → gemini → none. Each step turns off the previous winner.
+        let mut avail = all();
+        let chain = [
+            AIProvider::PhiSilica,
+            AIProvider::FoundryLocal,
+            AIProvider::Ollama,
+            AIProvider::CustomOpenAI,
+            AIProvider::OpenAI,
+            AIProvider::Anthropic,
+            AIProvider::Gemini,
+        ];
+        for expected in chain {
+            assert_eq!(
+                route_provider(AIProviderPreference::Auto, avail),
+                expected,
+                "wrong Auto winner with availability {:?}",
+                avail
+            );
+            match expected {
+                AIProvider::PhiSilica => avail.phi = false,
+                AIProvider::FoundryLocal => avail.foundry = false,
+                AIProvider::Ollama => avail.ollama = false,
+                AIProvider::CustomOpenAI => avail.custom = false,
+                AIProvider::OpenAI => avail.openai = false,
+                AIProvider::Anthropic => avail.anthropic = false,
+                AIProvider::Gemini => avail.gemini = false,
+                _ => unreachable!(),
+            }
+        }
+        // Nothing left
         assert_eq!(
-            route_provider(AIProviderPreference::Auto, true, true, true),
-            AIProvider::PhiSilica
+            route_provider(AIProviderPreference::Auto, avail),
+            AIProvider::None
         );
     }
 
     #[test]
-    fn auto_falls_back_to_foundry_then_openai() {
+    fn auto_with_only_an_openai_key_picks_openai() {
+        // Backward compatibility: the pre-2.5.0 single-key setup must keep
+        // resolving exactly as it did.
+        let avail = ProviderAvailability {
+            openai: true,
+            ..Default::default()
+        };
         assert_eq!(
-            route_provider(AIProviderPreference::Auto, false, true, true),
-            AIProvider::FoundryLocal
-        );
-        assert_eq!(
-            route_provider(AIProviderPreference::Auto, false, false, true),
+            route_provider(AIProviderPreference::Auto, avail),
             AIProvider::OpenAI
-        );
-        assert_eq!(
-            route_provider(AIProviderPreference::Auto, false, false, false),
-            AIProvider::None
         );
     }
 
     #[test]
     fn explicit_preference_wins_when_available() {
-        assert_eq!(
-            route_provider(AIProviderPreference::OpenAI, true, true, true),
-            AIProvider::OpenAI
-        );
-        assert_eq!(
-            route_provider(AIProviderPreference::FoundryLocal, true, true, true),
-            AIProvider::FoundryLocal
-        );
-        assert_eq!(
-            route_provider(AIProviderPreference::PhiSilica, true, true, true),
-            AIProvider::PhiSilica
-        );
+        let cases = [
+            (AIProviderPreference::OpenAI, AIProvider::OpenAI),
+            (AIProviderPreference::PhiSilica, AIProvider::PhiSilica),
+            (AIProviderPreference::FoundryLocal, AIProvider::FoundryLocal),
+            (AIProviderPreference::Ollama, AIProvider::Ollama),
+            (AIProviderPreference::CustomOpenAI, AIProvider::CustomOpenAI),
+            (AIProviderPreference::Anthropic, AIProvider::Anthropic),
+            (AIProviderPreference::Gemini, AIProvider::Gemini),
+        ];
+        for (pref, expected) in cases {
+            assert_eq!(route_provider(pref, all()), expected);
+        }
     }
 
     #[test]
     fn explicit_preference_never_falls_back() {
         // An unavailable explicit choice yields None rather than silently
-        // routing to a provider the user did not pick
+        // routing to a provider the user did not pick — for every provider.
+        let unavailable = |pref| {
+            let mut avail = all();
+            match pref {
+                AIProviderPreference::PhiSilica => avail.phi = false,
+                AIProviderPreference::FoundryLocal => avail.foundry = false,
+                AIProviderPreference::Ollama => avail.ollama = false,
+                AIProviderPreference::CustomOpenAI => avail.custom = false,
+                AIProviderPreference::OpenAI => avail.openai = false,
+                AIProviderPreference::Anthropic => avail.anthropic = false,
+                AIProviderPreference::Gemini => avail.gemini = false,
+                AIProviderPreference::Auto => unreachable!(),
+            }
+            avail
+        };
+        for pref in [
+            AIProviderPreference::OpenAI,
+            AIProviderPreference::PhiSilica,
+            AIProviderPreference::FoundryLocal,
+            AIProviderPreference::Ollama,
+            AIProviderPreference::CustomOpenAI,
+            AIProviderPreference::Anthropic,
+            AIProviderPreference::Gemini,
+        ] {
+            assert_eq!(
+                route_provider(pref, unavailable(pref)),
+                AIProvider::None,
+                "preference {:?} fell back instead of yielding None",
+                pref
+            );
+        }
+    }
+
+    #[test]
+    fn provider_wire_strings_are_pinned_for_frontend() {
+        // The frontend AIProvider union type depends on these exact strings.
+        // "openai" regression-pins the rename_all bug that emitted "open_a_i".
+        let cases = [
+            (AIProvider::None, "\"none\""),
+            (AIProvider::OpenAI, "\"openai\""),
+            (AIProvider::PhiSilica, "\"phi_silica\""),
+            (AIProvider::FoundryLocal, "\"foundry_local\""),
+            (AIProvider::Ollama, "\"ollama\""),
+            (AIProvider::CustomOpenAI, "\"custom_openai\""),
+            (AIProvider::Anthropic, "\"anthropic\""),
+            (AIProvider::Gemini, "\"gemini\""),
+        ];
+        for (provider, wire) in cases {
+            assert_eq!(serde_json::to_string(&provider).unwrap(), wire);
+            // Round-trip
+            assert_eq!(serde_json::from_str::<AIProvider>(wire).unwrap(), provider);
+        }
+        // Legacy "open_a_i" strings still deserialize
         assert_eq!(
-            route_provider(AIProviderPreference::PhiSilica, false, true, true),
-            AIProvider::None
-        );
-        assert_eq!(
-            route_provider(AIProviderPreference::FoundryLocal, true, false, true),
-            AIProvider::None
-        );
-        assert_eq!(
-            route_provider(AIProviderPreference::OpenAI, true, true, false),
-            AIProvider::None
+            serde_json::from_str::<AIProvider>("\"open_a_i\"").unwrap(),
+            AIProvider::OpenAI
         );
     }
 
     #[test]
-    fn provider_serializes_snake_case_for_frontend() {
-        // The frontend AIProvider union type depends on these exact strings
-        assert_eq!(
-            serde_json::to_string(&AIProvider::PhiSilica).unwrap(),
-            "\"phi_silica\""
-        );
-        assert_eq!(
-            serde_json::to_string(&AIProvider::FoundryLocal).unwrap(),
-            "\"foundry_local\""
-        );
-        assert_eq!(
-            serde_json::to_string(&AIProvider::None).unwrap(),
-            "\"none\""
-        );
-        assert_eq!(
-            serde_json::from_str::<AIProviderPreference>("\"foundry_local\"").unwrap(),
-            AIProviderPreference::FoundryLocal
-        );
+    fn preference_wire_strings_round_trip() {
+        for (pref, wire) in [
+            (AIProviderPreference::Auto, "\"auto\""),
+            (AIProviderPreference::OpenAI, "\"openai\""),
+            (AIProviderPreference::PhiSilica, "\"phi_silica\""),
+            (AIProviderPreference::FoundryLocal, "\"foundry_local\""),
+            (AIProviderPreference::Ollama, "\"ollama\""),
+            (AIProviderPreference::CustomOpenAI, "\"custom_openai\""),
+            (AIProviderPreference::Anthropic, "\"anthropic\""),
+            (AIProviderPreference::Gemini, "\"gemini\""),
+        ] {
+            assert_eq!(serde_json::to_string(&pref).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<AIProviderPreference>(wire).unwrap(),
+                pref
+            );
+        }
     }
 }
