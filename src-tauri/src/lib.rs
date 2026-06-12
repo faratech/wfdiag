@@ -19,6 +19,7 @@ mod sparse_identity;
 pub mod state;
 pub mod timestamp;
 mod tray;
+mod update_check;
 mod windows_native;
 #[cfg(windows)]
 mod wmi_native;
@@ -945,6 +946,7 @@ pub fn run() {
             get_fixable_issue_ids,
             copy_minidumps_to_desktop,
             open_url,
+            update_check::check_for_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

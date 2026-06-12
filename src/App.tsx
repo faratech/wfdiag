@@ -6,6 +6,7 @@ import { ToastProvider } from './contexts/ToastContext'
 import { useDiagnostics } from './hooks/useDiagnostics'
 import { useScanner } from './hooks/useScanner'
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts'
+import { useUpdateCheck } from './hooks/useUpdateCheck'
 import type { TabValue } from './components'
 import { SettingsDialog, AboutDialog, Tooltip, Kbd } from './components'
 import { CommandPalette } from './components/CommandPalette'
@@ -49,6 +50,7 @@ const AppContent: React.FC = () => {
 
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
+  const updateInfo = useUpdateCheck()
   useGlobalShortcuts({
     onTogglePalette: () => setPaletteOpen(o => !o),
     onShowHelp: () => setHelpOpen(true),
@@ -260,7 +262,7 @@ const AppContent: React.FC = () => {
         settings={settings}
         onSave={async (s) => { await saveSettings(s); setShowSettings(false) }}
       />
-      <AboutDialog open={showAbout} onOpenChange={setShowAbout} />
+      <AboutDialog open={showAbout} onOpenChange={setShowAbout} updateInfo={updateInfo} />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <ShortcutHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
