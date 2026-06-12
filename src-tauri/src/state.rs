@@ -7,7 +7,7 @@ use crate::diagnostics::TaskResult;
 use crate::native_monitor::SystemMonitor;
 use crate::results_storage::ScanStorage;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -34,6 +34,9 @@ pub struct AppState {
     pub system_monitor: Arc<Mutex<Option<SystemMonitor>>>,
     pub scan_storage: Arc<Mutex<Option<ScanStorage>>>,
     pub scan_storage_error: Arc<Mutex<Option<String>>>,
+    /// Session ids cancelled via `cancel_diagnostics`. Queued tasks of a
+    /// cancelled session are skipped; in-flight tasks run to completion.
+    pub cancelled_sessions: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AppState {
@@ -44,6 +47,7 @@ impl AppState {
             system_monitor: Arc::new(Mutex::new(None)),
             scan_storage: Arc::new(Mutex::new(scan_storage)),
             scan_storage_error: Arc::new(Mutex::new(scan_storage_error)),
+            cancelled_sessions: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
