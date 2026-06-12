@@ -1,20 +1,20 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[cfg(windows)]
-use windows::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
-#[cfg(windows)]
 use windows::Win32::System::SystemInformation::{GetSystemInfo, IMAGE_FILE_MACHINE, SYSTEM_INFO};
+#[cfg(windows)]
+use windows::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
 
 /// Processor architecture constants from Windows API
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u16)]
 pub enum ProcessorArchitecture {
-    Intel = 0,      // x86
-    Arm = 5,        // ARM (32-bit)
-    Amd64 = 9,      // x64
-    Arm64 = 12,     // ARM64
+    Intel = 0,  // x86
+    Arm = 5,    // ARM (32-bit)
+    Amd64 = 9,  // x64
+    Arm64 = 12, // ARM64
     Unknown = 0xFFFF,
 }
 
@@ -155,12 +155,14 @@ fn is_wow64_machine(process_machine: u16) -> bool {
 
 /// Convert IMAGE_FILE_MACHINE to ProcessorArchitecture
 #[cfg(windows)]
-fn machine_to_architecture(machine: windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE) -> ProcessorArchitecture {
+fn machine_to_architecture(
+    machine: windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE,
+) -> ProcessorArchitecture {
     match machine.0 {
-        0x014c => ProcessorArchitecture::Intel,     // IMAGE_FILE_MACHINE_I386
-        0x01c4 => ProcessorArchitecture::Arm,       // IMAGE_FILE_MACHINE_ARMNT
-        0x8664 => ProcessorArchitecture::Amd64,     // IMAGE_FILE_MACHINE_AMD64
-        0xAA64 => ProcessorArchitecture::Arm64,     // IMAGE_FILE_MACHINE_ARM64
+        0x014c => ProcessorArchitecture::Intel, // IMAGE_FILE_MACHINE_I386
+        0x01c4 => ProcessorArchitecture::Arm,   // IMAGE_FILE_MACHINE_ARMNT
+        0x8664 => ProcessorArchitecture::Amd64, // IMAGE_FILE_MACHINE_AMD64
+        0xAA64 => ProcessorArchitecture::Arm64, // IMAGE_FILE_MACHINE_ARM64
         _ => ProcessorArchitecture::Unknown,
     }
 }
@@ -200,9 +202,18 @@ mod tests {
 
     #[test]
     fn test_architecture_from_u16() {
-        assert_eq!(ProcessorArchitecture::from_u16(0), ProcessorArchitecture::Intel);
-        assert_eq!(ProcessorArchitecture::from_u16(9), ProcessorArchitecture::Amd64);
-        assert_eq!(ProcessorArchitecture::from_u16(12), ProcessorArchitecture::Arm64);
+        assert_eq!(
+            ProcessorArchitecture::from_u16(0),
+            ProcessorArchitecture::Intel
+        );
+        assert_eq!(
+            ProcessorArchitecture::from_u16(9),
+            ProcessorArchitecture::Amd64
+        );
+        assert_eq!(
+            ProcessorArchitecture::from_u16(12),
+            ProcessorArchitecture::Arm64
+        );
     }
 
     #[test]

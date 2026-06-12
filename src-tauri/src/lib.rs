@@ -3,11 +3,10 @@
 mod architecture;
 mod commands;
 pub mod diagnostics;
-pub mod error;
-pub mod state;
 #[cfg(windows)]
 mod dpapi;
 mod encrypted_storage;
+pub mod error;
 mod issue_detector;
 mod issue_fixer;
 mod native_diagnostics;
@@ -15,6 +14,7 @@ pub mod native_monitor;
 pub mod openai_integration;
 pub mod results_storage;
 mod security;
+pub mod state;
 pub mod timestamp;
 mod windows_native;
 #[cfg(windows)]
@@ -223,7 +223,9 @@ async fn run_diagnostic_task(
     let task = tasks
         .iter()
         .find(|t| t.id == task_id)
-        .ok_or_else(|| DiagError::TaskNotFound { task_id: task_id.clone() })?;
+        .ok_or_else(|| DiagError::TaskNotFound {
+            task_id: task_id.clone(),
+        })?;
 
     // Emit progress event
     window
@@ -300,7 +302,10 @@ async fn run_diagnostics_parallel(
                             }),
                         );
                         return Err::<(String, TaskResult), String>(
-                            DiagError::TaskNotFound { task_id: task_id.clone() }.into(),
+                            DiagError::TaskNotFound {
+                                task_id: task_id.clone(),
+                            }
+                            .into(),
                         );
                     }
                 };

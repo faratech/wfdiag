@@ -50,8 +50,8 @@ fn main() {
 }
 
 fn detect_npu_dxcore() -> Option<(String, u32)> {
-    use windows::core::GUID;
     use windows::Win32::Graphics::DXCore::*;
+    use windows::core::GUID;
 
     // DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML
     const DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML: GUID = GUID::from_values(
@@ -78,7 +78,12 @@ fn detect_npu_dxcore() -> Option<(String, u32)> {
     );
 
     const NPU_IDENTIFIERS: &[&str] = &[
-        "npu", "neural", "hexagon", "ai accelerator", "ai boost", "xdna",
+        "npu",
+        "neural",
+        "hexagon",
+        "ai accelerator",
+        "ai boost",
+        "xdna",
     ];
 
     unsafe {
@@ -119,8 +124,10 @@ fn detect_npu_dxcore() -> Option<(String, u32)> {
             };
 
             // Check capabilities
-            let has_compute = adapter.IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE);
-            let has_graphics = adapter.IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS);
+            let has_compute =
+                adapter.IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE);
+            let has_graphics =
+                adapter.IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS);
 
             // Get driver description
             let desc_size = match adapter.GetPropertySize(DriverDescription) {
@@ -130,7 +137,11 @@ fn detect_npu_dxcore() -> Option<(String, u32)> {
 
             let mut desc_buffer: Vec<u8> = vec![0; desc_size];
             if adapter
-                .GetProperty(DriverDescription, desc_size, desc_buffer.as_mut_ptr() as *mut _)
+                .GetProperty(
+                    DriverDescription,
+                    desc_size,
+                    desc_buffer.as_mut_ptr() as *mut _,
+                )
                 .is_err()
             {
                 continue;
@@ -163,24 +174,21 @@ fn detect_npu_dxcore() -> Option<(String, u32)> {
 
 // Inline WMI helper
 mod wmi_helper {
-    use anyhow::{anyhow, Result};
-    use serde_json::{json, Value};
+    use anyhow::{Result, anyhow};
+    use serde_json::{Value, json};
     use std::collections::HashMap;
-    use windows::core::{BSTR, PCWSTR};
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoSetProxyBlanket,
-        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, EOAC_NONE, RPC_C_AUTHN_LEVEL_DEFAULT,
-        RPC_C_IMP_LEVEL_IMPERSONATE,
-    };
-    use windows::Win32::System::Wmi::{
-        IWbemClassObject, IWbemLocator, IWbemServices,
-        WbemLocator, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY,
-        WBEM_INFINITE,
+        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+        CoSetProxyBlanket, EOAC_NONE, RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE,
     };
     use windows::Win32::System::Variant::{
-        VARIANT, VT_BOOL, VT_BSTR, VT_I4, VT_I8, VT_NULL, VT_EMPTY,
-        VT_UI1, VT_UI2, VT_UI4, VT_UI8,
+        VARIANT, VT_BOOL, VT_BSTR, VT_EMPTY, VT_I4, VT_I8, VT_NULL, VT_UI1, VT_UI2, VT_UI4, VT_UI8,
     };
+    use windows::Win32::System::Wmi::{
+        IWbemClassObject, IWbemLocator, IWbemServices, WBEM_FLAG_FORWARD_ONLY,
+        WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_INFINITE, WbemLocator,
+    };
+    use windows::core::{BSTR, PCWSTR};
 
     pub struct WmiConnection {
         services: IWbemServices,
@@ -191,8 +199,9 @@ mod wmi_helper {
             unsafe {
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
-                let locator: IWbemLocator = CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER)
-                    .map_err(|e| anyhow!("Failed to create WbemLocator: {}", e))?;
+                let locator: IWbemLocator =
+                    CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER)
+                        .map_err(|e| anyhow!("Failed to create WbemLocator: {}", e))?;
 
                 let namespace_bstr = BSTR::from("root\\cimv2");
                 let services = locator
@@ -209,14 +218,15 @@ mod wmi_helper {
 
                 CoSetProxyBlanket(
                     &services,
-                    10,  // RPC_C_AUTHN_WINNT
+                    10, // RPC_C_AUTHN_WINNT
                     0,
                     PCWSTR::null(),
                     RPC_C_AUTHN_LEVEL_DEFAULT,
                     RPC_C_IMP_LEVEL_IMPERSONATE,
                     None,
                     EOAC_NONE,
-                ).ok();
+                )
+                .ok();
 
                 Ok(Self { services })
             }
@@ -386,7 +396,8 @@ fn enumerate_gpu_engines() {
 
                         // Also track utilization
                         if let Some(util) = counter.get("UtilizationPercentage") {
-                            let util_val = util.as_u64().or_else(|| util.as_i64().map(|i| i as u64));
+                            let util_val =
+                                util.as_u64().or_else(|| util.as_i64().map(|i| i as u64));
                             if let Some(u) = util_val {
                                 luid_utils.entry(luid.to_string()).or_default().push(u);
                             }
@@ -397,7 +408,8 @@ fn enumerate_gpu_engines() {
 
             // Print first 10 entries for visibility
             if idx < 10 {
-                let util = counter.get("UtilizationPercentage")
+                let util = counter
+                    .get("UtilizationPercentage")
                     .map(|v| format!("{:?}", v))
                     .unwrap_or_else(|| "N/A".to_string());
                 println!("    [{}] Name: {}", idx, name);
@@ -413,10 +425,13 @@ fn enumerate_gpu_engines() {
     println!("\n  LUIDs and their engine types:");
     for (luid, engines) in &luid_engines {
         let engines_list: Vec<&str> = engines.iter().map(|s| s.as_str()).collect();
-        let utils = luid_utils.get(luid).map(|v| {
-            let sum: u64 = v.iter().sum();
-            format!("total_util={}", sum)
-        }).unwrap_or_default();
+        let utils = luid_utils
+            .get(luid)
+            .map(|v| {
+                let sum: u64 = v.iter().sum();
+                format!("total_util={}", sum)
+            })
+            .unwrap_or_default();
 
         println!("    {} -> {:?} {}", luid, engines_list, utils);
 
@@ -434,9 +449,9 @@ fn discover_npu_luid() -> Option<String> {
 
     let wmi_con = WmiConnection::new().ok()?;
 
-    let results: Vec<HashMap<String, Value>> = wmi_con.query(
-        "SELECT Name FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine",
-    ).ok()?;
+    let results: Vec<HashMap<String, Value>> = wmi_con
+        .query("SELECT Name FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine")
+        .ok()?;
 
     let mut luid_engines: HashMap<String, HashSet<String>> = HashMap::new();
 
@@ -545,13 +560,18 @@ fn get_all_compute_utilization() {
 
     for (idx, counter) in results.iter().enumerate() {
         let name = counter.get("Name").and_then(|v| v.as_str()).unwrap_or("?");
-        let util = counter.get("UtilizationPercentage")
+        let util = counter
+            .get("UtilizationPercentage")
             .map(|v| format!("{:?}", v))
             .unwrap_or_else(|| "N/A".to_string());
 
         // Check if it's NOT a GPU (no 3D in the name pattern)
         let is_3d_device = name.contains("_engtype_3D") || name.contains("engtype_3D");
-        let marker = if is_3d_device { "(GPU)" } else { "(possible NPU)" };
+        let marker = if is_3d_device {
+            "(GPU)"
+        } else {
+            "(possible NPU)"
+        };
 
         println!("    [{}] {} {}", idx, name, marker);
         println!("         Util: {}", util);

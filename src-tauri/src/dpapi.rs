@@ -8,14 +8,13 @@
 #[cfg(windows)]
 use windows::{
     Win32::Security::Cryptography::{
-        CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB,
-        CRYPTPROTECT_UI_FORBIDDEN,
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
     },
     core::PCWSTR,
 };
 
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 
 use crate::error::DiagError;
 
@@ -62,23 +61,26 @@ fn dpapi_encrypt(data: &str) -> Result<Vec<u8>, String> {
     let result = unsafe {
         CryptProtectData(
             &mut data_in,
-            PCWSTR::null(),  // No description
-            None,             // No additional entropy
-            None,             // Reserved
-            None,             // No prompt struct
-            CRYPTPROTECT_UI_FORBIDDEN,  // Flags
+            PCWSTR::null(),            // No description
+            None,                      // No additional entropy
+            None,                      // Reserved
+            None,                      // No prompt struct
+            CRYPTPROTECT_UI_FORBIDDEN, // Flags
             &mut data_out,
         )
     };
 
     if result.is_err() {
-        return Err(DiagError::api_key("encrypt", format!("DPAPI encryption failed: {:?}", result)).into());
+        return Err(DiagError::api_key(
+            "encrypt",
+            format!("DPAPI encryption failed: {:?}", result),
+        )
+        .into());
     }
 
     // Copy encrypted data to Vec
-    let encrypted = unsafe {
-        std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize).to_vec()
-    };
+    let encrypted =
+        unsafe { std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize).to_vec() };
 
     // Free the memory allocated by CryptProtectData
     unsafe {
@@ -108,17 +110,21 @@ fn dpapi_decrypt(encrypted: &[u8]) -> Result<String, String> {
     let result = unsafe {
         CryptUnprotectData(
             &mut data_in,
-            None,             // Don't need description
-            None,             // No additional entropy
-            None,             // Reserved
-            None,             // No prompt struct
+            None, // Don't need description
+            None, // No additional entropy
+            None, // Reserved
+            None, // No prompt struct
             CRYPTPROTECT_UI_FORBIDDEN,
             &mut data_out,
         )
     };
 
     if result.is_err() {
-        return Err(DiagError::api_key("decrypt", format!("DPAPI decryption failed: {:?}", result)).into());
+        return Err(DiagError::api_key(
+            "decrypt",
+            format!("DPAPI decryption failed: {:?}", result),
+        )
+        .into());
     }
 
     // Convert decrypted bytes to string
@@ -176,8 +182,8 @@ pub fn load_api_key() -> Result<Option<String>, String> {
         return Ok(None);
     }
 
-    let encrypted = fs::read(&path)
-        .map_err(|e| DiagError::file(path.display().to_string(), e.to_string()))?;
+    let encrypted =
+        fs::read(&path).map_err(|e| DiagError::file(path.display().to_string(), e.to_string()))?;
 
     if encrypted.is_empty() {
         return Ok(None);

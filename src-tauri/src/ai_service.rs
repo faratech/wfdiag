@@ -5,8 +5,8 @@
 //! caching, and rate limiting.
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ai_cache::AICache;
 use crate::ai_prompts;
@@ -261,44 +261,28 @@ pub async fn analyze(
 
     // Generate prompt based on context type
     let prompt = match request.context_type {
-        ContextType::DiagnosticInterpretation => {
-            ai_prompts::diagnostic_interpretation_prompt(
-                request.task_name.as_deref().unwrap_or("Unknown"),
-                &request.data,
-            )
-        }
-        ContextType::SectionSummary => {
-            ai_prompts::section_summary_prompt(
-                request.section_name.as_deref().unwrap_or("System"),
-                &request.data,
-            )
-        }
-        ContextType::HealthScoreExplanation => {
-            ai_prompts::health_explanation_prompt(&request.data)
-        }
-        ContextType::IssuePrioritization => {
-            ai_prompts::issue_prioritization_prompt(&request.data)
-        }
-        ContextType::GeneralAnalysis => {
-            request.data.clone()
-        }
+        ContextType::DiagnosticInterpretation => ai_prompts::diagnostic_interpretation_prompt(
+            request.task_name.as_deref().unwrap_or("Unknown"),
+            &request.data,
+        ),
+        ContextType::SectionSummary => ai_prompts::section_summary_prompt(
+            request.section_name.as_deref().unwrap_or("System"),
+            &request.data,
+        ),
+        ContextType::HealthScoreExplanation => ai_prompts::health_explanation_prompt(&request.data),
+        ContextType::IssuePrioritization => ai_prompts::issue_prioritization_prompt(&request.data),
+        ContextType::GeneralAnalysis => request.data.clone(),
     };
 
     // Call the appropriate provider
     let result = match provider {
-        AIProvider::OpenAI => {
-            analyze_with_openai(&prompt, api_key).await
-        }
-        AIProvider::PhiSilica => {
-            analyze_with_phi_silica(&prompt).await
-        }
-        AIProvider::None => {
-            Err(DiagError::ai_unavailable(
-                "none",
-                "No AI provider available. Configure OpenAI API key in Settings or use a Copilot+ PC.",
-            )
-            .into())
-        }
+        AIProvider::OpenAI => analyze_with_openai(&prompt, api_key).await,
+        AIProvider::PhiSilica => analyze_with_phi_silica(&prompt).await,
+        AIProvider::None => Err(DiagError::ai_unavailable(
+            "none",
+            "No AI provider available. Configure OpenAI API key in Settings or use a Copilot+ PC.",
+        )
+        .into()),
     };
 
     // Cache successful results
@@ -320,16 +304,19 @@ pub async fn analyze(
 /// If api_key is provided, uses it directly; otherwise loads from DPAPI storage
 async fn analyze_with_openai(prompt: &str, api_key: Option<String>) -> Result<String, String> {
     use async_openai::{
-        types::responses::{CreateResponseArgs, InputParam},
         Client,
         config::OpenAIConfig,
+        types::responses::{CreateResponseArgs, InputParam},
     };
 
     // Use provided key or load from storage
     let api_key = match api_key {
         Some(key) if !key.is_empty() => key,
         _ => crate::load_api_key_internal().await.ok_or_else(|| {
-            DiagError::api_key("load", "OpenAI API key not configured. Please enter your API key in Settings.")
+            DiagError::api_key(
+                "load",
+                "OpenAI API key not configured. Please enter your API key in Settings.",
+            )
         })?,
     };
 
@@ -346,16 +333,12 @@ async fn analyze_with_openai(prompt: &str, api_key: Option<String>) -> Result<St
             reason: format!("Failed to build request: {}", e),
         })?;
 
-    let response = client
-        .responses()
-        .create(request)
-        .await
-        .map_err(|e| {
-            eprintln!("OpenAI API error in ai_service: {:?}", e);
-            DiagError::AiAnalysisFailed {
-                reason: format!("OpenAI API error: {}", e),
-            }
-        })?;
+    let response = client.responses().create(request).await.map_err(|e| {
+        eprintln!("OpenAI API error in ai_service: {:?}", e);
+        DiagError::AiAnalysisFailed {
+            reason: format!("OpenAI API error: {}", e),
+        }
+    })?;
 
     Ok(response.output_text().unwrap_or_default())
 }
@@ -373,7 +356,10 @@ async fn analyze_with_phi_silica(prompt: &str) -> Result<String, String> {
     // not byte index, so a multi-byte UTF-8 char at the boundary can't panic (and with
     // panic = "abort" in release, abort the whole process).
     let final_prompt = if prompt.chars().count() > PHI_SILICA_MAX_PROMPT_CHARS {
-        let head: String = prompt.chars().take(PHI_SILICA_MAX_PROMPT_CHARS - 25).collect();
+        let head: String = prompt
+            .chars()
+            .take(PHI_SILICA_MAX_PROMPT_CHARS - 25)
+            .collect();
         format!("{}... [input truncated]", head)
     } else {
         prompt.to_string()

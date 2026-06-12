@@ -1,7 +1,7 @@
+use crate::native_diagnostics::NativeDiagnostics;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use crate::native_diagnostics::NativeDiagnostics;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticTask {
@@ -313,17 +313,15 @@ pub fn run_diagnostic_task_sync(task_id: &str) -> Result<TaskResult, String> {
     tokio::task::block_in_place(|| {
         // Get the current runtime handle
         let handle = tokio::runtime::Handle::current();
-        
+
         // Block on the async function using the current runtime
-        handle.block_on(async {
-            Ok(run_diagnostic_task(task_id).await)
-        })
+        handle.block_on(async { Ok(run_diagnostic_task(task_id).await) })
     })
 }
 
 pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
     let start = std::time::Instant::now();
-    
+
     // Run native diagnostics in a blocking task to avoid blocking the async runtime
     let task_id_owned = task_id.to_string();
     let native_result = tokio::task::spawn_blocking(move || {
@@ -331,7 +329,7 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             Ok(d) => d,
             Err(e) => return Err(e),
         };
-        
+
         match task_id_owned.as_str() {
             "comp_system" => diagnostics.run_wmi_query("Win32_ComputerSystem", None),
             "os_info" => diagnostics.run_wmi_query("Win32_OperatingSystem", None),
@@ -368,7 +366,9 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             "hosts_file" => diagnostics.read_hosts_file(),
             "dsregcmd" => diagnostics.run_dsregcmd(),
             "windows_update" => diagnostics.get_windows_update_history(),
-            "firewall_status" => diagnostics.run_wmi_query("FirewallProduct", Some(r"root\SecurityCenter2")),
+            "firewall_status" => {
+                diagnostics.run_wmi_query("FirewallProduct", Some(r"root\SecurityCenter2"))
+            }
             "store_apps" => diagnostics.get_store_apps(),
             "performance" => diagnostics.get_performance_data(),
             "scheduled_tasks" => diagnostics.get_scheduled_tasks(),
@@ -376,12 +376,15 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             "driver_verifier" => diagnostics.get_driver_verifier(),
             _ => Err(anyhow::anyhow!("Not implemented in native diagnostics")),
         }
-    }).await.unwrap_or_else(|_| Err(anyhow::anyhow!("Task panicked")));
-    
+    })
+    .await
+    .unwrap_or_else(|_| Err(anyhow::anyhow!("Task panicked")));
+
     let result = match native_result {
         Ok(json_value) => TaskResult {
             success: true,
-            output: serde_json::to_string_pretty(&json_value).unwrap_or_else(|_| json_value.to_string()),
+            output: serde_json::to_string_pretty(&json_value)
+                .unwrap_or_else(|_| json_value.to_string()),
             error: None,
             duration_ms: 0,
         },
@@ -395,15 +398,19 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
                 "ipconfig" => run_command("ipconfig", &["/all"]),
                 "hosts_file" => read_hosts_file(),
                 "dsregcmd" => run_command("dsregcmd", &["/status"]),
-                "dism_health" => run_command("dism", &["/online", "/cleanup-image", "/checkhealth"]),
+                "dism_health" => {
+                    run_command("dism", &["/online", "/cleanup-image", "/checkhealth"])
+                }
                 "driver_verifier" => run_command("verifier", &["/querysettings"]),
                 // These now have native implementations, return detailed error
-                "store_apps" | "performance" | "scheduled_tasks" | "chkdsk" | "windows_update" => TaskResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Native diagnostic failed: {}", error_msg)),
-                    duration_ms: 0,
-                },
+                "store_apps" | "performance" | "scheduled_tasks" | "chkdsk" | "windows_update" => {
+                    TaskResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Native diagnostic failed: {}", error_msg)),
+                        duration_ms: 0,
+                    }
+                }
                 _ => TaskResult {
                     success: false,
                     output: String::new(),
@@ -413,7 +420,7 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             }
         }
     };
-    
+
     let mut result = result;
     result.duration_ms = start.elapsed().as_millis() as u64;
     result
@@ -426,11 +433,15 @@ fn run_command(cmd: &str, args: &[&str]) -> TaskResult {
         Ok(output) => {
             let output_str = String::from_utf8_lossy(&output.stdout).to_string();
             let error_str = String::from_utf8_lossy(&output.stderr).to_string();
-            
+
             TaskResult {
                 success: output.status.success(),
                 output: output_str,
-                error: if !error_str.is_empty() { Some(error_str) } else { None },
+                error: if !error_str.is_empty() {
+                    Some(error_str)
+                } else {
+                    None
+                },
                 duration_ms: 0,
             }
         }
@@ -443,17 +454,9 @@ fn run_command(cmd: &str, args: &[&str]) -> TaskResult {
     }
 }
 
-
-
-
-
-
-
-
-
 fn read_hosts_file() -> TaskResult {
     let hosts_path = Path::new("C:\\Windows\\System32\\drivers\\etc\\hosts");
-    
+
     match fs::read_to_string(hosts_path) {
         Ok(content) => TaskResult {
             success: true,
@@ -469,5 +472,3 @@ fn read_hosts_file() -> TaskResult {
         },
     }
 }
-
-

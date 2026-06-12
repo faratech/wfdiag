@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use crate::diagnostics::TaskResult;
 use crate::timestamp::Timestamp;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,7 +29,10 @@ impl IssueDetector {
         Self
     }
 
-    pub fn detect_issues(&self, results: &std::collections::HashMap<String, TaskResult>) -> Vec<Issue> {
+    pub fn detect_issues(
+        &self,
+        results: &std::collections::HashMap<String, TaskResult>,
+    ) -> Vec<Issue> {
         // Check each issue type and add to list with status
         vec![
             self.check_disk_space(results),
@@ -49,32 +52,33 @@ impl IssueDetector {
     fn check_disk_space(&self, results: &std::collections::HashMap<String, TaskResult>) -> Issue {
         if let Some(result) = results.get("logical_disk")
             && result.success
-                && let Ok(disks) = serde_json::from_str::<Vec<serde_json::Value>>(&result.output) {
-                    for disk in disks {
-                        if let (Some(free_space), Some(size)) = (
-                            disk["FreeSpace"].as_u64(),
-                            disk["Size"].as_u64(),
-                        )
-                            && size > 0 {
-                                let free_percent = (free_space as f64 / size as f64) * 100.0;
-                                if free_percent < 10.0 {
-                                    return Issue {
-                                        id: "low_disk_space".to_string(),
-                                        category: "Storage".to_string(),
-                                        severity: IssueSeverity::Critical,
-                                        title: "Low Disk Space".to_string(),
-                                        description: format!(
-                                            "The disk '{}' is running low on space ({:.2}% free).",
-                                            disk["Name"].as_str().unwrap_or("Unknown"),
-                                            free_percent
-                                        ),
-                                        recommendation: "Free up disk space by deleting unnecessary files.".to_string(),
-                                        detected: true,
-                                    };
-                                }
-                            }
+            && let Ok(disks) = serde_json::from_str::<Vec<serde_json::Value>>(&result.output)
+        {
+            for disk in disks {
+                if let (Some(free_space), Some(size)) =
+                    (disk["FreeSpace"].as_u64(), disk["Size"].as_u64())
+                    && size > 0
+                {
+                    let free_percent = (free_space as f64 / size as f64) * 100.0;
+                    if free_percent < 10.0 {
+                        return Issue {
+                            id: "low_disk_space".to_string(),
+                            category: "Storage".to_string(),
+                            severity: IssueSeverity::Critical,
+                            title: "Low Disk Space".to_string(),
+                            description: format!(
+                                "The disk '{}' is running low on space ({:.2}% free).",
+                                disk["Name"].as_str().unwrap_or("Unknown"),
+                                free_percent
+                            ),
+                            recommendation: "Free up disk space by deleting unnecessary files."
+                                .to_string(),
+                            detected: true,
+                        };
                     }
                 }
+            }
+        }
         Issue {
             id: "low_disk_space".to_string(),
             category: "Storage".to_string(),
@@ -86,29 +90,34 @@ impl IssueDetector {
         }
     }
 
-    fn check_disk_fragmentation(&self, results: &std::collections::HashMap<String, TaskResult>) -> Issue {
+    fn check_disk_fragmentation(
+        &self,
+        results: &std::collections::HashMap<String, TaskResult>,
+    ) -> Issue {
         if let Some(result) = results.get("disk_fragmentation")
             && result.success
-                && let Ok(disks) = serde_json::from_str::<Vec<serde_json::Value>>(&result.output) {
-                    for disk in disks {
-                        if let Some(fragmentation) = disk["fragmentation_percent"].as_u64()
-                            && fragmentation > 20 {
-                                return Issue {
-                                    id: "disk_fragmentation".to_string(),
-                                    category: "Storage".to_string(),
-                                    severity: IssueSeverity::Warning,
-                                    title: "High Disk Fragmentation".to_string(),
-                                    description: format!(
-                                        "The disk '{}' has {}% fragmentation.",
-                                        disk["drive"].as_str().unwrap_or("Unknown"),
-                                        fragmentation
-                                    ),
-                                    recommendation: "Defragment your disk to improve performance.".to_string(),
-                                    detected: true,
-                                };
-                            }
-                    }
+            && let Ok(disks) = serde_json::from_str::<Vec<serde_json::Value>>(&result.output)
+        {
+            for disk in disks {
+                if let Some(fragmentation) = disk["fragmentation_percent"].as_u64()
+                    && fragmentation > 20
+                {
+                    return Issue {
+                        id: "disk_fragmentation".to_string(),
+                        category: "Storage".to_string(),
+                        severity: IssueSeverity::Warning,
+                        title: "High Disk Fragmentation".to_string(),
+                        description: format!(
+                            "The disk '{}' has {}% fragmentation.",
+                            disk["drive"].as_str().unwrap_or("Unknown"),
+                            fragmentation
+                        ),
+                        recommendation: "Defragment your disk to improve performance.".to_string(),
+                        detected: true,
+                    };
                 }
+            }
+        }
         Issue {
             id: "disk_fragmentation".to_string(),
             category: "Storage".to_string(),
@@ -120,29 +129,37 @@ impl IssueDetector {
         }
     }
 
-    fn check_unsigned_drivers(&self, results: &std::collections::HashMap<String, TaskResult>) -> Issue {
+    fn check_unsigned_drivers(
+        &self,
+        results: &std::collections::HashMap<String, TaskResult>,
+    ) -> Issue {
         let mut unsigned_count = 0;
         if let Some(result) = results.get("drivers_list")
             && result.success
-                && let Ok(drivers) = serde_json::from_str::<Vec<serde_json::Value>>(&result.output) {
-                    for driver in &drivers {
-                        if let Some(is_signed) = driver["IsSigned"].as_bool()
-                            && !is_signed {
-                                unsigned_count += 1;
-                            }
-                    }
-                    if unsigned_count > 0 {
-                        return Issue {
-                            id: "unsigned_drivers".to_string(),
-                            category: "Drivers".to_string(),
-                            severity: IssueSeverity::Warning,
-                            title: "Unsigned Drivers Detected".to_string(),
-                            description: format!("Found {} unsigned driver(s) that could cause instability.", unsigned_count),
-                            recommendation: "Update drivers from manufacturer websites.".to_string(),
-                            detected: true,
-                        };
-                    }
+            && let Ok(drivers) = serde_json::from_str::<Vec<serde_json::Value>>(&result.output)
+        {
+            for driver in &drivers {
+                if let Some(is_signed) = driver["IsSigned"].as_bool()
+                    && !is_signed
+                {
+                    unsigned_count += 1;
                 }
+            }
+            if unsigned_count > 0 {
+                return Issue {
+                    id: "unsigned_drivers".to_string(),
+                    category: "Drivers".to_string(),
+                    severity: IssueSeverity::Warning,
+                    title: "Unsigned Drivers Detected".to_string(),
+                    description: format!(
+                        "Found {} unsigned driver(s) that could cause instability.",
+                        unsigned_count
+                    ),
+                    recommendation: "Update drivers from manufacturer websites.".to_string(),
+                    detected: true,
+                };
+            }
+        }
         Issue {
             id: "unsigned_drivers".to_string(),
             category: "Drivers".to_string(),
@@ -154,21 +171,25 @@ impl IssueDetector {
         }
     }
 
-    fn check_event_log_errors(&self, results: &std::collections::HashMap<String, TaskResult>) -> Issue {
+    fn check_event_log_errors(
+        &self,
+        results: &std::collections::HashMap<String, TaskResult>,
+    ) -> Issue {
         if let Some(result) = results.get("event_logs")
             && result.success
-                && let Ok(events) = serde_json::from_str::<Vec<serde_json::Value>>(&result.output)
-                    && !events.is_empty() {
-                        return Issue {
-                            id: "event_log_errors".to_string(),
-                            category: "Logs".to_string(),
-                            severity: IssueSeverity::Warning,
-                            title: "Event Log Errors".to_string(),
-                            description: format!("Found {} error(s) in system event logs.", events.len()),
-                            recommendation: "Review event logs for details.".to_string(),
-                            detected: true,
-                        };
-                    }
+            && let Ok(events) = serde_json::from_str::<Vec<serde_json::Value>>(&result.output)
+            && !events.is_empty()
+        {
+            return Issue {
+                id: "event_log_errors".to_string(),
+                category: "Logs".to_string(),
+                severity: IssueSeverity::Warning,
+                title: "Event Log Errors".to_string(),
+                description: format!("Found {} error(s) in system event logs.", events.len()),
+                recommendation: "Review event logs for details.".to_string(),
+                detected: true,
+            };
+        }
         Issue {
             id: "event_log_errors".to_string(),
             category: "Logs".to_string(),
@@ -180,32 +201,37 @@ impl IssueDetector {
         }
     }
 
-    fn check_stopped_services(&self, results: &std::collections::HashMap<String, TaskResult>) -> Issue {
+    fn check_stopped_services(
+        &self,
+        results: &std::collections::HashMap<String, TaskResult>,
+    ) -> Issue {
         let mut stopped_count = 0;
         if let Some(result) = results.get("services")
             && result.success
-                && let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&result.output) {
-                    for service in &services {
-                        if let (Some(state), Some(start_mode)) = (
-                            service["State"].as_str(),
-                            service["StartMode"].as_str(),
-                        )
-                            && start_mode == "Auto" && state != "Running" {
-                                stopped_count += 1;
-                            }
-                    }
-                    if stopped_count > 0 {
-                        return Issue {
-                            id: "stopped_services".to_string(),
-                            category: "Services".to_string(),
-                            severity: IssueSeverity::Warning,
-                            title: "Stopped Services".to_string(),
-                            description: format!("{} automatic service(s) are not running.", stopped_count),
-                            recommendation: "Start stopped services or investigate why they failed.".to_string(),
-                            detected: true,
-                        };
-                    }
+            && let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&result.output)
+        {
+            for service in &services {
+                if let (Some(state), Some(start_mode)) =
+                    (service["State"].as_str(), service["StartMode"].as_str())
+                    && start_mode == "Auto"
+                    && state != "Running"
+                {
+                    stopped_count += 1;
                 }
+            }
+            if stopped_count > 0 {
+                return Issue {
+                    id: "stopped_services".to_string(),
+                    category: "Services".to_string(),
+                    severity: IssueSeverity::Warning,
+                    title: "Stopped Services".to_string(),
+                    description: format!("{} automatic service(s) are not running.", stopped_count),
+                    recommendation: "Start stopped services or investigate why they failed."
+                        .to_string(),
+                    detected: true,
+                };
+            }
+        }
         Issue {
             id: "stopped_services".to_string(),
             category: "Services".to_string(),
@@ -217,22 +243,26 @@ impl IssueDetector {
         }
     }
 
-    fn check_high_cpu_usage(&self, results: &std::collections::HashMap<String, TaskResult>) -> Issue {
+    fn check_high_cpu_usage(
+        &self,
+        results: &std::collections::HashMap<String, TaskResult>,
+    ) -> Issue {
         if let Some(result) = results.get("performance")
             && result.success
-                && let Ok(performance) = serde_json::from_str::<serde_json::Value>(&result.output)
-                    && let Some(cpu_usage) = performance["cpu_performance"]["PercentProcessorTime"].as_u64()
-                        && cpu_usage > 90 {
-                            return Issue {
-                                id: "high_cpu_usage".to_string(),
-                                category: "Performance".to_string(),
-                                severity: IssueSeverity::Warning,
-                                title: "High CPU Usage".to_string(),
-                                description: format!("CPU usage is at {}%.", cpu_usage),
-                                recommendation: "Check Task Manager for resource-intensive processes.".to_string(),
-                                detected: true,
-                            };
-                        }
+            && let Ok(performance) = serde_json::from_str::<serde_json::Value>(&result.output)
+            && let Some(cpu_usage) = performance["cpu_performance"]["PercentProcessorTime"].as_u64()
+            && cpu_usage > 90
+        {
+            return Issue {
+                id: "high_cpu_usage".to_string(),
+                category: "Performance".to_string(),
+                severity: IssueSeverity::Warning,
+                title: "High CPU Usage".to_string(),
+                description: format!("CPU usage is at {}%.", cpu_usage),
+                recommendation: "Check Task Manager for resource-intensive processes.".to_string(),
+                detected: true,
+            };
+        }
         Issue {
             id: "high_cpu_usage".to_string(),
             category: "Performance".to_string(),
@@ -244,29 +274,33 @@ impl IssueDetector {
         }
     }
 
-    fn check_high_memory_usage(&self, results: &std::collections::HashMap<String, TaskResult>) -> Issue {
+    fn check_high_memory_usage(
+        &self,
+        results: &std::collections::HashMap<String, TaskResult>,
+    ) -> Issue {
         if let Some(result) = results.get("performance")
             && result.success
-                && let Ok(performance) = serde_json::from_str::<serde_json::Value>(&result.output)
-                    && let (Some(total_memory), Some(available_memory)) = (
-                        performance["memory_performance"]["TotalVisibleMemorySize"].as_u64(),
-                        performance["memory_performance"]["FreePhysicalMemory"].as_u64(),
-                    )
-                        && total_memory > 0 {
-                            let used_memory = total_memory - available_memory;
-                            let used_percent = (used_memory as f64 / total_memory as f64) * 100.0;
-                            if used_percent > 90.0 {
-                                return Issue {
-                                    id: "high_memory_usage".to_string(),
-                                    category: "Performance".to_string(),
-                                    severity: IssueSeverity::Warning,
-                                    title: "High Memory Usage".to_string(),
-                                    description: format!("Memory usage is at {:.1}%.", used_percent),
-                                    recommendation: "Close unnecessary programs to free memory.".to_string(),
-                                    detected: true,
-                                };
-                            }
-                        }
+            && let Ok(performance) = serde_json::from_str::<serde_json::Value>(&result.output)
+            && let (Some(total_memory), Some(available_memory)) = (
+                performance["memory_performance"]["TotalVisibleMemorySize"].as_u64(),
+                performance["memory_performance"]["FreePhysicalMemory"].as_u64(),
+            )
+            && total_memory > 0
+        {
+            let used_memory = total_memory - available_memory;
+            let used_percent = (used_memory as f64 / total_memory as f64) * 100.0;
+            if used_percent > 90.0 {
+                return Issue {
+                    id: "high_memory_usage".to_string(),
+                    category: "Performance".to_string(),
+                    severity: IssueSeverity::Warning,
+                    title: "High Memory Usage".to_string(),
+                    description: format!("Memory usage is at {:.1}%.", used_percent),
+                    recommendation: "Close unnecessary programs to free memory.".to_string(),
+                    detected: true,
+                };
+            }
+        }
         Issue {
             id: "high_memory_usage".to_string(),
             category: "Performance".to_string(),
@@ -278,35 +312,47 @@ impl IssueDetector {
         }
     }
 
-    fn check_pending_windows_updates(&self, results: &std::collections::HashMap<String, TaskResult>) -> Issue {
+    fn check_pending_windows_updates(
+        &self,
+        results: &std::collections::HashMap<String, TaskResult>,
+    ) -> Issue {
         if let Some(result) = results.get("windows_update")
             && result.success
-                && let Ok(update_info) = serde_json::from_str::<serde_json::Value>(&result.output)
-                    && let Some(updates) = update_info["installed_updates"].as_array() {
-                        let mut most_recent_update: Option<Timestamp> = None;
-                        for update in updates {
-                            if let Some(installed_on_str) = update["InstalledOn"].as_str()
-                                && let Some(ts) = Self::parse_windows_date(installed_on_str)
-                                    && most_recent_update.map_or(true, |t| ts > t) {
-                                        most_recent_update = Some(ts);
-                                    }
-                        }
-                        if let Some(last_update_date) = most_recent_update {
-                            let now = Timestamp::now();
-                            let thirty_days = Duration::from_secs(30 * 24 * 60 * 60);
-                            if last_update_date.is_before(&now, thirty_days) {
-                                return Issue {
-                                    id: "pending_windows_updates".to_string(),
-                                    category: "System".to_string(),
-                                    severity: IssueSeverity::Warning,
-                                    title: "Outdated Windows Updates".to_string(),
-                                    description: format!("Last update was {}.", last_update_date.to_iso_string().split('T').next().unwrap_or("unknown")),
-                                    recommendation: "Check for and install pending updates.".to_string(),
-                                    detected: true,
-                                };
-                            }
-                        }
-                    }
+            && let Ok(update_info) = serde_json::from_str::<serde_json::Value>(&result.output)
+            && let Some(updates) = update_info["installed_updates"].as_array()
+        {
+            let mut most_recent_update: Option<Timestamp> = None;
+            for update in updates {
+                if let Some(installed_on_str) = update["InstalledOn"].as_str()
+                    && let Some(ts) = Self::parse_windows_date(installed_on_str)
+                    && most_recent_update.map_or(true, |t| ts > t)
+                {
+                    most_recent_update = Some(ts);
+                }
+            }
+            if let Some(last_update_date) = most_recent_update {
+                let now = Timestamp::now();
+                let thirty_days = Duration::from_secs(30 * 24 * 60 * 60);
+                if last_update_date.is_before(&now, thirty_days) {
+                    return Issue {
+                        id: "pending_windows_updates".to_string(),
+                        category: "System".to_string(),
+                        severity: IssueSeverity::Warning,
+                        title: "Outdated Windows Updates".to_string(),
+                        description: format!(
+                            "Last update was {}.",
+                            last_update_date
+                                .to_iso_string()
+                                .split('T')
+                                .next()
+                                .unwrap_or("unknown")
+                        ),
+                        recommendation: "Check for and install pending updates.".to_string(),
+                        detected: true,
+                    };
+                }
+            }
+        }
         Issue {
             id: "pending_windows_updates".to_string(),
             category: "System".to_string(),
@@ -333,33 +379,40 @@ impl IssueDetector {
         Timestamp::from_iso_string(&iso).ok()
     }
 
-    fn check_firewall_status(&self, results: &std::collections::HashMap<String, TaskResult>) -> Issue {
+    fn check_firewall_status(
+        &self,
+        results: &std::collections::HashMap<String, TaskResult>,
+    ) -> Issue {
         if let Some(result) = results.get("firewall_status")
             && result.success
-                && let Ok(firewalls) = serde_json::from_str::<Vec<serde_json::Value>>(&result.output) {
-                    for firewall in &firewalls {
-                        // Windows Security Center productState is a packed bitfield, NOT a
-                        // single enum value. The enabled/disabled state is the second byte
-                        // (bits 8-15): the 0x10 bit set => ON; 0x00/0x01 => OFF. The old
-                        // `== 262144` exact match missed most real disabled states (which
-                        // vary by provider and Windows version).
-                        if let Some(product_state) = firewall["productState"].as_u64() {
-                            let enabled_byte = (product_state >> 8) & 0xFF;
-                            let firewall_on = (enabled_byte & 0x10) != 0;
-                            if !firewall_on {
-                                return Issue {
-                                    id: "firewall_disabled".to_string(),
-                                    category: "Security".to_string(),
-                                    severity: IssueSeverity::Critical,
-                                    title: "Firewall Disabled".to_string(),
-                                    description: format!("'{}' is disabled.", firewall["displayName"].as_str().unwrap_or("Firewall")),
-                                    recommendation: "Enable firewall for network protection.".to_string(),
-                                    detected: true,
-                                };
-                            }
-                        }
+            && let Ok(firewalls) = serde_json::from_str::<Vec<serde_json::Value>>(&result.output)
+        {
+            for firewall in &firewalls {
+                // Windows Security Center productState is a packed bitfield, NOT a
+                // single enum value. The enabled/disabled state is the second byte
+                // (bits 8-15): the 0x10 bit set => ON; 0x00/0x01 => OFF. The old
+                // `== 262144` exact match missed most real disabled states (which
+                // vary by provider and Windows version).
+                if let Some(product_state) = firewall["productState"].as_u64() {
+                    let enabled_byte = (product_state >> 8) & 0xFF;
+                    let firewall_on = (enabled_byte & 0x10) != 0;
+                    if !firewall_on {
+                        return Issue {
+                            id: "firewall_disabled".to_string(),
+                            category: "Security".to_string(),
+                            severity: IssueSeverity::Critical,
+                            title: "Firewall Disabled".to_string(),
+                            description: format!(
+                                "'{}' is disabled.",
+                                firewall["displayName"].as_str().unwrap_or("Firewall")
+                            ),
+                            recommendation: "Enable firewall for network protection.".to_string(),
+                            detected: true,
+                        };
                     }
                 }
+            }
+        }
         Issue {
             id: "firewall_disabled".to_string(),
             category: "Security".to_string(),
@@ -399,17 +452,18 @@ impl IssueDetector {
 
     fn check_dns_cache(&self, results: &std::collections::HashMap<String, TaskResult>) -> Issue {
         if let Some(result) = results.get("network_adapter")
-            && (!result.success || result.output.contains("error")) {
-                return Issue {
-                    id: "dns_cache".to_string(),
-                    category: "Network".to_string(),
-                    severity: IssueSeverity::Info,
-                    title: "DNS Cache May Need Refresh".to_string(),
-                    description: "Network connectivity issues detected.".to_string(),
-                    recommendation: "Clear DNS cache if experiencing issues.".to_string(),
-                    detected: true,
-                };
-            }
+            && (!result.success || result.output.contains("error"))
+        {
+            return Issue {
+                id: "dns_cache".to_string(),
+                category: "Network".to_string(),
+                severity: IssueSeverity::Info,
+                title: "DNS Cache May Need Refresh".to_string(),
+                description: "Network connectivity issues detected.".to_string(),
+                recommendation: "Clear DNS cache if experiencing issues.".to_string(),
+                detected: true,
+            };
+        }
         Issue {
             id: "dns_cache".to_string(),
             category: "Network".to_string(),

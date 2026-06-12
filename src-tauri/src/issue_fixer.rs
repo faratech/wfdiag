@@ -63,13 +63,13 @@ impl IssueFixer {
         let mut actions = Vec::new();
 
         // Launch Windows Defragment and Optimize Drives utility
-        let output = Command::new("dfrgui.exe")
-            .spawn();
+        let output = Command::new("dfrgui.exe").spawn();
 
         match output {
             Ok(_) => {
                 actions.push("Launched Windows Defragment and Optimize Drives utility".to_string());
-                actions.push("Please select the drive and click 'Optimize' to defragment".to_string());
+                actions
+                    .push("Please select the drive and click 'Optimize' to defragment".to_string());
 
                 Ok(FixResult {
                     success: true,
@@ -80,9 +80,7 @@ impl IssueFixer {
             }
             Err(_) => {
                 // Try alternative approach
-                let alt_output = Command::new("cmd")
-                    .args(["/c", "start", "dfrgui"])
-                    .spawn();
+                let alt_output = Command::new("cmd").args(["/c", "start", "dfrgui"]).spawn();
 
                 if alt_output.is_ok() {
                     actions.push("Launched Windows Defragment utility".to_string());
@@ -109,9 +107,7 @@ impl IssueFixer {
 
         // Launch Windows Disk Cleanup utility
         // This will open the disk cleanup tool for the user to run with proper permissions
-        let output = Command::new("cleanmgr")
-            .args(["/sagerun:1"])
-            .spawn();
+        let output = Command::new("cleanmgr").args(["/sagerun:1"]).spawn();
 
         match output {
             Ok(_) => {
@@ -155,9 +151,7 @@ impl IssueFixer {
         let mut actions = Vec::new();
 
         // Stop Windows Update service
-        let _ = Command::new("net")
-            .args(["stop", "wuauserv"])
-            .output()?;
+        let _ = Command::new("net").args(["stop", "wuauserv"]).output()?;
         actions.push("Stopped Windows Update service".to_string());
 
         // Clear update cache
@@ -169,9 +163,7 @@ impl IssueFixer {
         }
 
         // Restart Windows Update service
-        let output = Command::new("net")
-            .args(["start", "wuauserv"])
-            .output()?;
+        let output = Command::new("net").args(["start", "wuauserv"]).output()?;
 
         if output.status.success() {
             actions.push("Restarted Windows Update service".to_string());
@@ -194,9 +186,7 @@ impl IssueFixer {
     async fn fix_dns_cache(&self) -> Result<FixResult> {
         let mut actions = Vec::new();
 
-        let output = Command::new("ipconfig")
-            .args(["/flushdns"])
-            .output()?;
+        let output = Command::new("ipconfig").args(["/flushdns"]).output()?;
 
         if output.status.success() {
             actions.push("Flushed DNS cache".to_string());
@@ -233,9 +223,11 @@ impl IssueFixer {
         if let Ok(entries) = std::fs::read_dir(&thumb_cache_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.file_name()
+                if path
+                    .file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("thumbcache")) {
+                    .is_some_and(|n| n.starts_with("thumbcache"))
+                {
                     let _ = std::fs::remove_file(&path);
                 }
             }
@@ -279,7 +271,10 @@ impl IssueFixer {
 
         // Empty recycle bin using PowerShell
         let output = Command::new("powershell")
-            .args(["-Command", "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"])
+            .args([
+                "-Command",
+                "Clear-RecycleBin -Force -ErrorAction SilentlyContinue",
+            ])
             .output()?;
 
         if output.status.success() {
@@ -303,17 +298,15 @@ impl IssueFixer {
     async fn fix_stopped_services(&self) -> Result<FixResult> {
         let mut actions = Vec::new();
         let critical_services = vec![
-            "wuauserv",  // Windows Update
-            "BITS",      // Background Intelligent Transfer
-            "spooler",   // Print Spooler
-            "Themes",    // Windows Themes
-            "AudioSrv",  // Windows Audio
+            "wuauserv", // Windows Update
+            "BITS",     // Background Intelligent Transfer
+            "spooler",  // Print Spooler
+            "Themes",   // Windows Themes
+            "AudioSrv", // Windows Audio
         ];
 
         for service in critical_services {
-            let output = Command::new("sc")
-                .args(["start", service])
-                .output()?;
+            let output = Command::new("sc").args(["start", service]).output()?;
 
             if output.status.success() {
                 actions.push(format!("Started {} service", service));
@@ -336,8 +329,7 @@ impl IssueFixer {
         let mut actions = Vec::new();
 
         // Launch Task Manager to let user identify and end high CPU processes
-        let output = Command::new("taskmgr.exe")
-            .spawn();
+        let output = Command::new("taskmgr.exe").spawn();
 
         match output {
             Ok(_) => {
@@ -353,9 +345,7 @@ impl IssueFixer {
             }
             Err(_) => {
                 // Try alternative approach
-                let alt_output = Command::new("cmd")
-                    .args(["/c", "start", "taskmgr"])
-                    .spawn();
+                let alt_output = Command::new("cmd").args(["/c", "start", "taskmgr"]).spawn();
 
                 if alt_output.is_ok() {
                     actions.push("Launched Task Manager".to_string());

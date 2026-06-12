@@ -1264,8 +1264,8 @@ impl LanguageModel {
             .map(|| result__)
         })
     }
-    pub fn EnsureReadyAsync(
-    ) -> windows_core::Result<windows_future::IAsyncOperationWithProgress<AIFeatureReadyResult, f64>>
+    pub fn EnsureReadyAsync()
+    -> windows_core::Result<windows_future::IAsyncOperationWithProgress<AIFeatureReadyResult, f64>>
     {
         Self::ILanguageModelStatics(|this| unsafe {
             let mut result__ = core::mem::zeroed();

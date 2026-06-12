@@ -52,11 +52,11 @@ impl Timestamp {
         let (year, month, day) = days_to_ymd(days);
 
         fmt.replace("%Y", &format!("{:04}", year))
-           .replace("%m", &format!("{:02}", month))
-           .replace("%d", &format!("{:02}", day))
-           .replace("%H", &format!("{:02}", hours))
-           .replace("%M", &format!("{:02}", minutes))
-           .replace("%S", &format!("{:02}", seconds))
+            .replace("%m", &format!("{:02}", month))
+            .replace("%d", &format!("{:02}", day))
+            .replace("%H", &format!("{:02}", hours))
+            .replace("%M", &format!("{:02}", minutes))
+            .replace("%S", &format!("{:02}", seconds))
     }
 
     /// Format as ISO 8601 string (YYYY-MM-DDTHH:MM:SSZ)
@@ -94,11 +94,7 @@ impl Timestamp {
             &s[..idx]
         } else if let Some(idx) = s.rfind('-') {
             // Check if it's the date separator or timezone
-            if idx > 10 {
-                &s[..idx]
-            } else {
-                s
-            }
+            if idx > 10 { &s[..idx] } else { s }
         } else {
             s
         };
@@ -108,12 +104,24 @@ impl Timestamp {
             return Err(DiagError::internal(format!("Invalid ISO 8601 format: {}", s)).into());
         }
 
-        let year: i32 = s[0..4].parse().map_err(|_| DiagError::internal("Invalid year"))?;
-        let month: u32 = s[5..7].parse().map_err(|_| DiagError::internal("Invalid month"))?;
-        let day: u32 = s[8..10].parse().map_err(|_| DiagError::internal("Invalid day"))?;
-        let hour: u32 = s[11..13].parse().map_err(|_| DiagError::internal("Invalid hour"))?;
-        let minute: u32 = s[14..16].parse().map_err(|_| DiagError::internal("Invalid minute"))?;
-        let second: u32 = s[17..19].parse().map_err(|_| DiagError::internal("Invalid second"))?;
+        let year: i32 = s[0..4]
+            .parse()
+            .map_err(|_| DiagError::internal("Invalid year"))?;
+        let month: u32 = s[5..7]
+            .parse()
+            .map_err(|_| DiagError::internal("Invalid month"))?;
+        let day: u32 = s[8..10]
+            .parse()
+            .map_err(|_| DiagError::internal("Invalid day"))?;
+        let hour: u32 = s[11..13]
+            .parse()
+            .map_err(|_| DiagError::internal("Invalid hour"))?;
+        let minute: u32 = s[14..16]
+            .parse()
+            .map_err(|_| DiagError::internal("Invalid minute"))?;
+        let second: u32 = s[17..19]
+            .parse()
+            .map_err(|_| DiagError::internal("Invalid second"))?;
 
         // Convert to Unix timestamp
         let days = ymd_to_days(year, month, day);

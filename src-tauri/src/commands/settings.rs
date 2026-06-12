@@ -78,15 +78,14 @@ fn default_ai_provider() -> String {
 
 /// Get the settings file path
 pub fn get_settings_path() -> Result<PathBuf, String> {
-    let app_data = dirs::config_dir()
-        .ok_or_else(|| DiagError::internal("Could not find config directory"))?;
+    let app_data =
+        dirs::config_dir().ok_or_else(|| DiagError::internal("Could not find config directory"))?;
     let settings_dir = app_data.join("com.windowsforum.diagnostics");
 
     // Create directory if it doesn't exist
     if !settings_dir.exists() {
-        std::fs::create_dir_all(&settings_dir).map_err(|e| {
-            DiagError::file(settings_dir.display().to_string(), e.to_string())
-        })?;
+        std::fs::create_dir_all(&settings_dir)
+            .map_err(|e| DiagError::file(settings_dir.display().to_string(), e.to_string()))?;
     }
 
     Ok(settings_dir.join("settings.json"))
