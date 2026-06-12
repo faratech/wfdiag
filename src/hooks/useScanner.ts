@@ -325,6 +325,7 @@ export const useScanner = () => {
   }, [])
 
   return {
+    runDiagnostics,
     runQuickScan,
     runFullScan,
     stopScan,

@@ -34,14 +34,6 @@ export interface Issue {
 }
 
 // Global search result type
-export interface SearchResult {
-  type: 'diagnostic' | 'issue' | 'history' | 'setting'
-  title: string
-  description?: string
-  navigateTo?: TabValue
-  data?: any
-}
-
 interface AppContextType {
   // State
   selectedTab: TabValue
@@ -91,16 +83,9 @@ interface AppContextType {
   // NavRail state
   navRailCollapsed: boolean
   setNavRailCollapsed: (collapsed: boolean) => void
-  // Global search state
-  globalSearchQuery: string
-  setGlobalSearchQuery: (query: string) => void
-  globalSearchResults: SearchResult[]
-  performGlobalSearch: (query: string) => void
-  // Search highlight state
-  highlightedTaskId: string | null
-  setHighlightedTaskId: (id: string | null) => void
-  searchHighlight: string
-  setSearchHighlight: (text: string) => void
+  // Deep-link from the command palette into a diagnostic's detail pane
+  pendingDetailTaskId: string | null
+  setPendingDetailTaskId: (id: string | null) => void
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined)
@@ -170,62 +155,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     localStorage.setItem('navRailCollapsed', JSON.stringify(collapsed))
   }
 
-  // Global search state
-  const [globalSearchQuery, setGlobalSearchQuery] = useState('')
-  const [globalSearchResults, setGlobalSearchResults] = useState<SearchResult[]>([])
-
-  // Search highlight state
-  const [highlightedTaskId, setHighlightedTaskId] = useState<string | null>(null)
-  const [searchHighlight, setSearchHighlight] = useState('')
-
-  // Perform global search across diagnostics, issues, and history
-  const performGlobalSearch = (query: string) => {
-    if (!query.trim()) {
-      setGlobalSearchResults([])
-      return
-    }
-
-    const lowerQuery = query.toLowerCase()
-    const searchResults: SearchResult[] = []
-
-    // Search in diagnostic results
-    Object.entries(results).forEach(([taskId, result]) => {
-      const task = availableTasks.find(t => t.id === taskId)
-      if (task) {
-        const matchesName = task.name.toLowerCase().includes(lowerQuery)
-        const matchesDesc = task.description.toLowerCase().includes(lowerQuery)
-        const matchesOutput = typeof result.output === 'string' && result.output.toLowerCase().includes(lowerQuery)
-
-        if (matchesName || matchesDesc || matchesOutput) {
-          searchResults.push({
-            type: 'diagnostic',
-            title: task.name,
-            description: task.description,
-            navigateTo: 'diagnostics',
-            data: { taskId, result },
-          })
-        }
-      }
-    })
-
-    // Search in issues
-    issues.forEach((issue) => {
-      const matchesTitle = issue.title.toLowerCase().includes(lowerQuery)
-      const matchesDesc = issue.description.toLowerCase().includes(lowerQuery)
-
-      if (matchesTitle || matchesDesc) {
-        searchResults.push({
-          type: 'issue',
-          title: issue.title,
-          description: issue.description,
-          navigateTo: 'issues',
-          data: issue,
-        })
-      }
-    })
-
-    setGlobalSearchResults(searchResults.slice(0, 10)) // Limit to 10 results
-  }
+  // Task to open in the diagnostics detail pane on next render — set by the
+  // command palette to deep-link into a specific result, consumed (and
+  // cleared) by DiagnosticsScreen
+  const [pendingDetailTaskId, setPendingDetailTaskId] = useState<string | null>(null)
 
   // Load settings from backend on startup
   useEffect(() => {
@@ -320,14 +253,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     settingsLoaded,
     navRailCollapsed,
     setNavRailCollapsed,
-    globalSearchQuery,
-    setGlobalSearchQuery,
-    globalSearchResults,
-    performGlobalSearch,
-    highlightedTaskId,
-    setHighlightedTaskId,
-    searchHighlight,
-    setSearchHighlight,
+    pendingDetailTaskId,
+    setPendingDetailTaskId,
   }
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>

@@ -1,12 +1,15 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { AppProvider, useAppContext } from './contexts/AppContext'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
 import { AIProvider } from './contexts/AIContext'
 import { ToastProvider } from './contexts/ToastContext'
 import { useDiagnostics } from './hooks/useDiagnostics'
 import { useScanner } from './hooks/useScanner'
+import { useGlobalShortcuts } from './hooks/useGlobalShortcuts'
 import type { TabValue } from './components'
-import { SettingsDialog, AboutDialog, Tooltip } from './components'
+import { SettingsDialog, AboutDialog, Tooltip, Kbd } from './components'
+import { CommandPalette } from './components/CommandPalette'
+import { ShortcutHelp } from './components/ShortcutHelp'
 import { NAV_TAB_ICON } from './ui/diagnostic-icons'
 import { DiagnosticsScreen } from './screens/DiagnosticsScreen'
 import { MonitorScreen } from './screens/MonitorScreen'
@@ -42,6 +45,13 @@ const AppContent: React.FC = () => {
   const { themeMode, setThemeMode } = useTheme()
   const { detectIssues, copyToClipboard, exportResults, shareToWindowsForum, emailReport, generateSupportPackage } = useDiagnostics()
   const { runQuickScan, runFullScan, stopScan } = useScanner()
+
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [helpOpen, setHelpOpen] = useState(false)
+  useGlobalShortcuts({
+    onTogglePalette: () => setPaletteOpen(o => !o),
+    onShowHelp: () => setHelpOpen(true),
+  })
 
   // Detect issues whenever results change to a non-empty set
   const resultCount = Object.keys(results).length
@@ -169,6 +179,12 @@ const AppContent: React.FC = () => {
             </div>
             <div className="cb-spacer" />
             <div className="cb-group">
+              <Tooltip content="Search commands and diagnostics" shortcut="Ctrl+K">
+                <button className="cb-btn" onClick={() => setPaletteOpen(true)} aria-label="Open command palette">
+                  <i className="fa-solid fa-magnifying-glass" aria-hidden="true" /> Search
+                  <span className="meta"><Kbd keys="Ctrl+K" /></span>
+                </button>
+              </Tooltip>
               <Tooltip content={`Switch to ${isDark ? 'light' : 'dark'} theme`}>
                 <button className="cb-btn" onClick={() => setThemeMode(isDark ? 'light' : 'dark')} aria-label={`Switch to ${isDark ? 'light' : 'dark'} theme`}>
                   <i className={`fa-solid ${isDark ? 'fa-sun' : 'fa-moon'}`} aria-hidden="true" />
@@ -229,6 +245,8 @@ const AppContent: React.FC = () => {
         onSave={async (s) => { await saveSettings(s); setShowSettings(false) }}
       />
       <AboutDialog open={showAbout} onOpenChange={setShowAbout} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      <ShortcutHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   )
 }
