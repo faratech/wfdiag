@@ -20,7 +20,10 @@ pub enum AIProvider {
     #[default]
     None,
     OpenAI,
+    /// On-device Phi Silica via the Windows AI APIs (needs package identity)
     PhiSilica,
+    /// Local OpenAI-compatible server (Foundry Local), no identity required
+    FoundryLocal,
 }
 
 impl std::fmt::Display for AIProvider {
@@ -29,6 +32,7 @@ impl std::fmt::Display for AIProvider {
             AIProvider::None => write!(f, "none"),
             AIProvider::OpenAI => write!(f, "openai"),
             AIProvider::PhiSilica => write!(f, "phi_silica"),
+            AIProvider::FoundryLocal => write!(f, "foundry_local"),
         }
     }
 }
@@ -41,6 +45,7 @@ pub enum AIProviderPreference {
     Auto,
     OpenAI,
     PhiSilica,
+    FoundryLocal,
 }
 
 /// Context type for different AI analysis scenarios
@@ -88,6 +93,10 @@ pub struct AIProviderStatus {
     pub phi_silica_available: bool,
     pub phi_silica_ready: bool,
     pub phi_silica_message: Option<String>,
+    #[serde(default)]
+    pub foundry_local_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foundry_local_endpoint: Option<String>,
     pub active_provider: AIProvider,
 }
 
@@ -151,6 +160,12 @@ pub fn check_phi_silica_available() -> (bool, bool, Option<String>) {
     )
 }
 
+/// Check if a local OpenAI-compatible endpoint (Foundry Local) is reachable.
+/// Returns the base URL when available.
+pub async fn check_foundry_local_available() -> Option<String> {
+    crate::openai_integration::local_ai_endpoint().await
+}
+
 /// Determine the active provider based on preference and availability
 pub async fn determine_active_provider(pref: AIProviderPreference) -> AIProvider {
     match pref {
@@ -169,11 +184,22 @@ pub async fn determine_active_provider(pref: AIProviderPreference) -> AIProvider
                 AIProvider::None
             }
         }
+        AIProviderPreference::FoundryLocal => {
+            if check_foundry_local_available().await.is_some() {
+                AIProvider::FoundryLocal
+            } else {
+                AIProvider::None
+            }
+        }
         AIProviderPreference::Auto => {
-            // Prefer Phi Silica (local/free), fall back to OpenAI
+            // Prefer on-device Phi Silica (NPU, no model download), then a
+            // local Foundry Local endpoint (still on this machine, no
+            // identity needed), then cloud OpenAI
             let (phi_available, _, _) = check_phi_silica_available();
             if phi_available {
                 AIProvider::PhiSilica
+            } else if check_foundry_local_available().await.is_some() {
+                AIProvider::FoundryLocal
             } else if check_openai_available().await {
                 AIProvider::OpenAI
             } else {
@@ -188,6 +214,7 @@ pub async fn get_ai_status() -> AIProviderStatus {
     let pref = get_user_preference();
     let openai_available = check_openai_available().await;
     let (phi_available, phi_ready, phi_message) = check_phi_silica_available();
+    let foundry_endpoint = check_foundry_local_available().await;
     let active = determine_active_provider(pref).await;
 
     AIProviderStatus {
@@ -197,6 +224,8 @@ pub async fn get_ai_status() -> AIProviderStatus {
         phi_silica_available: phi_available,
         phi_silica_ready: phi_ready,
         phi_silica_message: phi_message,
+        foundry_local_available: foundry_endpoint.is_some(),
+        foundry_local_endpoint: foundry_endpoint,
         active_provider: active,
     }
 }
@@ -239,13 +268,20 @@ pub async fn analyze(
     // Determine provider - if api_key is provided, we can use OpenAI
     let pref = get_user_preference();
     let provider = if api_key.is_some() {
-        // If API key is provided from frontend, use OpenAI
+        // An API key from the frontend makes OpenAI the fallback, but an
+        // explicit local preference still wins when that provider is up
         match pref {
             AIProviderPreference::PhiSilica => {
-                // User prefers Phi Silica, check if available
                 let (phi_available, _, _) = check_phi_silica_available();
                 if phi_available {
                     AIProvider::PhiSilica
+                } else {
+                    AIProvider::OpenAI
+                }
+            }
+            AIProviderPreference::FoundryLocal => {
+                if check_foundry_local_available().await.is_some() {
+                    AIProvider::FoundryLocal
                 } else {
                     AIProvider::OpenAI
                 }
@@ -275,9 +311,11 @@ pub async fn analyze(
     let result = match provider {
         AIProvider::OpenAI => analyze_with_openai(&prompt, api_key).await,
         AIProvider::PhiSilica => analyze_with_phi_silica(&prompt).await,
+        AIProvider::FoundryLocal => analyze_with_foundry_local(&prompt).await,
         AIProvider::None => Err(DiagError::ai_unavailable(
             "none",
-            "No AI provider available. Configure OpenAI API key in Settings or use a Copilot+ PC.",
+            "No AI provider available. Configure an OpenAI API key in Settings, install \
+             Foundry Local, or run on a Copilot+ PC with package identity for Phi Silica.",
         )
         .into()),
     };
@@ -365,6 +403,54 @@ async fn analyze_with_phi_silica(prompt: &str) -> Result<String, String> {
     crate::phi_silica::generate_response(&final_prompt).await
 }
 
+/// Analyze using a local OpenAI-compatible endpoint (Foundry Local).
+/// The endpoint is resolved dynamically — its port must not be hardcoded.
+async fn analyze_with_foundry_local(prompt: &str) -> Result<String, String> {
+    use async_openai::{
+        Client,
+        config::OpenAIConfig,
+        types::responses::{CreateResponseArgs, InputParam},
+    };
+
+    let endpoint = check_foundry_local_available().await.ok_or_else(|| {
+        DiagError::ai_unavailable(
+            "foundry_local",
+            "No local AI endpoint available. Install Foundry Local and run 'foundry service \
+             start', or configure an endpoint in Settings.",
+        )
+    })?;
+
+    let config = OpenAIConfig::new()
+        .with_api_base(format!("{}/v1", endpoint))
+        .with_api_key("not-needed");
+    let client = Client::with_config(config);
+
+    let full_prompt = format!("{}\n\n{}", SYSTEM_PROMPT, prompt);
+
+    let request = CreateResponseArgs::default()
+        .model(crate::openai_integration::FOUNDRY_LOCAL_MODEL)
+        .input(InputParam::Text(full_prompt))
+        .build()
+        .map_err(|e| DiagError::AiAnalysisFailed {
+            reason: format!("Failed to build request: {}", e),
+        })?;
+
+    let response = client.responses().create(request).await.map_err(|e| {
+        eprintln!("Foundry Local API error in ai_service: {:?}", e);
+        DiagError::AiAnalysisFailed {
+            reason: format!(
+                "Foundry Local error: {}. Ensure the service is running and the model '{}' \
+                 is loaded (foundry model run {}).",
+                e,
+                crate::openai_integration::FOUNDRY_LOCAL_MODEL,
+                crate::openai_integration::FOUNDRY_LOCAL_MODEL
+            ),
+        }
+    })?;
+
+    Ok(response.output_text().unwrap_or_default())
+}
+
 /// Clear AI cache for a session or all
 pub fn clear_cache(session_id: Option<&str>) {
     if let Ok(mut cache) = get_cache().lock() {
@@ -449,6 +535,7 @@ pub async fn ai_set_preference(preference: String) -> Result<(), String> {
     let pref = match preference.to_lowercase().as_str() {
         "openai" => AIProviderPreference::OpenAI,
         "phi_silica" | "phisilica" => AIProviderPreference::PhiSilica,
+        "foundry_local" | "foundrylocal" => AIProviderPreference::FoundryLocal,
         _ => AIProviderPreference::Auto,
     };
     set_user_preference(pref);

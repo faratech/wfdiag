@@ -55,6 +55,11 @@ pub struct AppSettings {
     // the TS SettingsData field; #[serde(default)] keeps old settings files loadable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quick_scan_tasks: Option<Vec<String>>,
+    // Optional base URL of a local OpenAI-compatible endpoint (e.g. Foundry
+    // Local). When unset, the endpoint is discovered via the foundry CLI —
+    // its port is dynamic by design and must not be hardcoded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_ai_endpoint: Option<String>,
 }
 
 fn default_max_concurrent() -> u32 {

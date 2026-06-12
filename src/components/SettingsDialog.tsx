@@ -49,12 +49,17 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({ open, onOpenChan
         <select className="field-input" style={{ width: 180 }} value={draft.preferredAIProvider || 'auto'} onChange={e => set('preferredAIProvider', e.target.value as SettingsData['preferredAIProvider'])}>
           <option value="auto">Auto</option>
           <option value="phi_silica">Phi Silica (on-device)</option>
+          <option value="foundry_local">Foundry Local (local server)</option>
           <option value="openai">OpenAI (cloud)</option>
         </select>
       </div>
       <div className="form-row">
         <div><strong>Enable AI insights</strong></div>
         <input type="checkbox" checked={draft.aiEnabled ?? true} onChange={e => set('aiEnabled', e.target.checked)} />
+      </div>
+      <div className="form-row">
+        <div><strong>Local AI endpoint</strong><div className="hint">Optional. Leave empty to auto-discover Foundry Local</div></div>
+        <input className="field-input" style={{ width: 260 }} type="text" value={draft.localAiEndpoint || ''} placeholder="http://127.0.0.1:55769" onChange={e => set('localAiEndpoint', e.target.value)} />
       </div>
       <div className="form-row">
         <div><strong>Theme</strong></div>

@@ -20,7 +20,7 @@ export const AIScreen: React.FC = () => {
     setTranscript(t => [...t, { role: 'user', text }])
     setInput('')
     if (!isAIAvailable) {
-      setTranscript(t => [...t, { role: 'bot', text: 'No AI provider is available. Configure an OpenAI API key in Settings, or run on a Copilot+ PC for on-device Phi Silica.' }])
+      setTranscript(t => [...t, { role: 'bot', text: 'No AI provider is available. Configure an OpenAI API key in Settings, install Foundry Local (winget install Microsoft.FoundryLocal), or run on a Copilot+ PC for on-device Phi Silica.' }])
       return
     }
     setThinking(true)
@@ -49,7 +49,7 @@ export const AIScreen: React.FC = () => {
           <img src="/wf-ds/chatgpt-bot-avatar.webp" alt="" style={{ width: 24, height: 24, borderRadius: '50%' }} />
           <span>WindowsForum AI Assistant</span>
           <span className="count">
-            <span className="tag"><span className="status-dot success" style={{ boxShadow: 'none' }} /> {activeProvider === 'phi_silica' ? 'on-device · Phi Silica' : activeProvider === 'openai' ? 'cloud · OpenAI' : 'no provider'}</span>
+            <span className="tag"><span className="status-dot success" style={{ boxShadow: 'none' }} /> {activeProvider === 'phi_silica' ? 'on-device · Phi Silica' : activeProvider === 'foundry_local' ? 'local · Foundry Local' : activeProvider === 'openai' ? 'cloud · OpenAI' : 'no provider'}</span>
           </span>
         </header>
         <div className="chat-shell" style={{ minHeight: 360 }}>
@@ -101,15 +101,16 @@ export const AIScreen: React.FC = () => {
         <div className="wf-block">
           <header className="wf-block-header"><span className="accent-bar" /><span>Models</span></header>
           <div style={{ padding: 12, fontSize: 13 }}>
-            {[
+            {([
               ['Phi Silica (on-device NPU)', aiStatus?.phi_silica_available ? (aiStatus.phi_silica_ready ? 'Ready' : (aiStatus.phi_silica_message || 'Available')) : 'Unavailable', 'var(--wf-success-feature)', activeProvider === 'phi_silica'],
+              ['Foundry Local (local server)', aiStatus?.foundry_local_available ? `Running at ${aiStatus.foundry_local_endpoint || 'local endpoint'}` : 'Not detected', '#c98a00', activeProvider === 'foundry_local'],
               ['OpenAI (cloud)', aiStatus?.openai_api_key_set ? 'API key configured' : 'Not configured', 'var(--wf-paletteColor1)', activeProvider === 'openai'],
-            ].map((m, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: i < 1 ? '1px solid var(--hairline)' : 'none' }}>
-                <span className="status-dot" style={{ background: m[2] as string, boxShadow: 'none' }} />
+            ] as const).map((m, i, arr) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: i < arr.length - 1 ? '1px solid var(--hairline)' : 'none' }}>
+                <span className="status-dot" style={{ background: m[2], boxShadow: 'none' }} />
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600 }}>{m[0] as string}</div>
-                  <div style={{ fontSize: 11, color: 'var(--wf-text-muted)' }}>{m[1] as string}</div>
+                  <div style={{ fontWeight: 600 }}>{m[0]}</div>
+                  <div style={{ fontSize: 11, color: 'var(--wf-text-muted)' }}>{m[1]}</div>
                 </div>
                 {m[3] && <span className="tag">Active</span>}
               </div>
