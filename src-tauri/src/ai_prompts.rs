@@ -26,7 +26,7 @@ Give a 2-3 sentence summary. Note any concerns. Keep response under 80 words."#,
 
 /// Convert JSON diagnostic output to human-readable text
 /// This dramatically reduces token count vs raw JSON
-fn json_to_readable_text(output: &str, max_chars: usize) -> String {
+pub(crate) fn json_to_readable_text(output: &str, max_chars: usize) -> String {
     // Try to parse as JSON
     let trimmed = output.trim();
 
@@ -272,7 +272,7 @@ Rank by priority, brief reason each, which to fix first. Under 100 words."#,
 /// Truncates by CHARACTER count (not byte index) so a multi-byte UTF-8 sequence at
 /// the boundary can never trigger a "byte index is not a char boundary" panic. With
 /// `panic = "abort"` in release this would otherwise crash the whole process.
-fn truncate_output(output: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_output(output: &str, max_chars: usize) -> String {
     let total = output.chars().count();
     if total <= max_chars {
         output.to_string()

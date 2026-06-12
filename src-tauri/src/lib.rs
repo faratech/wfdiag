@@ -31,9 +31,11 @@ mod windows_ai_bindings;
 
 // Unified AI service layer
 mod ai_cache;
+mod ai_chat;
 mod ai_prompts;
 pub mod ai_providers;
 mod ai_service;
+mod ai_tools;
 
 use crate::diagnostics::{DiagnosticTask, TaskResult};
 use crate::error::DiagError;
@@ -946,6 +948,11 @@ pub fn run() {
             ai_service::ai_explain_health,
             ai_service::ai_set_preference,
             ai_service::ai_clear_cache,
+            // Agentic AI chat (streaming via ai-chat:// events)
+            ai_chat::ai_chat_send,
+            ai_chat::ai_chat_cancel,
+            ai_chat::ai_chat_new_session,
+            ai_chat::ai_chat_get_history,
             detect_issues,
             get_fixable_issue_ids,
             copy_minidumps_to_desktop,
