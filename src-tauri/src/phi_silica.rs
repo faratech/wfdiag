@@ -308,24 +308,18 @@ fn framework_package_dirs() -> Vec<std::path::PathBuf> {
     dirs
 }
 
-/// Candidate directories for the Windows App SDK AI DLLs, in priority order.
-///
-/// BUNDLED dirs come FIRST, the installed framework package LAST. The bundled
-/// Windows App SDK 2.0-experimental DLLs bypass the Limited Access Feature
-/// enforcement that the stable framework applies at generation time. A loose
-/// exe running under the sparse identity cannot unlock that LAF — the token is
-/// bound to the Store package's full family name, and the dev package has a
-/// different name — so it must use the bundled DLLs. The framework is the
-/// fallback for installs that ship no DLLs and have an unlockable identity.
+/// Candidate directories for the Windows App SDK AI DLLs, in priority order:
+/// the installed framework package(s) (no bundling needed), then next to the
+/// exe (MSIX layout), then the arch-specific subdirectories of the loose
+/// layout (x64/arm64 DLLs share filenames, so they cannot share one dir).
 #[cfg(windows)]
 fn dll_search_dirs() -> Vec<std::path::PathBuf> {
-    let mut dirs = Vec::new();
+    let mut dirs = framework_package_dirs();
     if let Some(app_dir) = get_app_directory() {
         dirs.push(app_dir.clone());
         dirs.push(app_dir.join("ai-sdk-dlls").join(DLL_ARCH));
         dirs.push(app_dir.join("ai-sdk").join(DLL_ARCH));
     }
-    dirs.extend(framework_package_dirs());
     dirs
 }
 
@@ -351,9 +345,20 @@ fn load_ai_dll(
     };
     use windows_core::{HSTRING, PCWSTR};
 
-    // Explicit paths FIRST (bundled experimental DLLs that bypass LAF), so a
-    // present bundled copy wins over the stable framework on the package graph.
-    // LOAD_WITH_ALTERED_SEARCH_PATH resolves the DLL's own imports from its dir.
+    // Bare name — the loader checks the package graph (framework packages)
+    // for packaged processes, so no bundled copy is required.
+    let wide = HSTRING::from(dll_name);
+    if let Ok(module) = unsafe { LoadLibraryW(PCWSTR::from_raw(wide.as_ptr())) } {
+        log_phi_silica(&format!(
+            "Loaded {} via package graph (bare name)",
+            dll_name
+        ));
+        return Some(module);
+    }
+
+    // Explicit paths (framework install dir, exe dir, bundled subdirs).
+    // LOAD_WITH_ALTERED_SEARCH_PATH resolves the DLL's own imports from its
+    // own directory.
     for dir in search_dirs {
         let dll_path = dir.join(dll_name);
         if !dll_path.exists() {
@@ -383,21 +388,10 @@ fn load_ai_dll(
             )),
         }
     }
-
-    // Bare name LAST — resolves from the framework package via the package
-    // graph (LAF-enforced). Used only when no bundled copy is present.
-    let wide = HSTRING::from(dll_name);
-    if let Ok(module) = unsafe { LoadLibraryW(PCWSTR::from_raw(wide.as_ptr())) } {
-        log_phi_silica(&format!(
-            "Loaded {} via package graph (bare name)",
-            dll_name
-        ));
-        return Some(module);
-    }
     None
 }
 
-/// Ensure the AI Text DLL is loaded — from a bundled experimental copy or, as a
+/// Ensure the AI Text DLL is loaded — from the installed framework package
 /// (no bundling) or, failing that, a bundled copy.
 #[cfg(windows)]
 fn try_direct_dll_activation() -> Result<(), String> {
