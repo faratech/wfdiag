@@ -36,7 +36,7 @@ use crate::diagnostics::{DiagnosticTask, TaskResult};
 use crate::error::DiagError;
 use crate::issue_detector::Issue;
 use native_monitor::{NetworkConnection, SystemMonitor};
-use results_storage::{ComparisonResult, ScanRecord, ScanStorage, ScanSummary};
+use results_storage::{ComparisonResult, ScanRecord, ScanStorage, ScanSummary, TaskTrend};
 use std::collections::HashMap;
 use tauri::Emitter;
 use tauri::State;
@@ -750,6 +750,47 @@ async fn clear_scan_history(state: State<'_, AppState>) -> Result<String, String
 }
 
 #[tauri::command]
+async fn update_scan_tags(
+    state: State<'_, AppState>,
+    scan_id: String,
+    tags: Vec<String>,
+) -> Result<(), String> {
+    let storage = state.scan_storage.lock().await;
+    match storage.as_ref() {
+        Some(storage) => storage.update_tags(&scan_id, tags),
+        None => {
+            let error = state.scan_storage_error.lock().await;
+            Err(DiagError::storage(
+                "update_tags",
+                error.as_deref().unwrap_or("Storage initialization failed"),
+            )
+            .into())
+        }
+    }
+}
+
+#[tauri::command]
+async fn get_task_trends(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<TaskTrend>, String> {
+    // Cap the window: every scan in it is loaded and decrypted
+    let limit = limit.unwrap_or(10).min(20);
+    let storage = state.scan_storage.lock().await;
+    match storage.as_ref() {
+        Some(storage) => storage.task_failure_trends(limit),
+        None => {
+            let error = state.scan_storage_error.lock().await;
+            Err(DiagError::storage(
+                "task_trends",
+                error.as_deref().unwrap_or("Storage initialization failed"),
+            )
+            .into())
+        }
+    }
+}
+
+#[tauri::command]
 async fn detect_issues(state: State<'_, AppState>) -> Result<Vec<Issue>, String> {
     let current = state.current_session.lock().await;
     if let Some(ref session) = *current {
@@ -873,6 +914,8 @@ pub fn run() {
             load_scan,
             compare_scans,
             clear_scan_history,
+            update_scan_tags,
+            get_task_trends,
             openai_integration::analyze_with_openai,
             openai_integration::analyze_system_with_ai,
             openai_integration::get_ai_provider_status,
