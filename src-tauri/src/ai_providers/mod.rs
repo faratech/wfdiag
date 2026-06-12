@@ -217,7 +217,7 @@ pub async fn resolve_config(
             Ok(ResolvedProviderConfig {
                 api_key: Some(api_key),
                 endpoint: None,
-                model: Some(crate::openai_integration::OPENAI_MODEL.to_string()),
+                model: Some(openai::OPENAI_MODEL.to_string()),
             })
         }
         AIProvider::FoundryLocal => {
@@ -233,7 +233,7 @@ pub async fn resolve_config(
             Ok(ResolvedProviderConfig {
                 api_key: None,
                 endpoint: Some(endpoint),
-                model: Some(crate::openai_integration::FOUNDRY_LOCAL_MODEL.to_string()),
+                model: Some(foundry::FOUNDRY_LOCAL_MODEL.to_string()),
             })
         }
         AIProvider::Ollama => {

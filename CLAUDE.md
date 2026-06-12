@@ -92,8 +92,10 @@ This is a Tauri v2 application with a clear separation between frontend and back
 - **windows_native.rs**: Direct Windows API bindings and wrappers
 - **architecture.rs**: CPU architecture detection (x64, ARM64) and emulation detection
 - **native_monitor.rs**: Real-time system monitoring with CPU, memory, disk, network and NPU stats
-- **ai_service.rs / ai_cache.rs / ai_prompts.rs**: Unified AI layer (provider routing, response cache, prompts)
-- **openai_integration.rs**: OpenAI Responses API integration; **phi_silica.rs**: on-device Phi Silica
+- **ai_service.rs / ai_cache.rs / ai_prompts.rs**: Unified AI layer (provider routing, response cache, budget-aware prompts)
+- **ai_providers/**: One client module per provider (openai, anthropic, gemini, openai_compat, ollama, foundry, phi) + `capabilities()` table, `resolve_config()`, shared discovery/SSE helpers; **phi_silica.rs**: on-device Phi Silica WinRT
+- **ai_chat.rs / ai_tools.rs**: Agentic chat (backend session store, streaming tool loop) and its READ-ONLY tool registry
+- **ai_report.rs**: One-click AI scan health report (deterministic context assembly, no tool loop)
 - **issue_detector.rs / issue_fixer.rs**: Issue detection from scan results and whitelisted automated fixes
 - **results_storage.rs**: Scan results storage, comparison, tags, failure trends
 - **state.rs**: AppState (current session, monitor, scan storage, cancelled sessions)
@@ -106,8 +108,11 @@ This is a Tauri v2 application with a clear separation between frontend and back
 - Tauri: v2.11 (Tauri framework; plugins: fs, dialog, clipboard-manager, shell, notification)
 - windows: v0.62 (Windows API bindings with native WMI support via Win32::System::Wmi)
 - winreg: v0.55 (Windows Registry access)
-- async-openai: v0.32 (OpenAI API client, Responses API)
-- tokio: v1.52 (Async runtime)
+- async-openai: v0.41 (features: native-tls, responses, chat-completion — the chat-completion
+  feature is REQUIRED for the generic OpenAI-compatible providers; OpenRouter/Ollama/etc. do
+  not serve /v1/responses)
+- reqwest v0.13 + eventsource-stream (native Anthropic/Gemini clients with SSE streaming)
+- tokio: v1.52 (Async runtime); tokio-util (CancellationToken for stoppable chat turns)
 
 ### Key Architectural Decisions
 1. **Tauri v2 Migration**: Uses new plugin architecture with separate packages for filesystem, dialog, clipboard, process, and shell
@@ -166,9 +171,18 @@ All backend functionality is exposed through Tauri commands registered in `lib.r
 - `save_current_scan`, `list_scan_history`, `load_scan`, `compare_scans`, `clear_scan_history`,
   `update_scan_tags`, `get_task_trends`
 - `check_for_update`: GitHub-release update check (no-op for Store installs and debug builds)
-- `commands::settings::*`: load/save settings, keyring-backed API key storage
-- AI: `ai_get_status`, `ai_analyze_diagnostic`, `ai_analyze_section`, `ai_explain_health`,
-  `ai_set_preference`, `ai_clear_cache`, plus `phi_silica::*` and `openai_integration::*`
+- `commands::settings::*`: load/save settings; per-provider API key storage
+  (`store_provider_api_key` / `clear_provider_api_key` with provider ∈ openai, anthropic,
+  gemini, custom_openai; legacy `store_api_key`/`load_api_key`/`clear_api_key` = OpenAI)
+- AI one-shot: `ai_get_status` (incl. the per-provider `providers` array),
+  `ai_analyze_diagnostic`, `ai_analyze_section`, `ai_explain_health`, `ai_set_preference`,
+  `ai_clear_cache`, `ai_list_ollama_models`, plus `phi_silica::*`
+- AI chat (streaming): `ai_chat_send` returns an ack immediately, then events
+  `ai-chat://delta` (coalesced text), `ai-chat://tool` (activity), `ai-chat://done`,
+  `ai-chat://error` (camelCase payloads pinned by serde tests); `ai_chat_cancel`,
+  `ai_chat_new_session`, `ai_chat_get_history` (render projection for rehydration)
+- AI report: `ai_generate_report` (cached → full text in the ack; else streams via
+  `ai-report://delta|done|error`)
 
 ### Windows API Integration
 The backend makes extensive use of Windows APIs through the `windows` crate:
@@ -324,17 +338,55 @@ Gotchas encoded in the manifests: concrete per-arch `ProcessorArchitecture`
 There is no in-app self-registration: shipped loose exes do not attempt to
 gain identity (Store-only decision).
 
-### AI Provider Fallback Chain
-`ai_service.rs` routes Auto preference as: Phi Silica (on-device WinRT,
-Store build only) → Foundry Local (local OpenAI-compatible server, no
-identity; model `phi-4-mini` — Phi Silica itself is not served by Foundry
-Local) → OpenAI (cloud, needs API key). The pure decision lives in
-`route_provider()` (unit-tested); probing stays lazy in
-`determine_active_provider()`. An explicit (non-Auto) preference never falls
-back to another provider. The Foundry Local port is dynamic by design; it is
-discovered via `foundry service status` or the `localAiEndpoint` setting —
-never hardcode it. When Phi Silica is unavailable the status message says
-why ("requires the Microsoft Store version") and what to do (`winget install
+### AI Providers (2.5.0+: seven providers)
+
+| Provider (wire id) | Runs | Auth | Tools | Streaming | Budget (chars) |
+|---|---|---|---|---|---|
+| `phi_silica` | on-device NPU (Store build only) | package identity | no | no | 2,500 |
+| `foundry_local` | local server | none | no (unverified) | yes | 12,000 |
+| `ollama` | local server | none | yes | yes | 12,000 |
+| `custom_openai` | any /v1/chat/completions server | optional key | yes | yes | 24,000 |
+| `openai` | cloud | API key | yes | yes | 48,000 |
+| `anthropic` | cloud (native Messages API) | API key | yes | yes | 48,000 |
+| `gemini` | cloud (native generateContent) | API key | yes | yes | 48,000 |
+
+`ai_providers::capabilities()` is the single source of truth for this table.
+Auto routing is local-first: Phi → Foundry → Ollama → custom → OpenAI →
+Anthropic → Gemini; the pure decision lives in `route_provider()`
+(unit-tested, takes a `ProviderAvailability` struct); probing stays lazy in
+`determine_active_provider_with_key()`. An explicit (non-Auto) preference
+never falls back to another provider. Wire strings are pinned per-variant
+with explicit `#[serde(rename)]` — `rename_all = "snake_case"` would emit
+`"open_a_i"` for OpenAI (a real bug fixed in 2.5.0; do not reintroduce).
+
+Provider gotchas encoded in the clients (don't relearn these):
+- Anthropic: `max_tokens` REQUIRED; never send `temperature`; branch on
+  `stop_reason == "refusal"` BEFORE reading content; default model constant
+  `ANTHROPIC_DEFAULT_MODEL` in `ai_providers/anthropic.rs`.
+- Gemini: auth via `x-goog-api-key` HEADER (never `?key=` — keys must not
+  appear in URLs); assistant role is `"model"`; `functionResponse.response`
+  must be a JSON object; no tool-call ids (synthesized as `name#index`).
+- Generic/custom + Ollama use `/v1/chat/completions` (they do not serve
+  `/v1/responses`); OpenAI/Foundry one-shot keeps the Responses API. No token
+  cap goes on the wire (current OpenAI models reject `max_tokens`, compat
+  servers don't all know `max_completion_tokens`).
+- The Foundry Local port is dynamic by design; it is discovered via
+  `foundry service status` or the `localAiEndpoint` setting — never hardcode
+  it (resolution lives in `ai_providers/foundry.rs`).
+- Ollama has no default model: the `ollamaModel` setting, else the first
+  entry from `/api/tags`, else an error telling the user to pull a model.
+
+API keys: one DPAPI file / keyring entry per provider via the closed
+`ProviderKeyId` set (`dpapi.rs`); OpenAI keeps the legacy `credentials.bin`
+name so existing installs need no migration. Keys NEVER land in
+settings.json — `settings_for_disk()` strips them (tested invariant).
+
+Agentic chat safety: the tool registry in `ai_tools.rs` is strictly
+READ-ONLY (no `fix_issue`, no mutations) and chat-triggered diagnostic runs
+are never written into the scan session. The loop is bounded: 4 tool
+iterations × 8 calls, 45 s per-tool timeout, concurrency 3, then a forced
+final answer. When Phi Silica is unavailable the status message says why
+("requires the Microsoft Store version") and what to do (`winget install
 Microsoft.FoundryLocal`).
 
 ### Testing

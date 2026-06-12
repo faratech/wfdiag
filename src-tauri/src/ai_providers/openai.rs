@@ -6,6 +6,10 @@
 
 use super::ResolvedProviderConfig;
 use crate::error::DiagError;
+
+/// OpenAI model used for all cloud-OpenAI calls.
+/// Change this constant to switch models globally.
+pub const OPENAI_MODEL: &str = "gpt-5-nano";
 use async_openai::{
     Client,
     config::OpenAIConfig,
@@ -30,10 +34,7 @@ pub async fn one_shot(
         })?;
 
     let client = Client::with_config(OpenAIConfig::new().with_api_key(api_key));
-    let model = cfg
-        .model
-        .as_deref()
-        .unwrap_or(crate::openai_integration::OPENAI_MODEL);
+    let model = cfg.model.as_deref().unwrap_or(OPENAI_MODEL);
 
     let full_prompt = format!("{}\n\n{}", system, prompt);
 

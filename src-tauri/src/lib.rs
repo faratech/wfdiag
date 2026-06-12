@@ -3,7 +3,8 @@
 mod architecture;
 mod commands;
 pub mod diagnostics;
-#[cfg(windows)]
+// dpapi self-gates internally (non-Windows stubs); the module stays
+// cross-platform because ProviderKeyId names the keyring entries too
 mod dpapi;
 mod encrypted_storage;
 pub mod error;
@@ -11,7 +12,6 @@ mod issue_detector;
 mod issue_fixer;
 mod native_diagnostics;
 pub mod native_monitor;
-pub mod openai_integration;
 pub mod results_storage;
 mod security;
 #[cfg(windows)]
@@ -935,9 +935,6 @@ pub fn run() {
             update_scan_tags,
             get_task_trends,
             ai_providers::ollama::ai_list_ollama_models,
-            openai_integration::analyze_with_openai,
-            openai_integration::analyze_system_with_ai,
-            openai_integration::get_ai_provider_status,
             phi_silica::check_phi_silica_available,
             phi_silica::ensure_phi_silica,
             phi_silica::analyze_with_phi_silica,
