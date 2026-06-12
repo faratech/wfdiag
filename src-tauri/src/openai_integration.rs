@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
+use crate::ai_providers::discovery::{extract_http_base, normalize_base_url, probe_endpoint_async};
 use crate::error::DiagError;
 
 /// AI Provider options
@@ -32,68 +33,13 @@ pub const OPENAI_MODEL: &str = "gpt-5-nano";
 /// local fallback model.
 pub(crate) const FOUNDRY_LOCAL_MODEL: &str = "phi-4-mini";
 
-/// Extract `scheme://host:port` from the first http(s) URL found in `text`.
-fn extract_http_base(text: &str) -> Option<String> {
-    let start = text.find("http://").or_else(|| text.find("https://"))?;
-    let url = &text[start..];
-    let end = url
-        .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
-        .unwrap_or(url.len());
-    let url = &url[..end];
-    let scheme_end = url.find("://")? + 3;
-    if url.len() <= scheme_end {
-        return None;
-    }
-    // Cut any path component, keeping scheme://authority only
-    let base_end = url[scheme_end..]
-        .find('/')
-        .map(|i| scheme_end + i)
-        .unwrap_or(url.len());
-    Some(url[..base_end].to_string())
-}
-
-/// TCP probe of an endpoint base URL (`scheme://host:port`).
-fn probe_endpoint(base: &str) -> bool {
-    use std::net::{TcpStream, ToSocketAddrs};
-    use std::time::Duration;
-
-    let Some(scheme_end) = base.find("://") else {
-        return false;
-    };
-    let host_port = &base[scheme_end + 3..];
-    let host_port = if host_port.contains(':') {
-        host_port.to_string()
-    } else {
-        format!("{}:80", host_port)
-    };
-    match host_port.to_socket_addrs() {
-        Ok(mut addrs) => {
-            addrs.any(|a| TcpStream::connect_timeout(&a, Duration::from_secs(2)).is_ok())
-        }
-        Err(_) => false,
-    }
-}
-
-async fn probe_endpoint_async(base: &str) -> bool {
-    let base = base.to_string();
-    tokio::task::spawn_blocking(move || probe_endpoint(&base))
-        .await
-        .unwrap_or(false)
-}
-
 /// Read the user-configured local AI endpoint from settings, normalized to a
 /// base URL without a trailing slash or `/v1` suffix.
 fn configured_local_endpoint() -> Option<String> {
-    let path = crate::commands::settings::get_settings_path().ok()?;
-    let content = std::fs::read_to_string(path).ok()?;
-    let settings: crate::commands::settings::AppSettings = serde_json::from_str(&content).ok()?;
-    settings
+    crate::commands::settings::read_settings_from_disk()?
         .local_ai_endpoint
-        .map(|e| {
-            let e = e.trim().trim_end_matches('/');
-            e.strip_suffix("/v1").unwrap_or(e).to_string()
-        })
-        .filter(|e| !e.is_empty())
+        .as_deref()
+        .and_then(normalize_base_url)
 }
 
 /// Ask the Foundry Local CLI where its service is listening. The service port
@@ -639,33 +585,5 @@ pub async fn analyze_system_with_ai_provider(
                 .ok_or_else(|| DiagError::api_key("validate", "OpenAI API key is required"))?;
             analyze_system_with_ai(key, prompt, app_handle).await
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::extract_http_base;
-
-    #[test]
-    fn extracts_base_from_foundry_status_output() {
-        let out = "🟢 Model management service is running on http://127.0.0.1:55769/openai/status";
-        assert_eq!(
-            extract_http_base(out),
-            Some("http://127.0.0.1:55769".to_string())
-        );
-    }
-
-    #[test]
-    fn extracts_base_without_path() {
-        assert_eq!(
-            extract_http_base("endpoint: http://localhost:5273 ready"),
-            Some("http://localhost:5273".to_string())
-        );
-    }
-
-    #[test]
-    fn returns_none_when_no_url_present() {
-        assert_eq!(extract_http_base("service is not running"), None);
-        assert_eq!(extract_http_base("http://"), None);
     }
 }

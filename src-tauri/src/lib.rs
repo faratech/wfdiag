@@ -32,6 +32,7 @@ mod windows_ai_bindings;
 // Unified AI service layer
 mod ai_cache;
 mod ai_prompts;
+pub mod ai_providers;
 mod ai_service;
 
 use crate::diagnostics::{DiagnosticTask, TaskResult};
@@ -904,6 +905,8 @@ pub fn run() {
             commands::settings::store_api_key,
             commands::settings::load_api_key,
             commands::settings::clear_api_key,
+            commands::settings::store_provider_api_key,
+            commands::settings::clear_provider_api_key,
             get_system_info,
             get_architecture_info,
             get_available_tasks,

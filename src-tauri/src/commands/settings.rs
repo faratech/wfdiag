@@ -5,15 +5,21 @@
 //! # Commands
 //! - `save_settings` - Save application settings to disk
 //! - `load_settings` - Load application settings from disk
-//! - `store_api_key` - Store OpenAI API key securely
+//! - `store_api_key` - Store OpenAI API key securely (legacy single-key command)
 //! - `load_api_key` - Load OpenAI API key from secure storage
-//! - `clear_api_key` - Remove stored API key
+//! - `clear_api_key` - Remove stored OpenAI API key
+//! - `store_provider_api_key` / `clear_provider_api_key` - Per-provider keys
+//!   (openai, anthropic, gemini, custom_openai)
 //!
 //! # Security
 //! API keys are stored using:
-//! - Windows: DPAPI encryption
-//! - Other platforms: System keyring
+//! - Windows: DPAPI encryption (one file per provider)
+//! - Other platforms: System keyring (one entry per provider)
+//!
+//! Keys are NEVER written to the settings JSON file — `settings_for_disk`
+//! strips every key field before serialization.
 
+use crate::dpapi::ProviderKeyId;
 use crate::error::DiagError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -48,9 +54,34 @@ pub struct AppSettings {
     pub ai_enabled: bool,
     #[serde(default = "default_ai_provider", rename = "preferredAIProvider")]
     pub preferred_ai_provider: String,
-    // API key - stored in keyring, included in frontend response
+    // API keys — stored in DPAPI/keyring, included in the frontend response,
+    // NEVER written to the settings file (see settings_for_disk)
     #[serde(default)]
     pub open_ai_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gemini_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_api_key: Option<String>,
+    // Per-provider model overrides; empty falls back to the provider module's
+    // default constant (anthropic.rs / gemini.rs)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gemini_model: Option<String>,
+    // Generic OpenAI-compatible endpoint (OpenRouter, Groq, …): base URL,
+    // model is required for the provider to be usable
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_model: Option<String>,
+    // Ollama: empty endpoint auto-discovers http://127.0.0.1:11434, empty
+    // model resolves to the first entry from /api/tags
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ollama_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ollama_model: Option<String>,
     // User-customized Quick Scan task IDs. camelCase rename => "quickScanTasks" to match
     // the TS SettingsData field; #[serde(default)] keeps old settings files loadable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,6 +120,14 @@ fn default_ai_provider() -> String {
     "auto".to_string()
 }
 
+/// Read settings from disk without hydrating secrets. For backend code that
+/// needs provider configuration (endpoints, model names) on a hot path.
+pub(crate) fn read_settings_from_disk() -> Option<AppSettings> {
+    let path = get_settings_path().ok()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
 /// Get the settings file path
 pub fn get_settings_path() -> Result<PathBuf, String> {
     let app_data =
@@ -104,47 +143,76 @@ pub fn get_settings_path() -> Result<PathBuf, String> {
     Ok(settings_dir.join("settings.json"))
 }
 
+/// Store or clear one provider key in the platform secret store.
+/// `Some("")` means "clear"; `None` means "not provided, leave untouched".
+fn persist_provider_key(id: ProviderKeyId, key: Option<&str>) -> Result<(), String> {
+    let Some(key) = key else { return Ok(()) };
+    #[cfg(windows)]
+    {
+        // Propagate (don't swallow) failures: otherwise save_settings returns Ok,
+        // the UI believes the key persisted, and it silently vanishes on restart.
+        // store_provider_key treats an empty string as "clear".
+        crate::dpapi::store_provider_key(id, key)
+            .map_err(|e| DiagError::api_key("store", e.to_string()).into())
+    }
+    #[cfg(not(windows))]
+    {
+        if !key.is_empty() {
+            let entry = Entry::new("wfdiag-tauri", id.keyring_user())
+                .map_err(|e| DiagError::api_key("store", e.to_string()))?;
+            entry
+                .set_password(key)
+                .map_err(|e| DiagError::api_key("store", e.to_string()).into())
+        } else {
+            if let Ok(entry) = Entry::new("wfdiag-tauri", id.keyring_user()) {
+                let _ = entry.delete_credential();
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Load one provider key from the platform secret store.
+pub async fn load_provider_key_internal(id: ProviderKeyId) -> Option<String> {
+    #[cfg(windows)]
+    {
+        crate::dpapi::load_provider_key(id).ok().flatten()
+    }
+    #[cfg(not(windows))]
+    {
+        let entry = Entry::new("wfdiag-tauri", id.keyring_user()).ok()?;
+        match entry.get_password() {
+            Ok(pwd) if !pwd.is_empty() => Some(pwd),
+            _ => None,
+        }
+    }
+}
+
+/// Copy of the settings with every API key stripped — the only shape that may
+/// be serialized to the settings file. Keys live in DPAPI/keyring exclusively.
+fn settings_for_disk(settings: &AppSettings) -> AppSettings {
+    let mut s = settings.clone();
+    s.open_ai_api_key = None;
+    s.anthropic_api_key = None;
+    s.gemini_api_key = None;
+    s.custom_api_key = None;
+    s
+}
+
 #[tauri::command]
 pub async fn save_settings(settings: AppSettings) -> Result<(), String> {
     let path = get_settings_path()?;
 
-    // If API key is provided, store it securely (separate from settings file)
-    if let Some(ref api_key) = settings.open_ai_api_key {
-        #[cfg(windows)]
-        {
-            if !api_key.is_empty() {
-                // Propagate (don't swallow) failures: otherwise save_settings returns Ok,
-                // the UI believes the key persisted, and it silently vanishes on restart.
-                crate::dpapi::store_api_key(api_key)
-                    .map_err(|e| DiagError::api_key("store", e.to_string()))?;
-                println!("API key stored with DPAPI");
-            } else {
-                // Empty string means clear the key
-                let _ = crate::dpapi::clear_api_key();
-                println!("API key cleared from DPAPI storage");
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            if !api_key.is_empty() {
-                let entry = Entry::new("wfdiag-tauri", "openai_api_key")
-                    .map_err(|e| DiagError::api_key("store", e.to_string()))?;
-                entry
-                    .set_password(api_key)
-                    .map_err(|e| DiagError::api_key("store", e.to_string()))?;
-                println!("API key stored in keyring");
-            } else if let Ok(entry) = Entry::new("wfdiag-tauri", "openai_api_key") {
-                let _ = entry.delete_credential();
-                println!("API key cleared from keyring");
-            }
-        }
-    }
+    // Route any provided keys to secure storage (separate from settings file)
+    persist_provider_key(ProviderKeyId::OpenAI, settings.open_ai_api_key.as_deref())?;
+    persist_provider_key(
+        ProviderKeyId::Anthropic,
+        settings.anthropic_api_key.as_deref(),
+    )?;
+    persist_provider_key(ProviderKeyId::Gemini, settings.gemini_api_key.as_deref())?;
+    persist_provider_key(ProviderKeyId::Custom, settings.custom_api_key.as_deref())?;
 
-    // Create a copy without the API key for file storage (security: don't write key to file)
-    let mut settings_for_file = settings.clone();
-    settings_for_file.open_ai_api_key = None;
-
-    let json = serde_json::to_string_pretty(&settings_for_file)
+    let json = serde_json::to_string_pretty(&settings_for_disk(&settings))
         .map_err(|e| DiagError::serialization(e.to_string()))?;
     std::fs::write(&path, &json)
         .map_err(|e| DiagError::file(path.display().to_string(), e.to_string()))?;
@@ -163,6 +231,10 @@ fn sync_in_memory_state(settings: &AppSettings) {
         "openai" => crate::ai_service::AIProviderPreference::OpenAI,
         "phi_silica" | "phisilica" => crate::ai_service::AIProviderPreference::PhiSilica,
         "foundry_local" | "foundrylocal" => crate::ai_service::AIProviderPreference::FoundryLocal,
+        "ollama" => crate::ai_service::AIProviderPreference::Ollama,
+        "custom_openai" | "custom" => crate::ai_service::AIProviderPreference::CustomOpenAI,
+        "anthropic" => crate::ai_service::AIProviderPreference::Anthropic,
+        "gemini" => crate::ai_service::AIProviderPreference::Gemini,
         _ => crate::ai_service::AIProviderPreference::Auto,
     };
     crate::ai_service::set_user_preference(pref);
@@ -185,31 +257,33 @@ pub async fn load_settings() -> Result<AppSettings, String> {
     // Sync loaded settings to in-memory state
     sync_in_memory_state(&settings);
 
-    // Load API key from keyring and include in response
-    if let Some(api_key) = load_api_key_internal().await {
-        settings.open_ai_api_key = Some(api_key);
-    }
+    // Hydrate API keys from secure storage into the response
+    settings.open_ai_api_key = load_provider_key_internal(ProviderKeyId::OpenAI).await;
+    settings.anthropic_api_key = load_provider_key_internal(ProviderKeyId::Anthropic).await;
+    settings.gemini_api_key = load_provider_key_internal(ProviderKeyId::Gemini).await;
+    settings.custom_api_key = load_provider_key_internal(ProviderKeyId::Custom).await;
 
     println!("Settings loaded from {:?}", path);
     Ok(settings)
 }
 
+/// Store an API key for a specific provider (openai, anthropic, gemini,
+/// custom_openai). An empty key clears the stored value.
+#[tauri::command]
+pub async fn store_provider_api_key(provider: String, key: String) -> Result<(), String> {
+    persist_provider_key(ProviderKeyId::parse(&provider)?, Some(&key))
+}
+
+/// Clear the stored API key for a specific provider.
+#[tauri::command]
+pub async fn clear_provider_api_key(provider: String) -> Result<(), String> {
+    persist_provider_key(ProviderKeyId::parse(&provider)?, Some(""))
+}
+
+/// Legacy single-key command — stores the OpenAI key.
 #[tauri::command]
 pub async fn store_api_key(key: String) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        crate::dpapi::store_api_key(&key)
-    }
-    #[cfg(not(windows))]
-    {
-        // Fallback to keyring on non-Windows
-        let entry = Entry::new("wfdiag-tauri", "openai_api_key")
-            .map_err(|e| DiagError::api_key("access", e.to_string()))?;
-        entry
-            .set_password(&key)
-            .map_err(|e| DiagError::api_key("store", e.to_string()))?;
-        Ok(())
-    }
+    persist_provider_key(ProviderKeyId::OpenAI, Some(&key))
 }
 
 #[tauri::command]
@@ -219,22 +293,12 @@ pub async fn load_api_key() -> Result<String, String> {
         .ok_or_else(|| DiagError::api_key("load", "No API key set").into())
 }
 
-/// Internal function for loading API key (used by ai_service)
+/// Internal function for loading the OpenAI API key (used by ai_service)
 pub async fn load_api_key_internal() -> Option<String> {
-    #[cfg(windows)]
-    {
-        crate::dpapi::load_api_key().ok().flatten()
-    }
-    #[cfg(not(windows))]
-    {
-        let entry = Entry::new("wfdiag-tauri", "openai_api_key").ok()?;
-        match entry.get_password() {
-            Ok(pwd) if !pwd.is_empty() => Some(pwd),
-            _ => None,
-        }
-    }
+    load_provider_key_internal(ProviderKeyId::OpenAI).await
 }
 
+/// Legacy single-key command — clears the OpenAI key.
 #[tauri::command]
 pub async fn clear_api_key() -> Result<(), String> {
     #[cfg(windows)]
@@ -243,11 +307,98 @@ pub async fn clear_api_key() -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
-        let entry = Entry::new("wfdiag-tauri", "openai_api_key")
+        let entry = Entry::new("wfdiag-tauri", ProviderKeyId::OpenAI.keyring_user())
             .map_err(|e| DiagError::api_key("access", e.to_string()))?;
         match entry.delete_credential() {
             Ok(_) | Err(KeyringError::NoEntry) => Ok(()),
             Err(e) => Err(DiagError::api_key("clear", e.to_string()).into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings_with_keys() -> AppSettings {
+        AppSettings {
+            open_ai_api_key: Some("sk-openai".into()),
+            anthropic_api_key: Some("sk-ant".into()),
+            gemini_api_key: Some("AIza-gem".into()),
+            custom_api_key: Some("sk-or-custom".into()),
+            anthropic_model: Some("claude-sonnet-4-6".into()),
+            custom_endpoint: Some("https://openrouter.ai/api".into()),
+            custom_model: Some("meta-llama/llama-4".into()),
+            ollama_endpoint: Some("http://127.0.0.1:11434".into()),
+            ollama_model: Some("llama3.2".into()),
+            ..AppSettings::default()
+        }
+    }
+
+    #[test]
+    fn settings_for_disk_strips_every_api_key() {
+        let on_disk = settings_for_disk(&settings_with_keys());
+        assert!(on_disk.open_ai_api_key.is_none());
+        assert!(on_disk.anthropic_api_key.is_none());
+        assert!(on_disk.gemini_api_key.is_none());
+        assert!(on_disk.custom_api_key.is_none());
+        // Non-secret provider config must survive
+        assert_eq!(
+            on_disk.anthropic_model.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
+        assert_eq!(
+            on_disk.custom_endpoint.as_deref(),
+            Some("https://openrouter.ai/api")
+        );
+        assert_eq!(on_disk.ollama_model.as_deref(), Some("llama3.2"));
+    }
+
+    #[test]
+    fn no_key_material_in_serialized_settings() {
+        // Belt-and-braces: the serialized JSON must not contain the secrets,
+        // under any field name.
+        let json = serde_json::to_string(&settings_for_disk(&settings_with_keys())).unwrap();
+        for secret in ["sk-openai", "sk-ant", "AIza-gem", "sk-or-custom"] {
+            assert!(!json.contains(secret), "secret {} leaked to disk", secret);
+        }
+    }
+
+    #[test]
+    fn settings_serde_uses_camel_case_field_names() {
+        // The TS SettingsData interface depends on these exact JSON keys
+        let json = serde_json::to_string(&settings_with_keys()).unwrap();
+        for field in [
+            "\"anthropicApiKey\"",
+            "\"geminiApiKey\"",
+            "\"customApiKey\"",
+            "\"anthropicModel\"",
+            "\"geminiModel\"",
+            "\"customEndpoint\"",
+            "\"customModel\"",
+            "\"ollamaEndpoint\"",
+            "\"ollamaModel\"",
+            "\"preferredAIProvider\"",
+        ] {
+            // geminiModel is None in the fixture and skipped — check it on a
+            // populated copy instead
+            if field == "\"geminiModel\"" {
+                let mut s = settings_with_keys();
+                s.gemini_model = Some("gemini-2.5-flash".into());
+                assert!(serde_json::to_string(&s).unwrap().contains(field));
+            } else {
+                assert!(json.contains(field), "missing JSON key {}", field);
+            }
+        }
+    }
+
+    #[test]
+    fn old_settings_files_still_load() {
+        // A pre-2.5.0 settings file (no provider fields) must deserialize
+        let old = r#"{"autoSave":true,"theme":"dark","preferredAIProvider":"auto"}"#;
+        let s: AppSettings = serde_json::from_str(old).unwrap();
+        assert!(s.auto_save);
+        assert!(s.anthropic_api_key.is_none());
+        assert!(s.ollama_endpoint.is_none());
     }
 }
