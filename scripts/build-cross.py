@@ -40,11 +40,10 @@ PUBLISHER = "CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4"
 # registering this loose/Developer-signed one (one registration per identity).
 SPARSE_PACKAGE_NAME = "32827MikeFara.WindowsForumDiagnostics"
 
-# Whether to ship Windows App SDK AI DLLs next to the loose exe. Off by
-# default: the sparse package now uses the Store identity, so the Phi Silica
-# LAF token validates and the framework path works without the bundled-DLL
-# bypass. Set --bundle-ai-dlls for an identity that cannot unlock the LAF.
-BUNDLE_AI_DLLS = False
+# Whether to ship Windows App SDK AI DLLs next to the loose exe. ON: the
+# bundled 2.0-experimental DLLs let Phi Silica run via direct DllGetActivation
+# Factory, the only path that does not depend on a registered package identity.
+BUNDLE_AI_DLLS = True
 
 # Certificate configuration for self-signing
 CERT_PATH = OUTPUT_DIR / "wfdiag-selfsign.pfx"
