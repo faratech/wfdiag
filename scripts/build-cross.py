@@ -36,6 +36,11 @@ PUBLISHER = "CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4"
 # the Store identity so both can be installed side by side.
 SPARSE_PACKAGE_NAME = "WindowsForum.Diagnostics.Sparse"
 
+# Whether to ship Windows App SDK AI DLLs next to the loose exe. Off by
+# default — with package identity the framework package provides them. Set by
+# the --bundle-ai-dlls flag for machines that lack the framework.
+BUNDLE_AI_DLLS = False
+
 # Certificate configuration for self-signing
 CERT_PATH = OUTPUT_DIR / "wfdiag-selfsign.pfx"
 CERT_PASSWORD = "WFDiag2024!"
@@ -282,18 +287,18 @@ def copy_to_output(target_name: str, release: bool = True) -> Path | None:
     print(f"\n>>> Copying {build_path} -> {final_path}")
     shutil.copy2(build_path, final_path)
 
-    # Ship the Windows App SDK AI DLLs for the loose layout. x64 and arm64
-    # DLLs share filenames, so they go to ai-sdk-dlls/<arch>/ subdirectories —
-    # phi_silica.rs searches there after the exe dir. The direct-DLL
-    # activation path needs these (it bypasses the LAF enforcement that
-    # blocks generation on the plain WinRT path).
-    ai_sdk_src = SRC_TAURI / "resources" / "ai-sdk" / target_name
-    if ai_sdk_src.exists():
-        ai_sdk_dst = OUTPUT_DIR / "ai-sdk-dlls" / target_name
-        ai_sdk_dst.mkdir(parents=True, exist_ok=True)
-        for dll in ai_sdk_src.glob("*.dll"):
-            shutil.copy2(dll, ai_sdk_dst / dll.name)
-        print(f"  AI SDK DLLs -> {ai_sdk_dst}")
+    # No AI DLLs are shipped with the loose exe: with package identity (sparse
+    # or MSIX) phi_silica.rs loads them from the installed Windows App SDK
+    # framework package. Drop the optional bundled copy by passing
+    # --bundle-ai-dlls if a machine lacks the framework.
+    if BUNDLE_AI_DLLS:
+        ai_sdk_src = SRC_TAURI / "resources" / "ai-sdk" / target_name
+        if ai_sdk_src.exists():
+            ai_sdk_dst = OUTPUT_DIR / "ai-sdk-dlls" / target_name
+            ai_sdk_dst.mkdir(parents=True, exist_ok=True)
+            for dll in ai_sdk_src.glob("*.dll"):
+                shutil.copy2(dll, ai_sdk_dst / dll.name)
+            print(f"  AI SDK DLLs -> {ai_sdk_dst}")
 
     return final_path
 
@@ -912,11 +917,20 @@ def main():
         action="store_true",
         help="Disable sccache (enabled by default if available)"
     )
+    parser.add_argument(
+        "--bundle-ai-dlls",
+        action="store_true",
+        help="Ship Windows App SDK AI DLLs next to the loose exe (default: off; "
+             "the installed framework package provides them under package identity)"
+    )
 
     args = parser.parse_args()
     release = not args.debug
     jobs = args.jobs
     skip_frontend = args.skip_frontend
+
+    global BUNDLE_AI_DLLS
+    BUNDLE_AI_DLLS = args.bundle_ai_dlls
 
     # Determine sccache usage - enabled by default if available
     if args.no_sccache:

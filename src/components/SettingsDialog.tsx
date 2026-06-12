@@ -62,6 +62,10 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({ open, onOpenChan
         <input className="field-input" style={{ width: 260 }} type="text" value={draft.localAiEndpoint || ''} placeholder="http://127.0.0.1:55769" onChange={e => set('localAiEndpoint', e.target.value)} />
       </div>
       <div className="form-row">
+        <div><strong>Phi Silica LAF token</strong><div className="hint">Optional. Microsoft-issued token unlocks the supported on-device path</div></div>
+        <input className="field-input" style={{ width: 260 }} type="password" value={draft.phiSilicaLafToken || ''} placeholder="Leave empty for built-in" onChange={e => set('phiSilicaLafToken', e.target.value)} />
+      </div>
+      <div className="form-row">
         <div><strong>Theme</strong></div>
         <select className="field-input" style={{ width: 180 }} value={draft.theme || 'dark'} onChange={e => set('theme', e.target.value as SettingsData['theme'])}>
           <option value="dark">Dark</option>

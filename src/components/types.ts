@@ -24,4 +24,9 @@ export interface SettingsData {
    * Leave empty to auto-discover via the foundry CLI (its port is dynamic).
    */
   localAiEndpoint?: string
+  /**
+   * Microsoft-issued Limited Access Feature token for Phi Silica. With an
+   * approved token the supported WinRT path works without the DLL bypass.
+   */
+  phiSilicaLafToken?: string
 }
