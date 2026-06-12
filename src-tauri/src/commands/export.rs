@@ -122,9 +122,9 @@ fn validate_save_path(path: &str) -> Result<(), String> {
             .map_err(|e| DiagError::path_validation(path.display().to_string(), e.to_string()))?
     } else {
         // For new files, check the parent directory exists and is allowed
-        let parent = path
-            .parent()
-            .ok_or_else(|| DiagError::path_validation(path.display().to_string(), "no parent directory"))?;
+        let parent = path.parent().ok_or_else(|| {
+            DiagError::path_validation(path.display().to_string(), "no parent directory")
+        })?;
         if !parent.exists() {
             return Err(DiagError::ParentNotExists {
                 path: parent.display().to_string(),

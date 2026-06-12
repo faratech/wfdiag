@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use tokio::time::interval;
-use windows::core::PCWSTR;
 use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation};
 use windows::Win32::Foundation::{HANDLE, UNICODE_STRING};
 use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
@@ -21,14 +20,15 @@ use windows::Win32::Storage::FileSystem::{
     GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDriveStringsW,
 };
 use windows::Win32::System::Performance::{
+    PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue,
-    PdhOpenQueryW, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER,
-    PDH_HQUERY,
+    PdhOpenQueryW,
 };
 use windows::Win32::System::ProcessStatus::{GetPerformanceInfo, PERFORMANCE_INFORMATION};
 use windows::Win32::System::SystemInformation::{
     GetSystemInfo, GetTickCount64, GlobalMemoryStatusEx, MEMORYSTATUSEX, SYSTEM_INFO,
 };
+use windows::core::PCWSTR;
 
 // Drive type constants
 const DRIVE_FIXED: u32 = 3;
@@ -60,7 +60,6 @@ static NPU_LUID: OnceLock<Option<String>> = OnceLock::new();
 
 /// Total physical memory - never changes
 static TOTAL_MEMORY: OnceLock<u64> = OnceLock::new();
-
 
 // Reusable buffer for NtQuerySystemInformation (per-thread to avoid locks)
 thread_local! {
@@ -464,9 +463,10 @@ impl SystemMonitor {
                                     sys_info.dwNumberOfProcessors as usize
                                 });
                                 for i in 0..cpu_count {
-                                    let counter_path: Vec<u16> = format!("\\Processor({})\\% Processor Time\0", i)
-                                        .encode_utf16()
-                                        .collect();
+                                    let counter_path: Vec<u16> =
+                                        format!("\\Processor({})\\% Processor Time\0", i)
+                                            .encode_utf16()
+                                            .collect();
                                     let mut counter_handle: PDH_HCOUNTER = PDH_HCOUNTER::default();
                                     // PDH functions return 0 on success
                                     if PdhAddEnglishCounterW(
@@ -474,7 +474,8 @@ impl SystemMonitor {
                                         PCWSTR::from_raw(counter_path.as_ptr()),
                                         0,
                                         &mut counter_handle,
-                                    ) == 0 {
+                                    ) == 0
+                                    {
                                         state.counters.push(SendPtr(counter_handle.0));
                                     }
                                 }
@@ -490,7 +491,9 @@ impl SystemMonitor {
                         state.first_sample_done = true;
                     }
                 }
-            }).await.ok();
+            })
+            .await
+            .ok();
         }
 
         // Wait briefly for meaningful delta between samples
@@ -733,15 +736,17 @@ async fn collect_stats_optimized(
     } else {
         // First time - run detection in spawn_blocking since DXCore/WMI need proper thread context
         let detected = tokio::task::spawn_blocking(|| {
-            let result = NPU_INFO.get_or_init(|| {
-                // Try DXCore first
-                if let Some((name, _)) = detect_npu_dxcore() {
-                    return (true, Some(name));
-                }
-                // Fall back to WMI
-                let (available, name, _) = detect_npu_wmi_fallback();
-                (available, name)
-            }).clone();
+            let result = NPU_INFO
+                .get_or_init(|| {
+                    // Try DXCore first
+                    if let Some((name, _)) = detect_npu_dxcore() {
+                        return (true, Some(name));
+                    }
+                    // Fall back to WMI
+                    let (available, name, _) = detect_npu_wmi_fallback();
+                    (available, name)
+                })
+                .clone();
 
             // Also initialize NPU_LUID for utilization queries
             if result.0 {
@@ -753,7 +758,9 @@ async fn collect_stats_optimized(
             }
 
             result
-        }).await.unwrap_or((false, None));
+        })
+        .await
+        .unwrap_or((false, None));
         detected
     };
     let npu_utilization = if npu_available {
@@ -805,7 +812,8 @@ fn compute_fast_stats(
         GetSystemInfo(&mut sys_info);
         sys_info.dwNumberOfProcessors as usize
     });
-    let (cpu_utilization, per_cpu_utilization, swap_utilization) = get_pdh_stats(pdh_state, cpu_count);
+    let (cpu_utilization, per_cpu_utilization, swap_utilization) =
+        get_pdh_stats(pdh_state, cpu_count);
     let cpu_frequency = *CPU_FREQUENCY.get_or_init(get_cpu_frequency_uncached);
 
     // 2. Memory. swap_used comes straight from get_memory_info so it shares the same
@@ -816,9 +824,8 @@ fn compute_fast_stats(
 
     // 3. Network
     // Need to lock async mutex in blocking context - use block_on
-    let (network_upload_kb, network_download_kb) = tauri::async_runtime::block_on(async {
-        get_network_stats(previous_network).await
-    });
+    let (network_upload_kb, network_download_kb) =
+        tauri::async_runtime::block_on(async { get_network_stats(previous_network).await });
 
     // 4. Processes (returns all processes sorted by CPU)
     let (all_procs, disk_read_bytes, disk_write_bytes) = tauri::async_runtime::block_on(async {
@@ -920,20 +927,20 @@ async fn get_disks_cached(
             // No update in progress, start one in background
             let cached_clone = Arc::clone(cached);
             let update_flag = Arc::clone(update_in_progress);
-            
+
             tokio::spawn(async move {
                 // Run heavy IO in blocking thread
                 let disks = tokio::task::spawn_blocking(get_disk_info_optimized)
                     .await
                     .unwrap_or_default();
-                
+
                 // Update cache
                 let mut cache_lock = cached_clone.lock().await;
                 *cache_lock = Some(CachedDiskInfo {
                     disks,
                     last_update: Instant::now(),
                 });
-                
+
                 // Release flag
                 update_flag.store(false, std::sync::atomic::Ordering::Release);
             });
@@ -969,13 +976,13 @@ async fn get_npu_util_cached(
                 let util = tokio::task::spawn_blocking(get_npu_utilization)
                     .await
                     .unwrap_or(None);
-                
+
                 let mut cache_lock = cached_clone.lock().await;
                 *cache_lock = Some(CachedNpuUtilization {
                     utilization: util,
                     last_update: Instant::now(),
                 });
-                
+
                 update_flag.store(false, std::sync::atomic::Ordering::Release);
             });
         }
@@ -1026,8 +1033,7 @@ fn get_pdh_stats(
             // \Paging File(_Total)\% Usage
             let path_wide: Vec<u16> = "\\Paging File(_Total)\\% Usage\0".encode_utf16().collect();
             let mut counter = PDH_HCOUNTER::default();
-            let status =
-                PdhAddEnglishCounterW(query, PCWSTR(path_wide.as_ptr()), 0, &mut counter);
+            let status = PdhAddEnglishCounterW(query, PCWSTR(path_wide.as_ptr()), 0, &mut counter);
             if status == 0 {
                 state.counters.push(SendPtr(counter.0));
             } else {
@@ -1055,8 +1061,10 @@ fn get_pdh_stats(
 
     // Process CPU counters
     for i in 0..cpu_count {
-        if i >= state.counters.len() { break; }
-        
+        if i >= state.counters.len() {
+            break;
+        }
+
         let counter_ptr = state.counters[i].0;
         if counter_ptr.is_null() {
             per_cpu.push(0.0);
@@ -1088,7 +1096,12 @@ fn get_pdh_stats(
         if !counter_ptr.is_null() {
             let mut value = PDH_FMT_COUNTERVALUE::default();
             let status = unsafe {
-                PdhGetFormattedCounterValue(PDH_HCOUNTER(counter_ptr), PDH_FMT_DOUBLE, None, &mut value)
+                PdhGetFormattedCounterValue(
+                    PDH_HCOUNTER(counter_ptr),
+                    PDH_FMT_DOUBLE,
+                    None,
+                    &mut value,
+                )
             };
             if status == 0 && value.CStatus == PDH_CSTATUS_VALID_DATA {
                 unsafe { (value.Anonymous.doubleValue as f32).clamp(0.0, 100.0) }
@@ -1106,14 +1119,15 @@ fn get_pdh_stats(
 }
 
 fn get_cpu_frequency_uncached() -> u64 {
-    use winreg::enums::HKEY_LOCAL_MACHINE;
     use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     if let Ok(cpu_key) = hklm.open_subkey("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0")
-        && let Ok(mhz) = cpu_key.get_value::<u32, _>("~MHz") {
-            return mhz as u64;
-        }
+        && let Ok(mhz) = cpu_key.get_value::<u32, _>("~MHz")
+    {
+        return mhz as u64;
+    }
     0
 }
 
@@ -1138,17 +1152,17 @@ fn get_memory_info() -> (u64, u64, u64, u64, u64) {
             let available = mem_status.ullAvailPhys;
             let used = total.saturating_sub(available);
 
-            let (swap_total, swap_used) = if GetPerformanceInfo(&mut perf_info, perf_info.cb).is_ok()
-            {
-                let page_size = perf_info.PageSize as u64;
-                let commit_limit = perf_info.CommitLimit as u64 * page_size;
-                let commit_total = perf_info.CommitTotal as u64 * page_size;
-                let pf_total = commit_limit.saturating_sub(total);
-                let pf_used = commit_total.saturating_sub(used);
-                (pf_total, pf_used.min(pf_total))
-            } else {
-                (0, 0)
-            };
+            let (swap_total, swap_used) =
+                if GetPerformanceInfo(&mut perf_info, perf_info.cb).is_ok() {
+                    let page_size = perf_info.PageSize as u64;
+                    let commit_limit = perf_info.CommitLimit as u64 * page_size;
+                    let commit_total = perf_info.CommitTotal as u64 * page_size;
+                    let pf_total = commit_limit.saturating_sub(total);
+                    let pf_used = commit_total.saturating_sub(used);
+                    (pf_total, pf_used.min(pf_total))
+                } else {
+                    (0, 0)
+                };
 
             return (total, used, available, swap_total, swap_used);
         }
@@ -1317,22 +1331,23 @@ async fn get_network_stats(previous_network: &Arc<Mutex<NetworkState>>) -> (f64,
 
     let now = Instant::now();
     let mut prev_state = previous_network.lock().await;
-    
+
     let mut upload_kb_per_sec = 0.0;
     let mut download_kb_per_sec = 0.0;
-    
+
     // Calculate time elapsed since last update (in seconds)
     let elapsed = now.duration_since(prev_state.last_update).as_secs_f64();
-    
+
     // Update timestamp
     prev_state.last_update = now;
 
-    if !prev_state.bytes.is_empty() && elapsed > 0.001 { // Avoid division by zero
+    if !prev_state.bytes.is_empty() && elapsed > 0.001 {
+        // Avoid division by zero
         for (interface, (tx, rx)) in &current_stats {
             if let Some((prev_tx, prev_rx)) = prev_state.bytes.get(interface) {
                 let tx_delta = tx.saturating_sub(*prev_tx) as f64;
                 let rx_delta = rx.saturating_sub(*prev_rx) as f64;
-                
+
                 // Calculate rate: (Total KB delta) / (Seconds elapsed)
                 upload_kb_per_sec += (tx_delta / 1024.0) / elapsed;
                 download_kb_per_sec += (rx_delta / 1024.0) / elapsed;
@@ -1508,7 +1523,7 @@ async fn get_top_processes_optimized(
             name: proc.name.clone(),
             exe_path: String::new(), // Requires opening process handle - expensive
             command: proc.name.clone(), // Command line requires separate query
-            user: String::new(), // Requires token query - expensive
+            user: String::new(),     // Requires token query - expensive
             cpu_percent,
             memory_percent,
             memory_mb: proc.working_set as f64 / (1024.0 * 1024.0),
@@ -1522,8 +1537,8 @@ async fn get_top_processes_optimized(
             priority: proc.base_priority,
             io_read_bytes: proc.read_bytes,
             io_write_bytes: proc.write_bytes,
-            is_elevated: false, // Requires token query - expensive
-            efficiency_mode: false, // Requires PowerThrottling query
+            is_elevated: false,        // Requires token query - expensive
+            efficiency_mode: false,    // Requires PowerThrottling query
             arch: ProcessArch::Native, // Requires IsWow64Process2
             tree_depth: 0,
             tree_prefix: String::new(),
@@ -1668,9 +1683,9 @@ pub fn get_npu_utilization() -> Option<f32> {
 fn discover_npu_luid_with_wmi(wmi_con: &crate::wmi_native::WmiConnection) -> Option<String> {
     use std::collections::HashSet;
 
-    if let Ok(results) = wmi_con.query(
-        "SELECT Name FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine",
-    ) {
+    if let Ok(results) =
+        wmi_con.query("SELECT Name FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine")
+    {
         let mut luid_engines: HashMap<String, HashSet<String>> = HashMap::new();
 
         for counter in &results {
@@ -1708,8 +1723,8 @@ fn discover_npu_luid_with_wmi(wmi_con: &crate::wmi_native::WmiConnection) -> Opt
 }
 
 fn detect_npu_dxcore() -> Option<(String, u32)> {
-    use windows::core::GUID;
     use windows::Win32::Graphics::DXCore::*;
+    use windows::core::GUID;
 
     // DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML - for ML-capable devices (NPUs and GPUs)
     const DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML: GUID = GUID::from_values(
@@ -1800,8 +1815,10 @@ fn detect_npu_dxcore() -> Option<(String, u32)> {
             };
 
             // Check if this is an NPU (has CORE_COMPUTE but NOT GRAPHICS)
-            let has_compute = adapter.IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE);
-            let has_graphics = adapter.IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS);
+            let has_compute =
+                adapter.IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE);
+            let has_graphics =
+                adapter.IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS);
 
             // Get driver description
             let desc_size = match adapter.GetPropertySize(DriverDescription) {
@@ -1811,7 +1828,11 @@ fn detect_npu_dxcore() -> Option<(String, u32)> {
 
             let mut desc_buffer: Vec<u8> = vec![0; desc_size];
             if adapter
-                .GetProperty(DriverDescription, desc_size, desc_buffer.as_mut_ptr() as *mut _)
+                .GetProperty(
+                    DriverDescription,
+                    desc_size,
+                    desc_buffer.as_mut_ptr() as *mut _,
+                )
                 .is_err()
             {
                 continue;
@@ -1970,12 +1991,20 @@ fn estimate_npu_tops(name: &str) -> Option<u32> {
     let name_lower = name.to_lowercase();
 
     // Qualcomm Snapdragon X
-    if name_lower.contains("snapdragon") || name_lower.contains("hexagon") || name_lower.contains("x elite") || name_lower.contains("x plus") {
+    if name_lower.contains("snapdragon")
+        || name_lower.contains("hexagon")
+        || name_lower.contains("x elite")
+        || name_lower.contains("x plus")
+    {
         return Some(45); // Snapdragon X Elite/Plus NPUs are 45 TOPS
     }
 
     // Intel Core Ultra
-    if name_lower.contains("intel") || name_lower.contains("core ultra") || name_lower.contains("meteor lake") || name_lower.contains("lunar lake") {
+    if name_lower.contains("intel")
+        || name_lower.contains("core ultra")
+        || name_lower.contains("meteor lake")
+        || name_lower.contains("lunar lake")
+    {
         if name_lower.contains("lunar lake") {
             return Some(48); // Lunar Lake NPU is 48 TOPS
         }
@@ -1983,7 +2012,8 @@ fn estimate_npu_tops(name: &str) -> Option<u32> {
     }
 
     // AMD XDNA
-    if name_lower.contains("amd") || name_lower.contains("xdna") || name_lower.contains("ryzen ai") {
+    if name_lower.contains("amd") || name_lower.contains("xdna") || name_lower.contains("ryzen ai")
+    {
         if name_lower.contains("xdna 2") || name_lower.contains("strix") {
             return Some(50); // XDNA 2 (Strix Point) is 50 TOPS
         }
@@ -2007,5 +2037,8 @@ fn format_npu_description(name: &str, tops: Option<u32>) -> String {
         "Performance specifications unknown."
     };
 
-    format!("{}\nEstimated Performance: {}\n{}", name, tops_str, copilot_status)
+    format!(
+        "{}\nEstimated Performance: {}\n{}",
+        name, tops_str, copilot_status
+    )
 }

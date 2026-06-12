@@ -3,8 +3,8 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::responses::{
-        CreateResponseArgs, InputParam, FunctionToolArgs, Tool,
-        OutputItem, InputItem, Item, FunctionCallOutputItemParam, FunctionCallOutput,
+        CreateResponseArgs, FunctionCallOutput, FunctionCallOutputItemParam, FunctionToolArgs,
+        InputItem, InputParam, Item, OutputItem, Tool,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -100,7 +100,11 @@ pub struct Finding {
 }
 
 /// Simple text analysis using Responses API
-pub async fn analyze_text(api_key: &str, system_prompt: &str, user_prompt: &str) -> Result<String, String> {
+pub async fn analyze_text(
+    api_key: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<String, String> {
     let config = OpenAIConfig::new().with_api_key(api_key);
     let client = Client::with_config(config);
 
@@ -112,26 +116,25 @@ pub async fn analyze_text(api_key: &str, system_prompt: &str, user_prompt: &str)
         .build()
         .map_err(|e| format!("Failed to build request: {}", e))?;
 
-    let response = client
-        .responses()
-        .create(request)
-        .await
-        .map_err(|e| {
-            let error_detail = format!("{:?}", e);
-            eprintln!("OpenAI API error details: {}", error_detail);
+    let response = client.responses().create(request).await.map_err(|e| {
+        let error_detail = format!("{:?}", e);
+        eprintln!("OpenAI API error details: {}", error_detail);
 
-            if error_detail.contains("401") || error_detail.contains("Unauthorized") {
-                "Invalid API key. Please check your OpenAI API key.".to_string()
-            } else if error_detail.contains("404") || error_detail.contains("model_not_found") {
-                format!("Model '{}' not found. Check if it's available on your account.", OPENAI_MODEL)
-            } else if error_detail.contains("429") {
-                "Rate limit exceeded. Please wait a moment.".to_string()
-            } else if error_detail.contains("insufficient_quota") {
-                "Insufficient quota. Check your OpenAI billing.".to_string()
-            } else {
-                format!("API error: {}", e)
-            }
-        })?;
+        if error_detail.contains("401") || error_detail.contains("Unauthorized") {
+            "Invalid API key. Please check your OpenAI API key.".to_string()
+        } else if error_detail.contains("404") || error_detail.contains("model_not_found") {
+            format!(
+                "Model '{}' not found. Check if it's available on your account.",
+                OPENAI_MODEL
+            )
+        } else if error_detail.contains("429") {
+            "Rate limit exceeded. Please wait a moment.".to_string()
+        } else if error_detail.contains("insufficient_quota") {
+            "Insufficient quota. Check your OpenAI billing.".to_string()
+        } else {
+            format!("API error: {}", e)
+        }
+    })?;
 
     // Extract text from response
     Ok(response.output_text().unwrap_or_default())
@@ -166,7 +169,11 @@ pub async fn analyze_system_with_ai(
     // Validate API key is not empty
     let api_key = api_key.trim().to_string();
     if api_key.is_empty() {
-        return Err(DiagError::api_key("validate", "OpenAI API key is empty. Please enter your API key in Settings.").into());
+        return Err(DiagError::api_key(
+            "validate",
+            "OpenAI API key is empty. Please enter your API key in Settings.",
+        )
+        .into());
     }
 
     // Never echo any characters of the API key. In debug builds, log only its presence.
@@ -265,7 +272,8 @@ REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAG
         eprintln!("OpenAI API error details: {:?}", e);
         let error_msg = format!("{:?}", e);
         if error_msg.contains("401") || error_msg.contains("Unauthorized") {
-            "Invalid API key. Please check your OpenAI API key is correct and starts with 'sk-'.".to_string()
+            "Invalid API key. Please check your OpenAI API key is correct and starts with 'sk-'."
+                .to_string()
         } else if error_msg.contains("404") {
             format!(
                 "Model not found. The model '{}' may not be available on your account.",
@@ -276,10 +284,7 @@ REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAG
         } else if error_msg.contains("insufficient_quota") {
             "Insufficient quota. Please check your OpenAI account billing.".to_string()
         } else {
-            format!(
-                "OpenAI API error: {}. Make sure your API key is valid.",
-                e
-            )
+            format!("OpenAI API error: {}. Make sure your API key is valid.", e)
         }
     })?;
 
@@ -298,9 +303,10 @@ REMEMBER: The user wants ACTION, not explanations of what you could do. RUN DIAG
         let mut tool_outputs: Vec<InputItem> = Vec::new();
         for item in response.output.iter() {
             if let OutputItem::FunctionCall(func_call) = item {
-                let args: Value = serde_json::from_str(&func_call.arguments)
-                    .unwrap_or_else(|_| json!({}));
-                let task_id = args.get("task_id")
+                let args: Value =
+                    serde_json::from_str(&func_call.arguments).unwrap_or_else(|_| json!({}));
+                let task_id = args
+                    .get("task_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
                 if task_id.is_empty() {
@@ -538,7 +544,8 @@ pub async fn analyze_system_with_ai_provider(
         "phi_silica" => analyze_system_with_phi_silica(prompt, app_handle).await,
         _ => {
             // Default to OpenAI
-            let key = api_key.ok_or_else(|| DiagError::api_key("validate", "OpenAI API key is required"))?;
+            let key = api_key
+                .ok_or_else(|| DiagError::api_key("validate", "OpenAI API key is required"))?;
             analyze_system_with_ai(key, prompt, app_handle).await
         }
     }

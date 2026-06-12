@@ -1,12 +1,12 @@
-use anyhow::Result;
-use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
-use std::fs;
 use crate::wmi_native::WmiConnection;
+use anyhow::Result;
+use serde_json::{Value, json};
+use std::fs;
+use std::path::{Path, PathBuf};
 use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 // Performance counter imports removed - not used in current implementation
-use winreg::enums::*;
 use winreg::RegKey;
+use winreg::enums::*;
 
 pub struct NativeDiagnostics;
 
@@ -52,16 +52,21 @@ impl NativeDiagnostics {
 
     pub fn get_native_network_adapters(&self) -> Result<Value> {
         let wmi_con = WmiConnection::new()?;
-        let config_results = wmi_con.query("SELECT * FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled=TRUE")?;
+        let config_results = wmi_con
+            .query("SELECT * FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled=TRUE")?;
         let adapter_results = wmi_con.query("SELECT * FROM Win32_NetworkAdapter")?;
 
         let mut adapters = Vec::new();
 
         for config in config_results {
-            let mut adapter_info: serde_json::Map<String, Value> = config.clone().into_iter().collect();
+            let mut adapter_info: serde_json::Map<String, Value> =
+                config.clone().into_iter().collect();
 
             // Get the index to match with adapter
-            let index = config.get("Index").and_then(|v| v.as_u64()).map(|u| u as u32);
+            let index = config
+                .get("Index")
+                .and_then(|v| v.as_u64())
+                .map(|u| u as u32);
 
             // Find matching adapter info.
             // Match on Win32_NetworkAdapter.Index (a uint32 that equals the config's
@@ -69,7 +74,11 @@ impl NativeDiagnostics {
             // None and the enrichment (Name/Speed/MAC/Manufacturer/...) never merged.
             if let Some(idx) = index {
                 for adapter in &adapter_results {
-                    if let Some(adapter_idx) = adapter.get("Index").and_then(|v| v.as_u64()).map(|u| u as u32) {
+                    if let Some(adapter_idx) = adapter
+                        .get("Index")
+                        .and_then(|v| v.as_u64())
+                        .map(|u| u as u32)
+                    {
                         if adapter_idx == idx {
                             // Add adapter-specific info
                             for (key, value) in adapter {
@@ -94,7 +103,7 @@ impl NativeDiagnostics {
         unsafe {
             GetSystemInfo(&mut system_info);
         }
-        
+
         Ok(json!({
             "processor_architecture": unsafe { system_info.Anonymous.Anonymous.wProcessorArchitecture.0 },
             "number_of_processors": system_info.dwNumberOfProcessors,
@@ -159,13 +168,13 @@ impl NativeDiagnostics {
             }
             info["computer_system"] = comp_info;
         }
-        
+
         // Add native system info
         let mut native_info = SYSTEM_INFO::default();
         unsafe {
             GetSystemInfo(&mut native_info);
         }
-        
+
         info["processor_info"] = json!({
             "architecture": unsafe { native_info.Anonymous.Anonymous.wProcessorArchitecture.0 },
             "processor_count": native_info.dwNumberOfProcessors,
@@ -173,30 +182,40 @@ impl NativeDiagnostics {
             "processor_level": native_info.wProcessorLevel,
             "processor_revision": native_info.wProcessorRevision,
         });
-        
+
         // Get additional system info
         {
             let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-            if let Ok(cv_key) = hklm.open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion") {
+            if let Ok(cv_key) = hklm.open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion")
+            {
                 let mut version_info = json!({});
-                
+
                 // Read various version fields
-                for field in &["ProductName", "DisplayVersion", "CurrentBuild", "UBR", "EditionID", "CompositionEditionID"] {
+                for field in &[
+                    "ProductName",
+                    "DisplayVersion",
+                    "CurrentBuild",
+                    "UBR",
+                    "EditionID",
+                    "CompositionEditionID",
+                ] {
                     if let Ok(value) = cv_key.get_value::<String, _>(field) {
                         version_info[field] = json!(value);
                     }
                 }
-                
+
                 info["windows_version_details"] = version_info;
             }
-            
+
             // Get hardware info
-            if let Ok(hw_key) = hklm.open_subkey("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0")
-                && let Ok(cpu_name) = hw_key.get_value::<String, _>("ProcessorNameString") {
-                    info["cpu_name"] = json!(cpu_name.trim());
-                }
+            if let Ok(hw_key) =
+                hklm.open_subkey("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0")
+                && let Ok(cpu_name) = hw_key.get_value::<String, _>("ProcessorNameString")
+            {
+                info["cpu_name"] = json!(cpu_name.trim());
+            }
         }
-        
+
         Ok(info)
     }
 
@@ -220,12 +239,13 @@ impl NativeDiagnostics {
         }
 
         // Try to get legacy VxD drivers (might not exist on modern systems)
-        match wmi_con.query(
-            "SELECT Name, DriverVersion, DriverDate, DeviceName FROM Win32_DriverVXD"
-        ) {
+        match wmi_con
+            .query("SELECT Name, DriverVersion, DriverDate, DeviceName FROM Win32_DriverVXD")
+        {
             Ok(vxd_results) => {
                 for result in vxd_results {
-                    let mut driver_info: serde_json::Map<String, Value> = result.into_iter().collect();
+                    let mut driver_info: serde_json::Map<String, Value> =
+                        result.into_iter().collect();
                     driver_info.insert("Type".to_string(), json!("VxD"));
                     drivers.push(Value::Object(driver_info));
                 }
@@ -285,28 +305,45 @@ impl NativeDiagnostics {
 
     pub fn get_installed_programs(&self) -> Result<Value> {
         let mut programs = Vec::new();
-        
+
         // Check both 32-bit and 64-bit registry locations
         let paths = vec![
-            (HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
-            (HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
-            (HKEY_CURRENT_USER, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
+            (
+                HKEY_LOCAL_MACHINE,
+                "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+            ),
+            (
+                HKEY_LOCAL_MACHINE,
+                "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+            ),
+            (
+                HKEY_CURRENT_USER,
+                "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+            ),
         ];
-        
+
         for (hkey, path) in paths {
             if let Ok(key) = RegKey::predef(hkey).open_subkey(path) {
                 for subkey_name in key.enum_keys().filter_map(Result::ok) {
                     if let Ok(subkey) = key.open_subkey(&subkey_name) {
                         let mut program_info = serde_json::Map::new();
-                        
+
                         // Read common fields
-                        for field in &["DisplayName", "DisplayVersion", "Publisher", "InstallDate", "UninstallString", "InstallLocation"] {
+                        for field in &[
+                            "DisplayName",
+                            "DisplayVersion",
+                            "Publisher",
+                            "InstallDate",
+                            "UninstallString",
+                            "InstallLocation",
+                        ] {
                             if let Ok(value) = subkey.get_value::<String, _>(field)
-                                && !value.is_empty() {
-                                    program_info.insert(field.to_string(), json!(value));
-                                }
+                                && !value.is_empty()
+                            {
+                                program_info.insert(field.to_string(), json!(value));
+                            }
                         }
-                        
+
                         // Only add if it has a display name
                         if program_info.contains_key("DisplayName") {
                             programs.push(Value::Object(program_info));
@@ -315,18 +352,18 @@ impl NativeDiagnostics {
                 }
             }
         }
-        
+
         Ok(json!(programs))
     }
 
     pub fn run_dxdiag(&self) -> Result<Value> {
         eprintln!("[DXDIAG] Starting DirectX diagnostic");
-        
+
         // Always use WMI as primary method - it's more reliable
         eprintln!("[DXDIAG] Getting DirectX info via WMI");
         self.get_directx_info_via_wmi()
     }
-    
+
     fn get_directx_info_via_wmi(&self) -> Result<Value> {
         let wmi_con = WmiConnection::new()?;
         let mut info = json!({
@@ -451,19 +488,21 @@ impl NativeDiagnostics {
                     disk_info.insert("HealthStatusText".to_string(), json!(health_str));
 
                     // Media type (0=Unspecified, 3=HDD, 4=SSD, 5=SCM)
-                    let media_type = disk_info.get("MediaType")
+                    let media_type = disk_info
+                        .get("MediaType")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
                     let media_str = match media_type {
                         3 => "HDD",
                         4 => "SSD",
                         5 => "SCM",
-                        _ => "Unknown"
+                        _ => "Unknown",
                     };
                     disk_info.insert("MediaTypeText".to_string(), json!(media_str));
 
                     // Bus type
-                    let bus_type = disk_info.get("BusType")
+                    let bus_type = disk_info
+                        .get("BusType")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
                     let bus_str = match bus_type {
@@ -483,7 +522,7 @@ impl NativeDiagnostics {
                         15 => "File Backed Virtual",
                         16 => "Storage Spaces",
                         17 => "NVMe",
-                        _ => "Unknown"
+                        _ => "Unknown",
                     };
                     disk_info.insert("BusTypeText".to_string(), json!(bus_str));
 
@@ -492,11 +531,18 @@ impl NativeDiagnostics {
             }
 
             // Also get reliability counters if available
-            if let Ok(reliability) = wmi_storage.query("SELECT * FROM MSFT_StorageReliabilityCounter") {
-                health_info["reliability_counters"] = json!(reliability.into_iter().map(|r| {
-                    let obj: serde_json::Map<String, Value> = r.into_iter().collect();
-                    Value::Object(obj)
-                }).collect::<Vec<_>>());
+            if let Ok(reliability) =
+                wmi_storage.query("SELECT * FROM MSFT_StorageReliabilityCounter")
+            {
+                health_info["reliability_counters"] = json!(
+                    reliability
+                        .into_iter()
+                        .map(|r| {
+                            let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                            Value::Object(obj)
+                        })
+                        .collect::<Vec<_>>()
+                );
             }
         }
 
@@ -536,8 +582,9 @@ impl NativeDiagnostics {
 
     pub fn run_dism_health(&self) -> Result<Value> {
         // Run DISM health check using secure execution
-        let output = Self::execute_secure_command("dism", &["/online", "/cleanup-image", "/checkhealth"])?;
-        
+        let output =
+            Self::execute_secure_command("dism", &["/online", "/cleanup-image", "/checkhealth"])?;
+
         if output.status.success() {
             let output_str = crate::security::decode_windows_output(&output.stdout);
 
@@ -547,7 +594,7 @@ impl NativeDiagnostics {
                 "status": "Unknown",
                 "repairable": false
             });
-            
+
             // Check for common DISM responses
             if output_str.contains("No component store corruption detected") {
                 health_info["status"] = json!("Healthy");
@@ -562,24 +609,26 @@ impl NativeDiagnostics {
                 health_info["message"] = json!("The component store is corrupted");
                 health_info["repairable"] = json!(true);
             }
-            
-            // Try to run scanhealth for more detailed info
-            let scan_output = Self::execute_secure_command("dism", &["/online", "/cleanup-image", "/scanhealth"]);
-                
-            if let Ok(scan) = scan_output
-                && scan.status.success() {
-                    let scan_str = crate::security::decode_windows_output(&scan.stdout);
-                    health_info["scan_output"] = json!(scan_str.clone());
 
-                    // Extract percentage if available
-                    if let Some(percent_pos) = scan_str.find("The component store is") {
-                        let relevant_text = &scan_str[percent_pos..];
-                        if let Some(end) = relevant_text.find('\n') {
-                            health_info["scan_result"] = json!(&relevant_text[..end]);
-                        }
+            // Try to run scanhealth for more detailed info
+            let scan_output =
+                Self::execute_secure_command("dism", &["/online", "/cleanup-image", "/scanhealth"]);
+
+            if let Ok(scan) = scan_output
+                && scan.status.success()
+            {
+                let scan_str = crate::security::decode_windows_output(&scan.stdout);
+                health_info["scan_output"] = json!(scan_str.clone());
+
+                // Extract percentage if available
+                if let Some(percent_pos) = scan_str.find("The component store is") {
+                    let relevant_text = &scan_str[percent_pos..];
+                    if let Some(end) = relevant_text.find('\n') {
+                        health_info["scan_result"] = json!(&relevant_text[..end]);
                     }
                 }
-            
+            }
+
             Ok(health_info)
         } else {
             let error_str = crate::security::decode_windows_output(&output.stderr);
@@ -603,18 +652,21 @@ impl NativeDiagnostics {
 
         let results = wmi_con.query("SELECT Description, IPAddress, IPSubnet, DefaultIPGateway, DNSServerSearchOrder, DHCPEnabled, DHCPServer, MACAddress, DNSDomain FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled = TRUE")?;
 
-        let configs: Vec<Value> = results.into_iter().map(|config| {
-            let mut obj = serde_json::Map::new();
+        let configs: Vec<Value> = results
+            .into_iter()
+            .map(|config| {
+                let mut obj = serde_json::Map::new();
 
-            // Copy relevant fields, filtering out nulls
-            for (key, value) in config {
-                if !value.is_null() {
-                    obj.insert(key, value);
+                // Copy relevant fields, filtering out nulls
+                for (key, value) in config {
+                    if !value.is_null() {
+                        obj.insert(key, value);
+                    }
                 }
-            }
 
-            Value::Object(obj)
-        }).collect();
+                Value::Object(obj)
+            })
+            .collect();
 
         Ok(json!(configs))
     }
@@ -630,13 +682,13 @@ impl NativeDiagnostics {
             Err(e) => Ok(json!({
                 "path": hosts_path,
                 "error": format!("Failed to read hosts file: {}", e)
-            }))
+            })),
         }
     }
-    
+
     fn parse_hosts_file(&self, content: &str) -> Vec<Value> {
         let mut entries = Vec::new();
-        
+
         for line in content.lines() {
             let line = line.trim();
             if !line.is_empty() && !line.starts_with('#') {
@@ -650,7 +702,7 @@ impl NativeDiagnostics {
                 }
             }
         }
-        
+
         entries
     }
 
@@ -658,9 +710,8 @@ impl NativeDiagnostics {
         // Check domain join status via WMI
         let wmi_con = WmiConnection::new()?;
 
-        let cs_results = wmi_con.query(
-            "SELECT Domain, DomainRole, PartOfDomain FROM Win32_ComputerSystem"
-        )?;
+        let cs_results =
+            wmi_con.query("SELECT Domain, DomainRole, PartOfDomain FROM Win32_ComputerSystem")?;
 
         if let Some(result) = cs_results.into_iter().next() {
             let info: serde_json::Map<String, Value> = result.into_iter().collect();
@@ -700,13 +751,15 @@ impl NativeDiagnostics {
                                 result_info["fragmentation_percent"] = json!(percent);
                                 result_info["status"] = json!("Analyzed");
                             } else {
-                                result_info["status"] = json!("Analysis failed: Could not parse output");
+                                result_info["status"] =
+                                    json!("Analysis failed: Could not parse output");
                             }
                         } else {
                             let error_str = crate::security::decode_windows_output(&output.stderr);
-                            result_info["status"] = json!(format!("Analysis failed: {}", error_str));
+                            result_info["status"] =
+                                json!(format!("Analysis failed: {}", error_str));
                         }
-                    },
+                    }
                     Err(e) => {
                         result_info["status"] = json!(format!("Execution failed: {}", e));
                     }
@@ -750,9 +803,8 @@ impl NativeDiagnostics {
 
     pub fn get_native_services(&self) -> Result<Value> {
         let wmi_con = WmiConnection::new()?;
-        let results = wmi_con.query(
-            "SELECT Name, DisplayName, State, StartMode, PathName FROM Win32_Service"
-        )?;
+        let results = wmi_con
+            .query("SELECT Name, DisplayName, State, StartMode, PathName FROM Win32_Service")?;
 
         let services: Vec<Value> = results
             .into_iter()
@@ -768,17 +820,18 @@ impl NativeDiagnostics {
     pub fn get_battery_report(&self) -> Result<Value> {
         let temp_file = std::env::temp_dir().join("wfdiag_battery.html");
         let temp_path = temp_file.to_string_lossy();
-        
-        let output = Self::execute_secure_command("powercfg", &["/batteryreport", "/output", &temp_path])?;
-        
+
+        let output =
+            Self::execute_secure_command("powercfg", &["/batteryreport", "/output", &temp_path])?;
+
         if output.status.success() && temp_file.exists() {
             std::thread::sleep(std::time::Duration::from_millis(500));
             let html_content = fs::read_to_string(&temp_file)?;
             let _ = fs::remove_file(&temp_file);
-            
+
             // Parse the HTML to extract battery information safely
             let battery_info = self.parse_battery_html(&html_content)?;
-            
+
             Ok(json!({
                 "battery_summary": battery_info,
                 "html_content": html_content,
@@ -820,7 +873,8 @@ impl NativeDiagnostics {
                                 if let Some(tag_end) = row_html[abs_td_start..].find('>') {
                                     let content_start = abs_td_start + tag_end + 1;
                                     if let Some(td_end) = row_html[content_start..].find("</td>") {
-                                        let cell_content = &row_html[content_start..content_start + td_end];
+                                        let cell_content =
+                                            &row_html[content_start..content_start + td_end];
                                         // Strip HTML tags and decode entities
                                         let text = cell_content
                                             .replace("<br>", " ")
@@ -871,9 +925,13 @@ impl NativeDiagnostics {
             if row.len() >= 2 {
                 let key = row[0].to_lowercase();
                 // Battery info patterns
-                if key.contains("manufacturer") || key.contains("chemistry") ||
-                   key.contains("design capacity") || key.contains("full charge") ||
-                   key.contains("serial") || key.contains("cycle") {
+                if key.contains("manufacturer")
+                    || key.contains("chemistry")
+                    || key.contains("design capacity")
+                    || key.contains("full charge")
+                    || key.contains("serial")
+                    || key.contains("cycle")
+                {
                     battery_data.push(json!({
                         "property": row[0].clone(),
                         "value": row[1].clone()
@@ -898,25 +956,29 @@ impl NativeDiagnostics {
         }
 
         // Calculate battery health
-        if let Some(latest) = battery_info["battery_capacity_history"].as_array()
+        if let Some(latest) = battery_info["battery_capacity_history"]
+            .as_array()
             .and_then(|h| h.first())
             && let (Some(full_charge), Some(design_capacity)) = (
                 latest["full_charge_capacity"].as_str(),
-                latest["design_capacity"].as_str()
+                latest["design_capacity"].as_str(),
             )
-                && let (Ok(full_mwh), Ok(design_mwh)) = (
-                    self.extract_mwh_value(full_charge),
-                    self.extract_mwh_value(design_capacity)
-                )
-                    && design_mwh > 0.0 {
-                        let health_percentage = (full_mwh / design_mwh * 100.0).round();
-                        battery_info["battery_health_percentage"] = json!(health_percentage);
-                        battery_info["battery_health_status"] = json!(
-                            if health_percentage >= 80.0 { "Good" }
-                            else if health_percentage >= 60.0 { "Fair" }
-                            else { "Poor" }
-                        );
-                    }
+            && let (Ok(full_mwh), Ok(design_mwh)) = (
+                self.extract_mwh_value(full_charge),
+                self.extract_mwh_value(design_capacity),
+            )
+            && design_mwh > 0.0
+        {
+            let health_percentage = (full_mwh / design_mwh * 100.0).round();
+            battery_info["battery_health_percentage"] = json!(health_percentage);
+            battery_info["battery_health_status"] = json!(if health_percentage >= 80.0 {
+                "Good"
+            } else if health_percentage >= 60.0 {
+                "Fair"
+            } else {
+                "Poor"
+            });
+        }
 
         Ok(battery_info)
     }
@@ -929,7 +991,7 @@ impl NativeDiagnostics {
             .replace(" Wh", "")
             .trim()
             .to_string();
-        
+
         cleaned.parse::<f64>()
     }
 
@@ -950,7 +1012,7 @@ impl NativeDiagnostics {
 
         if let Ok(entries) = fs::read_dir(minidump_path) {
             let mut all_entries = Vec::new();
-            
+
             // Collect entries first to sort them
             for entry in entries.filter_map(Result::ok) {
                 if start_time.elapsed() > search_timeout {
@@ -1044,13 +1106,14 @@ impl NativeDiagnostics {
 
         // Create Desktop\Minidumps directory if it doesn't exist
         if !desktop_minidumps.exists()
-            && let Err(e) = fs::create_dir_all(&desktop_minidumps) {
-                return Ok(json!({
-                    "success": false,
-                    "message": format!("Failed to create Desktop\\Minidumps directory: {}", e),
-                    "copied_files": []
-                }));
-            }
+            && let Err(e) = fs::create_dir_all(&desktop_minidumps)
+        {
+            return Ok(json!({
+                "success": false,
+                "message": format!("Failed to create Desktop\\Minidumps directory: {}", e),
+                "copied_files": []
+            }));
+        }
 
         let mut copied_files = Vec::new();
         let mut errors = Vec::new();
@@ -1075,7 +1138,11 @@ impl NativeDiagnostics {
                             }));
                         }
                         Err(e) => {
-                            errors.push(format!("Failed to copy {}: {}", filename.to_string_lossy(), e));
+                            errors.push(format!(
+                                "Failed to copy {}: {}",
+                                filename.to_string_lossy(),
+                                e
+                            ));
                         }
                     }
                 }
@@ -1101,8 +1168,8 @@ impl NativeDiagnostics {
     pub fn get_store_apps(&self) -> Result<Value> {
         // Use Windows PackageManager API to enumerate installed packages
         use windows::Management::Deployment::PackageManager;
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
-        use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+        use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
+        use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 
         // Initialize COM and WinRT on this thread (required for Tokio worker threads)
         unsafe {
@@ -1113,11 +1180,17 @@ impl NativeDiagnostics {
         let mut apps = Vec::new();
 
         // Create PackageManager and enumerate packages
-        let package_manager = PackageManager::new()
-            .map_err(|e| anyhow::anyhow!("Failed to create PackageManager: {} (0x{:08X})", e, e.code().0))?;
+        let package_manager = PackageManager::new().map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create PackageManager: {} (0x{:08X})",
+                e,
+                e.code().0
+            )
+        })?;
 
         // Get packages for current user (empty string = current user)
-        let packages = package_manager.FindPackages()
+        let packages = package_manager
+            .FindPackages()
             .map_err(|e| anyhow::anyhow!("Failed to enumerate packages: {}", e))?;
 
         for package in packages {
@@ -1135,16 +1208,22 @@ impl NativeDiagnostics {
                 if let Ok(name) = id.Name() {
                     let name_str = name.to_string();
                     // Skip system framework packages
-                    if name_str.contains("Microsoft.NET") ||
-                       name_str.contains("Microsoft.VCLibs") ||
-                       name_str.contains("Microsoft.UI.Xaml") {
+                    if name_str.contains("Microsoft.NET")
+                        || name_str.contains("Microsoft.VCLibs")
+                        || name_str.contains("Microsoft.UI.Xaml")
+                    {
                         continue;
                     }
                     app_info.insert("Name".to_string(), json!(name_str));
                 }
                 if let Ok(version) = id.Version() {
-                    app_info.insert("Version".to_string(), json!(format!("{}.{}.{}.{}",
-                        version.Major, version.Minor, version.Build, version.Revision)));
+                    app_info.insert(
+                        "Version".to_string(),
+                        json!(format!(
+                            "{}.{}.{}.{}",
+                            version.Major, version.Minor, version.Build, version.Revision
+                        )),
+                    );
                 }
                 if let Ok(publisher) = id.Publisher() {
                     app_info.insert("Publisher".to_string(), json!(publisher.to_string()));
@@ -1175,7 +1254,7 @@ impl NativeDiagnostics {
 
     pub fn get_performance_data(&self) -> Result<Value> {
         use windows::Win32::System::SystemInformation::{
-            GlobalMemoryStatusEx, GetSystemInfo, MEMORYSTATUSEX, SYSTEM_INFO,
+            GetSystemInfo, GlobalMemoryStatusEx, MEMORYSTATUSEX, SYSTEM_INFO,
         };
 
         let mut perf_data = json!({});
@@ -1225,7 +1304,7 @@ impl NativeDiagnostics {
         // Get CPU name and load from WMI (fallback for detailed info)
         if let Ok(wmi_con) = WmiConnection::new() {
             if let Ok(cpu_results) = wmi_con.query(
-                "SELECT Name, LoadPercentage, NumberOfCores, MaxClockSpeed FROM Win32_Processor"
+                "SELECT Name, LoadPercentage, NumberOfCores, MaxClockSpeed FROM Win32_Processor",
             ) {
                 if let Some(result) = cpu_results.into_iter().next() {
                     let cpu_info: serde_json::Map<String, Value> = result.into_iter().collect();
@@ -1241,9 +1320,9 @@ impl NativeDiagnostics {
             }
 
             // Get disk info from WMI
-            if let Ok(disk_results) = wmi_con.query(
-                "SELECT DeviceID, Size, FreeSpace FROM Win32_LogicalDisk WHERE DriveType=3"
-            ) {
+            if let Ok(disk_results) = wmi_con
+                .query("SELECT DeviceID, Size, FreeSpace FROM Win32_LogicalDisk WHERE DriveType=3")
+            {
                 let disks: Vec<Value> = disk_results
                     .into_iter()
                     .map(|r| {
@@ -1261,15 +1340,15 @@ impl NativeDiagnostics {
     }
 
     pub fn get_scheduled_tasks(&self) -> Result<Value> {
-        use windows::core::BSTR;
-        use windows::Win32::System::TaskScheduler::{
-            ITaskService, TaskScheduler, ITaskFolder,
-            TASK_STATE_DISABLED, TASK_STATE_QUEUED, TASK_STATE_READY, TASK_STATE_RUNNING,
-        };
         use windows::Win32::System::Com::{
-            CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+            CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+        };
+        use windows::Win32::System::TaskScheduler::{
+            ITaskFolder, ITaskService, TASK_STATE_DISABLED, TASK_STATE_QUEUED, TASK_STATE_READY,
+            TASK_STATE_RUNNING, TaskScheduler,
         };
         use windows::Win32::System::Variant::VARIANT;
+        use windows::core::BSTR;
 
         let mut tasks = Vec::new();
 
@@ -1278,25 +1357,26 @@ impl NativeDiagnostics {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
             // Create TaskScheduler instance
-            let task_service: ITaskService = CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER)
-                .map_err(|e| anyhow::anyhow!("Failed to create TaskScheduler: {}", e))?;
+            let task_service: ITaskService =
+                CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER)
+                    .map_err(|e| anyhow::anyhow!("Failed to create TaskScheduler: {}", e))?;
 
             // Connect to the task service (local, current user)
             let empty_var = VARIANT::default();
-            task_service.Connect(
-                &empty_var,
-                &empty_var,
-                &empty_var,
-                &empty_var,
-            ).map_err(|e| anyhow::anyhow!("Failed to connect to TaskScheduler: {}", e))?;
+            task_service
+                .Connect(&empty_var, &empty_var, &empty_var, &empty_var)
+                .map_err(|e| anyhow::anyhow!("Failed to connect to TaskScheduler: {}", e))?;
 
             // Get root folder
-            let root_folder: ITaskFolder = task_service.GetFolder(&BSTR::from("\\"))
+            let root_folder: ITaskFolder = task_service
+                .GetFolder(&BSTR::from("\\"))
                 .map_err(|e| anyhow::anyhow!("Failed to get root folder: {}", e))?;
 
             // Recursive function to enumerate tasks
             fn enumerate_folder(folder: &ITaskFolder, tasks: &mut Vec<Value>, depth: u32) {
-                if depth > 3 { return; } // Limit recursion depth
+                if depth > 3 {
+                    return;
+                } // Limit recursion depth
 
                 unsafe {
                     // Get tasks in this folder
@@ -1308,10 +1388,16 @@ impl NativeDiagnostics {
                                     let mut task_info = serde_json::Map::new();
 
                                     if let Ok(name) = task.Name() {
-                                        task_info.insert("TaskName".to_string(), json!(name.to_string()));
+                                        task_info.insert(
+                                            "TaskName".to_string(),
+                                            json!(name.to_string()),
+                                        );
                                     }
                                     if let Ok(path) = task.Path() {
-                                        task_info.insert("TaskPath".to_string(), json!(path.to_string()));
+                                        task_info.insert(
+                                            "TaskPath".to_string(),
+                                            json!(path.to_string()),
+                                        );
                                     }
                                     if let Ok(state) = task.State() {
                                         let state_str = match state {
@@ -1324,13 +1410,18 @@ impl NativeDiagnostics {
                                         task_info.insert("State".to_string(), json!(state_str));
                                     }
                                     if let Ok(enabled) = task.Enabled() {
-                                        task_info.insert("Enabled".to_string(), json!(enabled.as_bool()));
+                                        task_info.insert(
+                                            "Enabled".to_string(),
+                                            json!(enabled.as_bool()),
+                                        );
                                     }
                                     if let Ok(last_run) = task.LastRunTime() {
-                                        task_info.insert("LastRunTime".to_string(), json!(last_run));
+                                        task_info
+                                            .insert("LastRunTime".to_string(), json!(last_run));
                                     }
                                     if let Ok(next_run) = task.NextRunTime() {
-                                        task_info.insert("NextRunTime".to_string(), json!(next_run));
+                                        task_info
+                                            .insert("NextRunTime".to_string(), json!(next_run));
                                     }
 
                                     if task_info.contains_key("TaskName") {
@@ -1359,7 +1450,8 @@ impl NativeDiagnostics {
         }
 
         // Filter and limit
-        let filtered: Vec<Value> = tasks.into_iter()
+        let filtered: Vec<Value> = tasks
+            .into_iter()
             .filter(|t| {
                 // Exclude disabled tasks and some noisy system tasks
                 if let Some(state) = t.get("State").and_then(|s| s.as_str()) {
@@ -1397,7 +1489,9 @@ impl NativeDiagnostics {
         }
 
         // Try to get update history from Windows Update namespace
-        if let Ok(wmi_update) = WmiConnection::with_namespace(r"root\CCM\SoftwareUpdates\UpdatesStore") {
+        if let Ok(wmi_update) =
+            WmiConnection::with_namespace(r"root\CCM\SoftwareUpdates\UpdatesStore")
+        {
             if let Ok(updates) = wmi_update.query("SELECT * FROM CCM_UpdateStatus") {
                 let update_history: Vec<Value> = updates
                     .into_iter()
@@ -1492,7 +1586,8 @@ impl NativeDiagnostics {
     /// Secure command execution with validation
     fn execute_secure_command(program: &str, args: &[&str]) -> Result<std::process::Output> {
         let executor = crate::security::SecureCommandExecutor::new();
-        executor.execute_command(program, args)
+        executor
+            .execute_command(program, args)
             .map_err(|e| anyhow::anyhow!("Security validation failed: {}", e))
     }
 }

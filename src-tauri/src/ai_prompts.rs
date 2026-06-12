@@ -86,9 +86,7 @@ fn render_json_value(value: &serde_json::Value, depth: usize) -> String {
             }
             lines.join("\n")
         }
-        serde_json::Value::Object(obj) => {
-            render_object_as_text(obj, depth)
-        }
+        serde_json::Value::Object(obj) => render_object_as_text(obj, depth),
     }
 }
 
@@ -96,11 +94,26 @@ fn render_json_value(value: &serde_json::Value, depth: usize) -> String {
 fn render_object_as_text(obj: &serde_json::Map<String, serde_json::Value>, depth: usize) -> String {
     // Priority fields to show first (most important diagnostic info)
     let priority_fields = [
-        "Name", "Caption", "Description", "Status", "State",
-        "Capacity", "Size", "FreeSpace", "TotalPhysicalMemory",
-        "Speed", "MaxClockSpeed", "NumberOfCores", "NumberOfLogicalProcessors",
-        "Manufacturer", "Model", "Version", "DeviceID",
-        "IPAddress", "MACAddress", "AdapterType",
+        "Name",
+        "Caption",
+        "Description",
+        "Status",
+        "State",
+        "Capacity",
+        "Size",
+        "FreeSpace",
+        "TotalPhysicalMemory",
+        "Speed",
+        "MaxClockSpeed",
+        "NumberOfCores",
+        "NumberOfLogicalProcessors",
+        "Manufacturer",
+        "Model",
+        "Version",
+        "DeviceID",
+        "IPAddress",
+        "MACAddress",
+        "AdapterType",
     ];
 
     let mut lines = Vec::new();
@@ -112,8 +125,11 @@ fn render_object_as_text(obj: &serde_json::Map<String, serde_json::Value>, depth
             let rendered = render_json_value(val, depth + 1);
             if !rendered.is_empty() && rendered != "null" {
                 // Format large numbers nicely
-                let display_val = if field.contains("Size") || field.contains("Capacity") ||
-                                    field.contains("Memory") || field.contains("Space") {
+                let display_val = if field.contains("Size")
+                    || field.contains("Capacity")
+                    || field.contains("Memory")
+                    || field.contains("Space")
+                {
                     format_bytes_if_numeric(&rendered)
                 } else {
                     rendered
@@ -136,8 +152,11 @@ fn render_object_as_text(obj: &serde_json::Map<String, serde_json::Value>, depth
             continue;
         }
         // Skip internal/technical fields
-        if key.starts_with("__") || key.starts_with("Cim") ||
-           key.contains("Path") || key.contains("Class") {
+        if key.starts_with("__")
+            || key.starts_with("Cim")
+            || key.contains("Path")
+            || key.contains("Class")
+        {
             continue;
         }
 
@@ -288,7 +307,10 @@ pub fn compress_for_phi_silica(output: &str, max_chars: usize) -> String {
         let half = max_chars / 2;
         let total = compressed.chars().count();
         let first_part: String = compressed.chars().take(half).collect();
-        let last_part: String = compressed.chars().skip(total.saturating_sub(half)).collect();
+        let last_part: String = compressed
+            .chars()
+            .skip(total.saturating_sub(half))
+            .collect();
 
         format!(
             "{}\n... [content truncated] ...\n{}",
