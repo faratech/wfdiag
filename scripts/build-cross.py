@@ -282,6 +282,19 @@ def copy_to_output(target_name: str, release: bool = True) -> Path | None:
     print(f"\n>>> Copying {build_path} -> {final_path}")
     shutil.copy2(build_path, final_path)
 
+    # Ship the Windows App SDK AI DLLs for the loose layout. x64 and arm64
+    # DLLs share filenames, so they go to ai-sdk-dlls/<arch>/ subdirectories —
+    # phi_silica.rs searches there after the exe dir. The direct-DLL
+    # activation path needs these (it bypasses the LAF enforcement that
+    # blocks generation on the plain WinRT path).
+    ai_sdk_src = SRC_TAURI / "resources" / "ai-sdk" / target_name
+    if ai_sdk_src.exists():
+        ai_sdk_dst = OUTPUT_DIR / "ai-sdk-dlls" / target_name
+        ai_sdk_dst.mkdir(parents=True, exist_ok=True)
+        for dll in ai_sdk_src.glob("*.dll"):
+            shutil.copy2(dll, ai_sdk_dst / dll.name)
+        print(f"  AI SDK DLLs -> {ai_sdk_dst}")
+
     return final_path
 
 
