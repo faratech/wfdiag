@@ -148,7 +148,6 @@ coverage/
 **/*.rs.bk
 *.orig
 Cargo.lock.orig
-src-tauri/Cargo.lock
 src-tauri/.cargo/
 
 # =============================================================================
