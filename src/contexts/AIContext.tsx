@@ -206,6 +206,49 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   // Check if we have an API key from settings
   const hasApiKey = !!settings.openAiApiKey
 
+  // In-flight analysis requests keyed by cacheKey. Concurrent calls for the
+  // same content (e.g. a double-clicked Analyze button or two components
+  // requesting the same diagnostic) await one backend request instead of
+  // firing duplicates.
+  const inFlightRef = useRef<Map<string, Promise<string>>>(new Map())
+
+  // Shared body of all analysis functions: dedup against in-flight requests,
+  // manage loading/error state, store the interpretation on success.
+  const runDedupedAnalysis = useCallback((
+    cacheKey: string,
+    doInvoke: () => Promise<AIResponse>
+  ): Promise<string> => {
+    const inFlight = inFlightRef.current.get(cacheKey)
+    if (inFlight) {
+      return inFlight
+    }
+
+    setIsAnalyzing(prev => ({ ...prev, [cacheKey]: true }))
+    setErrors(prev => {
+      const { [cacheKey]: _, ...rest } = prev
+      return rest
+    })
+
+    const request = (async () => {
+      try {
+        const response = await doInvoke()
+        const interpretation = response.interpretation
+        setInterpretations(prev => ({ ...prev, [cacheKey]: interpretation }))
+        return interpretation
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error)
+        setErrors(prev => ({ ...prev, [cacheKey]: errorMsg }))
+        throw error
+      } finally {
+        inFlightRef.current.delete(cacheKey)
+        setIsAnalyzing(prev => ({ ...prev, [cacheKey]: false }))
+      }
+    })()
+
+    inFlightRef.current.set(cacheKey, request)
+    return request
+  }, [])
+
   // Analysis functions
   const analyzeDiagnostic = useCallback(async (
     taskId: string,
@@ -224,33 +267,16 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       return interpretations[cacheKey]
     }
 
-    // Set loading state
-    setIsAnalyzing(prev => ({ ...prev, [cacheKey]: true }))
-    setErrors(prev => {
-      const { [cacheKey]: _, ...rest } = prev
-      return rest
-    })
-
-    try {
-      const response = await invoke<AIResponse>('ai_analyze_diagnostic', {
+    return runDedupedAnalysis(cacheKey, () =>
+      invoke<AIResponse>('ai_analyze_diagnostic', {
         taskId,
         taskName,
         diagnosticOutput: output,
         sessionId,
         apiKey: settings.openAiApiKey || null
       })
-
-      const interpretation = response.interpretation
-      setInterpretations(prev => ({ ...prev, [cacheKey]: interpretation }))
-      return interpretation
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error)
-      setErrors(prev => ({ ...prev, [cacheKey]: errorMsg }))
-      throw error
-    } finally {
-      setIsAnalyzing(prev => ({ ...prev, [cacheKey]: false }))
-    }
-  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey])
+    )
+  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
 
   const analyzeSection = useCallback(async (
     sectionName: string,
@@ -265,31 +291,15 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       return interpretations[cacheKey]
     }
 
-    setIsAnalyzing(prev => ({ ...prev, [cacheKey]: true }))
-    setErrors(prev => {
-      const { [cacheKey]: _, ...rest } = prev
-      return rest
-    })
-
-    try {
-      const response = await invoke<AIResponse>('ai_analyze_section', {
+    return runDedupedAnalysis(cacheKey, () =>
+      invoke<AIResponse>('ai_analyze_section', {
         sectionName,
         sectionData,
         sessionId,
         apiKey: settings.openAiApiKey || null
       })
-
-      const interpretation = response.interpretation
-      setInterpretations(prev => ({ ...prev, [cacheKey]: interpretation }))
-      return interpretation
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error)
-      setErrors(prev => ({ ...prev, [cacheKey]: errorMsg }))
-      throw error
-    } finally {
-      setIsAnalyzing(prev => ({ ...prev, [cacheKey]: false }))
-    }
-  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey])
+    )
+  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
 
   const explainHealth = useCallback(async (metricsData: string): Promise<string> => {
     if (!aiEnabled || (!isAIAvailable && !hasApiKey)) {
@@ -301,30 +311,14 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       return interpretations[cacheKey]
     }
 
-    setIsAnalyzing(prev => ({ ...prev, [cacheKey]: true }))
-    setErrors(prev => {
-      const { [cacheKey]: _, ...rest } = prev
-      return rest
-    })
-
-    try {
-      const response = await invoke<AIResponse>('ai_explain_health', {
+    return runDedupedAnalysis(cacheKey, () =>
+      invoke<AIResponse>('ai_explain_health', {
         metricsData,
         sessionId,
         apiKey: settings.openAiApiKey || null
       })
-
-      const interpretation = response.interpretation
-      setInterpretations(prev => ({ ...prev, [cacheKey]: interpretation }))
-      return interpretation
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error)
-      setErrors(prev => ({ ...prev, [cacheKey]: errorMsg }))
-      throw error
-    } finally {
-      setIsAnalyzing(prev => ({ ...prev, [cacheKey]: false }))
-    }
-  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey])
+    )
+  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
 
   // Generic analysis function for monitoring, processes, comparisons, etc.
   const analyzeGeneric = useCallback(async (
@@ -341,32 +335,16 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       return interpretations[cacheKey]
     }
 
-    setIsAnalyzing(prev => ({ ...prev, [cacheKey]: true }))
-    setErrors(prev => {
-      const { [cacheKey]: _, ...rest } = prev
-      return rest
-    })
-
-    try {
+    return runDedupedAnalysis(cacheKey, () =>
       // Use ai_analyze_section with a special section name for generic analyses
-      const response = await invoke<AIResponse>('ai_analyze_section', {
+      invoke<AIResponse>('ai_analyze_section', {
         sectionName: cacheKey,
         sectionData: prompt,
         sessionId,
         apiKey: settings.openAiApiKey || null
       })
-
-      const interpretation = response.interpretation
-      setInterpretations(prev => ({ ...prev, [cacheKey]: interpretation }))
-      return interpretation
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error)
-      setErrors(prev => ({ ...prev, [cacheKey]: errorMsg }))
-      throw error
-    } finally {
-      setIsAnalyzing(prev => ({ ...prev, [cacheKey]: false }))
-    }
-  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey])
+    )
+  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
 
   // Cache management
   const clearCache = useCallback(async (targetSessionId?: string) => {

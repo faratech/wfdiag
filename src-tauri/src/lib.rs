@@ -206,10 +206,26 @@ async fn start_diagnostics(
 
     let mut current = state.current_session.lock().await;
     *current = Some(session);
+    drop(current);
+
+    // Only one session is ever active; dropping stale entries here keeps the
+    // cancellation set from growing across scans.
+    state.cancelled_sessions.lock().await.clear();
 
     println!("Diagnostic session {} started successfully", session_id);
 
     Ok(session_id)
+}
+
+/// Cancel a running diagnostic session. Cancellation is task-granular:
+/// tasks already in flight finish normally, queued tasks are skipped, and the
+/// pending `run_diagnostics_parallel` call resolves quickly with the results
+/// collected so far.
+#[tauri::command]
+async fn cancel_diagnostics(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    println!("Cancelling diagnostic session: {}", session_id);
+    state.cancelled_sessions.lock().await.insert(session_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -286,6 +302,21 @@ async fn run_diagnostics_parallel(
             let session_id = session_id.clone();
 
             async move {
+                // Skip queued tasks of a cancelled session before doing any work.
+                // No events are emitted: the frontend has already torn down its
+                // progress UI when it requested cancellation.
+                if state_clone
+                    .cancelled_sessions
+                    .lock()
+                    .await
+                    .contains(&session_id)
+                {
+                    return Err::<(String, TaskResult), String>(format!(
+                        "session {} cancelled",
+                        session_id
+                    ));
+                }
+
                 // Find task details
                 let task = match tasks_ref.iter().find(|t| t.id == task_id) {
                     Some(task) => task,
@@ -810,6 +841,7 @@ pub fn run() {
             get_architecture_info,
             get_available_tasks,
             start_diagnostics,
+            cancel_diagnostics,
             run_diagnostic_task,
             run_diagnostics_parallel,
             get_session_results,
