@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { useAppContext } from '../contexts/AppContext'
 import { useScanner } from '../hooks/useScanner'
 import { taskIcon } from '../ui/diagnostic-icons'
@@ -6,11 +6,19 @@ import { formatDuration } from './util'
 import { DiagnosticDetail, type DiagItem } from './DiagnosticDetail'
 
 export const DiagnosticsScreen: React.FC = () => {
-  const { availableTasks, results, isRunning, currentProgress, currentTaskName, scanStartTime, scanEndTime, taskStatuses } = useAppContext()
+  const { availableTasks, results, isRunning, currentProgress, currentTaskName, scanStartTime, scanEndTime, taskStatuses, pendingDetailTaskId, setPendingDetailTaskId } = useAppContext()
   const { runQuickScan, runFullScan, stopScan } = useScanner()
 
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
+
+  // Deep-link from the command palette ("View Result: X")
+  useEffect(() => {
+    if (pendingDetailTaskId && results[pendingDetailTaskId]) {
+      setSelectedId(pendingDetailTaskId)
+      setPendingDetailTaskId(null)
+    }
+  }, [pendingDetailTaskId, results, setPendingDetailTaskId])
 
   // Per-category progress for the scanning hero ("Hardware 3/5"), derived from
   // the live task-progress events; only categories with started tasks appear
