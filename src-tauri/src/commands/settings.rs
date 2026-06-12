@@ -65,6 +65,9 @@ pub struct AppSettings {
     // without the bundled-DLL bypass. Empty uses the built-in fallback token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phi_silica_laf_token: Option<String>,
+    // Closing the main window hides to the system tray instead of exiting
+    #[serde(default)]
+    pub close_to_tray: bool,
 }
 
 fn default_max_concurrent() -> u32 {
@@ -146,16 +149,24 @@ pub async fn save_settings(settings: AppSettings) -> Result<(), String> {
     std::fs::write(&path, &json)
         .map_err(|e| DiagError::file(path.display().to_string(), e.to_string()))?;
 
-    // Sync AI preference to in-memory state
-    let pref = match settings.preferred_ai_provider.to_lowercase().as_str() {
-        "openai" => crate::ai_service::AIProviderPreference::OpenAI,
-        "phi_silica" | "phisilica" => crate::ai_service::AIProviderPreference::PhiSilica,
-        _ => crate::ai_service::AIProviderPreference::Auto,
-    };
-    crate::ai_service::set_user_preference(pref);
+    // Sync settings the backend consults in memory
+    sync_in_memory_state(&settings);
 
     println!("Settings saved to {:?}", path);
     Ok(())
+}
+
+/// Mirror settings that backend code reads on hot paths into in-memory state
+/// (AI provider routing, the close-to-tray window handler).
+fn sync_in_memory_state(settings: &AppSettings) {
+    let pref = match settings.preferred_ai_provider.to_lowercase().as_str() {
+        "openai" => crate::ai_service::AIProviderPreference::OpenAI,
+        "phi_silica" | "phisilica" => crate::ai_service::AIProviderPreference::PhiSilica,
+        "foundry_local" | "foundrylocal" => crate::ai_service::AIProviderPreference::FoundryLocal,
+        _ => crate::ai_service::AIProviderPreference::Auto,
+    };
+    crate::ai_service::set_user_preference(pref);
+    crate::tray::set_close_to_tray(settings.close_to_tray);
 }
 
 #[tauri::command]
@@ -171,13 +182,8 @@ pub async fn load_settings() -> Result<AppSettings, String> {
         serde_json::from_str(&json).map_err(|e| DiagError::serialization(e.to_string()))?
     };
 
-    // Sync loaded AI preference to in-memory state
-    let pref = match settings.preferred_ai_provider.to_lowercase().as_str() {
-        "openai" => crate::ai_service::AIProviderPreference::OpenAI,
-        "phi_silica" | "phisilica" => crate::ai_service::AIProviderPreference::PhiSilica,
-        _ => crate::ai_service::AIProviderPreference::Auto,
-    };
-    crate::ai_service::set_user_preference(pref);
+    // Sync loaded settings to in-memory state
+    sync_in_memory_state(&settings);
 
     // Load API key from keyring and include in response
     if let Some(api_key) = load_api_key_internal().await {

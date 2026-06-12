@@ -18,6 +18,7 @@ mod security;
 mod sparse_identity;
 pub mod state;
 pub mod timestamp;
+mod tray;
 mod windows_native;
 #[cfg(windows)]
 mod wmi_native;
@@ -878,13 +879,23 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
-        .setup(|_app| {
+        .setup(|app| {
+            tray::setup_tray(app.handle())?;
             // Pre-initialize NPU detection in background to avoid delay on first monitoring start
             #[cfg(windows)]
             std::thread::spawn(|| {
                 native_monitor::prewarm_npu_cache();
             });
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == "main"
+                && tray::close_to_tray_enabled()
+            {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::settings::save_settings,
