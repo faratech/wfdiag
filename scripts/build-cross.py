@@ -30,20 +30,25 @@ SDK_BIN = Path("/mnt/c/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64"
 PROJECT_NAME = "WindowsForum_Diagnostics"
 PUBLISHER = "CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4"
 
-# Sparse identity package ("package with external location"): grants the loose
-# exe package identity + systemAIModels without full MSIX packaging. Uses the
-# SAME identity (Name + Publisher) as the Store app so the Microsoft-issued
-# Phi Silica LAF token — bound to the Store Package Family Name
-# 32827MikeFara.WindowsForumDiagnostics_t6j5qexy2jpp2 — validates under it.
-# Must match the <msix> element in src-tauri/windows-app.manifest. The Store
-# build of the same identity must be uninstalled on a machine before
-# registering this loose/Developer-signed one (one registration per identity).
+# Sparse identity package ("package with external location") — DEV TOOLING
+# ONLY. Phi Silica is Store-only in shipped builds (it requires registered
+# package identity; an unpackaged exe gets 0x80070005 even on the direct DLL
+# activation path). `build-sparse` + Install-SparseIdentity.ps1 let a
+# developer attach the Store identity to a loose exe to test that path
+# without a Store install. Uses the SAME identity (Name + Publisher) as the
+# Store app so the Microsoft-issued LAF token — bound to the Store Package
+# Family Name 32827MikeFara.WindowsForumDiagnostics_t6j5qexy2jpp2 — validates
+# under it. Must match the <msix> element in src-tauri/windows-app.manifest.
+# The Store build of the same identity must be uninstalled on the machine
+# first (one registration per identity), and the self-signed cert must be
+# trusted once.
 SPARSE_PACKAGE_NAME = "32827MikeFara.WindowsForumDiagnostics"
 
-# Whether to ship Windows App SDK AI DLLs next to the loose exe. ON: the
-# bundled 2.0-experimental DLLs let Phi Silica run via direct DllGetActivation
-# Factory, the only path that does not depend on a registered package identity.
-BUNDLE_AI_DLLS = True
+# Whether to ship Windows App SDK AI DLLs next to the loose exe. OFF by
+# default: the loose exe cannot use Phi Silica regardless (no package
+# identity), so the DLLs are dead weight. The MSIX build bundles its own
+# copies independently of this flag.
+BUNDLE_AI_DLLS = False
 
 # Certificate configuration for self-signing
 CERT_PATH = OUTPUT_DIR / "wfdiag-selfsign.pfx"
@@ -291,10 +296,9 @@ def copy_to_output(target_name: str, release: bool = True) -> Path | None:
     print(f"\n>>> Copying {build_path} -> {final_path}")
     shutil.copy2(build_path, final_path)
 
-    # No AI DLLs are shipped with the loose exe: with package identity (sparse
-    # or MSIX) phi_silica.rs loads them from the installed Windows App SDK
-    # framework package. Drop the optional bundled copy by passing
-    # --bundle-ai-dlls if a machine lacks the framework.
+    # By default no AI DLLs ship with the loose exe (Phi Silica needs package
+    # identity, which a loose exe doesn't have). --bundle-ai-dlls copies them
+    # anyway for dev testing alongside a sparse-registered identity.
     if BUNDLE_AI_DLLS:
         ai_sdk_src = SRC_TAURI / "resources" / "ai-sdk" / target_name
         if ai_sdk_src.exists():
@@ -886,7 +890,8 @@ def main():
         "action",
         choices=["check", "build", "build-all", "build-msix", "build-sparse"],
         help="Action to perform: check, build, build-all, build-msix, or "
-             "build-sparse (sparse identity packages for the loose exes)"
+             "build-sparse (DEV ONLY: sparse identity packages to test the "
+             "Store-identity Phi Silica path on a loose exe)"
     )
     parser.add_argument(
         "--target",
@@ -928,9 +933,9 @@ def main():
     parser.add_argument(
         "--bundle-ai-dlls",
         action="store_true",
-        help="Ship Windows App SDK AI DLLs next to the loose exe to bypass the "
-             "LAF enforcement (default: off; the Store-identity sparse package "
-             "unlocks the LAF with its token instead)"
+        help="Ship Windows App SDK AI DLLs next to the loose exe (default: off). "
+             "Dev-only: useful together with a sparse-registered identity; a "
+             "plain loose exe cannot use Phi Silica regardless"
     )
 
     args = parser.parse_args()

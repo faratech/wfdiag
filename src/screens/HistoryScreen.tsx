@@ -17,7 +17,8 @@ export const HistoryScreen: React.FC = () => {
     setSelected(id)
     clearComparison()
     if (current && id !== current.id) {
-      compareScans(current.id, id).catch(() => {})
+      // compareScans never rejects — failures land in cmpError, rendered below
+      void compareScans(current.id, id)
     }
   }
 

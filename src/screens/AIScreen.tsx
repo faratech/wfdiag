@@ -102,8 +102,8 @@ export const AIScreen: React.FC = () => {
           <header className="wf-block-header"><span className="accent-bar" /><span>Models</span></header>
           <div style={{ padding: 12, fontSize: 13 }}>
             {([
-              ['Phi Silica (on-device NPU)', aiStatus?.phi_silica_available ? (aiStatus.phi_silica_ready ? 'Ready' : (aiStatus.phi_silica_message || 'Available')) : 'Unavailable', 'var(--wf-success-feature)', activeProvider === 'phi_silica'],
-              ['Foundry Local (local server)', aiStatus?.foundry_local_available ? `Running at ${aiStatus.foundry_local_endpoint || 'local endpoint'}` : 'Not detected', '#c98a00', activeProvider === 'foundry_local'],
+              ['Phi Silica (on-device NPU)', aiStatus?.phi_silica_available ? (aiStatus.phi_silica_ready ? 'Ready' : (aiStatus.phi_silica_message || 'Available')) : (aiStatus?.phi_silica_message || 'Unavailable'), 'var(--wf-success-feature)', activeProvider === 'phi_silica'],
+              ['Foundry Local (local server)', aiStatus?.foundry_local_available ? `Running at ${aiStatus.foundry_local_endpoint || 'local endpoint'}` : 'Not detected — install with: winget install Microsoft.FoundryLocal', '#c98a00', activeProvider === 'foundry_local'],
               ['OpenAI (cloud)', aiStatus?.openai_api_key_set ? 'API key configured' : 'Not configured', 'var(--wf-paletteColor1)', activeProvider === 'openai'],
             ] as const).map((m, i, arr) => (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: i < arr.length - 1 ? '1px solid var(--hairline)' : 'none' }}>

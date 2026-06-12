@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useAppContext } from './AppContext'
+import * as logger from '../utils/logger'
 
 // Stable, fast (djb2) hash of the analyzed content. Folded into AI cache keys so that a
 // re-scan producing different output for the same task/section yields a NEW key and is
@@ -143,9 +144,9 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       setIsLoading(true)
       const status = await invoke<AIProviderStatus>('ai_get_status')
       setAiStatus(status)
-      console.log('AI status refreshed:', status)
+      logger.debug('AIContext', 'AI status refreshed', status)
     } catch (error) {
-      console.error('Failed to get AI status:', error)
+      logger.error('AIContext', 'Failed to get AI status', String(error))
       setAiStatus({
         preferred_provider: 'none',
         openai_available: false,
@@ -177,14 +178,13 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
 
     // Check if API key or provider changed
     if (currentApiKey !== prevApiKey || currentProvider !== prevProvider) {
-      console.log('AI settings changed, refreshing status...')
+      logger.debug('AIContext', 'AI settings changed, refreshing status')
       prevSettingsRef.current = { apiKey: currentApiKey, provider: currentProvider }
 
       // Update backend preference if it changed
       if (currentProvider !== prevProvider) {
         invoke('ai_set_preference', { preference: currentProvider }).catch((error) => {
-          // Log to console for debugging
-          console.error('Failed to set AI preference:', error)
+          logger.error('AIContext', 'Failed to set AI preference', String(error))
           // Store error in context state for UI consumption
           const errorMsg = error instanceof Error ? error.message : String(error)
           setErrors((prev) => ({
@@ -205,11 +205,11 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
 
   // Dummy setters for backwards compatibility (settings are managed via AppContext now)
   const setAiEnabled = useCallback((_enabled: boolean) => {
-    console.warn('setAiEnabled is deprecated - use Settings dialog to change AI settings')
+    logger.warn('AIContext', 'setAiEnabled is deprecated - use Settings dialog to change AI settings')
   }, [])
 
   const setPreferredProvider = useCallback(async (_provider: AIProviderPreference) => {
-    console.warn('setPreferredProvider is deprecated - use Settings dialog to change AI settings')
+    logger.warn('AIContext', 'setPreferredProvider is deprecated - use Settings dialog to change AI settings')
   }, [])
 
   // Check if we have an API key from settings
@@ -372,7 +372,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         setErrors({})
       }
     } catch (error) {
-      console.error('Failed to clear AI cache:', error)
+      logger.error('AIContext', 'Failed to clear AI cache', String(error))
     }
   }, [sessionId])
 

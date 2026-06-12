@@ -315,7 +315,8 @@ pub async fn analyze(
         AIProvider::None => Err(DiagError::ai_unavailable(
             "none",
             "No AI provider available. Configure an OpenAI API key in Settings, install \
-             Foundry Local, or run on a Copilot+ PC with package identity for Phi Silica.",
+             Foundry Local (winget install Microsoft.FoundryLocal) for local AI, or use \
+             the Microsoft Store version on a Copilot+ PC for on-device Phi Silica.",
         )
         .into()),
     };

@@ -6,9 +6,14 @@
 //! Note: This requires:
 //! - A Copilot+ PC with NPU hardware (40+ TOPS)
 //! - Windows 11 24H2/25H2 or later
-//! - AI Dev Gallery installed (provides Windows App SDK AI runtime)
-//! - App must be packaged as MSIX with systemAIModels capability
-//! - Limited Access Feature (LAF) token from Microsoft
+//! - Registered package identity (the Microsoft Store build) with the
+//!   systemAIModels capability — proven non-negotiable: even direct DLL
+//!   activation returns 0x80070005 in an unpackaged process
+//! - Limited Access Feature (LAF) token from Microsoft (bound to the Store
+//!   package family name)
+//!
+//! Loose/portable builds cannot use Phi Silica; the AI service routes them
+//! to Foundry Local or OpenAI instead.
 
 use serde::{Deserialize, Serialize};
 
@@ -99,24 +104,6 @@ fn get_windows_build() -> Option<u32> {
         .ok()?;
     let build_str: String = key.get_value("CurrentBuildNumber").ok()?;
     build_str.parse().ok()
-}
-
-/// Check if AI Dev Gallery is installed
-#[allow(dead_code)]
-#[cfg(windows)]
-fn check_ai_dev_gallery_installed() -> bool {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    std::process::Command::new("powershell")
-        .args([
-            "-Command",
-            "(Get-AppxPackage -Name 'Microsoft.AIDevGallery').Name",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-        .unwrap_or(false)
 }
 
 /// Initialize WinRT runtime (required before using WinRT APIs)
@@ -310,22 +297,20 @@ fn framework_package_dirs() -> Vec<std::path::PathBuf> {
 
 /// Candidate directories for the Windows App SDK AI DLLs, in priority order.
 ///
-/// BUNDLED dirs come FIRST, the installed framework package LAST. The bundled
-/// Windows App SDK 2.0-experimental DLLs bypass the Limited Access Feature
-/// enforcement that the stable framework applies at generation time. A loose
-/// exe running under the sparse identity cannot unlock that LAF — the token is
-/// bound to the Store package's full family name, and the dev package has a
-/// different name — so it must use the bundled DLLs. The framework is the
-/// fallback for installs that ship no DLLs and have an unlockable identity.
+/// The installed framework package comes FIRST: with package identity (the
+/// Store build), the package graph resolves the exact framework version the
+/// manifest declares, which is the supported configuration. Bundled copies
+/// next to the exe are the fallback for MSIX layouts that ship their own
+/// DLLs (the historically proven configuration) or machines where the
+/// framework package is missing.
 #[cfg(windows)]
 fn dll_search_dirs() -> Vec<std::path::PathBuf> {
-    let mut dirs = Vec::new();
+    let mut dirs = framework_package_dirs();
     if let Some(app_dir) = get_app_directory() {
         dirs.push(app_dir.clone());
         dirs.push(app_dir.join("ai-sdk-dlls").join(DLL_ARCH));
         dirs.push(app_dir.join("ai-sdk").join(DLL_ARCH));
     }
-    dirs.extend(framework_package_dirs());
     dirs
 }
 
@@ -351,9 +336,20 @@ fn load_ai_dll(
     };
     use windows_core::{HSTRING, PCWSTR};
 
-    // Explicit paths FIRST (bundled experimental DLLs that bypass LAF), so a
-    // present bundled copy wins over the stable framework on the package graph.
-    // LOAD_WITH_ALTERED_SEARCH_PATH resolves the DLL's own imports from its dir.
+    // Bare name FIRST — with package identity this resolves from the package
+    // graph (framework package or the MSIX's own root), the supported path.
+    let wide = HSTRING::from(dll_name);
+    if let Ok(module) = unsafe { LoadLibraryW(PCWSTR::from_raw(wide.as_ptr())) } {
+        log_phi_silica(&format!(
+            "Loaded {} via package graph (bare name)",
+            dll_name
+        ));
+        return Some(module);
+    }
+
+    // Explicit candidate paths as fallback (framework dirs, then bundled
+    // copies next to the exe). LOAD_WITH_ALTERED_SEARCH_PATH resolves the
+    // DLL's own imports from its directory.
     for dir in search_dirs {
         let dll_path = dir.join(dll_name);
         if !dll_path.exists() {
@@ -383,22 +379,11 @@ fn load_ai_dll(
             )),
         }
     }
-
-    // Bare name LAST — resolves from the framework package via the package
-    // graph (LAF-enforced). Used only when no bundled copy is present.
-    let wide = HSTRING::from(dll_name);
-    if let Ok(module) = unsafe { LoadLibraryW(PCWSTR::from_raw(wide.as_ptr())) } {
-        log_phi_silica(&format!(
-            "Loaded {} via package graph (bare name)",
-            dll_name
-        ));
-        return Some(module);
-    }
     None
 }
 
-/// Ensure the AI Text DLL is loaded — from a bundled experimental copy or, as a
-/// (no bundling) or, failing that, a bundled copy.
+/// Ensure the AI Text DLL is loaded — from the package graph / framework
+/// package or, failing that, a bundled copy next to the exe.
 #[cfg(windows)]
 fn try_direct_dll_activation() -> Result<(), String> {
     use std::sync::atomic::Ordering;
@@ -453,17 +438,15 @@ fn create_language_model_winrt() -> Result<crate::windows_ai_bindings::LanguageM
     wait_for_async_blocking(op)
 }
 
-/// Create a LanguageModel, preferring DllGetActivationFactory on the bundled
-/// DLLs and falling back to standard WinRT activation.
+/// Create a LanguageModel, preferring DllGetActivationFactory on the loaded
+/// AI Text DLL and falling back to standard WinRT activation.
 ///
-/// The direct-DLL path goes FIRST deliberately: the WinAppSDK runtime
-/// enforces Phi Silica as a Limited Access Feature on the Ro activation path
-/// (model creation succeeds but GenerateResponseAsync is denied with
-/// 0x80070005 when the LAF token is unapproved — ours returns "Unavailable"),
-/// while the direct factory from the bundled DLLs bypasses that enforcement.
-/// This is the configuration the MSIX build has always shipped. The WinRT
-/// fallback covers installs without bundled DLLs where identity +
-/// an approved LAF make the supported path work.
+/// The direct-DLL path goes FIRST because it is the configuration the MSIX
+/// build has always shipped and verified (RoGetActivationFactory has
+/// historically returned E_ACCESSDENIED for third-party apps even with
+/// identity). Both paths require registered package identity at the API
+/// level — an unpackaged process gets 0x80070005 from either, which is why
+/// loose builds don't route here at all.
 #[cfg(windows)]
 fn create_language_model() -> Result<crate::windows_ai_bindings::LanguageModel, String> {
     match create_language_model_direct() {
@@ -611,6 +594,22 @@ fn check_phi_silica_safe() -> (bool, String, Option<String>, Option<String>) {
     use crate::windows_ai_bindings::{AIFeatureReadyState, LanguageModel};
 
     log_phi_silica("=== check_phi_silica_safe called ===");
+
+    // Without registered package identity the Windows AI APIs deny access
+    // (0x80070005) on every activation path, so don't probe further — report
+    // the real reason and what to do about it.
+    if !crate::sparse_identity::has_package_identity() {
+        log_phi_silica("No package identity — Phi Silica unavailable");
+        return (
+            false,
+            "Phi Silica requires the Microsoft Store version of this app (Windows AI APIs \
+             need registered package identity). For local AI in this build, install \
+             Foundry Local (winget install Microsoft.FoundryLocal)."
+                .to_string(),
+            None,
+            Some("NO_PACKAGE_IDENTITY".to_string()),
+        );
+    }
 
     // Ensure WinRT is initialized before calling any WinRT APIs
     ensure_winrt_initialized();
@@ -935,14 +934,25 @@ where
     }
 }
 
-/// Log to file for debugging MSIX apps
+/// File logging for debugging MSIX apps, opt-in via `WFDIAG_AI_LOG=1` so
+/// production runs don't write to C:\temp on every AI call.
 #[cfg(windows)]
 fn log_phi_silica(msg: &str) {
     use std::fs::OpenOptions;
     use std::io::Write;
-    // Use C:\temp which should be accessible
+    use std::sync::OnceLock;
+
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let enabled = *ENABLED.get_or_init(|| {
+        std::env::var("WFDIAG_AI_LOG")
+            .map(|v| !v.trim().is_empty() && v != "0")
+            .unwrap_or(false)
+    });
+    if !enabled {
+        return;
+    }
+
     let log_path = std::path::Path::new("C:\\temp\\phi-silica-rust.log");
-    // Create dir if needed
     let _ = std::fs::create_dir_all("C:\\temp");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
         let _ = writeln!(
@@ -999,14 +1009,24 @@ pub async fn generate_response(prompt: &str) -> Result<String, String> {
         use crate::windows_ai_bindings::LanguageModelResponseStatus;
         use windows_core::HSTRING;
 
+        // Identity is a hard requirement — fail fast with the real reason
+        // instead of a bare 0x80070005 from deep inside the runtime.
+        if !crate::sparse_identity::has_package_identity() {
+            return Err(DiagError::ai_unavailable(
+                "phi_silica",
+                "Phi Silica requires the Microsoft Store version of this app",
+            )
+            .into());
+        }
+
         // Ensure WinRT is initialized, the App SDK bootstrapper has been
-        // attempted (needed for unpackaged/sparse processes), and LAF is unlocked
+        // attempted, and LAF is unlocked
         ensure_winrt_initialized();
         let _ = init_windows_app_sdk();
         let _ = try_unlock_laf();
 
-        // Create model: WinRT activation first (package identity), bundled
-        // DLL fallback second (MSIX layout)
+        // Create model: direct DLL activation first (proven MSIX
+        // configuration), WinRT activation as fallback
         let model = create_language_model()?;
 
         // Generate response
