@@ -9,8 +9,8 @@ This repository is now configured with Sigstore for keyless code signing using G
 - **Command**: `cosign-windows-amd64`
 
 ### 📋 GitHub Actions Workflow
-- **File**: `.github/workflows/sigstore-sign.yml`
-- **Triggers**: Push to main, tags, PRs, releases
+- **File**: `.github/workflows/release-signed.yml` (the standalone `sigstore-sign.yml` workflow has been removed)
+- **Triggers**: Version tags, manual dispatch
 - **Features**:
   - Builds Tauri app with latest dependencies
   - Signs executables, MSI, and NSIS installers
