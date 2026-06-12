@@ -29,4 +29,6 @@ export interface SettingsData {
    * approved token the supported WinRT path works without the DLL bypass.
    */
   phiSilicaLafToken?: string
+  /** Closing the main window hides to the system tray instead of exiting */
+  closeToTray?: boolean
 }

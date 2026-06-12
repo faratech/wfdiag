@@ -64,6 +64,20 @@ const AppContent: React.FC = () => {
     }
   }, [resultCount, detectIssues])
 
+  // "Quick Scan" from the tray menu (backend shows the window, then emits)
+  const runQuickScanRef = useRef(runQuickScan)
+  useEffect(() => {
+    runQuickScanRef.current = runQuickScan
+  }, [runQuickScan])
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    import('@tauri-apps/api/event')
+      .then(({ listen }) => listen('tray://quick-scan', () => runQuickScanRef.current()))
+      .then(fn => { unlisten = fn })
+      .catch(() => {}) // not running under Tauri (plain vite dev)
+    return () => unlisten?.()
+  }, [])
+
   const resultValues = Object.values(results)
   const passed = resultValues.filter(r => r.success).length
   const failed = resultValues.filter(r => !r.success).length

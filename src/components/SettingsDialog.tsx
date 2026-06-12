@@ -94,6 +94,10 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({ open, onOpenChan
         <input type="checkbox" checked={draft.scanOnStartup ?? false} onChange={e => set('scanOnStartup', e.target.checked)} />
       </div>
       <div className="form-row">
+        <div><strong>Close to tray</strong><div className="hint">Closing the window keeps the app running in the system tray</div></div>
+        <input type="checkbox" checked={draft.closeToTray ?? false} onChange={e => set('closeToTray', e.target.checked)} />
+      </div>
+      <div className="form-row">
         <div><strong>Max concurrent tasks</strong></div>
         <input className="field-input" style={{ width: 90 }} type="number" min={1} max={16} value={draft.maxConcurrentTasks ?? 5} onChange={e => set('maxConcurrentTasks', Number(e.target.value))} />
       </div>
