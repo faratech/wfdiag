@@ -215,7 +215,7 @@ pub fn check_phi_silica_available() -> (bool, bool, Option<String>) {
 /// Check if a local OpenAI-compatible endpoint (Foundry Local) is reachable.
 /// Returns the base URL when available.
 pub async fn check_foundry_local_available() -> Option<String> {
-    crate::openai_integration::local_ai_endpoint().await
+    crate::ai_providers::foundry::local_ai_endpoint().await
 }
 
 /// Check if an Ollama server is reachable. Returns the base URL when available.
@@ -424,7 +424,7 @@ pub async fn get_ai_status() -> AIProviderStatus {
             AIProvider::FoundryLocal,
             foundry_endpoint.is_some(),
             foundry_endpoint.is_some(),
-            Some(crate::openai_integration::FOUNDRY_LOCAL_MODEL.to_string()),
+            Some(crate::ai_providers::foundry::FOUNDRY_LOCAL_MODEL.to_string()),
             foundry_endpoint.clone(),
         ),
         provider_info(
@@ -446,7 +446,7 @@ pub async fn get_ai_status() -> AIProviderStatus {
             AIProvider::OpenAI,
             openai_available,
             openai_available,
-            Some(crate::openai_integration::OPENAI_MODEL.to_string()),
+            Some(crate::ai_providers::openai::OPENAI_MODEL.to_string()),
             None,
         ),
         provider_info(

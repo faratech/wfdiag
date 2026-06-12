@@ -1,5 +1,32 @@
 # Microsoft Store Release Notes
 
+## Version 2.5.0
+
+### What's New
+
+**An AI Assistant That Actually Runs Diagnostics**
+- Ask anything — the assistant now decides which diagnostics to run, runs them itself, and answers from the real data
+- Watch it work: live activity chips show every check it runs, with the raw results one click away
+- Streaming responses with a Stop button, multi-turn conversations, and safe read-only access
+
+**Bring Your Own AI — Seven Providers**
+- New: Anthropic Claude and Google Gemini (native), Ollama (auto-detected), and any OpenAI-compatible endpoint (OpenRouter, Groq, …)
+- Joining the existing OpenAI, Foundry Local, and on-device Phi Silica (Store version, Copilot+ PCs)
+- Per-provider API keys stored in Windows secure storage; Auto mode always prefers local AI first
+
+**One-Click Scan Report**
+- "Explain this scan" turns any completed scan into a health report: verdict, top issues, what changed since your last scan, and what to fix first
+
+**Smarter Analyses**
+- Cloud models now see the full diagnostic data instead of a heavily trimmed excerpt
+
+### Requirements
+- Windows 11 for full functionality
+- Copilot+ PC and the Microsoft Store version required for on-device AI (Phi Silica)
+- Free local AI: Foundry Local or Ollama; cloud AI: OpenAI, Anthropic or Gemini API key
+
+---
+
 ## Version 2.4.0
 
 ### What's New
