@@ -218,6 +218,11 @@ impl ScanStorage {
         println!("Loaded current scan: {} results", current.results.len());
         println!("Loaded previous scan: {} results", previous.results.len());
 
+        Ok(Self::compute_comparison(current, previous))
+    }
+
+    /// Pure diff of two loaded scans (storage-free, so it is unit-testable).
+    fn compute_comparison(current: ScanRecord, previous: ScanRecord) -> ComparisonResult {
         // Get task metadata for proper names and categories
         let all_tasks = crate::diagnostics::get_all_tasks();
         let task_map: HashMap<String, &crate::diagnostics::DiagnosticTask> =
@@ -303,7 +308,7 @@ impl ScanStorage {
             new_successes.len()
         );
 
-        Ok(ComparisonResult {
+        ComparisonResult {
             current_scan: ScanSummary {
                 id: current.id,
                 timestamp: current.timestamp,
@@ -328,7 +333,7 @@ impl ScanStorage {
             new_failures,
             new_successes,
             status_unchanged,
-        })
+        }
     }
 
     /// Compare two outputs intelligently, parsing JSON when possible
@@ -473,5 +478,130 @@ impl ScanStorage {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(success: bool, output: &str) -> TaskResult {
+        TaskResult {
+            success,
+            output: output.to_string(),
+            error: None,
+            duration_ms: 5,
+        }
+    }
+
+    fn scan(id: &str, results: Vec<(&str, TaskResult)>) -> ScanRecord {
+        let results: HashMap<String, TaskResult> = results
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let success_count = results.values().filter(|r| r.success).count();
+        ScanRecord {
+            id: id.to_string(),
+            timestamp: Timestamp::from_iso_string("2026-06-12T10:00:00Z").unwrap(),
+            computer_name: "TEST-PC".to_string(),
+            os_version: "Windows 11".to_string(),
+            is_admin: false,
+            task_count: results.len(),
+            success_count,
+            failure_count: results.len() - success_count,
+            duration_ms: 1000,
+            tags: vec![],
+            results,
+        }
+    }
+
+    #[test]
+    fn regression_lands_in_new_failures() {
+        let current = scan("cur", vec![("os_info", result(false, "boom"))]);
+        let previous = scan("prev", vec![("os_info", result(true, "fine"))]);
+        let cmp = ScanStorage::compute_comparison(current, previous);
+        assert_eq!(cmp.new_failures.len(), 1);
+        assert_eq!(cmp.new_failures[0].task_id, "os_info");
+        assert!(cmp.new_successes.is_empty());
+        assert_eq!(cmp.total_changes, 1);
+    }
+
+    #[test]
+    fn recovery_lands_in_new_successes() {
+        let current = scan("cur", vec![("os_info", result(true, "fine"))]);
+        let previous = scan("prev", vec![("os_info", result(false, "boom"))]);
+        let cmp = ScanStorage::compute_comparison(current, previous);
+        assert_eq!(cmp.new_successes.len(), 1);
+        assert!(cmp.new_failures.is_empty());
+        assert_eq!(cmp.total_changes, 1);
+    }
+
+    #[test]
+    fn json_key_order_is_not_a_change() {
+        let current = scan("cur", vec![("disk", result(true, r#"{"a": 1, "b": 2}"#))]);
+        let previous = scan("prev", vec![("disk", result(true, r#"{"b": 2, "a": 1}"#))]);
+        let cmp = ScanStorage::compute_comparison(current, previous);
+        assert_eq!(cmp.total_changes, 0);
+        assert_eq!(cmp.status_unchanged.len(), 1);
+        assert!(!cmp.status_unchanged[0].output_changed);
+    }
+
+    #[test]
+    fn real_output_change_is_counted() {
+        let current = scan("cur", vec![("disk", result(true, r#"{"free": 10}"#))]);
+        let previous = scan("prev", vec![("disk", result(true, r#"{"free": 90}"#))]);
+        let cmp = ScanStorage::compute_comparison(current, previous);
+        assert_eq!(cmp.total_changes, 1);
+        assert!(cmp.status_unchanged[0].output_changed);
+    }
+
+    #[test]
+    fn non_intersecting_tasks_are_skipped() {
+        // A task present in only one scan is a selection difference, not a
+        // regression — it must not inflate new_failures/total_changes
+        let current = scan("cur", vec![("only_in_current", result(true, "x"))]);
+        let previous = scan("prev", vec![("only_in_previous", result(true, "y"))]);
+        let cmp = ScanStorage::compute_comparison(current, previous);
+        assert!(cmp.new_failures.is_empty());
+        assert!(cmp.new_successes.is_empty());
+        assert!(cmp.status_unchanged.is_empty());
+        assert_eq!(cmp.total_changes, 0);
+    }
+
+    #[test]
+    fn outputs_equivalence_rules() {
+        // CRLF / surrounding whitespace normalize away for non-JSON
+        assert!(ScanStorage::outputs_are_equivalent("a\r\nb", "a\nb"));
+        assert!(ScanStorage::outputs_are_equivalent(" x ", "x"));
+        // Numeric representation differences inside JSON are equal as floats
+        assert!(ScanStorage::outputs_are_equivalent(
+            r#"{"v": 1.0}"#,
+            r#"{"v": 1}"#
+        ));
+        // Genuinely different values are a change
+        assert!(!ScanStorage::outputs_are_equivalent(
+            r#"{"v": 1}"#,
+            r#"{"v": 2}"#
+        ));
+        assert!(!ScanStorage::outputs_are_equivalent("abc", "abd"));
+    }
+
+    #[test]
+    fn scan_record_roundtrips_through_serde() {
+        let original = scan(
+            "rt",
+            vec![
+                ("os_info", result(true, "ok")),
+                ("disk", result(false, "err")),
+            ],
+        );
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: ScanRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.id, original.id);
+        assert_eq!(restored.task_count, original.task_count);
+        assert_eq!(restored.success_count, original.success_count);
+        assert_eq!(restored.results.len(), original.results.len());
+        assert!(!restored.results["disk"].success);
+        assert_eq!(restored.results["os_info"].output, "ok");
     }
 }
