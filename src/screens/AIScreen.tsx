@@ -3,6 +3,7 @@ import { useAIContext, type AIProvider, type ProviderInfo } from '../contexts/AI
 import { useAppContext } from '../contexts/AppContext'
 import { useAIChat } from '../hooks/useAIChat'
 import { ChatMessageBubble } from '../components/chat/ChatMessageBubble'
+import { ScanReportPanel } from '../components/chat/ScanReportPanel'
 
 export const PROVIDER_LABELS: Record<Exclude<AIProvider, 'none'>, string> = {
   phi_silica: 'Phi Silica (on-device NPU)',
@@ -48,8 +49,8 @@ function providerDetail(p: ProviderInfo, phiMessage?: string): string {
 }
 
 export const AIScreen: React.FC = () => {
-  const { aiStatus, activeProvider, sessionId, interpretations } = useAIContext()
-  const { results, setShowSettings } = useAppContext()
+  const { aiStatus, activeProvider } = useAIContext()
+  const { setShowSettings } = useAppContext()
   const { messages, send, stop, newConversation, isStreaming } = useAIChat()
   const [input, setInput] = useState('')
   const endRef = useRef<HTMLDivElement>(null)
@@ -137,14 +138,7 @@ export const AIScreen: React.FC = () => {
           </div>
         </div>
 
-        <div className="wf-block">
-          <header className="wf-block-header"><span className="accent-bar" /><span>Session Context</span></header>
-          <div style={{ padding: 12, fontSize: 12, color: 'var(--wf-text-muted)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}><span>Session ID</span><span className="wf-mono">{sessionId}</span></div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}><span>Diagnostics in context</span><span>{Object.keys(results).length}</span></div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}><span>Cached interpretations</span><span>{Object.keys(interpretations).length}</span></div>
-          </div>
-        </div>
+        <ScanReportPanel />
 
         <div className="wf-block">
           <header className="wf-block-header"><span className="accent-bar" /><span>Privacy</span></header>

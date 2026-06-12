@@ -589,6 +589,18 @@ pub async fn analyze(
     })
 }
 
+/// Read the shared AI response cache (used by the scan report).
+pub(crate) fn cached_value(key: &str) -> Option<String> {
+    get_cache().lock().ok().and_then(|cache| cache.get(key))
+}
+
+/// Write to the shared AI response cache (used by the scan report).
+pub(crate) fn cache_value(key: String, value: String) {
+    if let Ok(mut cache) = get_cache().lock() {
+        cache.insert(key, value);
+    }
+}
+
 /// Clear AI cache for a session or all
 pub fn clear_cache(session_id: Option<&str>) {
     if let Ok(mut cache) = get_cache().lock() {

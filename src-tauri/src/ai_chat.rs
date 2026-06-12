@@ -468,9 +468,11 @@ async fn run_tools(
     results
 }
 
-/// One full chat turn: stream model output, execute requested tools, repeat
-/// until the model answers (or budgets force an answer). Errors surface as
-/// events; `messages` is updated in place and written back by the caller.
+/// One full model turn: stream output, execute requested tools, repeat until
+/// the model answers (or budgets force an answer). Errors surface as events;
+/// `messages` is updated in place and written back by the caller. The system
+/// prompt is supplied by the caller — chat and the scan report share this
+/// loop with different instructions.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_chat_turn(
     provider_label: &str,
@@ -479,14 +481,13 @@ pub async fn run_chat_turn(
     session_id: &str,
     message_id: &str,
     messages: &mut Vec<ChatMessage>,
+    system: &str,
     tools: &[ToolSpec],
     executor: &dyn ToolExecutor,
     emitter: &dyn ChatEmitter,
     cancel: CancellationToken,
-    scan_context: Option<&str>,
 ) -> Result<(), String> {
     let plan = plan_context(caps.context_budget_chars);
-    let system = build_system_prompt(caps.supports_tools, scan_context, &plan);
     let use_tools = caps.supports_tools && !tools.is_empty();
     let mut tool_call_count = 0usize;
     let mut forced_final = false;
@@ -502,7 +503,7 @@ pub async fn run_chat_turn(
     for round in 0..=MAX_TOOL_ITERATIONS {
         let final_round = !use_tools || round == MAX_TOOL_ITERATIONS;
         let request = ChatRequest {
-            system: Some(system.clone()),
+            system: Some(system.to_string()),
             messages: trim_history(messages, plan.history_chars + plan.tool_data_chars),
             tools: if final_round {
                 Vec::new()
@@ -748,6 +749,12 @@ pub async fn ai_chat_send(
         provider: provider.to_string(),
     };
 
+    let system = build_system_prompt(
+        caps.supports_tools,
+        scan_context.as_deref(),
+        &plan_context(caps.context_budget_chars),
+    );
+
     tauri::async_runtime::spawn(async move {
         let mut messages = messages_snapshot;
         let chat = RealChatProvider { provider, cfg };
@@ -762,11 +769,11 @@ pub async fn ai_chat_send(
             &session_id,
             &message_id,
             &mut messages,
+            &system,
             &tools,
             &executor,
             &emitter,
             cancel,
-            scan_context.as_deref(),
         )
         .await;
 
@@ -1102,11 +1109,11 @@ mod tests {
             "s1",
             "m1",
             &mut messages,
+            "test system prompt",
             &specs(),
             &EchoExecutor,
             &emitter,
             CancellationToken::new(),
-            None,
         )
         .await
         .unwrap();
@@ -1161,11 +1168,11 @@ mod tests {
             "s1",
             "m1",
             &mut messages,
+            "test system prompt",
             &specs(),
             &EchoExecutor,
             &emitter,
             CancellationToken::new(),
-            None,
         )
         .await
         .unwrap();
@@ -1187,11 +1194,11 @@ mod tests {
             "s1",
             "m1",
             &mut messages,
+            "test system prompt",
             &specs(),
             &EchoExecutor,
             &emitter,
             cancel,
-            None,
         )
         .await
         .unwrap();
@@ -1221,11 +1228,11 @@ mod tests {
             "s1",
             "m1",
             &mut messages,
+            "test system prompt",
             &specs(),
             &EchoExecutor,
             &emitter,
             CancellationToken::new(),
-            None,
         )
         .await
         .unwrap();
