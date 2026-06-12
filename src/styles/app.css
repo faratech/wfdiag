@@ -1404,6 +1404,13 @@ html.is-dark .skeleton::after {
 }
 .form-row:last-child { border-bottom: none; }
 .form-row .hint { font-size: 11px; color: var(--wf-text-muted); }
+.settings-section-title {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--wf-text-muted);
+  padding: 14px 0 4px;
+  border-bottom: 1px solid var(--hairline);
+}
+.settings-section-title:first-child { padding-top: 0; }
 .field-input {
   padding: 7px 10px;
   border-radius: 4px;
