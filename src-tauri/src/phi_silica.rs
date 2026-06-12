@@ -17,10 +17,52 @@ use crate::error::DiagError;
 /// LAF constants for Phi Silica access
 #[cfg(windows)]
 const LAF_FEATURE_ID: &str = "com.microsoft.windows.ai.languagemodel";
+/// Built-in fallback token. A Microsoft-issued token is tied to a specific
+/// package family, so the real one is supplied at runtime via the
+/// `phiSilicaLafToken` setting or the `WFDIAG_LAF_TOKEN` env var.
 #[cfg(windows)]
 const LAF_TOKEN: &str = "edibyiYSeHx+qsGpzHNoCQ==";
+/// Fallback publisher id, used only when the running package's family name is
+/// unavailable. Normally derived at runtime from the package identity.
 #[cfg(windows)]
-const LAF_PUBLISHER_ID: &str = "t6j5qexy2jpp2"; // From package family name: 32827MikeFara.WindowsForumDiagnostics_t6j5qexy2jpp2
+const LAF_PUBLISHER_ID: &str = "t6j5qexy2jpp2";
+
+/// The LAF token to use: env var first (handy for testing an approved token
+/// without editing settings), then the `phiSilicaLafToken` setting, then the
+/// built-in fallback.
+#[cfg(windows)]
+fn configured_laf_token() -> String {
+    if let Ok(token) = std::env::var("WFDIAG_LAF_TOKEN")
+        && !token.trim().is_empty()
+    {
+        return token;
+    }
+    crate::commands::settings::get_settings_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|content| {
+            serde_json::from_str::<crate::commands::settings::AppSettings>(&content).ok()
+        })
+        .and_then(|settings| settings.phi_silica_laf_token)
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| LAF_TOKEN.to_string())
+}
+
+/// Publisher id hash from the running package's family name
+/// (`<name>_<hash>`). A Microsoft-issued LAF token validates against this, so
+/// it must match the actual identity rather than a hardcoded guess.
+#[cfg(windows)]
+fn current_publisher_id() -> String {
+    use windows::ApplicationModel::Package;
+    Package::Current()
+        .ok()
+        .and_then(|pkg| pkg.Id().ok())
+        .and_then(|id| id.FamilyName().ok())
+        .and_then(|family| family.to_string().rsplit('_').next().map(str::to_string))
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| LAF_PUBLISHER_ID.to_string())
+}
 
 /// Response from checking Phi Silica availability
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,10 +151,11 @@ fn try_unlock_laf() -> (bool, String) {
     }
 
     let feature_id = HSTRING::from(LAF_FEATURE_ID);
-    let token = HSTRING::from(LAF_TOKEN);
+    let token = HSTRING::from(configured_laf_token());
     let attestation = HSTRING::from(format!(
         "{} has registered their use of {} with Microsoft and agrees to the terms of use.",
-        LAF_PUBLISHER_ID, LAF_FEATURE_ID
+        current_publisher_id(),
+        LAF_FEATURE_ID
     ));
 
     match LimitedAccessFeatures::TryUnlockFeature(&feature_id, &token, &attestation) {
@@ -237,13 +280,41 @@ const DLL_ARCH: &str = "arm64";
 #[cfg(all(windows, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
 const DLL_ARCH: &str = "unknown";
 
-/// Candidate directories for the bundled Windows App SDK AI DLLs, in priority
-/// order: next to the exe (MSIX layout bundles them there), then the
-/// arch-specific subdirectories used by the loose layout, where x64 and arm64
-/// DLLs share filenames and therefore cannot live in the exe dir together.
+/// Install directories of the Windows App SDK framework packages this app
+/// depends on. With package identity (full MSIX or the sparse package), the
+/// framework's AI DLLs are already on disk here — so we never need to ship
+/// our own copies. Empty when the process has no identity.
+#[cfg(windows)]
+fn framework_package_dirs() -> Vec<std::path::PathBuf> {
+    use windows::ApplicationModel::Package;
+
+    let mut dirs = Vec::new();
+    let Ok(current) = Package::Current() else {
+        return dirs;
+    };
+    let Ok(deps) = current.Dependencies() else {
+        return dirs;
+    };
+    for dep in deps {
+        let is_runtime = dep
+            .Id()
+            .and_then(|id| id.Name())
+            .map(|name| name.to_string().starts_with("Microsoft.WindowsAppRuntime"))
+            .unwrap_or(false);
+        if is_runtime && let Ok(path) = dep.InstalledPath() {
+            dirs.push(std::path::PathBuf::from(path.to_string()));
+        }
+    }
+    dirs
+}
+
+/// Candidate directories for the Windows App SDK AI DLLs, in priority order:
+/// the installed framework package(s) (no bundling needed), then next to the
+/// exe (MSIX layout), then the arch-specific subdirectories of the loose
+/// layout (x64/arm64 DLLs share filenames, so they cannot share one dir).
 #[cfg(windows)]
 fn dll_search_dirs() -> Vec<std::path::PathBuf> {
-    let mut dirs = Vec::new();
+    let mut dirs = framework_package_dirs();
     if let Some(app_dir) = get_app_directory() {
         dirs.push(app_dir.clone());
         dirs.push(app_dir.join("ai-sdk-dlls").join(DLL_ARCH));
@@ -261,90 +332,99 @@ static AI_TEXT_DLL_LOADED: std::sync::atomic::AtomicBool =
 #[cfg(windows)]
 static mut AI_TEXT_DLL_MODULE: Option<windows::Win32::Foundation::HMODULE> = None;
 
-/// Try to load the AI DLL from the app dir or its arch-specific subdirectories
+/// Load a DLL by bare name first (resolves from the framework package via the
+/// package graph when the process has identity), then from each candidate
+/// directory. Returns the module handle on the first success.
 #[cfg(windows)]
-fn try_direct_dll_activation() -> Result<(), String> {
-    use std::sync::atomic::Ordering;
-    use windows::Win32::System::LibraryLoader::{LOAD_WITH_ALTERED_SEARCH_PATH, LoadLibraryExW};
-    use windows_core::PCWSTR;
+fn load_ai_dll(
+    dll_name: &str,
+    search_dirs: &[std::path::PathBuf],
+) -> Option<windows::Win32::Foundation::HMODULE> {
+    use windows::Win32::System::LibraryLoader::{
+        LOAD_WITH_ALTERED_SEARCH_PATH, LoadLibraryExW, LoadLibraryW,
+    };
+    use windows_core::{HSTRING, PCWSTR};
 
-    // Only load once (the flag is set only on success, so a missing DLL can
-    // be dropped in later and picked up on the next attempt)
-    if AI_TEXT_DLL_LOADED.load(Ordering::SeqCst) {
-        return Ok(());
+    // Bare name — the loader checks the package graph (framework packages)
+    // for packaged processes, so no bundled copy is required.
+    let wide = HSTRING::from(dll_name);
+    if let Ok(module) = unsafe { LoadLibraryW(PCWSTR::from_raw(wide.as_ptr())) } {
+        log_phi_silica(&format!(
+            "Loaded {} via package graph (bare name)",
+            dll_name
+        ));
+        return Some(module);
     }
 
-    log_phi_silica("Attempting to load bundled AI DLLs...");
-
-    let search_dirs = dll_search_dirs();
-    if search_dirs.is_empty() {
-        return Err(DiagError::ai_unavailable("phi_silica", "Failed to get app directory").into());
-    }
-    log_phi_silica(&format!("DLL search dirs: {:?}", search_dirs));
-
-    // Load the DLLs in dependency order. WindowsAppRuntime first: once it is
-    // in the loaded-module list, the Text DLL's static import of it resolves
-    // regardless of directory.
-    let dlls = [
-        "Microsoft.WindowsAppRuntime.dll",
-        "Microsoft.Windows.AI.Text.dll",
-    ];
-
-    let mut text_dll_loaded = false;
-
-    for dll_name in &dlls {
-        let Some(dll_path) = search_dirs
-            .iter()
-            .map(|dir| dir.join(dll_name))
-            .find(|path| path.exists())
-        else {
-            log_phi_silica(&format!("DLL not found in any search dir: {}", dll_name));
+    // Explicit paths (framework install dir, exe dir, bundled subdirs).
+    // LOAD_WITH_ALTERED_SEARCH_PATH resolves the DLL's own imports from its
+    // own directory.
+    for dir in search_dirs {
+        let dll_path = dir.join(dll_name);
+        if !dll_path.exists() {
             continue;
-        };
-
-        log_phi_silica(&format!("Loading: {:?}", dll_path));
-
-        let dll_path_wide: Vec<u16> = dll_path
+        }
+        let path_wide: Vec<u16> = dll_path
             .to_string_lossy()
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
-
-        unsafe {
-            // LOAD_WITH_ALTERED_SEARCH_PATH: resolve the DLL's own static
-            // imports from ITS directory first — required when loading from
-            // an ai-sdk-dlls/<arch> subdirectory rather than the exe dir
-            match LoadLibraryExW(
-                PCWSTR::from_raw(dll_path_wide.as_ptr()),
+        match unsafe {
+            LoadLibraryExW(
+                PCWSTR::from_raw(path_wide.as_ptr()),
                 None,
                 LOAD_WITH_ALTERED_SEARCH_PATH,
-            ) {
-                Ok(module) => {
-                    log_phi_silica(&format!("Loaded: {}", dll_name));
-                    if dll_name == &"Microsoft.Windows.AI.Text.dll" {
-                        AI_TEXT_DLL_MODULE = Some(module);
-                        text_dll_loaded = true;
-                    }
-                }
-                Err(e) => log_phi_silica(&format!("Failed to load {}: {}", dll_name, e.message())),
+            )
+        } {
+            Ok(module) => {
+                log_phi_silica(&format!("Loaded {} from {:?}", dll_name, dll_path));
+                return Some(module);
             }
+            Err(e) => log_phi_silica(&format!(
+                "Failed to load {} from {:?}: {}",
+                dll_name,
+                dll_path,
+                e.message()
+            )),
         }
     }
+    None
+}
 
-    if text_dll_loaded {
-        AI_TEXT_DLL_LOADED.store(true, Ordering::SeqCst);
-        log_phi_silica("Bundled DLLs loaded");
-        Ok(())
-    } else {
-        Err(DiagError::ai_unavailable(
+/// Ensure the AI Text DLL is loaded — from the installed framework package
+/// (no bundling) or, failing that, a bundled copy.
+#[cfg(windows)]
+fn try_direct_dll_activation() -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+
+    // Only load once (the flag is set only on success, so a DLL that becomes
+    // available later is still picked up on a subsequent attempt)
+    if AI_TEXT_DLL_LOADED.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let search_dirs = dll_search_dirs();
+    log_phi_silica(&format!("DLL search dirs: {:?}", search_dirs));
+
+    // Load WindowsAppRuntime first so the Text DLL's static import resolves
+    let _ = load_ai_dll("Microsoft.WindowsAppRuntime.dll", &search_dirs);
+
+    match load_ai_dll("Microsoft.Windows.AI.Text.dll", &search_dirs) {
+        Some(module) => {
+            unsafe { AI_TEXT_DLL_MODULE = Some(module) };
+            AI_TEXT_DLL_LOADED.store(true, Ordering::SeqCst);
+            log_phi_silica("AI Text DLL loaded");
+            Ok(())
+        }
+        None => Err(DiagError::ai_unavailable(
             "phi_silica",
             format!(
-                "Microsoft.Windows.AI.Text.dll not found next to the exe or in \
-                 ai-sdk-dlls\\{}",
+                "Microsoft.Windows.AI.Text.dll could not be loaded from the framework package, \
+                 next to the exe, or ai-sdk-dlls\\{}",
                 DLL_ARCH
             ),
         )
-        .into())
+        .into()),
     }
 }
 

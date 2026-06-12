@@ -60,6 +60,11 @@ pub struct AppSettings {
     // its port is dynamic by design and must not be hardcoded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_ai_endpoint: Option<String>,
+    // Microsoft-issued Limited Access Feature token for Phi Silica
+    // (systemAIModels). When set, the supported WinRT activation path works
+    // without the bundled-DLL bypass. Empty uses the built-in fallback token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phi_silica_laf_token: Option<String>,
 }
 
 fn default_max_concurrent() -> u32 {
