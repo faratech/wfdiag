@@ -47,6 +47,18 @@ pub struct ComparisonResult {
     pub status_unchanged: Vec<TaskChange>,
 }
 
+// Failure trend for one task across recent scans
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskTrend {
+    pub task_id: String,
+    /// Scans (of the considered window) in which the task failed
+    pub failed: usize,
+    /// Scans in which the task was present at all
+    pub seen_in: usize,
+    /// Size of the window actually loaded
+    pub scans_considered: usize,
+}
+
 // Simple task change representation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskChange {
@@ -402,6 +414,50 @@ impl ScanStorage {
             }
             _ => false, // Different types
         }
+    }
+
+    /// Replace the tags on a stored scan (used for user-editable labels).
+    pub fn update_tags(&self, scan_id: &str, tags: Vec<String>) -> Result<(), String> {
+        let mut scan = self.load_scan(scan_id)?;
+        scan.tags = tags;
+        self.encrypted_storage
+            .store(&scan.id, &scan)
+            .map_err(|e| DiagError::storage("update_tags", e.to_string()).into())
+    }
+
+    /// Per-task failure counts over the newest `limit` scans, for trend
+    /// badges ("failed in N of last M scans"). Only tasks that failed at
+    /// least once are returned.
+    pub fn task_failure_trends(&self, limit: usize) -> Result<Vec<TaskTrend>, String> {
+        let summaries = self.list_scans()?; // newest first
+        let mut failed: HashMap<String, usize> = HashMap::new();
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        let mut scans_used = 0usize;
+
+        for summary in summaries.iter().take(limit) {
+            let Ok(scan) = self.load_scan(&summary.id) else {
+                continue; // corrupt/unreadable scans don't poison the trend
+            };
+            scans_used += 1;
+            for (task_id, result) in &scan.results {
+                *seen.entry(task_id.clone()).or_default() += 1;
+                if !result.success {
+                    *failed.entry(task_id.clone()).or_default() += 1;
+                }
+            }
+        }
+
+        let mut trends: Vec<TaskTrend> = failed
+            .into_iter()
+            .map(|(task_id, fail_count)| TaskTrend {
+                seen_in: *seen.get(&task_id).unwrap_or(&fail_count),
+                scans_considered: scans_used,
+                failed: fail_count,
+                task_id,
+            })
+            .collect();
+        trends.sort_by(|a, b| b.failed.cmp(&a.failed).then(a.task_id.cmp(&b.task_id)));
+        Ok(trends)
     }
 
     fn cleanup_old_scans(&self) -> Result<(), String> {
