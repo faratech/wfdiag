@@ -78,6 +78,44 @@ def update_cargo_toml(file_path: Path, new_version: str, dry_run: bool) -> bool:
         return False
 
 
+def update_msix_conf(file_path: Path, new_version: str, dry_run: bool) -> bool:
+    """Update the nested msixVersion (X.Y.Z.0) in tauri.msix.conf.json.
+
+    The generic JSON helper only rewrites a root-level "version" key, which
+    this file does not have.
+    """
+    if not file_path.exists():
+        print(f"  Warning: File not found: {file_path}")
+        return False
+
+    try:
+        content = file_path.read_text(encoding='utf-8')
+        version_with_suffix = f"{new_version}.0"
+        pattern = r'("msixVersion"\s*:\s*)"[^"]+"'
+
+        match = re.search(pattern, content)
+        if not match:
+            print(f"  Warning: msixVersion not found in: {file_path}")
+            return False
+
+        old_version = re.search(r'"msixVersion"\s*:\s*"([^"]+)"', content).group(1)
+        if old_version == version_with_suffix:
+            print(f"  Skipped (already {version_with_suffix}): {file_path}")
+            return True
+
+        if dry_run:
+            print(f"  [DRY RUN] Would update: {file_path} ({old_version} -> {version_with_suffix})")
+        else:
+            new_content = re.sub(pattern, f'\\g<1>"{version_with_suffix}"', content, count=1)
+            file_path.write_text(new_content, encoding='utf-8')
+            print(f"  Updated: {file_path} ({old_version} -> {version_with_suffix})")
+
+        return True
+    except Exception as e:
+        print(f"  Error updating {file_path}: {e}")
+        return False
+
+
 def update_appx_manifest(file_path: Path, new_version: str, dry_run: bool) -> bool:
     """Update version in AppxManifest.xml (adds .0 suffix)."""
     if not file_path.exists():
@@ -205,24 +243,19 @@ def main():
     ):
         success_count += 1
 
-    # 8. src/components/NavigationHeader.tsx - version = 'X.Y.Z'
+    # 8. src/App.tsx - "Diagnostics · X.Y.Z" in the nav rail brand
     total_count += 1
     if update_tsx_file(
-        script_dir / 'src' / 'components' / 'NavigationHeader.tsx',
+        script_dir / 'src' / 'App.tsx',
         new_version,
-        [(r"version\s*=\s*'[\d.]+'", f"version = 'VERSION'")],
+        [(r'Diagnostics · [\d.]+', 'Diagnostics · VERSION')],
         dry_run
     ):
         success_count += 1
 
-    # 9. src/components/NavRail.tsx - v2.1.X in Caption1
+    # 9. src-tauri/tauri.msix.conf.json - nested msixVersion (X.Y.Z.0)
     total_count += 1
-    if update_tsx_file(
-        script_dir / 'src' / 'components' / 'NavRail.tsx',
-        new_version,
-        [(r'>v[\d.]+<', f'>vVERSION<')],
-        dry_run
-    ):
+    if update_msix_conf(script_dir / 'src-tauri' / 'tauri.msix.conf.json', new_version, dry_run):
         success_count += 1
 
     # 10. README.md
