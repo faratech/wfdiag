@@ -6,7 +6,7 @@ import { formatDuration } from './util'
 import { DiagnosticDetail, type DiagItem } from './DiagnosticDetail'
 
 export const DiagnosticsScreen: React.FC = () => {
-  const { availableTasks, results, isRunning, currentProgress, currentTaskName, scanStartTime, scanEndTime, taskStatuses, pendingDetailTaskId, setPendingDetailTaskId } = useAppContext()
+  const { availableTasks, results, isRunning, currentProgress, currentTaskName, scanStartTime, scanEndTime, taskStatuses, pendingDetailTaskId, setPendingDetailTaskId, setPendingScanReport, setSelectedTab } = useAppContext()
   const { runQuickScan, runFullScan, stopScan } = useScanner()
 
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -120,6 +120,14 @@ export const DiagnosticsScreen: React.FC = () => {
           <div className="value">{durationMs > 0 ? (durationMs / 1000).toFixed(1) : '—'}<span className="ch-sub">{durationMs > 0 ? 's' : ''}</span></div>
           <i className="fa-solid fa-stopwatch icon" />
         </div>
+        <button
+          className="btn"
+          style={{ alignSelf: 'center', whiteSpace: 'nowrap' }}
+          title="Generate an AI health report for this scan"
+          onClick={() => { setPendingScanReport(true); setSelectedTab('ai') }}
+        >
+          <i className="fa-solid fa-wand-magic-sparkles" /> Explain this scan
+        </button>
       </div>
 
       <div className="split-pane" style={{ margin: '0 24px 12px' }}>

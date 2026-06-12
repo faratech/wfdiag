@@ -1207,12 +1207,16 @@ html.is-dark .scan-hero .ring::after { background: #2a2a2c; }
   background: var(--wf-input-bg);
   white-space: pre-wrap; word-break: break-word;
 }
-.bubble.streaming::after {
+.bubble.streaming::after,
+.report-body.streaming::after {
   content: '▍';
   margin-left: 2px;
   color: var(--wf-paletteColor1);
   animation: chat-caret-blink 1s steps(2) infinite;
 }
+.report-body { font-size: 12.5px; line-height: 1.55; }
+.report-body h2 { font-size: 13px; margin: 10px 0 4px; }
+.report-body ul, .report-body ol { margin: 4px 0; padding-left: 18px; }
 @keyframes chat-caret-blink { 0% { opacity: 1; } 50% { opacity: 0; } }
 .chat-error { color: var(--error-fg, #c42b1c); }
 

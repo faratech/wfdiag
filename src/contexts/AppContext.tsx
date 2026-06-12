@@ -87,6 +87,9 @@ interface AppContextType {
   // Deep-link from the command palette into a diagnostic's detail pane
   pendingDetailTaskId: string | null
   setPendingDetailTaskId: (id: string | null) => void
+  // Deep-link from "Explain this scan" into the AI screen's report panel
+  pendingScanReport: boolean
+  setPendingScanReport: (pending: boolean) => void
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined)
@@ -160,6 +163,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   // command palette to deep-link into a specific result, consumed (and
   // cleared) by DiagnosticsScreen
   const [pendingDetailTaskId, setPendingDetailTaskId] = useState<string | null>(null)
+
+  // "Explain this scan" pressed — consumed (and cleared) by ScanReportPanel,
+  // which auto-generates the report when this is set
+  const [pendingScanReport, setPendingScanReport] = useState(false)
 
   // Load settings from backend on startup
   useEffect(() => {
@@ -257,6 +264,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     setNavRailCollapsed,
     pendingDetailTaskId,
     setPendingDetailTaskId,
+    pendingScanReport,
+    setPendingScanReport,
   }
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>

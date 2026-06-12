@@ -34,6 +34,7 @@ mod ai_cache;
 mod ai_chat;
 mod ai_prompts;
 pub mod ai_providers;
+mod ai_report;
 mod ai_service;
 mod ai_tools;
 
@@ -953,6 +954,7 @@ pub fn run() {
             ai_chat::ai_chat_cancel,
             ai_chat::ai_chat_new_session,
             ai_chat::ai_chat_get_history,
+            ai_report::ai_generate_report,
             detect_issues,
             get_fixable_issue_ids,
             copy_minidumps_to_desktop,

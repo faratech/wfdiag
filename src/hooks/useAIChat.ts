@@ -65,7 +65,7 @@ export function useAIChat() {
   const pendingTextRef = useRef<Map<string, string>>(new Map())
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const apiKeyRef = useRef<string | undefined>(settings.openAiApiKey)
-  apiKeyRef.current = settings.openAiApiKey
+  useEffect(() => { apiKeyRef.current = settings.openAiApiKey }, [settings.openAiApiKey])
 
   const adoptSession = useCallback((id: string) => {
     persistentSessionId = id
