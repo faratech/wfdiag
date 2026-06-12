@@ -6,11 +6,26 @@ import { formatDuration } from './util'
 import { DiagnosticDetail, type DiagItem } from './DiagnosticDetail'
 
 export const DiagnosticsScreen: React.FC = () => {
-  const { availableTasks, results, isRunning, currentProgress, currentTaskName, scanStartTime, scanEndTime } = useAppContext()
+  const { availableTasks, results, isRunning, currentProgress, currentTaskName, scanStartTime, scanEndTime, taskStatuses } = useAppContext()
   const { runQuickScan, runFullScan, stopScan } = useScanner()
 
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
+
+  // Per-category progress for the scanning hero ("Hardware 3/5"), derived from
+  // the live task-progress events; only categories with started tasks appear
+  const categoryProgress = useMemo(() => {
+    if (!isRunning) return []
+    const byCat: Record<string, { done: number; total: number }> = {}
+    for (const task of availableTasks) {
+      const status = taskStatuses[task.id]
+      if (!status) continue
+      const cat = (byCat[task.category] = byCat[task.category] || { done: 0, total: 0 })
+      cat.total++
+      if (status === 'done') cat.done++
+    }
+    return Object.entries(byCat)
+  }, [isRunning, availableTasks, taskStatuses])
 
   const completed: DiagItem[] = useMemo(
     () => availableTasks.filter(t => results[t.id]).map(t => ({ ...t, result: results[t.id] })),
@@ -43,6 +58,15 @@ export const DiagnosticsScreen: React.FC = () => {
         <h1>Running diagnostic sweep…</h1>
         <p className="sub">Collecting hardware inventory, driver telemetry, storage health, network state, security posture and event logs.</p>
         <div className="progress-mini"><span style={{ width: `${currentProgress}%` }} /></div>
+        {categoryProgress.length > 0 && (
+          <div className="scan-cats">
+            {categoryProgress.map(([cat, p]) => (
+              <span key={cat} className={`tag ${p.done === p.total ? 'done' : 'neutral'}`}>
+                {cat} {p.done}/{p.total}
+              </span>
+            ))}
+          </div>
+        )}
         <div className="task-line">{currentTaskName || 'Starting…'}</div>
         <button className="btn" onClick={stopScan}><i className="fa-solid fa-stop" /> Stop scan</button>
       </div>

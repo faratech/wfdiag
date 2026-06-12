@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { useAppContext } from '../contexts/AppContext'
 import { useDiagnostics } from '../hooks/useDiagnostics'
 import { useToast } from '../contexts/ToastContext'
+import { useScanner } from '../hooks/useScanner'
+import { EmptyState, Button } from '../components/ui'
 import * as logger from '../utils/logger'
 
 interface FixResult { success: boolean; message?: string }
@@ -11,8 +13,9 @@ const sevClass = (s: string) =>
   ({ critical: 'critical', warning: 'warning', info: 'info', ok: 'ok' } as Record<string, string>)[s.toLowerCase()] || 'info'
 
 export const IssuesScreen: React.FC = () => {
-  const { issues, fixingIssue, setFixingIssue } = useAppContext()
+  const { issues, fixingIssue, setFixingIssue, isRunning } = useAppContext()
   const { detectIssues, restartAsAdmin } = useDiagnostics()
+  const { runQuickScan } = useScanner()
   const { showInfo, showWarning, showError } = useToast()
 
   // IDs the backend can actually fix — used to gate the "Fix" button so it never appears
@@ -87,9 +90,13 @@ export const IssuesScreen: React.FC = () => {
 
       <div className="scrollable" style={{ padding: '0 24px 24px' }}>
         {issues.length === 0 && (
-          <div className="wf-block" style={{ padding: 24, textAlign: 'center', color: 'var(--wf-text-muted)' }}>
-            <i className="fa-solid fa-shield-halved" style={{ fontSize: 28, color: 'var(--ok-fg)' }} />
-            <p>No issues detected. Run a scan to refresh.</p>
+          <div className="wf-block">
+            <EmptyState
+              icon="fa-shield-halved"
+              title="No issues detected"
+              sub="Issues are derived from the most recent scan. Run a scan to refresh the analysis."
+              actions={<Button variant="primary" icon="fa-bolt" onClick={() => runQuickScan()} disabled={isRunning}>Quick Scan</Button>}
+            />
           </div>
         )}
         {issues.map((issue, idx) => {

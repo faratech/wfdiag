@@ -29,6 +29,7 @@ export const useScanner = () => {
     settings,
     searchQuery,
     setFilteredResults,
+    setTaskStatuses,
   } = useAppContext()
 
   // Track the current running session to prevent race conditions
@@ -83,6 +84,7 @@ export const useScanner = () => {
     setIsRunning(true)
     setCurrentProgress(0)
     setResults({})
+    setTaskStatuses({})
     // Capture the start time in a local so the auto-save timeout below uses THIS scan's
     // start, not the stale `scanStartTime` from a prior render's closure (which made the
     // first scan's duration ~the full epoch and later scans include all idle time).
@@ -116,9 +118,11 @@ export const useScanner = () => {
 
         if (event.payload.status === 'running' && event.payload.task_name) {
           setCurrentTaskName(event.payload.task_name)
+          setTaskStatuses(prev => ({ ...prev, [event.payload.task_id]: 'running' }))
         } else if (event.payload.status === 'completed') {
           completedTasks++
           setCurrentProgress((completedTasks / totalTasks) * 100)
+          setTaskStatuses(prev => ({ ...prev, [event.payload.task_id]: 'done' }))
         }
       })
 
@@ -213,7 +217,8 @@ export const useScanner = () => {
     settings.autoSave,
     settings.maxConcurrentTasks,
     clearAutoSaveTimeout,
-    waitAutoSaveDelay
+    waitAutoSaveDelay,
+    setTaskStatuses
   ])
 
   // Default Quick Scan task IDs (used when no custom list is configured)

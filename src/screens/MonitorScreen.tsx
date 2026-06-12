@@ -1,6 +1,7 @@
 import React, { useState, useCallback } from 'react'
 import { useMonitoring } from '../hooks/useMonitoring'
 import type { SystemStats } from '../types/monitoring'
+import { Skeleton } from '../components/ui'
 import { ChartCard } from './ChartCard'
 
 const HISTORY = 60
@@ -57,6 +58,14 @@ export const MonitorScreen: React.FC = () => {
       </div>
 
       <div className="scrollable" style={{ padding: '0 24px 24px' }}>
+        {!last && (
+          <div className="charts-grid" aria-hidden="true">
+            {Array.from({ length: 4 }, (_, i) => (
+              <Skeleton key={i} variant="block" height={150} />
+            ))}
+          </div>
+        )}
+        {last && (
         <div className="charts-grid">
           <ChartCard title="CPU" value={(last?.cpu_utilization ?? 0).toFixed(1)} sub="%" color="var(--wf-paletteColor1)" series={series.cpu} max={100} hint={last?.cpu_frequency ? `${(last.cpu_frequency / 1000).toFixed(2)} GHz` : 'Processor utilization'} />
           <ChartCard title="Memory" value={(last?.memory_utilization ?? 0).toFixed(1)} sub="%" color="#0e8fb8" series={series.mem} max={100} hint={last ? `${last.memory_used_gb.toFixed(1)} / ${last.memory_total_gb.toFixed(1)} GB used` : ''} />
@@ -66,6 +75,7 @@ export const MonitorScreen: React.FC = () => {
             <ChartCard title="NPU" value={(last?.npu_utilization ?? 0).toFixed(1)} sub="%" color="#c98a00" series={series.npu} max={100} hint={last?.npu_name ?? 'Neural processing unit'} />
           )}
         </div>
+        )}
       </div>
     </>
   )
