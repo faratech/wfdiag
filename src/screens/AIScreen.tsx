@@ -1,9 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { useAIContext, type AIProvider, type ProviderInfo } from '../contexts/AIContext'
 import { useAppContext } from '../contexts/AppContext'
-import { renderMarkdownLite } from '../utils/markdownLite'
-
-interface Msg { role: 'user' | 'bot'; text: string }
+import { useAIChat } from '../hooks/useAIChat'
+import { ChatMessageBubble } from '../components/chat/ChatMessageBubble'
 
 export const PROVIDER_LABELS: Record<Exclude<AIProvider, 'none'>, string> = {
   phi_silica: 'Phi Silica (on-device NPU)',
@@ -49,41 +48,22 @@ function providerDetail(p: ProviderInfo, phiMessage?: string): string {
 }
 
 export const AIScreen: React.FC = () => {
-  const { analyzeGeneric, aiStatus, isAIAvailable, activeProvider, sessionId, interpretations } = useAIContext()
+  const { aiStatus, activeProvider, sessionId, interpretations } = useAIContext()
   const { results, setShowSettings } = useAppContext()
-  const [transcript, setTranscript] = useState<Msg[]>([])
+  const { messages, send, stop, newConversation, isStreaming } = useAIChat()
   const [input, setInput] = useState('')
-  const [thinking, setThinking] = useState(false)
   const endRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [transcript, thinking])
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [messages, isStreaming])
 
-  const send = async (text: string) => {
-    if (!text.trim() || thinking) return
-    setTranscript(t => [...t, { role: 'user', text }])
+  const submit = (text: string) => {
+    if (!text.trim() || isStreaming) return
     setInput('')
-    if (!isAIAvailable) {
-      setTranscript(t => [...t, { role: 'bot', text: 'No AI provider is available. Add an API key (OpenAI, Anthropic or Gemini) in Settings, install Foundry Local (winget install Microsoft.FoundryLocal) or Ollama for local AI, or run the Microsoft Store version on a Copilot+ PC for on-device Phi Silica.' }])
-      return
-    }
-    setThinking(true)
-    try {
-      const resultSummary = Object.entries(results)
-        .map(([id, r]) => `${id}: ${r.success ? 'OK' : 'FAIL'}${r.error ? ` (${r.error})` : ''}`)
-        .join('\n')
-      const reply = await analyzeGeneric(
-        `chat:${Date.now()}`,
-        `User question: ${text}\n\nCurrent diagnostic results:\n${resultSummary || '(no scan run yet)'}`
-      )
-      setTranscript(t => [...t, { role: 'bot', text: reply || '(no response)' }])
-    } catch (e) {
-      setTranscript(t => [...t, { role: 'bot', text: `Error: ${String(e)}` }])
-    } finally {
-      setThinking(false)
-    }
+    void send(text)
   }
 
   const suggestions = ['Summarize my latest scan', 'What failed and why?', 'Any security concerns?', 'How do I free up disk space?']
+  const supportsTools = aiStatus?.providers?.find(p => p.id === activeProvider)?.supports_tools ?? false
 
   return (
     <div className="scrollable" style={{ padding: '0 24px 24px', display: 'flex', gap: 14, minHeight: 0 }}>
@@ -91,51 +71,45 @@ export const AIScreen: React.FC = () => {
         <header className="wf-block-header">
           <img src="/wf-ds/chatgpt-bot-avatar.webp" alt="" style={{ width: 24, height: 24, borderRadius: '50%' }} />
           <span>WindowsForum AI Assistant</span>
-          <span className="count">
+          <span className="count" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span className="tag"><span className="status-dot success" style={{ boxShadow: 'none' }} /> {PROVIDER_TAGS[activeProvider]}</span>
+            {messages.length > 0 && (
+              <button className="btn ghost" title="New conversation" onClick={() => { void newConversation() }}>
+                <i className="fa-solid fa-plus" aria-hidden="true" /> New
+              </button>
+            )}
           </span>
         </header>
         <div className="chat-shell" style={{ minHeight: 360 }}>
           <div className="chat-msgs" role="log" aria-live="polite" aria-label="AI conversation">
-            {transcript.length === 0 && (
+            {messages.length === 0 && (
               <div className="chat-msg bot">
                 <div className="av"><img src="/wf-ds/chatgpt-bot-avatar.webp" alt="" /></div>
                 <div className="msg-col">
                   <span className="msg-sender">WF Assistant</span>
-                  <div className="bubble">Ask me about your diagnostics. I read the current scan results and explain failures, risks and fixes.</div>
-                </div>
-              </div>
-            )}
-            {transcript.map((m, i) => (
-              <div key={i} className={`chat-msg ${m.role}`}>
-                <div className="av">{m.role === 'user' ? 'ME' : <img src="/wf-ds/chatgpt-bot-avatar.webp" alt="" />}</div>
-                <div className="msg-col">
-                  <span className="msg-sender">{m.role === 'user' ? 'You' : 'WF Assistant'}</span>
                   <div className="bubble">
-                    {m.role === 'bot'
-                      ? renderMarkdownLite(m.text)
-                      : <div style={{ whiteSpace: 'pre-wrap' }}>{m.text}</div>}
+                    {supportsTools
+                      ? 'Ask me about this PC. I can run diagnostics myself — disk, memory, network, drivers, logs — and answer from the real data.'
+                      : 'Ask me about your diagnostics. I read the current scan results and explain failures, risks and fixes.'}
                   </div>
                 </div>
               </div>
-            ))}
-            {thinking && (
-              <div className="chat-msg bot" aria-busy="true">
-                <div className="av"><img src="/wf-ds/chatgpt-bot-avatar.webp" alt="" /></div>
-                <div className="msg-col">
-                  <span className="msg-sender">WF Assistant</span>
-                  <div className="bubble"><i className="fa-solid fa-circle-notch fa-spin" aria-hidden="true" /> Analyzing latest scan…</div>
-                </div>
-              </div>
             )}
+            {messages.map(m => <ChatMessageBubble key={m.id} message={m} />)}
             <div ref={endRef} />
           </div>
           <div className="chat-suggestions">
-            {suggestions.map(s => <button key={s} className="suggest" onClick={() => send(s)}>{s}</button>)}
+            {suggestions.map(s => <button key={s} className="suggest" disabled={isStreaming} onClick={() => submit(s)}>{s}</button>)}
           </div>
-          <form className="chat-input" onSubmit={e => { e.preventDefault(); send(input) }}>
+          <form className="chat-input" onSubmit={e => { e.preventDefault(); submit(input) }}>
             <input type="text" placeholder="Ask about any diagnostic, error or trend…" value={input} onChange={e => setInput(e.target.value)} />
-            <button type="submit" className="btn primary"><i className="fa-solid fa-paper-plane" /> Send</button>
+            {isStreaming ? (
+              <button type="button" className="btn" onClick={() => { void stop() }}>
+                <i className="fa-solid fa-stop" aria-hidden="true" /> Stop
+              </button>
+            ) : (
+              <button type="submit" className="btn primary"><i className="fa-solid fa-paper-plane" /> Send</button>
+            )}
           </form>
         </div>
       </div>
