@@ -689,7 +689,7 @@ where
 
 /// Blocking wait for an async operation with progress - runs in spawn_blocking to be Send-safe
 #[cfg(windows)]
-fn wait_for_async_with_progress_blocking<T, P>(
+pub(crate) fn wait_for_async_with_progress_blocking<T, P>(
     op: windows_future::IAsyncOperationWithProgress<T, P>,
 ) -> Result<T, String>
 where

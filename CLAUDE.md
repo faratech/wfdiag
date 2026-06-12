@@ -316,8 +316,14 @@ The Windows AI APIs require package identity + the `systemAIModels` capability,
 but NOT full MSIX packaging. `build-sparse` creates per-arch "package with
 external location" identity packages: the exe stays loose on disk and a tiny
 signed MSIX (manifest + logos only, `AllowExternalContent=true`) grants it
-identity when registered via `Install-SparseIdentity.ps1` (which runs
-`Add-AppxPackage -ExternalLocation`). The exe's embedded application manifest
+identity when registered. Registration is automatic: at startup the app
+self-registers `wfdiag-sparse-<arch>.msix` found next to the exe via
+`PackageManager.AddPackageByUriAsync` + `ExternalLocationUri`
+(`src-tauri/src/sparse_identity.rs`) and relaunches itself once so identity
+attaches — no PowerShell needed. `Install-SparseIdentity.ps1` remains as the
+manual fallback. The only remaining manual prerequisite with the self-signed
+cert is trusting it once (Trusted Root, admin); a publicly trusted cert
+removes that too. The exe's embedded application manifest
 (`src-tauri/windows-app.manifest`) carries the matching `<msix>` element —
 without it Windows cannot attach identity to a directly-launched process.
 Gotchas encoded in the manifests: concrete per-arch `ProcessorArchitecture`
