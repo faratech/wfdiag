@@ -108,8 +108,9 @@ html.is-dark, html.dk {
   position: fixed;
   inset: 0;
   display: grid;
-  /* OS titlebar kept — demo .titlebar element omitted, so no titlebar row */
-  grid-template-rows: 1fr;
+  /* Custom titlebar row (decorations: false); auto collapses to 0 in
+     plain-browser dev where the Titlebar component renders nothing */
+  grid-template-rows: auto 1fr;
   background: var(--wf-page-bg) var(--wf-wallpaper) no-repeat fixed center top / cover;
   color: var(--wf-text);
   font-feature-settings: "ss01", "cv11";

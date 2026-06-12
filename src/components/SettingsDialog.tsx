@@ -77,6 +77,10 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({ open, onOpenChan
         <input type="checkbox" checked={draft.autoSave ?? true} onChange={e => set('autoSave', e.target.checked)} />
       </div>
       <div className="form-row">
+        <div><strong>Desktop notifications</strong><div className="hint">Notify when a scan finishes in the background</div></div>
+        <input type="checkbox" checked={draft.showNotifications ?? true} onChange={e => set('showNotifications', e.target.checked)} />
+      </div>
+      <div className="form-row">
         <div><strong>Scan on startup</strong></div>
         <input type="checkbox" checked={draft.scanOnStartup ?? false} onChange={e => set('scanOnStartup', e.target.checked)} />
       </div>

@@ -10,6 +10,7 @@ import type { TabValue } from './components'
 import { SettingsDialog, AboutDialog, Tooltip, Kbd } from './components'
 import { CommandPalette } from './components/CommandPalette'
 import { ShortcutHelp } from './components/ShortcutHelp'
+import { Titlebar } from './components/Titlebar'
 import { NAV_TAB_ICON } from './ui/diagnostic-icons'
 import { DiagnosticsScreen } from './screens/DiagnosticsScreen'
 import { MonitorScreen } from './screens/MonitorScreen'
@@ -74,6 +75,7 @@ const AppContent: React.FC = () => {
 
   return (
     <div className="app-window">
+      <Titlebar />
       <div className={`app-body ${navRailCollapsed ? 'rail-collapsed' : ''}`}>
         {/* Nav rail */}
         <nav className="nav-rail" aria-label="Primary">
