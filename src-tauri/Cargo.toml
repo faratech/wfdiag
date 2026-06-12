@@ -48,13 +48,15 @@ serde_json = "1.0"
 anyhow = "1.0"
 thiserror = "2.0"
 uuid = { version = "1.20.0", features = ["v4"] }
-rand = "0.9"
 base64 = "0.22"
 url = "2.5"
 dirs = "6.0"
 
 # OpenAI integration - using Responses API
-async-openai = { version = "0.32", default-features = false, features = ["native-tls", "responses"] }
+async-openai = { version = "0.41", default-features = false, features = ["native-tls", "responses"] }
+# keyring stays on 3.x: v4 split the crate into keyring-core + per-store
+# crates and is explicitly not meant for direct app use yet. Only used as a
+# Linux dev convenience anyway (Windows builds use DPAPI).
 keyring = "3.6"
 
 # Windows-specific dependencies
