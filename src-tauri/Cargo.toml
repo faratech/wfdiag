@@ -37,7 +37,7 @@ tauri-plugin-notification = "2"
 chrono = "0.4"
 
 # Async runtime
-tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
 futures = "0.3"
 
 # Serialization

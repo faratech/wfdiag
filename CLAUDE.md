@@ -306,7 +306,31 @@ python3 scripts/build-cross.py build-all --build-msix --sign
 
 # Just rebuild MSIX (without recompiling)
 python3 scripts/build-cross.py build-msix --sign
+
+# Sparse identity packages for the loose exes (Phi Silica without full MSIX)
+python3 scripts/build-cross.py build-sparse --sign
 ```
+
+### Sparse Packaging (Phi Silica without full MSIX)
+The Windows AI APIs require package identity + the `systemAIModels` capability,
+but NOT full MSIX packaging. `build-sparse` creates per-arch "package with
+external location" identity packages: the exe stays loose on disk and a tiny
+signed MSIX (manifest + logos only, `AllowExternalContent=true`) grants it
+identity when registered via `Install-SparseIdentity.ps1` (which runs
+`Add-AppxPackage -ExternalLocation`). The exe's embedded application manifest
+(`src-tauri/windows-app.manifest`) carries the matching `<msix>` element —
+without it Windows cannot attach identity to a directly-launched process.
+Gotchas encoded in the manifests: concrete per-arch `ProcessorArchitecture`
+(neutral breaks x64-on-ARM64 WinAppSDK resolution) and `MinVersion
+10.0.26100.0` (lower values silently drop the systemai capability).
+
+### AI Provider Fallback Chain
+`ai_service.rs` routes Auto preference as: Phi Silica (on-device WinRT, needs
+identity) → Foundry Local (local OpenAI-compatible server, no identity; model
+`phi-4-mini` — Phi Silica itself is not served by Foundry Local) → OpenAI
+(cloud, needs API key). The Foundry Local port is dynamic by design; it is
+discovered via `foundry service status` or the `localAiEndpoint` setting —
+never hardcode it.
 
 ### Testing
 ```powershell

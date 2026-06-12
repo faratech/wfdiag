@@ -30,6 +30,12 @@ SDK_BIN = Path("/mnt/c/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64"
 PROJECT_NAME = "WindowsForum_Diagnostics"
 PUBLISHER = "CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4"
 
+# Sparse identity package ("package with external location"): grants the loose
+# exe package identity + systemAIModels without full MSIX packaging. Must match
+# the <msix> element in src-tauri/windows-app.manifest, and must differ from
+# the Store identity so both can be installed side by side.
+SPARSE_PACKAGE_NAME = "WindowsForum.Diagnostics.Sparse"
+
 # Certificate configuration for self-signing
 CERT_PATH = OUTPUT_DIR / "wfdiag-selfsign.pfx"
 CERT_PASSWORD = "WFDiag2024!"
@@ -429,6 +435,175 @@ def create_appx_manifest(target_name: str, version: str) -> str:
 '''
 
 
+def create_sparse_manifest(target_name: str, version: str) -> str:
+    """Generate the AppxManifest.xml for a sparse identity package.
+
+    Key differences vs the full MSIX manifest:
+    - AllowExternalContent=true: the package carries only identity + logos;
+      the exe and assets stay loose on disk at the external location.
+    - ProcessorArchitecture MUST be the concrete arch, not neutral — neutral
+      identity makes the WinAppSDK framework dependency resolve to the host
+      (ARM64) architecture for x64 processes (WindowsAppSDK issue #6308).
+    - MinVersion 10.0.26100.0 on BOTH device families — a lower MinVersion
+      makes Windows silently ignore the systemAIModels capability.
+    """
+    arch = target_name
+    exe_name = f"wfdiag-{target_name}.exe"
+    return f'''<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         xmlns:systemai="http://schemas.microsoft.com/appx/manifest/systemai/windows10"
+         IgnorableNamespaces="uap uap10 rescap systemai">
+  <Identity Name="{SPARSE_PACKAGE_NAME}"
+            Publisher="{PUBLISHER}"
+            Version="{version}.0"
+            ProcessorArchitecture="{arch}" />
+  <Properties>
+    <DisplayName>WindowsForum Diagnostics (Loose)</DisplayName>
+    <PublisherDisplayName>Mike Fara</PublisherDisplayName>
+    <Logo>Logo.png</Logo>
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.26100.0" MaxVersionTested="10.0.26226.0" />
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.26100.0" MaxVersionTested="10.0.26226.0" />
+    <PackageDependency Name="Microsoft.WindowsAppRuntime.1.8"
+                       MinVersion="8000.675.1142.0"
+                       Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+  <Applications>
+    <Application Id="App" Executable="{exe_name}"
+                 uap10:TrustLevel="mediumIL"
+                 uap10:RuntimeBehavior="packagedClassicApp">
+      <uap:VisualElements DisplayName="WindowsForum Diagnostics"
+                          Description="System diagnostics tool for Windows"
+                          BackgroundColor="transparent"
+                          Square150x150Logo="Square150x150Logo.png"
+                          Square44x44Logo="Square44x44Logo.png" />
+    </Application>
+  </Applications>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+    <systemai:Capability Name="systemAIModels"/>
+  </Capabilities>
+</Package>
+'''
+
+
+def build_sparse(version: str, sign: bool = False) -> bool:
+    """Build per-arch sparse identity packages for the loose exes.
+
+    Output: {OUTPUT_DIR}/sparse-build/{PROJECT_NAME}_Sparse_{version}_{arch}.msix
+    plus Install-SparseIdentity.ps1 in OUTPUT_DIR. Registering the package
+    (Add-AppxPackage -ExternalLocation) gives the directly-launched loose exe
+    package identity + systemAIModels, which unlocks the Windows AI APIs
+    (Phi Silica) without full MSIX packaging.
+    """
+    print(f"\n{'='*60}")
+    print("Building Sparse Identity Packages")
+    print(f"{'='*60}")
+
+    makeappx = SDK_BIN / "MakeAppx.exe"
+    if not makeappx.exists():
+        print(f"Error: MakeAppx.exe not found at {makeappx}")
+        return False
+
+    sparse_dir = OUTPUT_DIR / "sparse-build"
+    if sparse_dir.exists():
+        shutil.rmtree(sparse_dir)
+    sparse_dir.mkdir(parents=True)
+
+    icons_dir = SRC_TAURI / "icons"
+    packages = []
+
+    for target_name in ["x64", "arm64"]:
+        layout_dir = sparse_dir / f"layout-{target_name}"
+        layout_dir.mkdir()
+
+        # Sparse payload is identity + logos only; binaries stay external
+        (layout_dir / "AppxManifest.xml").write_text(
+            create_sparse_manifest(target_name, version), encoding="utf-8"
+        )
+        shutil.copy2(icons_dir / "icon.png", layout_dir / "Logo.png")
+        shutil.copy2(icons_dir / "512x512.png", layout_dir / "Square150x150Logo.png")
+        shutil.copy2(icons_dir / "256x256.png" if (icons_dir / "256x256.png").exists()
+                     else icons_dir / "128x128@2x.png", layout_dir / "Square44x44Logo.png")
+
+        msix_path = sparse_dir / f"{PROJECT_NAME}_Sparse_{version}_{target_name}.msix"
+        # /nv skips validation: the manifest's Executable intentionally points
+        # at external content that is not inside the package payload
+        cmd = [str(makeappx), "pack", "/d", wslpath(layout_dir), "/p", wslpath(msix_path), "/o", "/nv"]
+        print(f"\n>>> Creating {target_name} sparse package...")
+        if not run_command(cmd):
+            print(f"Failed to create {target_name} sparse package")
+            return False
+        packages.append(msix_path)
+
+    if sign:
+        if not ensure_certificate():
+            return False
+        signtool = SDK_BIN / "signtool.exe"
+        for msix_path in packages:
+            print(f"\n>>> Signing {msix_path.name}...")
+            cmd = [
+                str(signtool), "sign", "/fd", "SHA256", "/a",
+                "/f", wslpath(CERT_PATH), "/p", CERT_PASSWORD,
+                wslpath(msix_path),
+            ]
+            if not run_command(cmd):
+                print(f"Failed to sign {msix_path.name}")
+                return False
+
+    # Installer/uninstaller helper next to the loose exes
+    install_script = OUTPUT_DIR / "Install-SparseIdentity.ps1"
+    install_script.write_text(f'''# Registers the WindowsForum Diagnostics sparse identity package so the loose
+# wfdiag-<arch>.exe gains package identity + the systemAIModels capability
+# (required by the Windows AI APIs / Phi Silica) without full MSIX packaging.
+#
+# Usage:   .\\Install-SparseIdentity.ps1 [-ExternalLocation C:\\code] [-Uninstall]
+# Note:    The signing certificate must be trusted (Trusted Root) first.
+param(
+    [string]$ExternalLocation = "{wslpath(OUTPUT_DIR)}",
+    [switch]$Uninstall
+)
+$ErrorActionPreference = "Stop"
+
+if ($Uninstall) {{
+    Get-AppxPackage -Name "{SPARSE_PACKAGE_NAME}" | Remove-AppxPackage
+    Write-Host "Sparse identity package removed."
+    exit 0
+}}
+
+$arch = if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq "Arm64") {{ "arm64" }} else {{ "x64" }}
+$msix = Join-Path $PSScriptRoot "sparse-build\\{PROJECT_NAME}_Sparse_{version}_$arch.msix"
+if (-not (Test-Path $msix)) {{ throw "Sparse package not found: $msix (run build-cross.py build-sparse --sign first)" }}
+
+Add-AppxPackage -Path $msix -ExternalLocation $ExternalLocation
+Write-Host ""
+Write-Host "Registered sparse identity '{SPARSE_PACKAGE_NAME}' ($arch)."
+Write-Host "External location: $ExternalLocation"
+Write-Host "Launch $ExternalLocation\\wfdiag-$arch.exe - it now runs with package identity"
+Write-Host "and the systemAIModels capability (Phi Silica via Windows AI APIs)."
+''', encoding="utf-8")
+
+    print(f"\n{'='*60}")
+    print("Sparse Package Build Complete")
+    print(f"{'='*60}")
+    for msix_path in packages:
+        print(f"  {msix_path}")
+    print(f"  Installer: {install_script}")
+    print("")
+    print("To register (in Windows PowerShell):")
+    print(f"  cd {wslpath(OUTPUT_DIR)}; .\\Install-SparseIdentity.ps1")
+    return True
+
+
 def build_msix(version: str) -> bool:
     """Build MSIX packages and bundle for both architectures."""
     print(f"\n{'='*60}")
@@ -546,39 +721,20 @@ def build_msix(version: str) -> bool:
     return True
 
 
-def sign_msix(version: str) -> bool:
-    """Sign the MSIX bundle using signtool and self-signed certificate.
+def ensure_certificate() -> bool:
+    """Ensure the self-signed signing certificate exists, creating it if needed.
 
-    This function calls a PowerShell script on Windows to:
-    1. Create self-signed certificate if it doesn't exist
-    2. Install certificate to Trusted Root (requires admin on first run)
-    3. Sign the MSIX bundle
+    Creates the cert via PowerShell (subject must match PUBLISHER so signed
+    packages validate) and tries to install it to Trusted Root (needs admin).
     """
-    print(f"\n{'='*60}")
-    print("Signing MSIX Bundle")
-    print(f"{'='*60}")
+    if CERT_PATH.exists():
+        print(f"Using existing certificate: {CERT_PATH}")
+        return True
 
-    # Check signtool exists
-    signtool = SDK_BIN / "signtool.exe"
-    if not signtool.exists():
-        print(f"Error: signtool.exe not found at {signtool}")
-        return False
+    print(f"\nCertificate not found at {CERT_PATH}")
+    print("Creating self-signed certificate via PowerShell...")
 
-    # Bundle path
-    win_msix_dir = OUTPUT_DIR / "msix-build"
-    bundle_path = win_msix_dir / f"{PROJECT_NAME}_{version}.msixbundle"
-
-    if not bundle_path.exists():
-        print(f"Error: Bundle not found at {bundle_path}")
-        return False
-
-    # Check if certificate exists
-    if not CERT_PATH.exists():
-        print(f"\nCertificate not found at {CERT_PATH}")
-        print("Creating self-signed certificate via PowerShell...")
-
-        # Create certificate using PowerShell
-        ps_script = f'''
+    ps_script = f'''
 $ErrorActionPreference = "Stop"
 $Publisher = "{PUBLISHER}"
 $CertPath = "{wslpath(CERT_PATH)}"
@@ -613,14 +769,37 @@ try {{
 }}
 '''
 
-        cmd = ["powershell.exe", "-Command", ps_script]
-        if not run_command(cmd):
-            print("Failed to create certificate")
-            print("\nTo create manually, run in Windows PowerShell as Admin:")
-            print(f'  powershell.exe -File C:\\code\\sign-msix.ps1')
-            return False
-    else:
-        print(f"Using existing certificate: {CERT_PATH}")
+    cmd = ["powershell.exe", "-Command", ps_script]
+    if not run_command(cmd):
+        print("Failed to create certificate")
+        print("\nTo create manually, run in Windows PowerShell as Admin:")
+        print(f'  powershell.exe -File C:\\code\\sign-msix.ps1')
+        return False
+    return True
+
+
+def sign_msix(version: str) -> bool:
+    """Sign the MSIX bundle using signtool and self-signed certificate."""
+    print(f"\n{'='*60}")
+    print("Signing MSIX Bundle")
+    print(f"{'='*60}")
+
+    # Check signtool exists
+    signtool = SDK_BIN / "signtool.exe"
+    if not signtool.exists():
+        print(f"Error: signtool.exe not found at {signtool}")
+        return False
+
+    # Bundle path
+    win_msix_dir = OUTPUT_DIR / "msix-build"
+    bundle_path = win_msix_dir / f"{PROJECT_NAME}_{version}.msixbundle"
+
+    if not bundle_path.exists():
+        print(f"Error: Bundle not found at {bundle_path}")
+        return False
+
+    if not ensure_certificate():
+        return False
 
     # Sign the bundle
     print(f"\nSigning bundle with signtool...")
@@ -671,8 +850,9 @@ def main():
     )
     parser.add_argument(
         "action",
-        choices=["check", "build", "build-all", "build-msix"],
-        help="Action to perform: check, build, build-all, or build-msix"
+        choices=["check", "build", "build-all", "build-msix", "build-sparse"],
+        help="Action to perform: check, build, build-all, build-msix, or "
+             "build-sparse (sparse identity packages for the loose exes)"
     )
     parser.add_argument(
         "--target",
@@ -858,6 +1038,15 @@ def main():
             OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
             shutil.copy2(bundle_src, bundle_dst)
             print(f"\n✓ Bundle copied to: {bundle_dst}")
+
+    elif args.action == "build-sparse":
+        # Sparse identity packages for the loose exes (no binaries inside)
+        version = get_version()
+        print(f"\nBuilding sparse identity packages v{version}...")
+
+        if not build_sparse(version, sign=args.sign):
+            print("Sparse package build failed!")
+            sys.exit(1)
 
     print("\nDone!")
 

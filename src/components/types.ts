@@ -15,8 +15,13 @@ export interface SettingsData {
   historyLimit?: number
   /** Enable AI-powered insights throughout the app */
   aiEnabled?: boolean
-  /** Preferred AI provider: auto-detect, openai, or phi_silica */
-  preferredAIProvider?: 'auto' | 'openai' | 'phi_silica'
+  /** Preferred AI provider: auto-detect, openai, phi_silica, or foundry_local */
+  preferredAIProvider?: 'auto' | 'openai' | 'phi_silica' | 'foundry_local'
   /** Custom task IDs for Quick Scan (if empty, uses default set) */
   quickScanTasks?: string[]
+  /**
+   * Base URL of a local OpenAI-compatible endpoint (e.g. Foundry Local).
+   * Leave empty to auto-discover via the foundry CLI (its port is dynamic).
+   */
+  localAiEndpoint?: string
 }

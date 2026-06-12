@@ -14,8 +14,8 @@ function hashContent(input: string): string {
 }
 
 // Types matching the Rust backend
-export type AIProvider = 'none' | 'openai' | 'phi_silica'
-export type AIProviderPreference = 'auto' | 'openai' | 'phi_silica'
+export type AIProvider = 'none' | 'openai' | 'phi_silica' | 'foundry_local'
+export type AIProviderPreference = 'auto' | 'openai' | 'phi_silica' | 'foundry_local'
 
 export interface AIProviderStatus {
   preferred_provider: AIProvider
@@ -24,6 +24,8 @@ export interface AIProviderStatus {
   phi_silica_available: boolean
   phi_silica_ready: boolean
   phi_silica_message?: string
+  foundry_local_available?: boolean
+  foundry_local_endpoint?: string
   active_provider: AIProvider
 }
 
@@ -113,16 +115,23 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   // Priority: settings API key (since that's what we send to backend), then backend status
   const activeProvider: AIProvider = (() => {
     if (hasSettingsApiKey) {
-      // If user prefers Phi Silica and it's available, use that
+      // An explicit local preference still wins over the API key when that
+      // provider is actually available
       if (preferredProvider === 'phi_silica' && aiStatus?.phi_silica_available) {
         return 'phi_silica'
+      }
+      if (preferredProvider === 'foundry_local' && aiStatus?.foundry_local_available) {
+        return 'foundry_local'
       }
       // Otherwise use OpenAI since we have an API key
       return 'openai'
     }
-    // No settings API key - check if Phi Silica is available
+    // No settings API key - prefer on-device Phi Silica, then Foundry Local
     if (aiStatus?.phi_silica_available) {
       return 'phi_silica'
+    }
+    if (aiStatus?.foundry_local_available) {
+      return 'foundry_local'
     }
     // Fall back to backend status
     return backendAvailable ? aiStatus!.active_provider : 'none'

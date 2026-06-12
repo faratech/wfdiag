@@ -19,33 +19,115 @@ use crate::error::DiagError;
 pub enum AiProvider {
     #[default]
     OpenAI,
-    PhiSilica, // Local Phi Silica via WindowsCopilotRuntimeServer
+    PhiSilica, // On-device WinRT path (phi_silica.rs) or a local OpenAI-compatible server
 }
 
-/// OpenAI model to use for all API calls (when Phi Silica is not available)
+/// OpenAI model to use for all API calls (when no local provider is available)
 /// Change this constant to switch models globally
 pub const OPENAI_MODEL: &str = "gpt-5-nano";
 
-/// Phi Silica local server configuration
-#[allow(dead_code)]
-const PHI_SILICA_BASE_URL: &str = "http://localhost:5001/v1";
-#[allow(dead_code)]
-const PHI_SILICA_MODEL: &str = "phi-silica"; // Model name used by WindowsCopilotRuntimeServer
+/// Default model alias requested from Foundry Local. Phi Silica itself is NOT
+/// served by Foundry Local (it is only reachable through the Windows AI APIs,
+/// which require package identity); phi-4-mini is Microsoft's documented
+/// local fallback model.
+pub(crate) const FOUNDRY_LOCAL_MODEL: &str = "phi-4-mini";
 
-/// Check if Phi Silica (WindowsCopilotRuntimeServer) is available
-async fn check_phi_silica_available() -> bool {
-    // Try to connect to the local Phi Silica server via TCP
-    use std::net::TcpStream;
+/// Extract `scheme://host:port` from the first http(s) URL found in `text`.
+fn extract_http_base(text: &str) -> Option<String> {
+    let start = text.find("http://").or_else(|| text.find("https://"))?;
+    let url = &text[start..];
+    let end = url
+        .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+        .unwrap_or(url.len());
+    let url = &url[..end];
+    let scheme_end = url.find("://")? + 3;
+    if url.len() <= scheme_end {
+        return None;
+    }
+    // Cut any path component, keeping scheme://authority only
+    let base_end = url[scheme_end..]
+        .find('/')
+        .map(|i| scheme_end + i)
+        .unwrap_or(url.len());
+    Some(url[..base_end].to_string())
+}
+
+/// TCP probe of an endpoint base URL (`scheme://host:port`).
+fn probe_endpoint(base: &str) -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
     use std::time::Duration;
 
-    let addr = "127.0.0.1:5001";
-
-    match addr.parse() {
-        Ok(addr) => TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok(),
-        Err(_) => {
-            // If the hardcoded address ever becomes invalid, treat the service as unavailable
-            false
+    let Some(scheme_end) = base.find("://") else {
+        return false;
+    };
+    let host_port = &base[scheme_end + 3..];
+    let host_port = if host_port.contains(':') {
+        host_port.to_string()
+    } else {
+        format!("{}:80", host_port)
+    };
+    match host_port.to_socket_addrs() {
+        Ok(mut addrs) => {
+            addrs.any(|a| TcpStream::connect_timeout(&a, Duration::from_secs(2)).is_ok())
         }
+        Err(_) => false,
+    }
+}
+
+async fn probe_endpoint_async(base: &str) -> bool {
+    let base = base.to_string();
+    tokio::task::spawn_blocking(move || probe_endpoint(&base))
+        .await
+        .unwrap_or(false)
+}
+
+/// Read the user-configured local AI endpoint from settings, normalized to a
+/// base URL without a trailing slash or `/v1` suffix.
+fn configured_local_endpoint() -> Option<String> {
+    let path = crate::commands::settings::get_settings_path().ok()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    let settings: crate::commands::settings::AppSettings = serde_json::from_str(&content).ok()?;
+    settings
+        .local_ai_endpoint
+        .map(|e| {
+            let e = e.trim().trim_end_matches('/');
+            e.strip_suffix("/v1").unwrap_or(e).to_string()
+        })
+        .filter(|e| !e.is_empty())
+}
+
+/// Ask the Foundry Local CLI where its service is listening. The service port
+/// is dynamic by design — Microsoft documents that it must never be hardcoded,
+/// so discovery goes through `foundry service status`.
+async fn discover_foundry_endpoint() -> Option<String> {
+    let mut cmd = tokio::process::Command::new("foundry");
+    cmd.args(["service", "status"]);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    extract_http_base(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Resolve a reachable local OpenAI-compatible endpoint: an explicit setting
+/// wins, otherwise Foundry Local is discovered via its CLI. Returns the base
+/// URL (append `/v1` for the OpenAI-compatible API root).
+pub(crate) async fn local_ai_endpoint() -> Option<String> {
+    if let Some(endpoint) = configured_local_endpoint()
+        && probe_endpoint_async(&endpoint).await
+    {
+        return Some(endpoint);
+    }
+    let endpoint = discover_foundry_endpoint().await?;
+    if probe_endpoint_async(&endpoint).await {
+        Some(endpoint)
+    } else {
+        None
     }
 }
 
@@ -60,18 +142,23 @@ pub struct AiProviderStatus {
 /// Tauri command to check AI provider availability
 #[tauri::command]
 pub async fn get_ai_provider_status() -> Result<AiProviderStatus, String> {
-    let phi_silica_available = check_phi_silica_available().await;
+    let endpoint = local_ai_endpoint().await;
 
     Ok(AiProviderStatus {
         openai_available: true,
-        phi_silica_available,
-        phi_silica_info: if phi_silica_available {
-            Some(
-                "Phi Silica is available via WindowsCopilotRuntimeServer on localhost:5001"
+        phi_silica_available: endpoint.is_some(),
+        phi_silica_info: match &endpoint {
+            Some(endpoint) => Some(format!(
+                "Local AI available via Foundry Local at {} (model: {})",
+                endpoint, FOUNDRY_LOCAL_MODEL
+            )),
+            None => Some(
+                "No local AI endpoint found. Install Foundry Local (winget install \
+                 Microsoft.FoundryLocal) and run 'foundry service start', or set a custom \
+                 endpoint in Settings. On-device Phi Silica uses the Windows AI APIs instead \
+                 and requires package identity (MSIX or sparse package)."
                     .to_string(),
-            )
-        } else {
-            Some("Phi Silica not available. Install WindowsCopilotRuntimeServer from Microsoft Store on a Copilot+ PC.".to_string())
+            ),
         },
     })
 }
@@ -441,26 +528,29 @@ fn parse_analysis(analysis: &str) -> (Vec<Finding>, Vec<String>) {
     (findings, recommendations)
 }
 
-/// Analyze system using Phi Silica (WindowsCopilotRuntimeServer on localhost:5001)
-/// This uses the same OpenAI-compatible API but with a local endpoint
+/// Analyze system using a local OpenAI-compatible endpoint (Foundry Local).
+/// The endpoint is discovered dynamically — settings override first, then the
+/// foundry CLI. Command name kept for IPC compatibility; the model served is
+/// phi-4-mini, not Phi Silica (which is only reachable via the Windows AI
+/// APIs and needs package identity).
 #[allow(dead_code)]
 #[tauri::command]
 pub async fn analyze_system_with_phi_silica(
     prompt: String,
     _app_handle: tauri::AppHandle,
 ) -> Result<Value, String> {
-    // First check if Phi Silica server is available
-    if !check_phi_silica_available().await {
+    let Some(endpoint) = local_ai_endpoint().await else {
         return Err(DiagError::ai_unavailable(
-            "phi_silica",
-            "Phi Silica is not available on this device",
+            "foundry_local",
+            "No local AI endpoint available. Install Foundry Local and run 'foundry service \
+             start', or configure an endpoint in Settings.",
         )
         .into());
-    }
+    };
 
-    // Create client configured for local Phi Silica server
+    // Create client configured for the local OpenAI-compatible server
     let config = OpenAIConfig::new()
-        .with_api_base(PHI_SILICA_BASE_URL)
+        .with_api_base(format!("{}/v1", endpoint))
         .with_api_key("not-needed"); // Local server doesn't require API key
     let client = Client::with_config(config);
 
@@ -506,15 +596,16 @@ pub async fn analyze_system_with_phi_silica(
     );
 
     let request = CreateResponseArgs::default()
-        .model(PHI_SILICA_MODEL)
+        .model(FOUNDRY_LOCAL_MODEL)
         .input(InputParam::Text(full_prompt))
         .build()
         .map_err(|e| format!("Failed to build request: {}", e))?;
 
     let response = client.responses().create(request).await.map_err(|e| {
         format!(
-            "Phi Silica API error: {}. Ensure WindowsCopilotRuntimeServer is running.",
-            e
+            "Local AI endpoint error: {}. Ensure the Foundry Local service is running \
+             ('foundry service start') and the model '{}' is loaded.",
+            e, FOUNDRY_LOCAL_MODEL
         )
     })?;
 
@@ -527,7 +618,7 @@ pub async fn analyze_system_with_phi_silica(
         "diagnostic_results": {},
         "findings": findings,
         "recommendations": recommendations,
-        "provider": "phi_silica"
+        "provider": "foundry_local"
     }))
 }
 
@@ -548,5 +639,33 @@ pub async fn analyze_system_with_ai_provider(
                 .ok_or_else(|| DiagError::api_key("validate", "OpenAI API key is required"))?;
             analyze_system_with_ai(key, prompt, app_handle).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_http_base;
+
+    #[test]
+    fn extracts_base_from_foundry_status_output() {
+        let out = "🟢 Model management service is running on http://127.0.0.1:55769/openai/status";
+        assert_eq!(
+            extract_http_base(out),
+            Some("http://127.0.0.1:55769".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_base_without_path() {
+        assert_eq!(
+            extract_http_base("endpoint: http://localhost:5273 ready"),
+            Some("http://localhost:5273".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_when_no_url_present() {
+        assert_eq!(extract_http_base("service is not running"), None);
+        assert_eq!(extract_http_base("http://"), None);
     }
 }
