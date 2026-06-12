@@ -343,7 +343,11 @@ def build_target(target_name: str, release: bool = True, jobs: int = None, use_s
     if not release:
         env["RUSTFLAGS"] = f"{existing_rustflags} -C codegen-units={num_jobs}"
 
-    cmd = ["cargo", "build", "--target", triple, "-j", str(num_jobs)]
+    # Build only the app binary (pulls in the rlib). Avoids the debug_diagnostics
+    # bin and the cdylib/staticlib, whose .pdb collides with the bin's in debug
+    # profile (a fatal "output filename collision" under plain cargo build;
+    # release strips pdbs so it never surfaced).
+    cmd = ["cargo", "build", "--target", triple, "-j", str(num_jobs), "--bin", "wfdiag-tauri"]
     if release:
         cmd.append("--release")
 
