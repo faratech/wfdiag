@@ -20,15 +20,15 @@ name = "debug_diagnostics"
 path = "src/bin/debug_diagnostics.rs"
 
 [build-dependencies]
-tauri-build = { version = "2.5", features = [] }
+tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
 # Tauri framework
-tauri = { version = "2.9", features = [] }
+tauri = { version = "2.11", features = [] }
 
 # Tauri v2 plugins
-tauri-plugin-fs = "2.4"
-tauri-plugin-dialog = "2.6.0"
+tauri-plugin-fs = "2.5"
+tauri-plugin-dialog = "2.7"
 tauri-plugin-clipboard-manager = "2.3"
 tauri-plugin-shell = "2.3"
 
