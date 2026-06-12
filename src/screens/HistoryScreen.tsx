@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useScanHistory } from '../hooks/useScanHistory'
 import { useComparison } from '../hooks/useComparison'
 import { useToast } from '../contexts/ToastContext'
+import { Skeleton, EmptyState } from '../components/ui'
 
 export const HistoryScreen: React.FC = () => {
   const { scans, loading, refreshScans } = useScanHistory()
@@ -62,6 +63,11 @@ export const HistoryScreen: React.FC = () => {
               <span style={{ textAlign: 'right' }}>Fail</span>
               <span style={{ textAlign: 'right' }}>Time</span>
             </div>
+            {loading && scans.length === 0 && (
+              <div style={{ padding: 14 }}>
+                <Skeleton variant="block" count={4} height={38} />
+              </div>
+            )}
             {scans.map((h, idx) => (
               <div key={h.id} className="history-row" style={{ background: selected === h.id ? 'rgba(15,108,189,0.12)' : 'transparent' }} onClick={() => select(h.id)}>
                 <span className={`status-dot ${h.failure_count > 0 ? 'warning' : 'success'}`} />
@@ -76,7 +82,11 @@ export const HistoryScreen: React.FC = () => {
               </div>
             ))}
             {!loading && scans.length === 0 && (
-              <div style={{ padding: 20, color: 'var(--wf-text-muted)', fontSize: 13 }}>No saved scans yet.</div>
+              <EmptyState
+                icon="fa-clock-rotate-left"
+                title="No saved scans yet"
+                sub="Run and save a scan to start tracking drift between sessions."
+              />
             )}
           </div>
         </div>

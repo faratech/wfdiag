@@ -40,6 +40,7 @@ function makeContext(overrides: Partial<MockContext> = {}): MockContext {
     setCurrentTaskName: vi.fn(),
     setScanStartTime: vi.fn(),
     setScanEndTime: vi.fn(),
+    setTaskStatuses: vi.fn(),
     settings: { autoSave: false, maxConcurrentTasks: 2 },
     searchQuery: '',
     setFilteredResults: vi.fn(),

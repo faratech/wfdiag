@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { useAIContext } from '../contexts/AIContext'
 import { useAppContext } from '../contexts/AppContext'
+import { renderMarkdownLite } from '../utils/markdownLite'
 
 interface Msg { role: 'user' | 'bot'; text: string }
 
@@ -52,23 +53,36 @@ export const AIScreen: React.FC = () => {
           </span>
         </header>
         <div className="chat-shell" style={{ minHeight: 360 }}>
-          <div className="chat-msgs">
+          <div className="chat-msgs" role="log" aria-live="polite" aria-label="AI conversation">
             {transcript.length === 0 && (
               <div className="chat-msg bot">
                 <div className="av"><img src="/wf-ds/chatgpt-bot-avatar.webp" alt="" /></div>
-                <div className="bubble">Ask me about your diagnostics. I read the current scan results and explain failures, risks and fixes.</div>
+                <div className="msg-col">
+                  <span className="msg-sender">WF Assistant</span>
+                  <div className="bubble">Ask me about your diagnostics. I read the current scan results and explain failures, risks and fixes.</div>
+                </div>
               </div>
             )}
             {transcript.map((m, i) => (
               <div key={i} className={`chat-msg ${m.role}`}>
                 <div className="av">{m.role === 'user' ? 'ME' : <img src="/wf-ds/chatgpt-bot-avatar.webp" alt="" />}</div>
-                <div className="bubble"><div style={{ whiteSpace: 'pre-wrap' }}>{m.text}</div></div>
+                <div className="msg-col">
+                  <span className="msg-sender">{m.role === 'user' ? 'You' : 'WF Assistant'}</span>
+                  <div className="bubble">
+                    {m.role === 'bot'
+                      ? renderMarkdownLite(m.text)
+                      : <div style={{ whiteSpace: 'pre-wrap' }}>{m.text}</div>}
+                  </div>
+                </div>
               </div>
             ))}
             {thinking && (
-              <div className="chat-msg bot">
+              <div className="chat-msg bot" aria-busy="true">
                 <div className="av"><img src="/wf-ds/chatgpt-bot-avatar.webp" alt="" /></div>
-                <div className="bubble"><i className="fa-solid fa-circle-notch fa-spin" /> Analyzing latest scan…</div>
+                <div className="msg-col">
+                  <span className="msg-sender">WF Assistant</span>
+                  <div className="bubble"><i className="fa-solid fa-circle-notch fa-spin" aria-hidden="true" /> Analyzing latest scan…</div>
+                </div>
               </div>
             )}
             <div ref={endRef} />

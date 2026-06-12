@@ -60,6 +60,10 @@ interface AppContextType {
   setCurrentProgress: (progress: number) => void
   currentTaskName: string
   setCurrentTaskName: (name: string) => void
+  // Per-task status of the current scan, keyed by task id (drives the
+  // per-category progress chips in the scanning hero)
+  taskStatuses: Record<string, 'running' | 'done'>
+  setTaskStatuses: React.Dispatch<React.SetStateAction<Record<string, 'running' | 'done'>>>
   isMonitoringActive: boolean
   setIsMonitoringActive: (active: boolean) => void
   showComparison: boolean
@@ -122,6 +126,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const [isRunning, setIsRunning] = useState(false)
   const [currentProgress, setCurrentProgress] = useState(0)
   const [currentTaskName, setCurrentTaskName] = useState('')
+  const [taskStatuses, setTaskStatuses] = useState<Record<string, 'running' | 'done'>>({})
   const [isMonitoringActive, setIsMonitoringActive] = useState(false)
 
   // Wrapper to stop monitoring when leaving the monitoring tab
@@ -287,6 +292,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     setCurrentProgress,
     currentTaskName,
     setCurrentTaskName,
+    taskStatuses,
+    setTaskStatuses,
     isMonitoringActive,
     setIsMonitoringActive,
     showComparison,

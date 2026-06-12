@@ -1,14 +1,27 @@
 import React, { useMemo, useState } from 'react'
 import { useMonitoring } from '../hooks/useMonitoring'
 import type { ProcessInfo } from '../types/monitoring'
+import { Skeleton } from '../components/ui'
 import { formatBytesMb } from './util'
 
 type SortKey = 'name' | 'pid' | 'cpu_percent' | 'memory_mb' | 'thread_count' | 'user'
+type SortDir = 'asc' | 'desc'
 
 export const ProcessesScreen: React.FC = () => {
   const { processes, isActive, toggle, refresh } = useMonitoring({ autoStart: true, componentName: 'ProcessesScreen' })
   const [sortBy, setSortBy] = useState<SortKey>('cpu_percent')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [search, setSearch] = useState('')
+
+  const setSort = (key: SortKey) => {
+    if (key === sortBy) {
+      setSortDir(d => (d === 'desc' ? 'asc' : 'desc'))
+    } else {
+      setSortBy(key)
+      // Numeric columns read best descending, text columns ascending
+      setSortDir(key === 'name' || key === 'user' ? 'asc' : 'desc')
+    }
+  }
 
   const sorted = useMemo(() => {
     let list = [...processes]
@@ -16,13 +29,15 @@ export const ProcessesScreen: React.FC = () => {
       const q = search.toLowerCase()
       list = list.filter(p => p.name.toLowerCase().includes(q) || (p.command || '').toLowerCase().includes(q))
     }
+    const dir = sortDir === 'desc' ? 1 : -1
     list.sort((a, b) => {
       const av = a[sortBy] as number | string
       const bv = b[sortBy] as number | string
-      return typeof bv === 'number' ? (bv as number) - (av as number) : String(bv).localeCompare(String(av))
+      const cmp = typeof bv === 'number' ? (bv as number) - (av as number) : String(bv).localeCompare(String(av))
+      return cmp * dir
     })
     return list
-  }, [processes, sortBy, search])
+  }, [processes, sortBy, sortDir, search])
 
   const totalCpu = processes.reduce((s, p) => s + p.cpu_percent, 0)
   const totalMem = processes.reduce((s, p) => s + p.memory_mb, 0)
@@ -37,11 +52,13 @@ export const ProcessesScreen: React.FC = () => {
       <div className="row-gap-12" style={{ padding: '0 24px 12px', justifyContent: 'space-between' }}>
         <div className="row-gap-12">
           <input
+            className="field-input"
             type="text"
             placeholder="Filter processes…"
+            aria-label="Filter processes"
             value={search}
             onChange={e => setSearch(e.target.value)}
-            style={{ width: 240, padding: '5px 10px', borderRadius: 4, border: '1px solid var(--hairline)', background: 'var(--wf-input-bg)', color: 'var(--wf-text)', fontSize: 13, fontFamily: 'inherit' }}
+            style={{ width: 240 }}
           />
           <span style={{ fontSize: 12, color: 'var(--wf-text-muted)' }}>
             Showing {sorted.length} of {processes.length} · {totalCpu.toFixed(1)}% CPU · {(totalMem / 1024).toFixed(1)} GB RAM
@@ -59,13 +76,22 @@ export const ProcessesScreen: React.FC = () => {
             <thead>
               <tr>
                 {cols.map(([k, label]) => (
-                  <th key={k} onClick={() => setSortBy(k)}>
-                    {label}{sortBy === k && <span className="sort-arrow"> ↓</span>}
+                  <th key={k} aria-sort={sortBy === k ? (sortDir === 'asc' ? 'ascending' : 'descending') : undefined}>
+                    <button className="th-sort" onClick={() => setSort(k)}>
+                      {label}{sortBy === k && <span className="sort-arrow">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+                    </button>
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody>
+              {processes.length === 0 && (
+                <tr>
+                  <td colSpan={6} style={{ padding: 14 }}>
+                    <Skeleton variant="text" count={8} height={22} />
+                  </td>
+                </tr>
+              )}
               {sorted.map((p: ProcessInfo) => (
                 <tr key={p.pid}>
                   <td>
