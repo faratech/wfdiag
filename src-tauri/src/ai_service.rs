@@ -512,6 +512,16 @@ fn generate_cache_key(request: &AIRequest, session_id: &str, provider: AIProvide
     )
 }
 
+/// How many characters of diagnostic DATA a one-shot prompt may embed for a
+/// provider — roughly half its whole-request budget (the rest is template,
+/// system prompt and output headroom). Phi Silica lands at ~1,250, close to
+/// its long-proven 1,200, and its hard 2,500-char prompt clamp still applies
+/// as the final guard; cloud providers get the full 20k data window.
+fn one_shot_data_budget(provider: AIProvider) -> usize {
+    let budget = crate::ai_providers::capabilities(provider).context_budget_chars;
+    (budget / 2).clamp(800, 20_000)
+}
+
 /// Analyze with the appropriate provider
 /// If api_key is provided, it counts as OpenAI availability for routing
 pub async fn analyze(
@@ -536,18 +546,25 @@ pub async fn analyze(
         });
     }
 
-    // Generate prompt based on context type
+    // Generate prompt based on context type, sized to the provider's budget
+    let data_budget = one_shot_data_budget(provider);
     let prompt = match request.context_type {
         ContextType::DiagnosticInterpretation => ai_prompts::diagnostic_interpretation_prompt(
             request.task_name.as_deref().unwrap_or("Unknown"),
             &request.data,
+            data_budget,
         ),
         ContextType::SectionSummary => ai_prompts::section_summary_prompt(
             request.section_name.as_deref().unwrap_or("System"),
             &request.data,
+            data_budget,
         ),
-        ContextType::HealthScoreExplanation => ai_prompts::health_explanation_prompt(&request.data),
-        ContextType::IssuePrioritization => ai_prompts::issue_prioritization_prompt(&request.data),
+        ContextType::HealthScoreExplanation => {
+            ai_prompts::health_explanation_prompt(&request.data, data_budget)
+        }
+        ContextType::IssuePrioritization => {
+            ai_prompts::issue_prioritization_prompt(&request.data, data_budget)
+        }
         ContextType::GeneralAnalysis => request.data.clone(),
     };
 
@@ -675,13 +692,16 @@ pub async fn ai_clear_cache(session_id: Option<String>) -> Result<(), String> {
 }
 
 /// System prompt for AI analysis
+// Phi Silica never sees this (its one-shot path skips the system prompt to
+// preserve the on-device budget); per-prompt length hints in ai_prompts.rs
+// handle the compact case.
 const SYSTEM_PROMPT: &str = r#"You are a Windows system diagnostic expert. Analyze the provided data and give a clear, concise interpretation.
 
 Guidelines:
 - Be direct and specific
 - Focus on actionable insights
-- Mention any anomalies or concerns
-- Keep responses under 150 words
+- Mention any anomalies or concerns, with the values that matter
+- Be as brief as the data allows; never pad
 - Use technical but accessible language"#;
 
 #[cfg(test)]
