@@ -268,7 +268,10 @@ export const useScanner = () => {
   // Default Quick Scan task IDs (used when no custom list is configured)
   const DEFAULT_QUICK_SCAN_TASKS = [
     'comp_system', 'os_info', 'processor', 'physical_memory', 'disk_drive',
-    'logical_disk', 'network_adapter', 'systeminfo'
+    'logical_disk', 'network_adapter', 'systeminfo',
+    // Cheap, high-signal detection sources (registry/WMI lookups); the
+    // heavier event_codes_critical scan stays full-scan-only
+    'pending_reboot', 'device_errors', 'defender_status'
   ]
 
   const runQuickScan = useCallback(async () => {

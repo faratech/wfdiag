@@ -13,6 +13,7 @@ export const PROVIDER_LABELS: Record<Exclude<AIProvider, 'none'>, string> = {
   openai: 'OpenAI (cloud)',
   anthropic: 'Anthropic Claude (cloud)',
   gemini: 'Google Gemini (cloud)',
+  deepseek: 'DeepSeek (cloud)',
 }
 
 const PROVIDER_TAGS: Record<AIProvider, string> = {
@@ -24,6 +25,7 @@ const PROVIDER_TAGS: Record<AIProvider, string> = {
   openai: 'cloud · OpenAI',
   anthropic: 'cloud · Claude',
   gemini: 'cloud · Gemini',
+  deepseek: 'cloud · DeepSeek',
 }
 
 /** Status line for one provider row in the Models panel */
@@ -50,12 +52,22 @@ function providerDetail(p: ProviderInfo, phiMessage?: string): string {
 
 export const AIScreen: React.FC = () => {
   const { aiStatus, activeProvider } = useAIContext()
-  const { setShowSettings } = useAppContext()
+  const { setShowSettings, pendingChatPrompt, setPendingChatPrompt } = useAppContext()
   const { messages, send, stop, newConversation, isStreaming } = useAIChat()
   const [input, setInput] = useState('')
   const endRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [messages, isStreaming])
+
+  // "Ask AI" deep-link from the Issues screen: consume once (clear BEFORE
+  // sending so a re-render can never double-fire)
+  useEffect(() => {
+    if (pendingChatPrompt && !isStreaming) {
+      const prompt = pendingChatPrompt
+      setPendingChatPrompt(null)
+      void send(prompt)
+    }
+  }, [pendingChatPrompt, isStreaming, send, setPendingChatPrompt])
 
   const submit = (text: string) => {
     if (!text.trim() || isStreaming) return
@@ -67,8 +79,8 @@ export const AIScreen: React.FC = () => {
   const supportsTools = aiStatus?.providers?.find(p => p.id === activeProvider)?.supports_tools ?? false
 
   return (
-    <div className="scrollable" style={{ padding: '0 24px 24px', display: 'flex', gap: 14, minHeight: 0 }}>
-      <div className="wf-block" style={{ flex: 2, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+    <div className="scrollable screen-pad ai-grid">
+      <div className="wf-block ai-chat-col">
         <header className="wf-block-header">
           <img src="/wf-ds/chatgpt-bot-avatar.webp" alt="" style={{ width: 24, height: 24, borderRadius: '50%' }} />
           <span>WindowsForum AI Assistant</span>
@@ -81,7 +93,7 @@ export const AIScreen: React.FC = () => {
             )}
           </span>
         </header>
-        <div className="chat-shell" style={{ minHeight: 360 }}>
+        <div className="chat-shell">
           <div className="chat-msgs" role="log" aria-live="polite" aria-label="AI conversation">
             {messages.length === 0 && (
               <div className="chat-msg bot">
@@ -115,7 +127,7 @@ export const AIScreen: React.FC = () => {
         </div>
       </div>
 
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
+      <div className="ai-side-col">
         <div className="wf-block">
           <header className="wf-block-header"><span className="accent-bar" /><span>Models</span></header>
           <div style={{ padding: 12, fontSize: 13 }}>

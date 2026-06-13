@@ -42,6 +42,9 @@ pub enum AIProvider {
     /// Google Gemini via the native generateContent API
     #[serde(rename = "gemini")]
     Gemini,
+    /// DeepSeek cloud (OpenAI-compatible chat completions)
+    #[serde(rename = "deepseek")]
+    DeepSeek,
 }
 
 impl std::fmt::Display for AIProvider {
@@ -55,6 +58,7 @@ impl std::fmt::Display for AIProvider {
             AIProvider::CustomOpenAI => write!(f, "custom_openai"),
             AIProvider::Anthropic => write!(f, "anthropic"),
             AIProvider::Gemini => write!(f, "gemini"),
+            AIProvider::DeepSeek => write!(f, "deepseek"),
         }
     }
 }
@@ -79,6 +83,8 @@ pub enum AIProviderPreference {
     Anthropic,
     #[serde(rename = "gemini")]
     Gemini,
+    #[serde(rename = "deepseek")]
+    DeepSeek,
 }
 
 /// Context type for different AI analysis scenarios
@@ -259,6 +265,13 @@ pub async fn check_gemini_available() -> bool {
         .is_some()
 }
 
+/// Check if DeepSeek is available (API key stored)
+pub async fn check_deepseek_available() -> bool {
+    crate::commands::settings::load_provider_key_internal(crate::dpapi::ProviderKeyId::DeepSeek)
+        .await
+        .is_some()
+}
+
 /// Snapshot of which providers could serve a request right now.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProviderAvailability {
@@ -270,6 +283,7 @@ pub struct ProviderAvailability {
     pub openai: bool,
     pub anthropic: bool,
     pub gemini: bool,
+    pub deepseek: bool,
 }
 
 /// Pure routing decision: which provider serves a request given the user's
@@ -301,6 +315,8 @@ pub fn route_provider(pref: AIProviderPreference, avail: ProviderAvailability) -
                 AIProvider::Anthropic
             } else if avail.gemini {
                 AIProvider::Gemini
+            } else if avail.deepseek {
+                AIProvider::DeepSeek
             } else {
                 AIProvider::None
             }
@@ -312,6 +328,7 @@ pub fn route_provider(pref: AIProviderPreference, avail: ProviderAvailability) -
         AIProviderPreference::CustomOpenAI if avail.custom => AIProvider::CustomOpenAI,
         AIProviderPreference::Anthropic if avail.anthropic => AIProvider::Anthropic,
         AIProviderPreference::Gemini if avail.gemini => AIProvider::Gemini,
+        AIProviderPreference::DeepSeek if avail.deepseek => AIProvider::DeepSeek,
         _ => AIProvider::None,
     }
 }
@@ -340,6 +357,7 @@ pub async fn determine_active_provider_with_key(
         }
         AIProviderPreference::Anthropic => avail.anthropic = check_anthropic_available().await,
         AIProviderPreference::Gemini => avail.gemini = check_gemini_available().await,
+        AIProviderPreference::DeepSeek => avail.deepseek = check_deepseek_available().await,
         AIProviderPreference::Auto => {
             avail.phi = check_phi_silica_available().0;
             avail.foundry = !avail.phi && check_foundry_local_available().await.is_some();
@@ -353,6 +371,8 @@ pub async fn determine_active_provider_with_key(
             avail.anthropic = !won && check_anthropic_available().await;
             let won = won || avail.anthropic;
             avail.gemini = !won && check_gemini_available().await;
+            let won = won || avail.gemini;
+            avail.deepseek = !won && check_deepseek_available().await;
         }
     }
     route_provider(pref, avail)
@@ -388,6 +408,7 @@ pub async fn get_ai_status() -> AIProviderStatus {
     let custom_endpoint = check_custom_available().await;
     let anthropic_available = check_anthropic_available().await;
     let gemini_available = check_gemini_available().await;
+    let deepseek_available = check_deepseek_available().await;
     // Status reports ALL providers, so every availability is gathered (no
     // lazy short-circuit here) and routing reuses the same snapshot instead
     // of re-probing via determine_active_provider
@@ -399,6 +420,7 @@ pub async fn get_ai_status() -> AIProviderStatus {
         openai: openai_available,
         anthropic: anthropic_available,
         gemini: gemini_available,
+        deepseek: deepseek_available,
     };
     let active = route_provider(pref, avail);
 
@@ -475,6 +497,21 @@ pub async fn get_ai_status() -> AIProviderStatus {
                     .filter(|m| !m.trim().is_empty())
                     .unwrap_or_else(|| {
                         crate::ai_providers::gemini::GEMINI_DEFAULT_MODEL.to_string()
+                    }),
+            ),
+            None,
+        ),
+        provider_info(
+            AIProvider::DeepSeek,
+            deepseek_available,
+            deepseek_available,
+            Some(
+                settings
+                    .deepseek_model
+                    .clone()
+                    .filter(|m| !m.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        crate::ai_providers::deepseek::DEEPSEEK_DEFAULT_MODEL.to_string()
                     }),
             ),
             None,
@@ -690,10 +727,29 @@ pub async fn ai_set_preference(preference: String) -> Result<(), String> {
         "custom_openai" | "custom" => AIProviderPreference::CustomOpenAI,
         "anthropic" => AIProviderPreference::Anthropic,
         "gemini" => AIProviderPreference::Gemini,
+        "deepseek" => AIProviderPreference::DeepSeek,
         _ => AIProviderPreference::Auto,
     };
     set_user_preference(pref);
     Ok(())
+}
+
+/// Prioritize detected issues (the IssuePrioritization prompt finally gets a
+/// caller — analyzeGeneric would mis-route through the section template).
+#[tauri::command]
+pub async fn ai_prioritize_issues(
+    issues_data: String,
+    session_id: String,
+    api_key: Option<String>,
+) -> Result<AIResponse, String> {
+    let request = AIRequest {
+        context_type: ContextType::IssuePrioritization,
+        context_id: "issues".to_string(),
+        data: issues_data,
+        task_name: None,
+        section_name: None,
+    };
+    analyze(request, &session_id, api_key).await
 }
 
 /// Clear AI cache
@@ -730,6 +786,7 @@ mod tests {
             openai: true,
             anthropic: true,
             gemini: true,
+            deepseek: true,
         }
     }
 
@@ -746,6 +803,7 @@ mod tests {
             AIProvider::OpenAI,
             AIProvider::Anthropic,
             AIProvider::Gemini,
+            AIProvider::DeepSeek,
         ];
         for expected in chain {
             assert_eq!(
@@ -762,6 +820,7 @@ mod tests {
                 AIProvider::OpenAI => avail.openai = false,
                 AIProvider::Anthropic => avail.anthropic = false,
                 AIProvider::Gemini => avail.gemini = false,
+                AIProvider::DeepSeek => avail.deepseek = false,
                 _ => unreachable!(),
             }
         }
@@ -796,6 +855,7 @@ mod tests {
             (AIProviderPreference::CustomOpenAI, AIProvider::CustomOpenAI),
             (AIProviderPreference::Anthropic, AIProvider::Anthropic),
             (AIProviderPreference::Gemini, AIProvider::Gemini),
+            (AIProviderPreference::DeepSeek, AIProvider::DeepSeek),
         ];
         for (pref, expected) in cases {
             assert_eq!(route_provider(pref, all()), expected);
@@ -816,6 +876,7 @@ mod tests {
                 AIProviderPreference::OpenAI => avail.openai = false,
                 AIProviderPreference::Anthropic => avail.anthropic = false,
                 AIProviderPreference::Gemini => avail.gemini = false,
+                AIProviderPreference::DeepSeek => avail.deepseek = false,
                 AIProviderPreference::Auto => unreachable!(),
             }
             avail
@@ -828,6 +889,7 @@ mod tests {
             AIProviderPreference::CustomOpenAI,
             AIProviderPreference::Anthropic,
             AIProviderPreference::Gemini,
+            AIProviderPreference::DeepSeek,
         ] {
             assert_eq!(
                 route_provider(pref, unavailable(pref)),
@@ -851,6 +913,7 @@ mod tests {
             (AIProvider::CustomOpenAI, "\"custom_openai\""),
             (AIProvider::Anthropic, "\"anthropic\""),
             (AIProvider::Gemini, "\"gemini\""),
+            (AIProvider::DeepSeek, "\"deepseek\""),
         ];
         for (provider, wire) in cases {
             assert_eq!(serde_json::to_string(&provider).unwrap(), wire);
@@ -875,6 +938,7 @@ mod tests {
             (AIProviderPreference::CustomOpenAI, "\"custom_openai\""),
             (AIProviderPreference::Anthropic, "\"anthropic\""),
             (AIProviderPreference::Gemini, "\"gemini\""),
+            (AIProviderPreference::DeepSeek, "\"deepseek\""),
         ] {
             assert_eq!(serde_json::to_string(&pref).unwrap(), wire);
             assert_eq!(

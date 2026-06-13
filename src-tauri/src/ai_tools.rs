@@ -8,7 +8,7 @@
 
 use crate::ai_providers::{ToolCall, ToolSpec};
 use crate::diagnostics;
-use crate::issue_detector::{IssueDetector, IssueSeverity};
+use crate::issue_catalog::{DetectCtx, IssueSeverity, detect_all};
 use crate::native_monitor::SystemMonitor;
 use crate::results_storage::ScanStorage;
 use crate::state::DiagnosticSession;
@@ -86,6 +86,14 @@ pub fn tool_registry() -> Vec<ToolSpec> {
             name: "get_live_stats".into(),
             description: "Current CPU, memory, disk and network stats from the live monitor \
                           (only when monitoring is running)."
+                .into(),
+            parameters: json!({"type": "object", "properties": {}}),
+        },
+        ToolSpec {
+            name: "list_remediations".into(),
+            description: "List the app's vetted one-click fixes (id, tier, what each runs). \
+                          You can reference them by label; only the USER can run them, from \
+                          the Issues tab."
                 .into(),
             parameters: json!({"type": "object", "properties": {}}),
         },
@@ -192,7 +200,12 @@ impl AppToolExecutor {
         let Some(session) = session.as_ref() else {
             return Ok("No scan data — run a scan first, then issues can be detected.".to_string());
         };
-        let issues = IssueDetector::new().detect_issues(&session.results);
+        let detect_ctx = DetectCtx {
+            results: &session.results,
+            now: crate::timestamp::Timestamp::now(),
+            temp_file_count: None, // env probing stays out of the chat path
+        };
+        let issues = detect_all(&detect_ctx);
         let mut detected: Vec<String> = Vec::new();
         for issue in issues.iter().filter(|i| i.detected) {
             let severity = match issue.severity {
@@ -315,6 +328,28 @@ impl AppToolExecutor {
     }
 }
 
+impl AppToolExecutor {
+    async fn list_remediations(&self) -> Result<String, String> {
+        let lines: Vec<String> = crate::remediation::remediations()
+            .iter()
+            .map(|r| {
+                format!(
+                    "{} | {} | {:?}{} | {}",
+                    r.id,
+                    r.label,
+                    r.tier,
+                    if r.admin_required { " | admin" } else { "" },
+                    r.description
+                )
+            })
+            .collect();
+        Ok(crate::ai_prompts::truncate_output(
+            &lines.join("\n"),
+            self.max_result_chars,
+        ))
+    }
+}
+
 impl ToolExecutor for AppToolExecutor {
     fn execute<'a>(&'a self, call: &'a ToolCall) -> ToolFuture<'a> {
         Box::pin(async move {
@@ -325,6 +360,7 @@ impl ToolExecutor for AppToolExecutor {
                 "compare_with_previous_scan" => self.compare_with_previous_scan().await,
                 "get_live_stats" => self.get_live_stats().await,
                 "list_scan_history" => self.list_scan_history().await,
+                "list_remediations" => self.list_remediations().await,
                 other => Err(format!("Unknown tool '{}'", other)),
             }
         })
@@ -348,6 +384,7 @@ mod tests {
                 "get_detected_issues",
                 "compare_with_previous_scan",
                 "get_live_stats",
+                "list_remediations",
                 "list_scan_history",
             ]
         );
