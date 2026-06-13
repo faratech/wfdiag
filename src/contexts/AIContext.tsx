@@ -14,6 +14,15 @@ function hashContent(input: string): string {
   return (hash >>> 0).toString(36)
 }
 
+// The ONLY way to build keys into interpretations/isAnalyzing/errors. Components
+// must use these instead of hand-writing `diagnostic:${id}` — a hand-written key
+// without the content hash silently never matches (the "Interpret this diagnostic
+// does nothing" bug).
+export const diagnosticCacheKey = (taskId: string, output: string) =>
+  `diagnostic:${taskId}:${hashContent(output)}`
+export const sectionCacheKey = (sectionName: string, sectionData: string) =>
+  `section:${sectionName}:${hashContent(sectionData)}`
+
 // Types matching the Rust backend (wire strings pinned by backend tests)
 export type AIProvider =
   | 'none'
@@ -24,6 +33,7 @@ export type AIProvider =
   | 'custom_openai'
   | 'anthropic'
   | 'gemini'
+  | 'deepseek'
 export type AIProviderPreference = 'auto' | Exclude<AIProvider, 'none'>
 
 export interface ProviderInfo {
@@ -75,6 +85,7 @@ interface AIContextType {
   analyzeSection: (sectionName: string, sectionData: string) => Promise<string>
   explainHealth: (metricsData: string) => Promise<string>
   analyzeGeneric: (cacheKey: string, prompt: string, forceRefresh?: boolean) => Promise<string>
+  prioritizeIssues: (issuesJson: string, forceRefresh?: boolean) => Promise<string>
 
   // Loading states per context_id
   isAnalyzing: Record<string, boolean>
@@ -152,7 +163,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       return available(preferredProvider) ? preferredProvider : 'none'
     }
     const autoOrder: Exclude<AIProvider, 'none'>[] = [
-      'phi_silica', 'foundry_local', 'ollama', 'custom_openai', 'openai', 'anthropic', 'gemini',
+      'phi_silica', 'foundry_local', 'ollama', 'custom_openai', 'openai', 'anthropic', 'gemini', 'deepseek',
     ]
     for (const id of autoOrder) {
       if (available(id)) return id
@@ -293,7 +304,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
 
     // Check if already cached (key includes a hash of the output so a re-scan with
     // different data for the same task does not return a stale interpretation).
-    const cacheKey = `diagnostic:${taskId}:${hashContent(output)}`
+    const cacheKey = diagnosticCacheKey(taskId, output)
     if (interpretations[cacheKey]) {
       return interpretations[cacheKey]
     }
@@ -317,7 +328,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       return ''
     }
 
-    const cacheKey = `section:${sectionName}:${hashContent(sectionData)}`
+    const cacheKey = sectionCacheKey(sectionName, sectionData)
     if (interpretations[cacheKey]) {
       return interpretations[cacheKey]
     }
@@ -377,6 +388,28 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     )
   }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
 
+  // Rank detected issues with the backend's dedicated prioritization prompt.
+  // Content-hashed cache key: a re-scan with different issues re-analyzes.
+  const prioritizeIssues = useCallback(async (
+    issuesJson: string,
+    forceRefresh = false
+  ): Promise<string> => {
+    if (!aiEnabled || (!isAIAvailable && !hasApiKey)) {
+      return ''
+    }
+    const cacheKey = `issues:prioritize:${hashContent(issuesJson)}`
+    if (!forceRefresh && interpretations[cacheKey]) {
+      return interpretations[cacheKey]
+    }
+    return runDedupedAnalysis(cacheKey, () =>
+      invoke<AIResponse>('ai_prioritize_issues', {
+        issuesData: issuesJson,
+        sessionId,
+        apiKey: settings.openAiApiKey || null
+      })
+    )
+  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
+
   // Cache management
   const clearCache = useCallback(async (targetSessionId?: string) => {
     try {
@@ -411,6 +444,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     analyzeSection,
     explainHealth,
     analyzeGeneric,
+    prioritizeIssues,
     isAnalyzing,
     interpretations,
     errors,

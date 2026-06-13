@@ -18,6 +18,7 @@
 //! do and how much context it gets.
 
 pub mod anthropic;
+pub mod deepseek;
 pub mod discovery;
 pub mod foundry;
 pub mod gemini;
@@ -318,6 +319,25 @@ pub async fn resolve_config(
                 model: Some(model),
             })
         }
+        AIProvider::DeepSeek => {
+            let api_key = load_provider_key_internal(ProviderKeyId::DeepSeek)
+                .await
+                .ok_or_else(|| {
+                    String::from(DiagError::api_key(
+                        "load",
+                        "DeepSeek API key not configured. Please enter your API key in Settings.",
+                    ))
+                })?;
+            let model = settings
+                .deepseek_model
+                .filter(|m| !m.trim().is_empty())
+                .unwrap_or_else(|| deepseek::DEEPSEEK_DEFAULT_MODEL.to_string());
+            Ok(ResolvedProviderConfig {
+                api_key: Some(api_key),
+                endpoint: Some(deepseek::DEEPSEEK_API_BASE.to_string()),
+                model: Some(model),
+            })
+        }
     }
 }
 
@@ -339,7 +359,7 @@ pub async fn one_shot(
         AIProvider::PhiSilica => phi::one_shot(prompt).await,
         AIProvider::OpenAI => openai::one_shot(cfg, system, prompt).await,
         AIProvider::FoundryLocal => foundry::one_shot(cfg, system, prompt).await,
-        AIProvider::Ollama | AIProvider::CustomOpenAI => {
+        AIProvider::Ollama | AIProvider::CustomOpenAI | AIProvider::DeepSeek => {
             openai_compat::one_shot(provider, cfg, system, prompt).await
         }
         AIProvider::Anthropic => anthropic::one_shot(cfg, system, prompt).await,
@@ -363,7 +383,8 @@ pub async fn chat_stream(
         AIProvider::OpenAI
         | AIProvider::FoundryLocal
         | AIProvider::Ollama
-        | AIProvider::CustomOpenAI => openai_compat::chat_stream(provider, cfg, req, tx).await,
+        | AIProvider::CustomOpenAI
+        | AIProvider::DeepSeek => openai_compat::chat_stream(provider, cfg, req, tx).await,
         AIProvider::Anthropic => anthropic::chat_stream(cfg, req, tx).await,
         AIProvider::Gemini => gemini::chat_stream(cfg, req, tx).await,
     }
@@ -414,11 +435,13 @@ pub fn capabilities(provider: AIProvider) -> ProviderCaps {
             supports_streaming: true,
             context_budget_chars: 24_000,
         },
-        AIProvider::OpenAI | AIProvider::Anthropic | AIProvider::Gemini => ProviderCaps {
-            supports_tools: true,
-            supports_streaming: true,
-            context_budget_chars: 48_000,
-        },
+        AIProvider::OpenAI | AIProvider::Anthropic | AIProvider::Gemini | AIProvider::DeepSeek => {
+            ProviderCaps {
+                supports_tools: true,
+                supports_streaming: true,
+                context_budget_chars: 48_000,
+            }
+        }
     }
 }
 
@@ -451,6 +474,10 @@ mod tests {
             cloud
         );
         assert_eq!(capabilities(AIProvider::Gemini).context_budget_chars, cloud);
+        assert_eq!(
+            capabilities(AIProvider::DeepSeek).context_budget_chars,
+            cloud
+        );
     }
 
     #[test]
@@ -473,6 +500,7 @@ mod tests {
             (AIProvider::OpenAI, true),
             (AIProvider::Anthropic, true),
             (AIProvider::Gemini, true),
+            (AIProvider::DeepSeek, true),
         ] {
             assert_eq!(
                 capabilities(provider).supports_tools,

@@ -6,6 +6,7 @@ import { ToastProvider } from './contexts/ToastContext'
 import { useDiagnostics } from './hooks/useDiagnostics'
 import { useScanner } from './hooks/useScanner'
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts'
+import { useMediaQuery } from './hooks/useMediaQuery'
 import { useUpdateCheck } from './hooks/useUpdateCheck'
 import type { TabValue } from './components'
 import { SettingsDialog, AboutDialog, Tooltip, Kbd } from './components'
@@ -51,6 +52,11 @@ const AppContent: React.FC = () => {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
   const updateInfo = useUpdateCheck()
+  // Auto-collapse the rail on narrow windows. The user's stored preference
+  // (navRailCollapsed in localStorage) is never written by this path, so it
+  // restores by itself when the window widens again.
+  const forceCollapsed = useMediaQuery('(max-width: 1100px)')
+  const railCollapsed = navRailCollapsed || forceCollapsed
   useGlobalShortcuts({
     onTogglePalette: () => setPaletteOpen(o => !o),
     onShowHelp: () => setHelpOpen(true),
@@ -92,7 +98,7 @@ const AppContent: React.FC = () => {
   return (
     <div className="app-window">
       <Titlebar />
-      <div className={`app-body ${navRailCollapsed ? 'rail-collapsed' : ''}`}>
+      <div className={`app-body ${railCollapsed ? 'rail-collapsed' : ''}`}>
         {/* Nav rail */}
         <nav className="nav-rail" aria-label="Primary">
           <div className="rail-brand">
@@ -119,7 +125,7 @@ const AppContent: React.FC = () => {
                   {t.id === 'issues' && issueCount > 0 && <span className="item-badge">{issueCount}</span>}
                 </button>
               )
-              return navRailCollapsed
+              return railCollapsed
                 ? <Tooltip key={t.id} content={t.label} shortcut={`Ctrl+${i + 1}`} side="right">{btn}</Tooltip>
                 : btn
             })}
@@ -149,10 +155,14 @@ const AppContent: React.FC = () => {
             </div>
             <button className="nav-item" onClick={() => setShowSettings(true)}><i className="fa-solid fa-gear item-icon" /><span className="item-label">Settings</span></button>
             <button className="nav-item" onClick={() => setShowAbout(true)}><i className="fa-solid fa-circle-info item-icon" /><span className="item-label">About</span></button>
-            <button className="nav-item" onClick={() => setNavRailCollapsed(!navRailCollapsed)}>
-              <i className={`fa-solid ${navRailCollapsed ? 'fa-angles-right' : 'fa-angles-left'} item-icon`} />
-              <span className="item-label">Collapse</span>
-            </button>
+            {/* Hidden while the narrow window forces a collapse — toggling a
+                preference with no visible effect would just confuse */}
+            {!forceCollapsed && (
+              <button className="nav-item" onClick={() => setNavRailCollapsed(!navRailCollapsed)}>
+                <i className={`fa-solid ${navRailCollapsed ? 'fa-angles-right' : 'fa-angles-left'} item-icon`} />
+                <span className="item-label">Collapse</span>
+              </button>
+            )}
           </div>
         </nav>
 

@@ -27,38 +27,10 @@ export const useAI = () => {
     [context]
   )
 
-  /**
-   * Get cached interpretation for a diagnostic (doesn't trigger fetch)
-   */
-  const getCachedDiagnosticInterpretation = useCallback(
-    (taskId: string): string | null => {
-      const cacheKey = `diagnostic:${taskId}`
-      return context.interpretations[cacheKey] ?? null
-    },
-    [context.interpretations]
-  )
-
-  /**
-   * Check if a diagnostic interpretation is currently loading
-   */
-  const isDiagnosticLoading = useCallback(
-    (taskId: string): boolean => {
-      const cacheKey = `diagnostic:${taskId}`
-      return context.isAnalyzing[cacheKey] ?? false
-    },
-    [context.isAnalyzing]
-  )
-
-  /**
-   * Get error for a diagnostic interpretation
-   */
-  const getDiagnosticError = useCallback(
-    (taskId: string): string | null => {
-      const cacheKey = `diagnostic:${taskId}`
-      return context.errors[cacheKey] ?? null
-    },
-    [context.errors]
-  )
+  // NOTE: cached-lookup helpers keyed by bare `diagnostic:${taskId}` /
+  // `section:${name}` were removed — AIContext keys include a content hash
+  // (see diagnosticCacheKey/sectionCacheKey exports there), so the bare keys
+  // never matched anything. Use those exported helpers for lookups.
 
   /**
    * Request AI interpretation for a section
@@ -76,28 +48,6 @@ export const useAI = () => {
       }
     },
     [context]
-  )
-
-  /**
-   * Get cached section interpretation
-   */
-  const getCachedSectionInterpretation = useCallback(
-    (sectionName: string): string | null => {
-      const cacheKey = `section:${sectionName}`
-      return context.interpretations[cacheKey] ?? null
-    },
-    [context.interpretations]
-  )
-
-  /**
-   * Check if a section interpretation is currently loading
-   */
-  const isSectionLoading = useCallback(
-    (sectionName: string): boolean => {
-      const cacheKey = `section:${sectionName}`
-      return context.isAnalyzing[cacheKey] ?? false
-    },
-    [context.isAnalyzing]
   )
 
   /**
@@ -251,14 +201,9 @@ Scan Comparison:
 
     // Diagnostic operations
     requestDiagnosticInterpretation,
-    getCachedDiagnosticInterpretation,
-    isDiagnosticLoading,
-    getDiagnosticError,
 
     // Section operations
     requestSectionInterpretation,
-    getCachedSectionInterpretation,
-    isSectionLoading,
 
     // Health operations
     explainHealth: context.explainHealth,

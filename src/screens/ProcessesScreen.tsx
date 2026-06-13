@@ -49,16 +49,15 @@ export const ProcessesScreen: React.FC = () => {
 
   return (
     <>
-      <div className="row-gap-12" style={{ padding: '0 24px 12px', justifyContent: 'space-between' }}>
+      <div className="row-gap-12 screen-toolbar" style={{ justifyContent: 'space-between' }}>
         <div className="row-gap-12">
           <input
-            className="field-input"
+            className="field-input filter-input"
             type="text"
             placeholder="Filter processes…"
             aria-label="Filter processes"
             value={search}
             onChange={e => setSearch(e.target.value)}
-            style={{ width: 240 }}
           />
           <span style={{ fontSize: 12, color: 'var(--wf-text-muted)' }}>
             Showing {sorted.length} of {processes.length} · {totalCpu.toFixed(1)}% CPU · {(totalMem / 1024).toFixed(1)} GB RAM
@@ -70,7 +69,7 @@ export const ProcessesScreen: React.FC = () => {
         </div>
       </div>
 
-      <div className="scrollable" style={{ padding: '0 24px 24px' }}>
+      <div className="scrollable screen-pad">
         <div className="wf-block">
           <table className="proc-table">
             <thead>
