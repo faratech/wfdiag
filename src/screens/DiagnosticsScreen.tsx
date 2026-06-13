@@ -99,7 +99,7 @@ export const DiagnosticsScreen: React.FC = () => {
 
   return (
     <>
-      <div className="stat-strip" style={{ padding: '0 24px', marginBottom: 12 }}>
+      <div className="stat-strip screen-strip">
         <div className="stat-card passed">
           <div className="label">Passed</div>
           <div className="value">{passed}<span className="ch-sub"> / {completed.length}</span></div>
@@ -130,7 +130,7 @@ export const DiagnosticsScreen: React.FC = () => {
         </button>
       </div>
 
-      <div className="split-pane" style={{ margin: '0 24px 12px' }}>
+      <div className="split-pane">
         <div className="diag-list">
           <div className="diag-list-header">
             <span>{filtered.length} of {completed.length} diagnostics</span>

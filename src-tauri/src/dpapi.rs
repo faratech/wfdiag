@@ -26,6 +26,7 @@ pub enum ProviderKeyId {
     OpenAI,
     Anthropic,
     Gemini,
+    DeepSeek,
     Custom,
 }
 
@@ -37,6 +38,7 @@ impl ProviderKeyId {
             "openai" => Ok(Self::OpenAI),
             "anthropic" => Ok(Self::Anthropic),
             "gemini" => Ok(Self::Gemini),
+            "deepseek" => Ok(Self::DeepSeek),
             "custom_openai" | "custom" => Ok(Self::Custom),
             other => Err(DiagError::api_key(
                 "store",
@@ -53,6 +55,7 @@ impl ProviderKeyId {
             Self::OpenAI => "credentials.bin",
             Self::Anthropic => "credentials_anthropic.bin",
             Self::Gemini => "credentials_gemini.bin",
+            Self::DeepSeek => "credentials_deepseek.bin",
             Self::Custom => "credentials_custom.bin",
         }
     }
@@ -65,6 +68,7 @@ impl ProviderKeyId {
             Self::OpenAI => "openai_api_key",
             Self::Anthropic => "anthropic_api_key",
             Self::Gemini => "gemini_api_key",
+            Self::DeepSeek => "deepseek_api_key",
             Self::Custom => "custom_api_key",
         }
     }
@@ -301,6 +305,10 @@ mod tests {
             "credentials_anthropic.bin"
         );
         assert_eq!(ProviderKeyId::Gemini.filename(), "credentials_gemini.bin");
+        assert_eq!(
+            ProviderKeyId::DeepSeek.filename(),
+            "credentials_deepseek.bin"
+        );
         assert_eq!(ProviderKeyId::Custom.filename(), "credentials_custom.bin");
     }
 
@@ -312,6 +320,10 @@ mod tests {
             Ok(ProviderKeyId::Anthropic)
         );
         assert_eq!(ProviderKeyId::parse("gemini"), Ok(ProviderKeyId::Gemini));
+        assert_eq!(
+            ProviderKeyId::parse("deepseek"),
+            Ok(ProviderKeyId::DeepSeek)
+        );
         assert_eq!(
             ProviderKeyId::parse("custom_openai"),
             Ok(ProviderKeyId::Custom)

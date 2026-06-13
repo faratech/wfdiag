@@ -63,6 +63,8 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deepseek_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_api_key: Option<String>,
     // Per-provider model overrides; empty falls back to the provider module's
     // default constant (anthropic.rs / gemini.rs)
@@ -70,6 +72,8 @@ pub struct AppSettings {
     pub anthropic_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deepseek_model: Option<String>,
     // Generic OpenAI-compatible endpoint (OpenRouter, Groq, …): base URL,
     // model is required for the provider to be usable
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -195,6 +199,7 @@ fn settings_for_disk(settings: &AppSettings) -> AppSettings {
     s.open_ai_api_key = None;
     s.anthropic_api_key = None;
     s.gemini_api_key = None;
+    s.deepseek_api_key = None;
     s.custom_api_key = None;
     s
 }
@@ -210,6 +215,10 @@ pub async fn save_settings(settings: AppSettings) -> Result<(), String> {
         settings.anthropic_api_key.as_deref(),
     )?;
     persist_provider_key(ProviderKeyId::Gemini, settings.gemini_api_key.as_deref())?;
+    persist_provider_key(
+        ProviderKeyId::DeepSeek,
+        settings.deepseek_api_key.as_deref(),
+    )?;
     persist_provider_key(ProviderKeyId::Custom, settings.custom_api_key.as_deref())?;
 
     let json = serde_json::to_string_pretty(&settings_for_disk(&settings))
@@ -235,6 +244,7 @@ fn sync_in_memory_state(settings: &AppSettings) {
         "custom_openai" | "custom" => crate::ai_service::AIProviderPreference::CustomOpenAI,
         "anthropic" => crate::ai_service::AIProviderPreference::Anthropic,
         "gemini" => crate::ai_service::AIProviderPreference::Gemini,
+        "deepseek" => crate::ai_service::AIProviderPreference::DeepSeek,
         _ => crate::ai_service::AIProviderPreference::Auto,
     };
     crate::ai_service::set_user_preference(pref);
@@ -261,6 +271,7 @@ pub async fn load_settings() -> Result<AppSettings, String> {
     settings.open_ai_api_key = load_provider_key_internal(ProviderKeyId::OpenAI).await;
     settings.anthropic_api_key = load_provider_key_internal(ProviderKeyId::Anthropic).await;
     settings.gemini_api_key = load_provider_key_internal(ProviderKeyId::Gemini).await;
+    settings.deepseek_api_key = load_provider_key_internal(ProviderKeyId::DeepSeek).await;
     settings.custom_api_key = load_provider_key_internal(ProviderKeyId::Custom).await;
 
     println!("Settings loaded from {:?}", path);
@@ -325,6 +336,7 @@ mod tests {
             open_ai_api_key: Some("sk-openai".into()),
             anthropic_api_key: Some("sk-ant".into()),
             gemini_api_key: Some("AIza-gem".into()),
+            deepseek_api_key: Some("sk-deep".into()),
             custom_api_key: Some("sk-or-custom".into()),
             anthropic_model: Some("claude-sonnet-4-6".into()),
             custom_endpoint: Some("https://openrouter.ai/api".into()),
@@ -341,6 +353,7 @@ mod tests {
         assert!(on_disk.open_ai_api_key.is_none());
         assert!(on_disk.anthropic_api_key.is_none());
         assert!(on_disk.gemini_api_key.is_none());
+        assert!(on_disk.deepseek_api_key.is_none());
         assert!(on_disk.custom_api_key.is_none());
         // Non-secret provider config must survive
         assert_eq!(
@@ -359,7 +372,7 @@ mod tests {
         // Belt-and-braces: the serialized JSON must not contain the secrets,
         // under any field name.
         let json = serde_json::to_string(&settings_for_disk(&settings_with_keys())).unwrap();
-        for secret in ["sk-openai", "sk-ant", "AIza-gem", "sk-or-custom"] {
+        for secret in ["sk-openai", "sk-ant", "AIza-gem", "sk-deep", "sk-or-custom"] {
             assert!(!json.contains(secret), "secret {} leaked to disk", secret);
         }
     }
@@ -372,6 +385,7 @@ mod tests {
             "\"anthropicApiKey\"",
             "\"geminiApiKey\"",
             "\"customApiKey\"",
+            "\"deepseekApiKey\"",
             "\"anthropicModel\"",
             "\"geminiModel\"",
             "\"customEndpoint\"",

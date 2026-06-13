@@ -32,6 +32,8 @@ html.is-dark, html.dk {
   --statusbar-h: 26px;
   --rail-w: 248px;
   --rail-w-collapsed: 56px;
+  /* Fluid screen gutter: 14px at narrow windows, 24px from ~960px up */
+  --gutter: clamp(14px, 2.5vw, 24px);
 
   /* Mica = base color + low-opacity tint over wallpaper */
   --mica-tint: rgba(252, 252, 253, 0.78);
@@ -362,12 +364,18 @@ html.is-dark .sysinfo { background: rgba(255,255,255,0.04); }
   display: flex; flex-direction: column;
   min-width: 0;
   min-height: 0;
+  /* The screens' @container rules resolve against the CONTENT width (the
+     rail changes available space independent of the viewport). Nothing
+     position:fixed renders inside .content-area — keep it that way, or it
+     would start positioning against this container. */
+  container-type: inline-size;
+  container-name: content;
 }
 
 /* ===== Command bar — Win11 toolbar with subtle hover surfaces ===== */
 .command-bar {
   display: flex; align-items: center; gap: 6px;
-  padding: 10px 20px;
+  padding: 10px var(--gutter);
   background: var(--mica-alt);
   backdrop-filter: blur(40px) saturate(180%);
   -webkit-backdrop-filter: blur(40px) saturate(180%);
@@ -411,7 +419,7 @@ html.is-dark .cb-btn:hover { background: rgba(255,255,255,0.06); }
 /* ===== Page header ===== */
 .page-header {
   display: flex; align-items: flex-start; justify-content: space-between;
-  padding: 22px 24px 10px;
+  padding: 22px var(--gutter) 10px;
   flex-shrink: 0;
 }
 .page-header h1 {
@@ -432,7 +440,7 @@ html.is-dark .cb-btn:hover { background: rgba(255,255,255,0.06); }
 .scrollable {
   flex: 1;
   overflow: auto;
-  padding: 12px 24px 24px;
+  padding: 12px var(--gutter) var(--gutter);
   min-height: 0;
 }
 .scrollable::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -582,10 +590,11 @@ html.is-dark .scrollable::-webkit-scrollbar-thumb { background: rgba(255,255,255
 /* ===== Diagnostic two-panel ===== */
 .split-pane {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
   gap: 12px;
   flex: 1;
   min-height: 0;
+  margin: 0 var(--gutter) 12px;
 }
 .diag-list {
   background: var(--surface-card);
@@ -738,7 +747,7 @@ html.is-dark .diag-item.selected { background: rgba(15,108,189,0.24); }
 /* ===== Data tables ===== */
 .kv-grid {
   display: grid;
-  grid-template-columns: 200px 1fr;
+  grid-template-columns: minmax(110px, 200px) minmax(0, 1fr);
   gap: 0;
   font-size: 13px;
 }
@@ -928,7 +937,7 @@ html.is-dark .proc-bar { background: rgba(255,255,255,0.08); }
 /* ===== Monitor charts ===== */
 .charts-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
   gap: 12px;
 }
 .chart-card {
@@ -1004,7 +1013,7 @@ html.is-dark .btn-icon:hover { background: rgba(255,255,255,0.07); }
 /* ===== Empty/Hero scan state ===== */
 .scan-hero {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  flex: 1; margin: 12px 24px 24px;
+  flex: 1; margin: 12px var(--gutter) var(--gutter);
   padding: 32px;
   text-align: center;
   background: var(--content-bg);
@@ -1118,7 +1127,7 @@ html.is-dark .scan-hero .ring::after { background: #2a2a2c; }
 /* ===== History ===== */
 .history-row {
   display: grid;
-  grid-template-columns: 16px 130px 1fr 80px 80px 80px;
+  grid-template-columns: 16px minmax(90px, 130px) minmax(0, 1fr) 60px 60px 64px;
   gap: 12px;
   align-items: center;
   padding: 10px 14px;
@@ -1134,9 +1143,9 @@ html.is-dark .scan-hero .ring::after { background: #2a2a2c; }
 .history-row .stat.failed { color: var(--wf-error-feature); }
 
 /* ===== AI chat ===== */
-.chat-shell { display: flex; flex-direction: column; height: 100%; }
+.chat-shell { display: flex; flex-direction: column; height: 100%; min-height: min(360px, 45vh); }
 .chat-msgs { flex: 1; overflow: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
-.chat-msg { display: flex; gap: 10px; max-width: 80%; }
+.chat-msg { display: flex; gap: 10px; max-width: min(560px, 92%); }
 .chat-msg.user { align-self: flex-end; flex-direction: row-reverse; }
 .chat-msg .av {
   width: 28px; height: 28px; border-radius: 50%;
@@ -1437,12 +1446,20 @@ html.is-dark .skeleton::after {
 }
 .form-row {
   display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap;
   padding: 8px 0;
   border-bottom: 1px solid var(--hairline);
-  gap: 16px;
+  gap: 8px 16px;
 }
 .form-row:last-child { border-bottom: none; }
 .form-row .hint { font-size: 11px; color: var(--wf-text-muted); }
+/* Inputs size to the modal instead of a hardcoded 260px; when a row is too
+   narrow for label + field they wrap, with the field staying right-aligned */
+.form-row .field-input {
+  width: clamp(160px, 48%, 260px);
+  margin-left: auto;
+}
+.form-row .field-input[type="number"] { width: 90px; flex: none; }
 .settings-section-title {
   font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--wf-text-muted);
@@ -1585,3 +1602,121 @@ html.is-dark .palette-item.active { background: rgba(15,108,189,0.26); }
 }
 .scan-cats .tag { font-weight: 500; }
 .scan-cats .tag.done { background: var(--ok-bg); color: var(--ok-fg); border-color: var(--ok-border); }
+
+/* ============================================================================
+   Fluid layout — utilities, screen grids, and container-query breakpoints.
+   All thresholds resolve against the CONTENT AREA width (container "content",
+   declared on .content-area), not the viewport: the nav rail (248px/56px)
+   changes available space independent of window size.
+   ========================================================================== */
+
+/* Screen padding utilities (replace hardcoded inline `padding: 0 24px …`) */
+.screen-pad { padding: 0 var(--gutter) var(--gutter); }
+.screen-toolbar { padding: 0 var(--gutter) 12px; }
+.screen-strip { padding: 0 var(--gutter); margin-bottom: 12px; }
+
+/* Fluid filter/search inputs (replace inline width: 220-240px) */
+.filter-input { width: clamp(140px, 28cqi, 240px); }
+
+/* Secondary query container for blocks whose width depends on their pane,
+   not the content area (History's Scan Sessions list) */
+.cq-block { container-type: inline-size; container-name: block; }
+
+/* Long-content overflow: prose containers wrap anywhere; .code-block keeps
+   white-space: pre + its own scrollbars (deliberately NOT in this list) */
+.bubble,
+.report-body,
+.ai-panel .ai-body,
+.issue-card .desc,
+.issue-card .reco,
+.kv-grid .v,
+.tool-chips-label {
+  overflow-wrap: anywhere;
+}
+/* markdownLite emits bare <pre> inside reports — wrap instead of overflowing */
+.report-body pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: rgba(0, 0, 0, 0.06);
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-family: var(--wf-font-mono, monospace);
+  font-size: 11.5px;
+}
+
+/* --- History screen: two panes that stack when the content area is narrow */
+.history-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+/* Previous/Current diff panes: auto-fit stacks them intrinsically when the
+   parent pane is narrow — no breakpoint needed */
+.diff-cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 8px;
+}
+.history-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --- AI screen: chat + sidebar, stacking with chat first */
+.ai-grid { display: flex; gap: 14px; min-height: 0; }
+.ai-chat-col { flex: 2 1 420px; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.ai-side-col { flex: 1 1 260px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+/* --- Processes table: fixed layout so long paths truncate instead of
+   forcing horizontal overflow (an overflow-x wrapper would break the
+   position:sticky header, which sticks to .scrollable) */
+.proc-table { table-layout: fixed; }
+.proc-table th:nth-child(2) { width: 70px; }   /* PID */
+.proc-table th:nth-child(3) { width: 140px; }  /* CPU + bar */
+.proc-table th:nth-child(4) { width: 150px; }  /* Memory */
+.proc-table th:nth-child(5) { width: 84px; }   /* Threads */
+.proc-table th:nth-child(6) { width: 110px; }  /* User */
+.proc-table .pname > div { min-width: 0; }
+.proc-table .pname > div > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proc-table td:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --- Container-query breakpoints (content-area width) --- */
+
+/* AI screen stacks: chat above the Models/Report/Privacy column */
+@container content (max-width: 860px) {
+  .ai-grid { flex-direction: column; }
+  .ai-chat-col { flex: 0 0 auto; }
+  .ai-chat-col .chat-shell { height: min(56vh, 460px); }
+}
+
+/* History panes stack: sessions list above the diff panel */
+@container content (max-width: 760px) {
+  .history-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Diagnostics split-pane stacks: list above detail */
+@container content (max-width: 680px) {
+  .split-pane {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(150px, 36%) minmax(0, 1fr);
+  }
+}
+
+/* Processes: drop the lowest-value columns when space runs out.
+   nth-child indices are coupled to the column order in ProcessesScreen.tsx. */
+@container content (max-width: 640px) {
+  .proc-table th:nth-child(5), .proc-table td:nth-child(5),
+  .proc-table th:nth-child(6), .proc-table td:nth-child(6) { display: none; }
+}
+
+/* Diagnostic key/value pairs stack at very narrow detail panes */
+@container content (max-width: 480px) {
+  .kv-grid { grid-template-columns: minmax(0, 1fr); }
+  .kv-grid .k { border-bottom: 0; padding-bottom: 0; }
+}
+
+/* History rows inside a narrow sessions pane (container "block" =
+   .cq-block on the Scan Sessions wf-block in HistoryScreen.tsx): tighter
+   columns, hide the Time column (6th child in header AND data rows). */
+@container block (max-width: 560px) {
+  .history-row { grid-template-columns: 16px minmax(80px, 110px) minmax(0, 1fr) 48px 48px; }
+  .history-row > :nth-child(6) { display: none; }
+}

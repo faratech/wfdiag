@@ -11,6 +11,7 @@ export type AIProviderId =
   | 'custom_openai'
   | 'anthropic'
   | 'gemini'
+  | 'deepseek'
 
 export interface SettingsData {
   openAiApiKey?: string
@@ -22,6 +23,10 @@ export interface SettingsData {
   geminiApiKey?: string
   /** Gemini model override; empty uses the app default (gemini-2.5-flash) */
   geminiModel?: string
+  /** DeepSeek API key */
+  deepseekApiKey?: string
+  /** DeepSeek model override; empty uses the app default (deepseek-chat) */
+  deepseekModel?: string
   /** Base URL of a custom OpenAI-compatible endpoint (OpenRouter, Groq, …) */
   customEndpoint?: string
   /** API key for the custom endpoint (optional — local proxies may not need one) */

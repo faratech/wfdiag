@@ -96,7 +96,18 @@ This is a Tauri v2 application with a clear separation between frontend and back
 - **ai_providers/**: One client module per provider (openai, anthropic, gemini, openai_compat, ollama, foundry, phi) + `capabilities()` table, `resolve_config()`, shared discovery/SSE helpers; **phi_silica.rs**: on-device Phi Silica WinRT
 - **ai_chat.rs / ai_tools.rs**: Agentic chat (backend session store, streaming tool loop) and its READ-ONLY tool registry
 - **ai_report.rs**: One-click AI scan health report (deterministic context assembly, no tool loop)
-- **issue_detector.rs / issue_fixer.rs**: Issue detection from scan results and whitelisted automated fixes
+- **issue_catalog.rs / issue_detector.rs**: Issue engine — `issue_catalog.rs` is the single
+  registry (~28 `IssueSpec`s: metadata + remediation mapping; invariants enforced by tests);
+  `issue_detector.rs` holds the pure detect fns (deterministic: clock + temp-file count are
+  injected via `DetectCtx`, never read inside detectors)
+- **remediation.rs**: Tiered remediation catalog (OpenTool | AutoSafe | Repair). Every command
+  is a compile-time constant. The Repair tier REQUIRES `confirmed: true` — the gate lives in
+  `remediation::execute`, not the UI. Commands run through the injectable `CommandRunner`
+  (tests use a recorder; `RealRunner` adds CREATE_NO_WINDOW + timeouts). `maintenance: true`
+  entries appear in the Issues screen's always-available Maintenance list
+- **ai_fix_plan.rs**: AI-proposed fix plans — the model only ever emits catalog IDs, which
+  `parse_fix_plan` validates against the remediation catalog and detected issues; execution is
+  always user-initiated through the normal confirm flow
 - **results_storage.rs**: Scan results storage, comparison, tags, failure trends
 - **state.rs**: AppState (current session, monitor, scan storage, cancelled sessions)
 - **tray.rs**: System tray (Show/Hide, Quick Scan, Exit) and close-to-tray handling
@@ -349,6 +360,7 @@ gain identity (Store-only decision).
 | `openai` | cloud | API key | yes | yes | 48,000 |
 | `anthropic` | cloud (native Messages API) | API key | yes | yes | 48,000 |
 | `gemini` | cloud (native generateContent) | API key | yes | yes | 48,000 |
+| `deepseek` | cloud (OpenAI-compatible) | API key | yes | yes | 48,000 |
 
 `ai_providers::capabilities()` is the single source of truth for this table.
 Auto routing is local-first: Phi → Foundry → Ollama → custom → OpenAI →

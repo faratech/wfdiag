@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react'
 import type { DiagnosticTask, TaskResult } from '../contexts/AppContext'
-import { useAIContext } from '../contexts/AIContext'
+import { useAIContext, diagnosticCacheKey } from '../contexts/AIContext'
 import { taskIcon } from '../ui/diagnostic-icons'
 import { formatDuration, parseOutput, toKeyValues } from './util'
+import * as logger from '../utils/logger'
 
 export interface DiagItem extends DiagnosticTask {
   result: TaskResult
@@ -16,7 +17,9 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
   const success = item.result.success
   const parsed = parseOutput(item.result.output)
   const kv = parsed ? toKeyValues(parsed) : []
-  const cacheKey = `diagnostic:${item.id}`
+  // Must match AIContext's internal key (content hash included) or the
+  // spinner/result/error land under a key this component never reads
+  const cacheKey = diagnosticCacheKey(item.id, item.result.output)
   const aiText = interpretations[cacheKey]
   const aiBusy = !!isAnalyzing[cacheKey]
   const aiErr = errors[cacheKey]
@@ -25,7 +28,10 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
 
   const runAi = () => {
     if (!aiText && !aiBusy) {
-      analyzeDiagnostic(item.id, item.name, item.result.output).catch(() => {})
+      // Failures surface via errors[cacheKey]; the catch only silences the
+      // duplicate unhandled-rejection noise
+      analyzeDiagnostic(item.id, item.name, item.result.output).catch(err =>
+        logger.error('DiagnosticDetail', 'AI interpretation failed', String(err)))
     }
   }
 
