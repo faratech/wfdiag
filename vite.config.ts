@@ -54,7 +54,9 @@ export default defineConfig({
   envPrefix: ['VITE_', 'TAURI_'],
   build: {
     target: ['es2021', 'chrome100', 'safari13'],
-    minify: !process.env.TAURI_DEBUG ? 'esbuild' : false,
+    // Vite 8 bundles with Rolldown and no longer ships esbuild; use the
+    // built-in (Oxc) minifier instead of the old 'esbuild' setting.
+    minify: !process.env.TAURI_DEBUG,
     sourcemap: !!process.env.TAURI_DEBUG,
   },
   define: {
