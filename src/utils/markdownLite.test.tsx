@@ -38,4 +38,35 @@ describe('renderMarkdownLite', () => {
     expect(out).not.toContain('<img')
     expect(out).toContain('&lt;img')
   })
+
+  it('renders a GFM pipe table', () => {
+    const out = html('| Component | Status |\n|-----------|--------|\n| CPU | OK |\n| Memory | Warning |')
+    expect(out).toBe(
+      '<table class="md-table">' +
+        '<thead><tr><th>Component</th><th>Status</th></tr></thead>' +
+        '<tbody>' +
+        '<tr><td>CPU</td><td>OK</td></tr>' +
+        '<tr><td>Memory</td><td>Warning</td></tr>' +
+        '</tbody>' +
+        '</table>'
+    )
+  })
+
+  it('applies column alignment from the delimiter row', () => {
+    const out = html('| L | C | R |\n| :--- | :--: | ---: |\n| a | b | c |')
+    expect(out).toContain('<th style="text-align: center;">C</th>')
+    expect(out).toContain('<td style="text-align: right;">c</td>')
+  })
+
+  it('keeps spaces in cells and pads ragged rows', () => {
+    const out = html('| Name | Value |\n|---|---|\n| CPU Usage | 91% |\n| OnlyOne |')
+    // a real space inside a cell must survive
+    expect(out).toContain('<td>CPU Usage</td>')
+    // a short row is padded to the header width with an empty cell
+    expect(out).toContain('<tr><td>OnlyOne</td><td></td></tr>')
+  })
+
+  it('does not treat a non-table pipe line as a table', () => {
+    expect(html('a | b without a delimiter row')).toBe('<p>a | b without a delimiter row</p>')
+  })
 })
