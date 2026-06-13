@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import type { DiagnosticTask, TaskResult } from '../contexts/AppContext'
-import { useAIContext } from '../contexts/AIContext'
+import { useAIContext, diagnosticCacheKey } from '../contexts/AIContext'
 import { taskIcon } from '../ui/diagnostic-icons'
 import { formatDuration, parseOutput, toKeyValues } from './util'
+import * as logger from '../utils/logger'
 
 export interface DiagItem extends DiagnosticTask {
   result: TaskResult
@@ -16,16 +17,22 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
   const success = item.result.success
   const parsed = parseOutput(item.result.output)
   const kv = parsed ? toKeyValues(parsed) : []
-  const cacheKey = `diagnostic:${item.id}`
+  // Must match AIContext's internal key (content hash included) or the
+  // spinner/result/error land under a key this component never reads
+  const cacheKey = diagnosticCacheKey(item.id, item.result.output)
   const aiText = interpretations[cacheKey]
   const aiBusy = !!isAnalyzing[cacheKey]
   const aiErr = errors[cacheKey]
 
-  useEffect(() => { setTab('output') }, [item.id])
+  // Tab resets to 'output' when a different diagnostic is selected because the
+  // parent remounts this component with key={item.id} (see DiagnosticsScreen).
 
   const runAi = () => {
     if (!aiText && !aiBusy) {
-      analyzeDiagnostic(item.id, item.name, item.result.output).catch(() => {})
+      // Failures surface via errors[cacheKey]; the catch only silences the
+      // duplicate unhandled-rejection noise
+      analyzeDiagnostic(item.id, item.name, item.result.output).catch(err =>
+        logger.error('DiagnosticDetail', 'AI interpretation failed', String(err)))
     }
   }
 
@@ -45,7 +52,6 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
         </div>
         <div className="diag-meta">
           <span><i className="fa-solid fa-folder" /> {item.category}</span>
-          <span><i className="fa-solid fa-fingerprint" /> {item.id}</span>
           {item.result.duration_ms > 0 && <span><i className="fa-solid fa-stopwatch" /> {formatDuration(item.result.duration_ms)}</span>}
         </div>
       </div>

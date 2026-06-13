@@ -6,6 +6,7 @@ import { ToastProvider } from './contexts/ToastContext'
 import { useDiagnostics } from './hooks/useDiagnostics'
 import { useScanner } from './hooks/useScanner'
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts'
+import { useMediaQuery } from './hooks/useMediaQuery'
 import { useUpdateCheck } from './hooks/useUpdateCheck'
 import type { TabValue } from './components'
 import { SettingsDialog, AboutDialog, Tooltip, Kbd } from './components'
@@ -40,7 +41,7 @@ const PAGE_META: Record<TabValue, { title: string; sub: string }> = {
 
 const AppContent: React.FC = () => {
   const {
-    selectedTab, setSelectedTab, systemInfo, results, isRunning, currentProgress, currentTaskName,
+    selectedTab, setSelectedTab, systemInfo, results, sessionId, isRunning, currentProgress, currentTaskName,
     scanStartTime, scanEndTime, issues, navRailCollapsed, setNavRailCollapsed,
     showSettings, setShowSettings, showAbout, setShowAbout, settings, saveSettings,
   } = useAppContext()
@@ -51,20 +52,28 @@ const AppContent: React.FC = () => {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
   const updateInfo = useUpdateCheck()
+  // Auto-collapse the rail on narrow windows. The user's stored preference
+  // (navRailCollapsed in localStorage) is never written by this path, so it
+  // restores by itself when the window widens again.
+  const forceCollapsed = useMediaQuery('(max-width: 1100px)')
+  const railCollapsed = navRailCollapsed || forceCollapsed
   useGlobalShortcuts({
     onTogglePalette: () => setPaletteOpen(o => !o),
     onShowHelp: () => setHelpOpen(true),
   })
 
-  // Detect issues whenever results change to a non-empty set
+  // Re-detect issues once per scan, when its results first arrive. Keying on
+  // the session id (not the result COUNT) is essential: the quick-scan task set
+  // is fixed, so every scan yields the same count — a count-based guard would
+  // refresh issues only on the first scan and then go stale on every re-scan.
   const resultCount = Object.keys(results).length
-  const lastDetect = useRef(0)
+  const lastDetect = useRef<string | null>(null)
   useEffect(() => {
-    if (resultCount > 0 && resultCount !== lastDetect.current) {
-      lastDetect.current = resultCount
+    if (resultCount > 0 && sessionId && sessionId !== lastDetect.current) {
+      lastDetect.current = sessionId
       detectIssues()
     }
-  }, [resultCount, detectIssues])
+  }, [resultCount, sessionId, detectIssues])
 
   // "Quick Scan" from the tray menu (backend shows the window, then emits)
   const runQuickScanRef = useRef(runQuickScan)
@@ -92,14 +101,14 @@ const AppContent: React.FC = () => {
   return (
     <div className="app-window">
       <Titlebar />
-      <div className={`app-body ${navRailCollapsed ? 'rail-collapsed' : ''}`}>
+      <div className={`app-body ${railCollapsed ? 'rail-collapsed' : ''}`}>
         {/* Nav rail */}
         <nav className="nav-rail" aria-label="Primary">
           <div className="rail-brand">
             <div className="rail-brand-mark"><img src="/wf-ds/icon-only.png" alt="" /></div>
             <div className="rail-brand-text">
               <div className="b1">WindowsForum</div>
-              <div className="b2">Diagnostics · 2.4.0</div>
+              <div className="b2">Diagnostics · 2.5.0</div>
             </div>
           </div>
 
@@ -119,7 +128,7 @@ const AppContent: React.FC = () => {
                   {t.id === 'issues' && issueCount > 0 && <span className="item-badge">{issueCount}</span>}
                 </button>
               )
-              return navRailCollapsed
+              return railCollapsed
                 ? <Tooltip key={t.id} content={t.label} shortcut={`Ctrl+${i + 1}`} side="right">{btn}</Tooltip>
                 : btn
             })}
@@ -149,10 +158,14 @@ const AppContent: React.FC = () => {
             </div>
             <button className="nav-item" onClick={() => setShowSettings(true)}><i className="fa-solid fa-gear item-icon" /><span className="item-label">Settings</span></button>
             <button className="nav-item" onClick={() => setShowAbout(true)}><i className="fa-solid fa-circle-info item-icon" /><span className="item-label">About</span></button>
-            <button className="nav-item" onClick={() => setNavRailCollapsed(!navRailCollapsed)}>
-              <i className={`fa-solid ${navRailCollapsed ? 'fa-angles-right' : 'fa-angles-left'} item-icon`} />
-              <span className="item-label">Collapse</span>
-            </button>
+            {/* Hidden while the narrow window forces a collapse — toggling a
+                preference with no visible effect would just confuse */}
+            {!forceCollapsed && (
+              <button className="nav-item" onClick={() => setNavRailCollapsed(!navRailCollapsed)}>
+                <i className={`fa-solid ${navRailCollapsed ? 'fa-angles-right' : 'fa-angles-left'} item-icon`} />
+                <span className="item-label">Collapse</span>
+              </button>
+            )}
           </div>
         </nav>
 
@@ -260,7 +273,7 @@ const AppContent: React.FC = () => {
         open={showSettings}
         onOpenChange={setShowSettings}
         settings={settings}
-        onSave={async (s) => { await saveSettings(s); setShowSettings(false) }}
+        onSave={async (s) => { await saveSettings(s); setThemeMode((s.theme as 'dark' | 'light' | 'auto') || 'dark'); setShowSettings(false) }}
       />
       <AboutDialog open={showAbout} onOpenChange={setShowAbout} updateInfo={updateInfo} />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />

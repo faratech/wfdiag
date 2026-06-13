@@ -49,7 +49,7 @@ const TaskDiffDetail: React.FC<{ change: TaskChange }> = ({ change }) => {
           )}
         </div>
       )}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+      <div className="diff-cols">
         <div>
           <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--wf-text-muted)', fontWeight: 700, marginBottom: 4 }}>Previous</div>
           <pre style={preStyle}>{change.previous_output || '(empty)'}</pre>
@@ -159,15 +159,14 @@ export const HistoryScreen: React.FC = () => {
 
   return (
     <>
-      <div className="row-gap-12" style={{ padding: '0 24px 12px', justifyContent: 'space-between' }}>
+      <div className="row-gap-12 screen-toolbar" style={{ justifyContent: 'space-between' }}>
         <div className="row-gap-12">
           <span style={{ fontSize: 13, color: 'var(--wf-text-muted)' }}>
             <strong style={{ color: 'var(--wf-text)' }}>{filteredScans.length}</strong>
             {query ? ` of ${scans.length}` : ''} scans
           </span>
           <input
-            className="field-input"
-            style={{ width: 220 }}
+            className="field-input filter-input"
             type="search"
             placeholder="Filter by label, date, machine…"
             value={query}
@@ -181,8 +180,8 @@ export const HistoryScreen: React.FC = () => {
         </div>
       </div>
 
-      <div className="scrollable" style={{ padding: '0 24px 24px', display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 14 }}>
-        <div className="wf-block">
+      <div className="scrollable screen-pad history-grid">
+        <div className="wf-block cq-block">
           <header className="wf-block-header">
             <span className="accent-bar" />
             <span>Scan Sessions</span>
@@ -237,7 +236,7 @@ export const HistoryScreen: React.FC = () => {
                   <>
                     <input
                       className="field-input"
-                      style={{ width: 160 }}
+                      style={{ flex: 1, minWidth: 100, maxWidth: 200 }}
                       value={labelDraft}
                       autoFocus
                       onChange={e => setLabelDraft(e.target.value)}

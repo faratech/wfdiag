@@ -16,7 +16,7 @@
         "displayName": "WF Diagnostics",
         "publisherDisplayName": "WindowsForum",
         "identityName": "WindowsForum.WFDiagnostics",
-        "msixVersion": "2.4.0.0",
+        "msixVersion": "2.5.0.0",
         "languages": ["en-US"],
         "capabilities": [
           "internetClient",

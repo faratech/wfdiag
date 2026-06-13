@@ -234,7 +234,10 @@ impl ScanStorage {
     }
 
     /// Pure diff of two loaded scans (storage-free, so it is unit-testable).
-    fn compute_comparison(current: ScanRecord, previous: ScanRecord) -> ComparisonResult {
+    pub(crate) fn compute_comparison(
+        current: ScanRecord,
+        previous: ScanRecord,
+    ) -> ComparisonResult {
         // Get task metadata for proper names and categories
         let all_tasks = crate::diagnostics::get_all_tasks();
         let task_map: HashMap<String, &crate::diagnostics::DiagnosticTask> =

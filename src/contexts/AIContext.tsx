@@ -14,9 +14,37 @@ function hashContent(input: string): string {
   return (hash >>> 0).toString(36)
 }
 
-// Types matching the Rust backend
-export type AIProvider = 'none' | 'openai' | 'phi_silica' | 'foundry_local'
-export type AIProviderPreference = 'auto' | 'openai' | 'phi_silica' | 'foundry_local'
+// The ONLY way to build keys into interpretations/isAnalyzing/errors. Components
+// must use these instead of hand-writing `diagnostic:${id}` — a hand-written key
+// without the content hash silently never matches (the "Interpret this diagnostic
+// does nothing" bug).
+export const diagnosticCacheKey = (taskId: string, output: string) =>
+  `diagnostic:${taskId}:${hashContent(output)}`
+export const sectionCacheKey = (sectionName: string, sectionData: string) =>
+  `section:${sectionName}:${hashContent(sectionData)}`
+
+// Types matching the Rust backend (wire strings pinned by backend tests)
+export type AIProvider =
+  | 'none'
+  | 'openai'
+  | 'phi_silica'
+  | 'foundry_local'
+  | 'ollama'
+  | 'custom_openai'
+  | 'anthropic'
+  | 'gemini'
+  | 'deepseek'
+export type AIProviderPreference = 'auto' | Exclude<AIProvider, 'none'>
+
+export interface ProviderInfo {
+  id: Exclude<AIProvider, 'none'>
+  available: boolean
+  configured: boolean
+  model?: string
+  endpoint?: string
+  supports_tools: boolean
+  supports_streaming: boolean
+}
 
 export interface AIProviderStatus {
   preferred_provider: AIProvider
@@ -28,6 +56,8 @@ export interface AIProviderStatus {
   foundry_local_available?: boolean
   foundry_local_endpoint?: string
   active_provider: AIProvider
+  /** One row per real provider, in Auto routing order (2.5.0+) */
+  providers?: ProviderInfo[]
 }
 
 export interface AIResponse {
@@ -55,6 +85,7 @@ interface AIContextType {
   analyzeSection: (sectionName: string, sectionData: string) => Promise<string>
   explainHealth: (metricsData: string) => Promise<string>
   analyzeGeneric: (cacheKey: string, prompt: string, forceRefresh?: boolean) => Promise<string>
+  prioritizeIssues: (issuesJson: string, forceRefresh?: boolean) => Promise<string>
 
   // Loading states per context_id
   isAnalyzing: Record<string, boolean>
@@ -112,60 +143,80 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   const hasSettingsApiKey = !!settings.openAiApiKey
   const isAIAvailable = backendAvailable || hasSettingsApiKey
 
-  // Determine active provider based on what will actually be used
-  // Priority: settings API key (since that's what we send to backend), then backend status
+  // Determine the active provider — a frontend mirror of the backend's
+  // route_provider(): explicit preference never falls back; Auto walks the
+  // local-first chain. The settings OpenAI key counts as OpenAI availability
+  // (it is sent with every analyze call), which is why this can't just read
+  // aiStatus.active_provider.
   const activeProvider: AIProvider = (() => {
-    if (hasSettingsApiKey) {
-      // An explicit local preference still wins over the API key when that
-      // provider is actually available
-      if (preferredProvider === 'phi_silica' && aiStatus?.phi_silica_available) {
-        return 'phi_silica'
-      }
-      if (preferredProvider === 'foundry_local' && aiStatus?.foundry_local_available) {
-        return 'foundry_local'
-      }
-      // Otherwise use OpenAI since we have an API key
-      return 'openai'
+    const available = (id: Exclude<AIProvider, 'none'>): boolean => {
+      if (id === 'openai' && hasSettingsApiKey) return true
+      const row = aiStatus?.providers?.find(p => p.id === id)
+      if (row) return row.available
+      // Legacy fields (status from a pre-2.5 backend during dev reloads)
+      if (id === 'phi_silica') return !!aiStatus?.phi_silica_available
+      if (id === 'foundry_local') return !!aiStatus?.foundry_local_available
+      if (id === 'openai') return !!aiStatus?.openai_available
+      return false
     }
-    // No settings API key - prefer on-device Phi Silica, then Foundry Local
-    if (aiStatus?.phi_silica_available) {
-      return 'phi_silica'
+    if (preferredProvider !== 'auto') {
+      return available(preferredProvider) ? preferredProvider : 'none'
     }
-    if (aiStatus?.foundry_local_available) {
-      return 'foundry_local'
+    const autoOrder: Exclude<AIProvider, 'none'>[] = [
+      'phi_silica', 'foundry_local', 'ollama', 'custom_openai', 'openai', 'anthropic', 'gemini', 'deepseek',
+    ]
+    for (const id of autoOrder) {
+      if (available(id)) return id
     }
-    // Fall back to backend status
     return backendAvailable ? aiStatus!.active_provider : 'none'
   })()
 
-  // Load AI status
-  const refreshStatus = useCallback(async () => {
+  // Pure status fetch: returns a safe fallback on error and never calls
+  // setState. Keeping the setState out of here lets the mount effect apply the
+  // result inline (after the await), off the synchronous-setState-in-effect path.
+  const loadStatus = useCallback(async (): Promise<AIProviderStatus> => {
     try {
-      setIsLoading(true)
       const status = await invoke<AIProviderStatus>('ai_get_status')
-      setAiStatus(status)
       logger.debug('AIContext', 'AI status refreshed', status)
+      return status
     } catch (error) {
       logger.error('AIContext', 'Failed to get AI status', String(error))
-      setAiStatus({
+      return {
         preferred_provider: 'none',
         openai_available: false,
         openai_api_key_set: false,
         phi_silica_available: false,
         phi_silica_ready: false,
         active_provider: 'none'
-      })
-    } finally {
-      setIsLoading(false)
+      }
     }
   }, [])
 
-  // Initial status load once settings are loaded
+  const fetchStatus = useCallback(async () => {
+    setAiStatus(await loadStatus())
+    setIsLoading(false)
+  }, [loadStatus])
+
+  // User/settings-initiated refresh: surface the loading state immediately,
+  // then fetch.
+  const refreshStatus = useCallback(async () => {
+    setIsLoading(true)
+    await fetchStatus()
+  }, [fetchStatus])
+
+  // Initial status load once settings are loaded. `isLoading` already starts
+  // true; applying the result inside the promise callback (post-await) keeps it
+  // off the synchronous-setState-in-effect path.
   useEffect(() => {
-    if (settingsLoaded) {
-      refreshStatus()
-    }
-  }, [settingsLoaded, refreshStatus])
+    if (!settingsLoaded) return
+    let cancelled = false
+    void loadStatus().then(status => {
+      if (cancelled) return
+      setAiStatus(status)
+      setIsLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [settingsLoaded, loadStatus])
 
   // Refresh status when relevant settings change
   useEffect(() => {
@@ -271,7 +322,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
 
     // Check if already cached (key includes a hash of the output so a re-scan with
     // different data for the same task does not return a stale interpretation).
-    const cacheKey = `diagnostic:${taskId}:${hashContent(output)}`
+    const cacheKey = diagnosticCacheKey(taskId, output)
     if (interpretations[cacheKey]) {
       return interpretations[cacheKey]
     }
@@ -295,7 +346,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       return ''
     }
 
-    const cacheKey = `section:${sectionName}:${hashContent(sectionData)}`
+    const cacheKey = sectionCacheKey(sectionName, sectionData)
     if (interpretations[cacheKey]) {
       return interpretations[cacheKey]
     }
@@ -355,6 +406,28 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     )
   }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
 
+  // Rank detected issues with the backend's dedicated prioritization prompt.
+  // Content-hashed cache key: a re-scan with different issues re-analyzes.
+  const prioritizeIssues = useCallback(async (
+    issuesJson: string,
+    forceRefresh = false
+  ): Promise<string> => {
+    if (!aiEnabled || (!isAIAvailable && !hasApiKey)) {
+      return ''
+    }
+    const cacheKey = `issues:prioritize:${hashContent(issuesJson)}`
+    if (!forceRefresh && interpretations[cacheKey]) {
+      return interpretations[cacheKey]
+    }
+    return runDedupedAnalysis(cacheKey, () =>
+      invoke<AIResponse>('ai_prioritize_issues', {
+        issuesData: issuesJson,
+        sessionId,
+        apiKey: settings.openAiApiKey || null
+      })
+    )
+  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
+
   // Cache management
   const clearCache = useCallback(async (targetSessionId?: string) => {
     try {
@@ -389,6 +462,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     analyzeSection,
     explainHealth,
     analyzeGeneric,
+    prioritizeIssues,
     isAnalyzing,
     interpretations,
     errors,

@@ -1,7 +1,7 @@
 import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
-import { AIProvider, useAIContext, type AIResponse } from './AIContext'
+import { AIProvider, useAIContext, diagnosticCacheKey, type AIResponse } from './AIContext'
 
 const invokeMock = vi.fn()
 
@@ -106,6 +106,30 @@ describe('AIContext analysis dedup and cache', () => {
 
     expect(second).toBe('cached analysis')
     expect(analyzeCalls()).toHaveLength(1)
+  })
+
+  it('stores results under the exported diagnosticCacheKey (DiagnosticDetail contract)', async () => {
+    // Regression: DiagnosticDetail once looked up `diagnostic:${id}` while the
+    // context keyed by content hash — the "Interpret does nothing" bug. The
+    // exported helper and the internal key must always agree.
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'ai_get_status') return okStatus
+      if (cmd === 'ai_analyze_diagnostic') return aiResponse('keyed analysis')
+      return undefined
+    })
+
+    const { result } = renderHook(() => useAIContext(), { wrapper })
+
+    await act(async () => {
+      await result.current.analyzeDiagnostic('os_info', 'OS Info', '{"build": 26100}')
+    })
+
+    const key = diagnosticCacheKey('os_info', '{"build": 26100}')
+    await waitFor(() => {
+      expect(result.current.interpretations[key]).toBe('keyed analysis')
+    })
+    // And the loading flag uses the same key space
+    expect(result.current.isAnalyzing[key]).toBe(false)
   })
 
   it('re-analyzes when the same task produces different output', async () => {

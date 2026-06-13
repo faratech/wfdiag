@@ -24,6 +24,17 @@ export interface TaskResult {
   duration_ms: number
 }
 
+export interface RemediationSummary {
+  id: string
+  label: string
+  description: string
+  tier: 'open_tool' | 'auto_safe' | 'repair'
+  admin_required: boolean
+  requires_restart: boolean
+  long_running: boolean
+  maintenance: boolean
+}
+
 export interface Issue {
   id?: string
   title: string
@@ -32,6 +43,10 @@ export interface Issue {
   category: string
   recommendation?: string
   detected: boolean
+  /** Diagnostic tasks this issue was derived from (used by "Ask AI") */
+  source_tasks?: string[]
+  /** The vetted remediation for this issue, when one applies */
+  remediation?: RemediationSummary
 }
 
 // Global search result type
@@ -84,9 +99,16 @@ interface AppContextType {
   // NavRail state
   navRailCollapsed: boolean
   setNavRailCollapsed: (collapsed: boolean) => void
-  // Deep-link from the command palette into a diagnostic's detail pane
-  pendingDetailTaskId: string | null
-  setPendingDetailTaskId: (id: string | null) => void
+  // The diagnostic selected in the detail pane; also the target of the command
+  // palette's "View Result" deep-link (set directly, so no transient flag)
+  selectedDiagnosticId: string | null
+  setSelectedDiagnosticId: (id: string | null) => void
+  // Deep-link from "Explain this scan" into the AI screen's report panel
+  pendingScanReport: boolean
+  setPendingScanReport: (pending: boolean) => void
+  // Deep-link from an issue's "Ask AI" into the agentic chat (pre-seeded prompt)
+  pendingChatPrompt: string | null
+  setPendingChatPrompt: (prompt: string | null) => void
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined)
@@ -159,7 +181,15 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   // Task to open in the diagnostics detail pane on next render — set by the
   // command palette to deep-link into a specific result, consumed (and
   // cleared) by DiagnosticsScreen
-  const [pendingDetailTaskId, setPendingDetailTaskId] = useState<string | null>(null)
+  const [selectedDiagnosticId, setSelectedDiagnosticId] = useState<string | null>(null)
+
+  // "Explain this scan" pressed — consumed (and cleared) by ScanReportPanel,
+  // which auto-generates the report when this is set
+  const [pendingScanReport, setPendingScanReport] = useState(false)
+
+  // An issue's "Ask AI" pressed — consumed (and cleared) by AIScreen, which
+  // sends it into the agentic chat
+  const [pendingChatPrompt, setPendingChatPrompt] = useState<string | null>(null)
 
   // Load settings from backend on startup
   useEffect(() => {
@@ -255,8 +285,12 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     settingsLoaded,
     navRailCollapsed,
     setNavRailCollapsed,
-    pendingDetailTaskId,
-    setPendingDetailTaskId,
+    selectedDiagnosticId,
+    setSelectedDiagnosticId,
+    pendingScanReport,
+    setPendingScanReport,
+    pendingChatPrompt,
+    setPendingChatPrompt,
   }
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>
