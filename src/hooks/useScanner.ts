@@ -6,6 +6,16 @@ import { isPermissionGranted, requestPermission, sendNotification } from '@tauri
 import { useAppContext, type TaskResult } from '../contexts/AppContext'
 import * as logger from '../utils/logger'
 
+// Default Quick Scan task IDs (used when no custom list is configured). Module
+// scope keeps the reference stable so callbacks needn't depend on it.
+const DEFAULT_QUICK_SCAN_TASKS = [
+  'comp_system', 'os_info', 'processor', 'physical_memory', 'disk_drive',
+  'logical_disk', 'network_adapter', 'systeminfo',
+  // Cheap, high-signal detection sources (registry/WMI lookups); the
+  // heavier event_codes_critical scan stays full-scan-only
+  'pending_reboot', 'device_errors', 'defender_status'
+]
+
 // Mirror scan progress onto the Windows taskbar button. All calls are
 // best-effort: failures (missing permission, non-Tauri dev context) must
 // never affect the scan itself.
@@ -143,7 +153,7 @@ export const useScanner = () => {
         status: 'running' | 'completed'
         task_name?: string
         success?: boolean
-      }>('task-progress', (event: any) => {
+      }>('task-progress', event => {
         // Only process events for the current session
         if (currentSessionRef.current !== newSessionId) {
           logger.debug('useScanner', 'Ignoring event from old session')
@@ -264,12 +274,6 @@ export const useScanner = () => {
     waitAutoSaveDelay,
     setTaskStatuses
   ])
-
-  // Default Quick Scan task IDs (used when no custom list is configured)
-  const DEFAULT_QUICK_SCAN_TASKS = [
-    'comp_system', 'os_info', 'processor', 'physical_memory', 'disk_drive',
-    'logical_disk', 'network_adapter', 'systeminfo'
-  ]
 
   const runQuickScan = useCallback(async () => {
     // Use custom quick scan tasks from settings, or fall back to defaults

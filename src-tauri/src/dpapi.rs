@@ -18,8 +18,64 @@ use std::path::PathBuf;
 
 use crate::error::DiagError;
 
-/// Get the path to the encrypted credentials file
-fn get_credentials_path() -> Result<PathBuf, String> {
+/// Closed set of providers whose API keys we store. Filenames and keyring
+/// entry names derive from this enum only — caller strings are never
+/// interpolated into paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKeyId {
+    OpenAI,
+    Anthropic,
+    Gemini,
+    DeepSeek,
+    Custom,
+}
+
+impl ProviderKeyId {
+    /// Parse a frontend-supplied provider id. Unknown ids are an error, not a
+    /// default — this keeps the filename set closed.
+    pub fn parse(provider: &str) -> Result<Self, String> {
+        match provider {
+            "openai" => Ok(Self::OpenAI),
+            "anthropic" => Ok(Self::Anthropic),
+            "gemini" => Ok(Self::Gemini),
+            "deepseek" => Ok(Self::DeepSeek),
+            "custom_openai" | "custom" => Ok(Self::Custom),
+            other => Err(DiagError::api_key(
+                "store",
+                format!("Unknown API key provider '{}'", other),
+            )
+            .into()),
+        }
+    }
+
+    /// Encrypted credentials filename. OpenAI keeps the legacy name so
+    /// existing stored keys work without migration.
+    fn filename(self) -> &'static str {
+        match self {
+            Self::OpenAI => "credentials.bin",
+            Self::Anthropic => "credentials_anthropic.bin",
+            Self::Gemini => "credentials_gemini.bin",
+            Self::DeepSeek => "credentials_deepseek.bin",
+            Self::Custom => "credentials_custom.bin",
+        }
+    }
+
+    /// Keyring entry name (non-Windows dev builds). OpenAI keeps the legacy
+    /// entry name for the same no-migration reason.
+    #[cfg(not(windows))]
+    pub fn keyring_user(self) -> &'static str {
+        match self {
+            Self::OpenAI => "openai_api_key",
+            Self::Anthropic => "anthropic_api_key",
+            Self::Gemini => "gemini_api_key",
+            Self::DeepSeek => "deepseek_api_key",
+            Self::Custom => "custom_api_key",
+        }
+    }
+}
+
+/// Get the path to the encrypted credentials file for a provider
+fn get_credentials_path(id: ProviderKeyId) -> Result<PathBuf, String> {
     let app_data = dirs::data_local_dir()
         .ok_or_else(|| DiagError::internal("Could not find local app data directory"))?;
     let creds_dir = app_data.join("WFDiag");
@@ -30,7 +86,7 @@ fn get_credentials_path() -> Result<PathBuf, String> {
             .map_err(|e| DiagError::file(creds_dir.display().to_string(), e.to_string()))?;
     }
 
-    Ok(creds_dir.join("credentials.bin"))
+    Ok(creds_dir.join(id.filename()))
 }
 
 // FFI for LocalFree - simpler than pulling in another windows crate feature
@@ -158,14 +214,14 @@ fn dpapi_decrypt(_encrypted: &[u8]) -> Result<String, String> {
     .into())
 }
 
-/// Store the API key securely using DPAPI
-pub fn store_api_key(key: &str) -> Result<(), String> {
+/// Store a provider's API key securely using DPAPI
+pub fn store_provider_key(id: ProviderKeyId, key: &str) -> Result<(), String> {
     if key.is_empty() {
-        return clear_api_key();
+        return clear_provider_key(id);
     }
 
     let encrypted = dpapi_encrypt(key)?;
-    let path = get_credentials_path()?;
+    let path = get_credentials_path(id)?;
 
     fs::write(&path, encrypted)
         .map_err(|e| DiagError::file(path.display().to_string(), e.to_string()))?;
@@ -174,9 +230,9 @@ pub fn store_api_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Load the API key from secure DPAPI storage
-pub fn load_api_key() -> Result<Option<String>, String> {
-    let path = get_credentials_path()?;
+/// Load a provider's API key from secure DPAPI storage
+pub fn load_provider_key(id: ProviderKeyId) -> Result<Option<String>, String> {
+    let path = get_credentials_path(id)?;
 
     if !path.exists() {
         return Ok(None);
@@ -205,9 +261,9 @@ pub fn load_api_key() -> Result<Option<String>, String> {
     }
 }
 
-/// Clear the stored API key
-pub fn clear_api_key() -> Result<(), String> {
-    let path = get_credentials_path()?;
+/// Clear a provider's stored API key
+pub fn clear_provider_key(id: ProviderKeyId) -> Result<(), String> {
+    let path = get_credentials_path(id)?;
 
     if path.exists() {
         fs::remove_file(&path)
@@ -216,6 +272,11 @@ pub fn clear_api_key() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Clear the stored OpenAI API key (legacy single-key entry point)
+pub fn clear_api_key() -> Result<(), String> {
+    clear_provider_key(ProviderKeyId::OpenAI)
 }
 
 #[cfg(test)]
@@ -232,5 +293,45 @@ mod tests {
 
         let decrypted = dpapi_decrypt(&encrypted).expect("Decryption should succeed");
         assert_eq!(decrypted, original);
+    }
+
+    #[test]
+    fn openai_keeps_legacy_credentials_filename() {
+        // Existing installs must keep finding their stored OpenAI key — the
+        // legacy filename is load-bearing, the others must not collide.
+        assert_eq!(ProviderKeyId::OpenAI.filename(), "credentials.bin");
+        assert_eq!(
+            ProviderKeyId::Anthropic.filename(),
+            "credentials_anthropic.bin"
+        );
+        assert_eq!(ProviderKeyId::Gemini.filename(), "credentials_gemini.bin");
+        assert_eq!(
+            ProviderKeyId::DeepSeek.filename(),
+            "credentials_deepseek.bin"
+        );
+        assert_eq!(ProviderKeyId::Custom.filename(), "credentials_custom.bin");
+    }
+
+    #[test]
+    fn provider_key_id_parse_is_a_closed_set() {
+        assert_eq!(ProviderKeyId::parse("openai"), Ok(ProviderKeyId::OpenAI));
+        assert_eq!(
+            ProviderKeyId::parse("anthropic"),
+            Ok(ProviderKeyId::Anthropic)
+        );
+        assert_eq!(ProviderKeyId::parse("gemini"), Ok(ProviderKeyId::Gemini));
+        assert_eq!(
+            ProviderKeyId::parse("deepseek"),
+            Ok(ProviderKeyId::DeepSeek)
+        );
+        assert_eq!(
+            ProviderKeyId::parse("custom_openai"),
+            Ok(ProviderKeyId::Custom)
+        );
+        assert_eq!(ProviderKeyId::parse("custom"), Ok(ProviderKeyId::Custom));
+        // Providers without their own key, and garbage, must be rejected
+        assert!(ProviderKeyId::parse("phi_silica").is_err());
+        assert!(ProviderKeyId::parse("../evil").is_err());
+        assert!(ProviderKeyId::parse("").is_err());
     }
 }

@@ -35,6 +35,157 @@ impl NativeDiagnostics {
         Ok(Value::Array(json_results))
     }
 
+    /// High-signal System-log event codes for issue detection, aggregated by
+    /// (source, code) over the last 7 days. Deliberately separate from the
+    /// `event_logs` task (Error-type-only, 50-row cap): Kernel-Power 41 is a
+    /// Critical-level record, so no Type filter is used here. Time filtering
+    /// happens in Rust (WQL datetime literals are error-prone); per-source
+    /// WHERE clauses keep the scans bounded.
+    pub fn get_critical_event_codes(&self) -> Result<Value> {
+        const WINDOW_DAYS: i64 = 7;
+        const ROW_CAP: usize = 100;
+        // (source, codes); empty codes = every event from that source
+        const TARGETS: &[(&str, &[u32])] = &[
+            ("Microsoft-Windows-Kernel-Power", &[41]),
+            ("EventLog", &[6008]),
+            ("disk", &[7, 51, 153]),
+            ("Microsoft-Windows-WHEA-Logger", &[]),
+            ("Service Control Manager", &[7031, 7034]),
+        ];
+
+        fn value_as_u64(v: Option<&Value>) -> Option<u64> {
+            match v {
+                Some(Value::Number(n)) => n.as_u64(),
+                Some(Value::String(s)) => s.parse().ok(),
+                _ => None,
+            }
+        }
+
+        let wmi_con = WmiConnection::new()?;
+        let cutoff = crate::timestamp::Timestamp::now().secs - WINDOW_DAYS * 24 * 3600;
+        let mut events: Vec<Value> = Vec::new();
+
+        for (source, codes) in TARGETS {
+            let mut wql = format!(
+                "SELECT TimeGenerated, SourceName, EventCode, Message FROM Win32_NTLogEvent \
+                 WHERE Logfile='System' AND SourceName='{}'",
+                source
+            );
+            if !codes.is_empty() {
+                let clause = codes
+                    .iter()
+                    .map(|c| format!("EventCode={}", c))
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                wql.push_str(&format!(" AND ({})", clause));
+            }
+            // A missing source or empty log is normal — skip, don't fail the task
+            let Ok(rows) = wmi_con.query(&wql) else {
+                continue;
+            };
+
+            // Aggregate by event code: count, most recent, sample message.
+            // The WQL has no ORDER BY, so rows arrive in arbitrary order — apply
+            // the 7-day cutoff FIRST and let the cap bound the recent rows we
+            // process, otherwise a batch of old rows could exhaust the cap and
+            // hide genuinely recent events.
+            let mut groups: std::collections::HashMap<u64, (u64, i64, String)> =
+                std::collections::HashMap::new();
+            let mut kept = 0usize;
+            for row in rows {
+                if kept >= ROW_CAP {
+                    break;
+                }
+                let Some(time) = row
+                    .get("TimeGenerated")
+                    .and_then(|v| v.as_str())
+                    .and_then(crate::timestamp::parse_wmi_datetime)
+                else {
+                    continue;
+                };
+                if time.secs < cutoff {
+                    continue;
+                }
+                kept += 1;
+                let code = value_as_u64(row.get("EventCode")).unwrap_or(0);
+                let message: String = row
+                    .get("Message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .chars()
+                    .take(300)
+                    .collect();
+                let entry = groups.entry(code).or_insert((0, 0, String::new()));
+                entry.0 += 1;
+                if time.secs >= entry.1 {
+                    entry.1 = time.secs;
+                    entry.2 = message;
+                }
+            }
+            for (code, (count, last_seen, sample_message)) in groups {
+                events.push(json!({
+                    "source": source,
+                    "code": code,
+                    "count": count,
+                    "last_seen": crate::timestamp::Timestamp::from_secs(last_seen).to_iso_string(),
+                    "sample_message": sample_message,
+                }));
+            }
+        }
+
+        Ok(json!({ "window_days": WINDOW_DAYS, "events": events }))
+    }
+
+    /// Pending-reboot detection via the canonical registry markers.
+    pub fn get_pending_reboot(&self) -> Result<Value> {
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        let mut reasons: Vec<&str> = Vec::new();
+        if hklm
+            .open_subkey(
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
+            )
+            .is_ok()
+        {
+            reasons.push("component_based_servicing");
+        }
+        if hklm
+            .open_subkey(
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
+            )
+            .is_ok()
+        {
+            reasons.push("windows_update");
+        }
+        if let Ok(key) = hklm.open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager")
+            && key.get_raw_value("PendingFileRenameOperations").is_ok()
+        {
+            reasons.push("pending_file_rename");
+        }
+        Ok(json!({ "pending": !reasons.is_empty(), "reasons": reasons }))
+    }
+
+    /// Devices reporting a Device Manager problem code (yellow-bang devices).
+    /// Code 22 = disabled by the user — callers treat it as lower severity.
+    pub fn get_device_errors(&self) -> Result<Value> {
+        let wmi_con = WmiConnection::new()?;
+        let rows = wmi_con.query(
+            "SELECT Name, DeviceID, ConfigManagerErrorCode, Status FROM Win32_PnPEntity \
+             WHERE ConfigManagerErrorCode <> 0",
+        )?;
+        let json_results: Vec<Value> = rows
+            .into_iter()
+            .map(|r| Value::Object(r.into_iter().collect()))
+            .collect();
+        Ok(Value::Array(json_results))
+    }
+
+    /// Antivirus products from Security Center (same productState bitfield
+    /// family as the firewall task). The namespace is absent on Server SKUs —
+    /// the resulting task failure reads as "unknown", never as "disabled".
+    pub fn get_defender_status(&self) -> Result<Value> {
+        self.run_wmi_query("AntiVirusProduct", Some(r"root\SecurityCenter2"))
+    }
+
     pub fn get_native_disk_space(&self) -> Result<Value> {
         let wmi_con = WmiConnection::new()?;
         let results = wmi_con.query("SELECT * FROM Win32_LogicalDisk WHERE DriveType=3")?;
@@ -441,11 +592,24 @@ impl NativeDiagnostics {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(255);
 
-                    // Default to 0 (Unknown) which is appropriate for OperationalStatus
-                    let operational_status = disk_info
-                        .get("OperationalStatus")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
+                    // MSFT_PhysicalDisk.OperationalStatus is a UInt16[] array (CIM),
+                    // rendered as a JSON array — pick the most severe problem code so
+                    // the text/health flag reflect it. Default 0 (Unknown).
+                    let operational_status = match disk_info.get("OperationalStatus") {
+                        Some(Value::Array(states)) => {
+                            let codes: Vec<u64> =
+                                states.iter().filter_map(|s| s.as_u64()).collect();
+                            // Prefer a problem status (Error > Predictive > Stressed >
+                            // Degraded) over OK/Unknown when several are reported.
+                            [6, 5, 4, 3]
+                                .into_iter()
+                                .find(|c| codes.contains(c))
+                                .or_else(|| codes.first().copied())
+                                .unwrap_or(0)
+                        }
+                        Some(v) => v.as_u64().unwrap_or(0),
+                        None => 0,
+                    };
 
                     // Convert operational status to text (0=Unknown, 1=Other, 2=OK, 3=Degraded, etc.)
                     let operational_str = match operational_status {

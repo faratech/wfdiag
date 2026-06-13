@@ -3,15 +3,16 @@
 mod architecture;
 mod commands;
 pub mod diagnostics;
-#[cfg(windows)]
+// dpapi self-gates internally (non-Windows stubs); the module stays
+// cross-platform because ProviderKeyId names the keyring entries too
 mod dpapi;
 mod encrypted_storage;
 pub mod error;
+mod issue_catalog;
 mod issue_detector;
-mod issue_fixer;
 mod native_diagnostics;
 pub mod native_monitor;
-pub mod openai_integration;
+mod remediation;
 pub mod results_storage;
 mod security;
 #[cfg(windows)]
@@ -31,12 +32,17 @@ mod windows_ai_bindings;
 
 // Unified AI service layer
 mod ai_cache;
+mod ai_chat;
+mod ai_fix_plan;
 mod ai_prompts;
+pub mod ai_providers;
+mod ai_report;
 mod ai_service;
+mod ai_tools;
 
 use crate::diagnostics::{DiagnosticTask, TaskResult};
 use crate::error::DiagError;
-use crate::issue_detector::Issue;
+use crate::issue_catalog::Issue;
 use native_monitor::{NetworkConnection, SystemMonitor};
 use results_storage::{ComparisonResult, ScanRecord, ScanStorage, ScanSummary, TaskTrend};
 use std::collections::HashMap;
@@ -455,20 +461,28 @@ async fn get_uptime() -> Result<serde_json::Value, String> {
     }))
 }
 
+/// Run a remediation from the vetted catalog. The Repair-tier confirmation
+/// gate is enforced in remediation::execute, not here and not in the UI.
 #[tauri::command]
-async fn fix_issue(issue_id: String) -> Result<issue_fixer::FixResult, String> {
-    let fixer = issue_fixer::IssueFixer::new();
-    fixer
-        .fix_issue(&issue_id)
-        .await
-        .map_err(|e| DiagError::task_failed(format!("fix_{}", issue_id), e.to_string()).into())
+async fn run_remediation(
+    remediation_id: String,
+    confirmed: Option<bool>,
+) -> Result<remediation::FixOutcome, String> {
+    remediation::execute(
+        &remediation_id,
+        confirmed.unwrap_or(false),
+        &remediation::RealRunner,
+    )
+    .await
 }
 
+/// The full remediation catalog (the Maintenance section renders the
+/// `maintenance: true` subset).
 #[tauri::command]
-fn get_fixable_issue_ids() -> Result<Vec<String>, String> {
-    Ok(issue_fixer::fixable_issue_ids()
+fn get_remediations() -> Result<Vec<remediation::RemediationSummary>, String> {
+    Ok(remediation::remediations()
         .iter()
-        .map(|s| s.to_string())
+        .map(|spec| spec.summary())
         .collect())
 }
 
@@ -796,9 +810,17 @@ async fn get_task_trends(
 async fn detect_issues(state: State<'_, AppState>) -> Result<Vec<Issue>, String> {
     let current = state.current_session.lock().await;
     if let Some(ref session) = *current {
-        let issue_detector = issue_detector::IssueDetector::new();
-        let issues = issue_detector.detect_issues(&session.results);
-        Ok(issues)
+        // The OS dependencies live here, not in the detectors: inject the
+        // clock and the temp-dir entry count so detection stays pure.
+        let temp_file_count = std::fs::read_dir(std::env::temp_dir())
+            .ok()
+            .map(|entries| entries.count());
+        let ctx = issue_catalog::DetectCtx {
+            results: &session.results,
+            now: timestamp::Timestamp::now(),
+            temp_file_count,
+        };
+        Ok(issue_catalog::detect_all(&ctx))
     } else {
         Err(DiagError::NoActiveSession.into())
     }
@@ -904,6 +926,8 @@ pub fn run() {
             commands::settings::store_api_key,
             commands::settings::load_api_key,
             commands::settings::clear_api_key,
+            commands::settings::store_provider_api_key,
+            commands::settings::clear_provider_api_key,
             get_system_info,
             get_architecture_info,
             get_available_tasks,
@@ -915,7 +939,8 @@ pub fn run() {
             commands::export::export_results,
             commands::export::save_results_to_file,
             get_uptime,
-            fix_issue,
+            run_remediation,
+            get_remediations,
             restart_as_admin,
             start_monitoring,
             stop_monitoring,
@@ -928,9 +953,7 @@ pub fn run() {
             clear_scan_history,
             update_scan_tags,
             get_task_trends,
-            openai_integration::analyze_with_openai,
-            openai_integration::analyze_system_with_ai,
-            openai_integration::get_ai_provider_status,
+            ai_providers::ollama::ai_list_ollama_models,
             phi_silica::check_phi_silica_available,
             phi_silica::ensure_phi_silica,
             phi_silica::analyze_with_phi_silica,
@@ -942,8 +965,15 @@ pub fn run() {
             ai_service::ai_explain_health,
             ai_service::ai_set_preference,
             ai_service::ai_clear_cache,
+            ai_service::ai_prioritize_issues,
+            ai_fix_plan::ai_propose_fix_plan,
+            // Agentic AI chat (streaming via ai-chat:// events)
+            ai_chat::ai_chat_send,
+            ai_chat::ai_chat_cancel,
+            ai_chat::ai_chat_new_session,
+            ai_chat::ai_chat_get_history,
+            ai_report::ai_generate_report,
             detect_issues,
-            get_fixable_issue_ids,
             copy_minidumps_to_desktop,
             open_url,
             update_check::check_for_update,

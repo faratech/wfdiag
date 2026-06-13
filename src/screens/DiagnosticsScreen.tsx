@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import { useAppContext } from '../contexts/AppContext'
 import { useScanner } from '../hooks/useScanner'
 import { taskIcon } from '../ui/diagnostic-icons'
@@ -6,19 +6,14 @@ import { formatDuration } from './util'
 import { DiagnosticDetail, type DiagItem } from './DiagnosticDetail'
 
 export const DiagnosticsScreen: React.FC = () => {
-  const { availableTasks, results, isRunning, currentProgress, currentTaskName, scanStartTime, scanEndTime, taskStatuses, pendingDetailTaskId, setPendingDetailTaskId } = useAppContext()
+  const { availableTasks, results, isRunning, currentProgress, currentTaskName, scanStartTime, scanEndTime, taskStatuses, selectedDiagnosticId, setSelectedDiagnosticId, setPendingScanReport, setSelectedTab } = useAppContext()
   const { runQuickScan, runFullScan, stopScan } = useScanner()
 
-  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
 
-  // Deep-link from the command palette ("View Result: X")
-  useEffect(() => {
-    if (pendingDetailTaskId && results[pendingDetailTaskId]) {
-      setSelectedId(pendingDetailTaskId)
-      setPendingDetailTaskId(null)
-    }
-  }, [pendingDetailTaskId, results, setPendingDetailTaskId])
+  // The selected diagnostic lives in AppContext so the command palette's "View
+  // Result" deep-link can set it directly (no transient flag, no effect). When
+  // nothing valid is selected we fall back to the first completed check below.
 
   // Per-category progress for the scanning hero ("Hardware 3/5"), derived from
   // the live task-progress events; only categories with started tasks appear
@@ -55,12 +50,12 @@ export const DiagnosticsScreen: React.FC = () => {
   const passed = completed.filter(t => t.result.success).length
   const failed = completed.filter(t => !t.result.success).length
   const durationMs = scanEndTime > 0 ? scanEndTime - scanStartTime : 0
-  const selected = completed.find(t => t.id === selectedId) || completed[0]
+  const selected = completed.find(t => t.id === selectedDiagnosticId) || completed[0]
 
   if (isRunning) {
     return (
       <div className="scan-hero scanning">
-        <div className="ring" style={{ ['--p' as any]: currentProgress }}>
+        <div className="ring" style={{ '--p': currentProgress } as React.CSSProperties}>
           <span className="pct">{Math.round(currentProgress)}%</span>
         </div>
         <h1>Running diagnostic sweep…</h1>
@@ -99,7 +94,7 @@ export const DiagnosticsScreen: React.FC = () => {
 
   return (
     <>
-      <div className="stat-strip" style={{ padding: '0 24px', marginBottom: 12 }}>
+      <div className="stat-strip screen-strip">
         <div className="stat-card passed">
           <div className="label">Passed</div>
           <div className="value">{passed}<span className="ch-sub"> / {completed.length}</span></div>
@@ -120,9 +115,17 @@ export const DiagnosticsScreen: React.FC = () => {
           <div className="value">{durationMs > 0 ? (durationMs / 1000).toFixed(1) : '—'}<span className="ch-sub">{durationMs > 0 ? 's' : ''}</span></div>
           <i className="fa-solid fa-stopwatch icon" />
         </div>
+        <button
+          className="btn"
+          style={{ alignSelf: 'center', whiteSpace: 'nowrap' }}
+          title="Generate an AI health report for this scan"
+          onClick={() => { setPendingScanReport(true); setSelectedTab('ai') }}
+        >
+          <i className="fa-solid fa-wand-magic-sparkles" /> Explain this scan
+        </button>
       </div>
 
-      <div className="split-pane" style={{ margin: '0 24px 12px' }}>
+      <div className="split-pane">
         <div className="diag-list">
           <div className="diag-list-header">
             <span>{filtered.length} of {completed.length} diagnostics</span>
@@ -139,7 +142,7 @@ export const DiagnosticsScreen: React.FC = () => {
                   <div
                     key={item.id}
                     className={`diag-item ${(selected?.id === item.id) ? 'selected' : ''}`}
-                    onClick={() => setSelectedId(item.id)}
+                    onClick={() => setSelectedDiagnosticId(item.id)}
                   >
                     <span className={`status-dot ${item.result.success ? 'success' : 'error'}`} />
                     <i className={`fa-solid ${taskIcon(item.id, item.category)}`} style={{ width: 13, color: 'var(--wf-text-muted)', fontSize: 12 }} />
@@ -151,7 +154,7 @@ export const DiagnosticsScreen: React.FC = () => {
             ))}
           </div>
         </div>
-        {selected && <DiagnosticDetail item={selected} />}
+        {selected && <DiagnosticDetail key={selected.id} item={selected} />}
       </div>
     </>
   )

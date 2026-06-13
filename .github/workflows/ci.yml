@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # No branch filter on pull_request: stacked PRs (feature -> feature) must
+  # run the same gates as PRs into main — cargo test only ever executes here
+  # (windows-latest), never on the Linux dev box.
   pull_request:
-    branches: [main]
   push:
     branches: [main]
 

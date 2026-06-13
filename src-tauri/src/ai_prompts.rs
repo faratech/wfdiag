@@ -1,16 +1,29 @@
 //! AI Prompt Templates
 //!
-//! Contains prompt templates for different AI analysis scenarios.
+//! Contains prompt templates for different AI analysis scenarios. Every
+//! builder takes `max_data_chars` — the per-provider data budget derived from
+//! `ai_providers::capabilities()` — instead of assuming Phi Silica's 4k-token
+//! limit for everyone. Compact budgets (≲2k chars, i.e. Phi Silica) also get
+//! tighter response-length instructions.
 
-/// Maximum characters for diagnostic output in prompts
-/// Phi Silica has 4k token context (~16k chars max)
-/// Use 1200 chars for data to leave room for prompt template + output
-const PHI_SILICA_MAX_OUTPUT: usize = 1200;
+/// Budgets at or below this are "compact": data is heavily truncated and the
+/// model is told to answer in a couple of sentences.
+const COMPACT_BUDGET_CHARS: usize = 2_000;
 
 /// Generate prompt for single diagnostic interpretation
-pub fn diagnostic_interpretation_prompt(task_name: &str, output: &str) -> String {
+pub fn diagnostic_interpretation_prompt(
+    task_name: &str,
+    output: &str,
+    max_data_chars: usize,
+) -> String {
     // Convert JSON to readable text for better token efficiency
-    let readable_output = json_to_readable_text(output, PHI_SILICA_MAX_OUTPUT);
+    let readable_output = json_to_readable_text(output, max_data_chars);
+    let length_hint = if max_data_chars <= COMPACT_BUDGET_CHARS {
+        "Give a 2-3 sentence summary. Note any concerns. Keep response under 80 words."
+    } else {
+        "Summarize the findings and call out anything concerning, with the values that \
+         matter. Keep response under 200 words."
+    };
 
     format!(
         r#"Analyze this Windows diagnostic:
@@ -18,15 +31,16 @@ pub fn diagnostic_interpretation_prompt(task_name: &str, output: &str) -> String
 {task_name}:
 {output}
 
-Give a 2-3 sentence summary. Note any concerns. Keep response under 80 words."#,
+{length_hint}"#,
         task_name = task_name,
-        output = readable_output
+        output = readable_output,
+        length_hint = length_hint
     )
 }
 
 /// Convert JSON diagnostic output to human-readable text
 /// This dramatically reduces token count vs raw JSON
-fn json_to_readable_text(output: &str, max_chars: usize) -> String {
+pub(crate) fn json_to_readable_text(output: &str, max_chars: usize) -> String {
     // Try to parse as JSON
     let trimmed = output.trim();
 
@@ -218,26 +232,41 @@ fn format_bytes_if_numeric(s: &str) -> String {
 }
 
 /// Generate prompt for section summary (Hardware, System, Storage, Network)
-pub fn section_summary_prompt(section_name: &str, section_data: &str) -> String {
+pub fn section_summary_prompt(
+    section_name: &str,
+    section_data: &str,
+    max_data_chars: usize,
+) -> String {
     // Convert JSON to readable text
-    let readable_data = json_to_readable_text(section_data, 1500);
+    let readable_data = json_to_readable_text(section_data, max_data_chars);
+    let length_hint = if max_data_chars <= COMPACT_BUDGET_CHARS {
+        "Under 100 words."
+    } else {
+        "Under 200 words."
+    };
 
     format!(
         r#"Summarize {section_name} diagnostics:
 
 {section_data}
 
-Status (healthy/needs attention/critical), key findings (2-3 points), recommendation. Under 100 words."#,
+Status (healthy/needs attention/critical), key findings (2-3 points), recommendation. {length_hint}"#,
         section_name = section_name,
-        section_data = readable_data
+        section_data = readable_data,
+        length_hint = length_hint
     )
 }
 
 /// Generate prompt for health score explanation
-pub fn health_explanation_prompt(metrics_data: &str) -> String {
+pub fn health_explanation_prompt(metrics_data: &str, max_data_chars: usize) -> String {
     // Bound the (otherwise unbounded) caller-supplied metrics so this prompt stays
     // within context limits like the sibling builders. truncate_output is char-safe.
-    let metrics_data = truncate_output(metrics_data, 1500);
+    let metrics_data = truncate_output(metrics_data, max_data_chars);
+    let length_hint = if max_data_chars <= COMPACT_BUDGET_CHARS {
+        "Keep the response under 120 words."
+    } else {
+        "Keep the response under 200 words."
+    };
     format!(
         r#"Explain these Windows system health metrics to a user.
 
@@ -249,22 +278,29 @@ Provide:
 2. Which components are affecting the score most
 3. What could be done to improve the score
 
-Keep the response under 120 words. Be encouraging but honest."#,
-        metrics_data = metrics_data
+{length_hint} Be encouraging but honest."#,
+        metrics_data = metrics_data,
+        length_hint = length_hint
     )
 }
 
 /// Generate prompt for issue prioritization
-pub fn issue_prioritization_prompt(issues_data: &str) -> String {
-    let readable_data = json_to_readable_text(issues_data, 1200);
+pub fn issue_prioritization_prompt(issues_data: &str, max_data_chars: usize) -> String {
+    let readable_data = json_to_readable_text(issues_data, max_data_chars);
+    let length_hint = if max_data_chars <= COMPACT_BUDGET_CHARS {
+        "Under 100 words."
+    } else {
+        "Under 200 words."
+    };
 
     format!(
         r#"Prioritize these Windows issues:
 
 {issues_data}
 
-Rank by priority, brief reason each, which to fix first. Under 100 words."#,
-        issues_data = readable_data
+Rank by priority, brief reason each, which to fix first. {length_hint}"#,
+        issues_data = readable_data,
+        length_hint = length_hint
     )
 }
 
@@ -272,7 +308,7 @@ Rank by priority, brief reason each, which to fix first. Under 100 words."#,
 /// Truncates by CHARACTER count (not byte index) so a multi-byte UTF-8 sequence at
 /// the boundary can never trigger a "byte index is not a char boundary" panic. With
 /// `panic = "abort"` in release this would otherwise crash the whole process.
-fn truncate_output(output: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_output(output: &str, max_chars: usize) -> String {
     let total = output.chars().count();
     if total <= max_chars {
         output.to_string()
@@ -356,5 +392,23 @@ mod tests {
         let verbose = "line1\n\n\n  line2  \n\n  line3  ";
         let compressed = compress_for_phi_silica(verbose, 1000);
         assert_eq!(compressed, "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn budgets_control_data_truncation_and_length_hints() {
+        let data = "x".repeat(10_000);
+        // Compact (Phi Silica-sized) budget: heavy truncation + tight cap
+        let compact = diagnostic_interpretation_prompt("Disk Drives", &data, 1_200);
+        assert!(compact.len() < 2_000);
+        assert!(compact.contains("under 80 words"));
+        // Cloud-sized budget: the same data survives intact + relaxed cap
+        let roomy = diagnostic_interpretation_prompt("Disk Drives", &data, 20_000);
+        assert!(roomy.len() > 9_000);
+        assert!(roomy.contains("under 200 words"));
+
+        assert!(section_summary_prompt("Storage", &data, 1_500).contains("Under 100 words."));
+        assert!(section_summary_prompt("Storage", &data, 20_000).contains("Under 200 words."));
+        assert!(health_explanation_prompt(&data, 1_500).contains("under 120 words"));
+        assert!(issue_prioritization_prompt(&data, 20_000).contains("Under 200 words."));
     }
 }

@@ -262,6 +262,34 @@ pub fn get_all_tasks() -> Vec<DiagnosticTask> {
             admin_required: false,
         },
         DiagnosticTask {
+            id: "event_codes_critical".to_string(),
+            name: "Critical Event Codes".to_string(),
+            description: "Crash, disk and hardware error events (7 days)".to_string(),
+            category: "Logs".to_string(),
+            admin_required: false,
+        },
+        DiagnosticTask {
+            id: "pending_reboot".to_string(),
+            name: "Pending Reboot".to_string(),
+            description: "Whether Windows is waiting for a restart".to_string(),
+            category: "System".to_string(),
+            admin_required: false,
+        },
+        DiagnosticTask {
+            id: "device_errors".to_string(),
+            name: "Device Errors".to_string(),
+            description: "Devices with Device Manager problem codes".to_string(),
+            category: "Hardware".to_string(),
+            admin_required: false,
+        },
+        DiagnosticTask {
+            id: "defender_status".to_string(),
+            name: "Antivirus Status".to_string(),
+            description: "Antivirus products and their state".to_string(),
+            category: "Security".to_string(),
+            admin_required: false,
+        },
+        DiagnosticTask {
             id: "firewall_status".to_string(),
             name: "Firewall Status".to_string(),
             description: "Check firewall status".to_string(),
@@ -366,13 +394,16 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             "hosts_file" => diagnostics.read_hosts_file(),
             "dsregcmd" => diagnostics.run_dsregcmd(),
             "windows_update" => diagnostics.get_windows_update_history(),
+            "event_codes_critical" => diagnostics.get_critical_event_codes(),
+            "pending_reboot" => diagnostics.get_pending_reboot(),
+            "device_errors" => diagnostics.get_device_errors(),
+            "defender_status" => diagnostics.get_defender_status(),
             "firewall_status" => {
                 diagnostics.run_wmi_query("FirewallProduct", Some(r"root\SecurityCenter2"))
             }
             "store_apps" => diagnostics.get_store_apps(),
             "performance" => diagnostics.get_performance_data(),
             "scheduled_tasks" => diagnostics.get_scheduled_tasks(),
-            "disk_health" => diagnostics.get_disk_health(),
             "driver_verifier" => diagnostics.get_driver_verifier(),
             _ => Err(anyhow::anyhow!("Not implemented in native diagnostics")),
         }

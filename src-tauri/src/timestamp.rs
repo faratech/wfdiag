@@ -10,6 +10,38 @@ pub struct Timestamp {
     pub secs: i64,
 }
 
+/// Parse a CIM/WMI datetime — `"20240612153045.500000-300"` — into a
+/// Timestamp. The trailing signed value is the LOCAL-to-UTC offset in
+/// MINUTES; `+***` (offset unspecified) is treated as UTC. Returns None on
+/// anything malformed.
+pub(crate) fn parse_wmi_datetime(s: &str) -> Option<Timestamp> {
+    let s = s.trim();
+    if s.len() < 14 || !s.as_bytes()[..14].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let (digits, rest) = s.split_at(14);
+    let iso = format!(
+        "{}-{}-{}T{}:{}:{}Z",
+        &digits[0..4],
+        &digits[4..6],
+        &digits[6..8],
+        &digits[8..10],
+        &digits[10..12],
+        &digits[12..14]
+    );
+    let mut ts = Timestamp::from_iso_string(&iso).ok()?;
+    // rest = ".ffffff-300" | ".ffffff+***" | "" — the offset sign is the LAST
+    // sign per the CIM grammar (the fractional part has none), so rfind avoids
+    // mistaking a stray sign in the fraction for the offset delimiter.
+    if let Some(sign_pos) = rest.rfind(['+', '-'])
+        && let Ok(offset_minutes) = rest[sign_pos..].parse::<i64>()
+    {
+        // CIM datetime is local time; UTC = local - offset
+        ts.secs -= offset_minutes * 60;
+    }
+    Some(ts)
+}
+
 impl Timestamp {
     /// Create a timestamp for the current time
     pub fn now() -> Self {
@@ -240,5 +272,43 @@ mod tests {
     fn test_epoch() {
         let ts = Timestamp::from_secs(0);
         assert_eq!(ts.to_iso_string(), "1970-01-01T00:00:00Z");
+    }
+}
+
+#[cfg(test)]
+mod wmi_datetime_tests {
+    use super::*;
+
+    #[test]
+    fn parses_cim_datetime_with_minute_offset() {
+        // 15:30:45 local at UTC-300min (-5h) => 20:30:45 UTC
+        let ts = parse_wmi_datetime("20240612153045.500000-300").unwrap();
+        assert_eq!(ts.to_iso_string(), "2024-06-12T20:30:45Z");
+        // Positive offset subtracts
+        let ts = parse_wmi_datetime("20240612153045.000000+060").unwrap();
+        assert_eq!(ts.to_iso_string(), "2024-06-12T14:30:45Z");
+    }
+
+    #[test]
+    fn unspecified_offset_is_treated_as_utc() {
+        // DriverDate commonly arrives as date-only with +***
+        let ts = parse_wmi_datetime("20190312000000.000000+***").unwrap();
+        assert_eq!(ts.to_iso_string(), "2019-03-12T00:00:00Z");
+    }
+
+    #[test]
+    fn offset_uses_last_sign_not_first() {
+        // The offset delimiter is the LAST sign; a stray sign earlier in the
+        // string (e.g. a malformed fraction) must not steal the offset parse.
+        let ts = parse_wmi_datetime("20240612153045.5-0-300").unwrap();
+        assert_eq!(ts.to_iso_string(), "2024-06-12T20:30:45Z");
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse_wmi_datetime("").is_none());
+        assert!(parse_wmi_datetime("2024-06-12T15:30:45Z").is_none());
+        assert!(parse_wmi_datetime("notadate").is_none());
+        assert!(parse_wmi_datetime("2024061").is_none());
     }
 }

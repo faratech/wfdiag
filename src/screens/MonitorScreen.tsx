@@ -36,7 +36,7 @@ export const MonitorScreen: React.FC = () => {
 
   return (
     <>
-      <div className="row-gap-12" style={{ padding: '0 24px 12px', justifyContent: 'space-between' }}>
+      <div className="row-gap-12 screen-toolbar" style={{ justifyContent: 'space-between' }}>
         <div className="row-gap-12">
           <span className={`tag ${isActive ? 'success' : 'neutral'}`}>
             <span className="status-dot" style={{ background: isActive ? 'var(--ok-fg)' : 'var(--wf-text-muted)', animation: isActive ? 'pulse 1.4s ease-in-out infinite' : 'none' }} />
@@ -57,7 +57,7 @@ export const MonitorScreen: React.FC = () => {
         </div>
       </div>
 
-      <div className="scrollable" style={{ padding: '0 24px 24px' }}>
+      <div className="scrollable screen-pad">
         {!last && (
           <div className="charts-grid" aria-hidden="true">
             {Array.from({ length: 4 }, (_, i) => (
