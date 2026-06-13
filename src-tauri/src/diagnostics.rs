@@ -404,7 +404,6 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             "store_apps" => diagnostics.get_store_apps(),
             "performance" => diagnostics.get_performance_data(),
             "scheduled_tasks" => diagnostics.get_scheduled_tasks(),
-            "disk_health" => diagnostics.get_disk_health(),
             "driver_verifier" => diagnostics.get_driver_verifier(),
             _ => Err(anyhow::anyhow!("Not implemented in native diagnostics")),
         }

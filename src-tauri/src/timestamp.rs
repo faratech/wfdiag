@@ -30,9 +30,10 @@ pub(crate) fn parse_wmi_datetime(s: &str) -> Option<Timestamp> {
         &digits[12..14]
     );
     let mut ts = Timestamp::from_iso_string(&iso).ok()?;
-    // rest = ".ffffff-300" | ".ffffff+***" | "" — find the sign after the
-    // fractional part and apply the minute offset when it parses
-    if let Some(sign_pos) = rest.find(['+', '-'])
+    // rest = ".ffffff-300" | ".ffffff+***" | "" — the offset sign is the LAST
+    // sign per the CIM grammar (the fractional part has none), so rfind avoids
+    // mistaking a stray sign in the fraction for the offset delimiter.
+    if let Some(sign_pos) = rest.rfind(['+', '-'])
         && let Ok(offset_minutes) = rest[sign_pos..].parse::<i64>()
     {
         // CIM datetime is local time; UTC = local - offset
@@ -293,6 +294,14 @@ mod wmi_datetime_tests {
         // DriverDate commonly arrives as date-only with +***
         let ts = parse_wmi_datetime("20190312000000.000000+***").unwrap();
         assert_eq!(ts.to_iso_string(), "2019-03-12T00:00:00Z");
+    }
+
+    #[test]
+    fn offset_uses_last_sign_not_first() {
+        // The offset delimiter is the LAST sign; a stray sign earlier in the
+        // string (e.g. a malformed fraction) must not steal the offset parse.
+        let ts = parse_wmi_datetime("20240612153045.5-0-300").unwrap();
+        assert_eq!(ts.to_iso_string(), "2024-06-12T20:30:45Z");
     }
 
     #[test]

@@ -31,9 +31,19 @@ fn task_object(ctx: &DetectCtx, task_id: &str) -> Option<Value> {
     serde_json::from_str::<Value>(&result.output).ok()
 }
 
+/// Read a JSON value as u64 whether it arrived as a number OR a numeric
+/// string. WMI marshals CIM `uint64` properties (e.g. `Win32_LogicalDisk`'s
+/// `Size`/`FreeSpace`) as `VT_BSTR`, so they reach us as JSON strings — a
+/// plain `.as_u64()` silently returns `None` on real hardware.
+fn json_u64(v: &Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
 pub fn detect_low_disk_space(ctx: &DetectCtx) -> Option<Detection> {
     for disk in task_array(ctx, "logical_disk")? {
-        if let (Some(free_space), Some(size)) = (disk["FreeSpace"].as_u64(), disk["Size"].as_u64())
+        if let (Some(free_space), Some(size)) =
+            (json_u64(&disk["FreeSpace"]), json_u64(&disk["Size"]))
             && size > 0
         {
             let free_percent = (free_space as f64 / size as f64) * 100.0;
@@ -231,8 +241,13 @@ pub fn detect_dns_misconfigured(ctx: &DetectCtx) -> Option<Detection> {
 pub fn detect_smart_failure_predicted(ctx: &DetectCtx) -> Option<Detection> {
     let health = task_object(ctx, "chkdsk")?;
     for disk in health["disks"].as_array()? {
-        // MSFT_PhysicalDisk OperationalStatus 5 = Predictive Failure (SMART)
-        if disk["OperationalStatus"].as_u64() == Some(5) {
+        // MSFT_PhysicalDisk.OperationalStatus is a UInt16[] array (CIM), not a
+        // scalar — WMI renders it as a JSON array. 5 = Predictive Failure (SMART).
+        let predictive = match &disk["OperationalStatus"] {
+            Value::Array(states) => states.iter().any(|s| json_u64(s) == Some(5)),
+            other => json_u64(other) == Some(5),
+        };
+        if predictive {
             return Some(Detection::new(format!(
                 "Disk '{}' is predicting imminent failure (SMART). Back up your data NOW.",
                 disk["Model"].as_str().unwrap_or("Unknown")
@@ -652,12 +667,24 @@ mod tests {
 
     #[test]
     fn low_disk_space_detected_below_ten_percent() {
+        // WMI marshals uint64 Size/FreeSpace as STRINGS — the real shape, and
+        // the one the original numeric-literal test failed to exercise.
+        let results = results_with(
+            "logical_disk",
+            r#"[{"Name": "C:", "FreeSpace": "5000000000", "Size": "100000000000"}]"#,
+        );
+        let detection = detect_low_disk_space(&ctx(&results)).expect("should detect");
+        assert!(detection.description.contains("C:"));
+    }
+
+    #[test]
+    fn low_disk_space_accepts_numeric_json_too() {
+        // Defensive: a provider that returns real JSON numbers must still work.
         let results = results_with(
             "logical_disk",
             r#"[{"Name": "C:", "FreeSpace": 5000000000, "Size": 100000000000}]"#,
         );
-        let detection = detect_low_disk_space(&ctx(&results)).expect("should detect");
-        assert!(detection.description.contains("C:"));
+        assert!(detect_low_disk_space(&ctx(&results)).is_some());
     }
 
     #[test]
@@ -822,22 +849,30 @@ mod tests {
 
     #[test]
     fn smart_predictive_failure_and_unhealthy_disks() {
+        // MSFT_PhysicalDisk.OperationalStatus is a UInt16[] ARRAY — the real
+        // shape. A scalar would never have matched on hardware.
         let results = results_with(
             "chkdsk",
-            r#"{"disks": [{"Model": "SSD A", "OperationalStatus": 5, "HealthStatus": 0}]}"#,
+            r#"{"disks": [{"Model": "SSD A", "OperationalStatus": [5], "HealthStatus": 0}]}"#,
+        );
+        assert!(detect_smart_failure_predicted(&ctx(&results)).is_some());
+        // Multi-element array containing the predictive-failure code still fires
+        let results = results_with(
+            "chkdsk",
+            r#"{"disks": [{"Model": "SSD A2", "OperationalStatus": [2, 5], "HealthStatus": 0}]}"#,
         );
         assert!(detect_smart_failure_predicted(&ctx(&results)).is_some());
         // HealthStatus 2 => Critical override
         let results = results_with(
             "chkdsk",
-            r#"{"disks": [{"Model": "HDD B", "OperationalStatus": 2, "HealthStatus": 2}]}"#,
+            r#"{"disks": [{"Model": "HDD B", "OperationalStatus": [2], "HealthStatus": 2}]}"#,
         );
         let d = detect_disk_unhealthy(&ctx(&results)).expect("unhealthy");
         assert_eq!(d.severity, Some(IssueSeverity::Critical));
         // HealthStatus 1 => default (Warning)
         let results = results_with(
             "chkdsk",
-            r#"{"disks": [{"Model": "HDD C", "OperationalStatus": 2, "HealthStatus": 1}]}"#,
+            r#"{"disks": [{"Model": "HDD C", "OperationalStatus": [2], "HealthStatus": 1}]}"#,
         );
         assert!(
             detect_disk_unhealthy(&ctx(&results))
@@ -848,7 +883,7 @@ mod tests {
         // Healthy => nothing
         let results = results_with(
             "chkdsk",
-            r#"{"disks": [{"Model": "NVMe D", "OperationalStatus": 2, "HealthStatus": 0}]}"#,
+            r#"{"disks": [{"Model": "NVMe D", "OperationalStatus": [2], "HealthStatus": 0}]}"#,
         );
         assert!(detect_smart_failure_predicted(&ctx(&results)).is_none());
         assert!(detect_disk_unhealthy(&ctx(&results)).is_none());

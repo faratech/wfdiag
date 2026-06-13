@@ -173,10 +173,16 @@ pub async fn ai_propose_fix_plan(
         let Some(session) = session.as_ref() else {
             return Err("No scan data yet — run a scan first.".to_string());
         };
+        // Match the UI's detect_issues so the same issues (incl. temp_files)
+        // are in scope — otherwise a planned clear_temp_files entry would be
+        // dropped as "not a detected issue".
+        let temp_file_count = std::fs::read_dir(std::env::temp_dir())
+            .ok()
+            .map(|entries| entries.count());
         let ctx = crate::issue_catalog::DetectCtx {
             results: &session.results,
             now: crate::timestamp::Timestamp::now(),
-            temp_file_count: None,
+            temp_file_count,
         };
         crate::issue_catalog::detect_all(&ctx)
     };
