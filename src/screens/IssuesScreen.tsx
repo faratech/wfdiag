@@ -32,7 +32,7 @@ export const IssuesScreen: React.FC = () => {
     issues, results, fixingIssue, setFixingIssue, isRunning, systemInfo,
     setPendingChatPrompt, setSelectedTab,
   } = useAppContext()
-  const { prioritizeIssues, isAnalyzing } = useAIContext()
+  const { prioritizeIssues } = useAIContext()
   const { detectIssues, restartAsAdmin } = useDiagnostics()
   const { runQuickScan } = useScanner()
   const { showInfo, showWarning, showError } = useToast()
@@ -116,7 +116,6 @@ export const IssuesScreen: React.FC = () => {
   }
 
   // ---- AI: triage + fix plan ----
-  const triageKey = `issues:prioritize`
   const runTriage = async (force = false) => {
     setTriageBusy(true)
     try {
@@ -202,8 +201,13 @@ export const IssuesScreen: React.FC = () => {
                 </button>
               </span>
             </header>
-            {(triage || isAnalyzing[triageKey] || plan) && (
+            {(triage || triageBusy || plan) && (
               <div style={{ padding: 12, fontSize: 13 }}>
+                {triageBusy && !triage && (
+                  <p style={{ color: 'var(--wf-text-muted)' }}>
+                    <i className="fa-solid fa-circle-notch fa-spin" /> Prioritizing issues…
+                  </p>
+                )}
                 {triage && <div className="report-body">{renderMarkdownLite(triage)}</div>}
                 {plan && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: triage ? 10 : 0 }}>

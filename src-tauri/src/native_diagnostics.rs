@@ -84,10 +84,18 @@ impl NativeDiagnostics {
                 continue;
             };
 
-            // Aggregate by event code: count, most recent, sample message
+            // Aggregate by event code: count, most recent, sample message.
+            // The WQL has no ORDER BY, so rows arrive in arbitrary order — apply
+            // the 7-day cutoff FIRST and let the cap bound the recent rows we
+            // process, otherwise a batch of old rows could exhaust the cap and
+            // hide genuinely recent events.
             let mut groups: std::collections::HashMap<u64, (u64, i64, String)> =
                 std::collections::HashMap::new();
-            for row in rows.into_iter().take(ROW_CAP) {
+            let mut kept = 0usize;
+            for row in rows {
+                if kept >= ROW_CAP {
+                    break;
+                }
                 let Some(time) = row
                     .get("TimeGenerated")
                     .and_then(|v| v.as_str())
@@ -98,6 +106,7 @@ impl NativeDiagnostics {
                 if time.secs < cutoff {
                     continue;
                 }
+                kept += 1;
                 let code = value_as_u64(row.get("EventCode")).unwrap_or(0);
                 let message: String = row
                     .get("Message")
@@ -583,11 +592,24 @@ impl NativeDiagnostics {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(255);
 
-                    // Default to 0 (Unknown) which is appropriate for OperationalStatus
-                    let operational_status = disk_info
-                        .get("OperationalStatus")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
+                    // MSFT_PhysicalDisk.OperationalStatus is a UInt16[] array (CIM),
+                    // rendered as a JSON array — pick the most severe problem code so
+                    // the text/health flag reflect it. Default 0 (Unknown).
+                    let operational_status = match disk_info.get("OperationalStatus") {
+                        Some(Value::Array(states)) => {
+                            let codes: Vec<u64> =
+                                states.iter().filter_map(|s| s.as_u64()).collect();
+                            // Prefer a problem status (Error > Predictive > Stressed >
+                            // Degraded) over OK/Unknown when several are reported.
+                            [6, 5, 4, 3]
+                                .into_iter()
+                                .find(|c| codes.contains(c))
+                                .or_else(|| codes.first().copied())
+                                .unwrap_or(0)
+                        }
+                        Some(v) => v.as_u64().unwrap_or(0),
+                        None => 0,
+                    };
 
                     // Convert operational status to text (0=Unknown, 1=Other, 2=OK, 3=Degraded, etc.)
                     let operational_str = match operational_status {

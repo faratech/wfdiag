@@ -41,7 +41,7 @@ const PAGE_META: Record<TabValue, { title: string; sub: string }> = {
 
 const AppContent: React.FC = () => {
   const {
-    selectedTab, setSelectedTab, systemInfo, results, isRunning, currentProgress, currentTaskName,
+    selectedTab, setSelectedTab, systemInfo, results, sessionId, isRunning, currentProgress, currentTaskName,
     scanStartTime, scanEndTime, issues, navRailCollapsed, setNavRailCollapsed,
     showSettings, setShowSettings, showAbout, setShowAbout, settings, saveSettings,
   } = useAppContext()
@@ -62,15 +62,18 @@ const AppContent: React.FC = () => {
     onShowHelp: () => setHelpOpen(true),
   })
 
-  // Detect issues whenever results change to a non-empty set
+  // Re-detect issues once per scan, when its results first arrive. Keying on
+  // the session id (not the result COUNT) is essential: the quick-scan task set
+  // is fixed, so every scan yields the same count — a count-based guard would
+  // refresh issues only on the first scan and then go stale on every re-scan.
   const resultCount = Object.keys(results).length
-  const lastDetect = useRef(0)
+  const lastDetect = useRef<string | null>(null)
   useEffect(() => {
-    if (resultCount > 0 && resultCount !== lastDetect.current) {
-      lastDetect.current = resultCount
+    if (resultCount > 0 && sessionId && sessionId !== lastDetect.current) {
+      lastDetect.current = sessionId
       detectIssues()
     }
-  }, [resultCount, detectIssues])
+  }, [resultCount, sessionId, detectIssues])
 
   // "Quick Scan" from the tray menu (backend shows the window, then emits)
   const runQuickScanRef = useRef(runQuickScan)

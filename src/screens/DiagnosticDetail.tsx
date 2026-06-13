@@ -51,7 +51,6 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
         </div>
         <div className="diag-meta">
           <span><i className="fa-solid fa-folder" /> {item.category}</span>
-          <span><i className="fa-solid fa-fingerprint" /> {item.id}</span>
           {item.result.duration_ms > 0 && <span><i className="fa-solid fa-stopwatch" /> {formatDuration(item.result.duration_ms)}</span>}
         </div>
       </div>
