@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import type { DiagnosticTask, TaskResult } from '../contexts/AppContext'
 import { useAIContext, diagnosticCacheKey } from '../contexts/AIContext'
 import { taskIcon } from '../ui/diagnostic-icons'
@@ -24,7 +24,8 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
   const aiBusy = !!isAnalyzing[cacheKey]
   const aiErr = errors[cacheKey]
 
-  useEffect(() => { setTab('output') }, [item.id])
+  // Tab resets to 'output' when a different diagnostic is selected because the
+  // parent remounts this component with key={item.id} (see DiagnosticsScreen).
 
   const runAi = () => {
     if (!aiText && !aiBusy) {

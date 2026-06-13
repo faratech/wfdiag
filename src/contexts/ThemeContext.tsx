@@ -58,10 +58,9 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({
     onModeChange?.(mode)
   }
 
-  useEffect(() => {
-    if (initialMode !== themeMode) setThemeModeInternal(initialMode)
-  }, [initialMode])
-
+  // `initialMode` only seeds the state: the provider mounts after settings have
+  // loaded (App gates on settingsLoaded), and later changes to the persisted
+  // theme flow through setThemeMode at the Save handler — no prop-follow needed.
   const isDark = themeMode === 'dark' || (themeMode === 'auto' && systemPrefersDark)
 
   useEffect(() => { applyThemeClass(isDark) }, [isDark])

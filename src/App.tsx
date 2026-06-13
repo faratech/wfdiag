@@ -273,7 +273,7 @@ const AppContent: React.FC = () => {
         open={showSettings}
         onOpenChange={setShowSettings}
         settings={settings}
-        onSave={async (s) => { await saveSettings(s); setShowSettings(false) }}
+        onSave={async (s) => { await saveSettings(s); setThemeMode((s.theme as 'dark' | 'light' | 'auto') || 'dark'); setShowSettings(false) }}
       />
       <AboutDialog open={showAbout} onOpenChange={setShowAbout} updateInfo={updateInfo} />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />

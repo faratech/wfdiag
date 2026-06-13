@@ -17,28 +17,33 @@ export interface ModalProps {
  * restoration to the element that opened it. Visual output matches the
  * previous hand-rolled dialogs (wf-block + modal-card + wf-block-header).
  */
-export const Modal: React.FC<ModalProps> = ({ open, onClose, title, width = 520, children, footer }) => {
+export const Modal: React.FC<ModalProps> = (props) =>
+  props.open ? <ModalInner {...props} /> : null
+
+/**
+ * Mounted only while open (Modal gates on it), so `closing` always starts false
+ * — the close animation can never be stuck on from a prior cycle. The element
+ * unmounts after the out-animation completes (handleAnimationEnd → onClose →
+ * parent sets open=false), so the animation always plays in full.
+ */
+const ModalInner: React.FC<ModalProps> = ({ onClose, title, width = 520, children, footer }) => {
   const [closing, setClosing] = useState(false)
   const cardRef = useRef<HTMLDivElement>(null)
   const restoreRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
-    if (open) {
-      setClosing(false)
-      restoreRef.current = document.activeElement as HTMLElement | null
-      // Focus the first focusable element once the card is in the DOM
-      requestAnimationFrame(() => {
-        const first = cardRef.current?.querySelector<HTMLElement>(FOCUSABLE)
-        ;(first ?? cardRef.current)?.focus()
-      })
-    }
-  }, [open])
+    restoreRef.current = document.activeElement as HTMLElement | null
+    // Focus the first focusable element once the card is in the DOM
+    requestAnimationFrame(() => {
+      const first = cardRef.current?.querySelector<HTMLElement>(FOCUSABLE)
+      ;(first ?? cardRef.current)?.focus()
+    })
+  }, [])
 
   const requestClose = useCallback(() => setClosing(true), [])
 
   const handleAnimationEnd = (e: React.AnimationEvent) => {
     if (closing && e.animationName === 'overlay-out') {
-      setClosing(false)
       onClose()
       restoreRef.current?.focus()
     }
@@ -66,8 +71,6 @@ export const Modal: React.FC<ModalProps> = ({ open, onClose, title, width = 520,
       first.focus()
     }
   }
-
-  if (!open) return null
 
   return (
     <div

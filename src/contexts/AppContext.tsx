@@ -99,9 +99,10 @@ interface AppContextType {
   // NavRail state
   navRailCollapsed: boolean
   setNavRailCollapsed: (collapsed: boolean) => void
-  // Deep-link from the command palette into a diagnostic's detail pane
-  pendingDetailTaskId: string | null
-  setPendingDetailTaskId: (id: string | null) => void
+  // The diagnostic selected in the detail pane; also the target of the command
+  // palette's "View Result" deep-link (set directly, so no transient flag)
+  selectedDiagnosticId: string | null
+  setSelectedDiagnosticId: (id: string | null) => void
   // Deep-link from "Explain this scan" into the AI screen's report panel
   pendingScanReport: boolean
   setPendingScanReport: (pending: boolean) => void
@@ -180,7 +181,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   // Task to open in the diagnostics detail pane on next render — set by the
   // command palette to deep-link into a specific result, consumed (and
   // cleared) by DiagnosticsScreen
-  const [pendingDetailTaskId, setPendingDetailTaskId] = useState<string | null>(null)
+  const [selectedDiagnosticId, setSelectedDiagnosticId] = useState<string | null>(null)
 
   // "Explain this scan" pressed — consumed (and cleared) by ScanReportPanel,
   // which auto-generates the report when this is set
@@ -284,8 +285,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     settingsLoaded,
     navRailCollapsed,
     setNavRailCollapsed,
-    pendingDetailTaskId,
-    setPendingDetailTaskId,
+    selectedDiagnosticId,
+    setSelectedDiagnosticId,
     pendingScanReport,
     setPendingScanReport,
     pendingChatPrompt,

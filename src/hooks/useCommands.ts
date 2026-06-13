@@ -35,7 +35,7 @@ export function useCommands(): Command[] {
   const {
     setSelectedTab, availableTasks, results, isRunning, systemInfo,
     setShowSettings, setShowAbout, navRailCollapsed, setNavRailCollapsed,
-    setPendingDetailTaskId,
+    setSelectedDiagnosticId,
   } = useAppContext()
   const { themeMode, setThemeMode } = useTheme()
   const { runDiagnostics, runQuickScan, runFullScan, stopScan } = useScanner()
@@ -145,7 +145,7 @@ export function useCommands(): Command[] {
           icon: taskIcon(task.id, task.category),
           keywords: `${task.category} ${task.id}`,
           run: () => {
-            setPendingDetailTaskId(task.id)
+            setSelectedDiagnosticId(task.id)
             setSelectedTab('diagnostics')
           },
         })
@@ -164,7 +164,7 @@ export function useCommands(): Command[] {
     return commands
   }, [
     availableTasks, results, isRunning, hasResults, isDark, navRailCollapsed, systemInfo,
-    setSelectedTab, setShowSettings, setShowAbout, setNavRailCollapsed, setPendingDetailTaskId,
+    setSelectedTab, setShowSettings, setShowAbout, setNavRailCollapsed, setSelectedDiagnosticId,
     setThemeMode, runDiagnostics, runQuickScan, runFullScan, stopScan,
     copyToClipboard, exportResults, shareToWindowsForum, emailReport, generateSupportPackage,
   ])

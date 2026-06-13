@@ -2,16 +2,19 @@
  * Hook for comparing JSON data and finding differences
  */
 
+/** Any value that can result from `JSON.parse`. */
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
+
 export interface JsonDifference {
   path: string
   type: 'added' | 'removed' | 'modified' | 'type_changed'
-  oldValue?: any
-  newValue?: any
+  oldValue?: JsonValue
+  newValue?: JsonValue
 }
 
 export function useJsonDiff() {
-  
-  const compareJson = (obj1: any, obj2: any, path: string = ''): JsonDifference[] => {
+
+  const compareJson = (obj1: JsonValue | undefined, obj2: JsonValue | undefined, path: string = ''): JsonDifference[] => {
     const differences: JsonDifference[] = []
     
     // Handle null/undefined cases
@@ -63,25 +66,27 @@ export function useJsonDiff() {
     
     // Objects
     if (typeof obj1 === 'object' && typeof obj2 === 'object') {
-      const allKeys = new Set([...Object.keys(obj1), ...Object.keys(obj2)])
-      
+      const o1 = obj1 as { [key: string]: JsonValue }
+      const o2 = obj2 as { [key: string]: JsonValue }
+      const allKeys = new Set([...Object.keys(o1), ...Object.keys(o2)])
+
       for (const key of allKeys) {
         const currentPath = path ? `${path}.${key}` : key
-        
-        if (!(key in obj1)) {
+
+        if (!(key in o1)) {
           differences.push({
             path: currentPath,
             type: 'added',
-            newValue: obj2[key]
+            newValue: o2[key]
           })
-        } else if (!(key in obj2)) {
+        } else if (!(key in o2)) {
           differences.push({
             path: currentPath,
             type: 'removed',
-            oldValue: obj1[key]
+            oldValue: o1[key]
           })
         } else {
-          differences.push(...compareJson(obj1[key], obj2[key], currentPath))
+          differences.push(...compareJson(o1[key], o2[key], currentPath))
         }
       }
       return differences
@@ -102,8 +107,8 @@ export function useJsonDiff() {
   
   const findJsonDifferences = (json1: string, json2: string): JsonDifference[] | null => {
     try {
-      const parsed1 = JSON.parse(json1)
-      const parsed2 = JSON.parse(json2)
+      const parsed1 = JSON.parse(json1) as JsonValue
+      const parsed2 = JSON.parse(json2) as JsonValue
       return compareJson(parsed1, parsed2)
     } catch {
       return null

@@ -171,34 +171,52 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     return backendAvailable ? aiStatus!.active_provider : 'none'
   })()
 
-  // Load AI status
-  const refreshStatus = useCallback(async () => {
+  // Pure status fetch: returns a safe fallback on error and never calls
+  // setState. Keeping the setState out of here lets the mount effect apply the
+  // result inline (after the await), off the synchronous-setState-in-effect path.
+  const loadStatus = useCallback(async (): Promise<AIProviderStatus> => {
     try {
-      setIsLoading(true)
       const status = await invoke<AIProviderStatus>('ai_get_status')
-      setAiStatus(status)
       logger.debug('AIContext', 'AI status refreshed', status)
+      return status
     } catch (error) {
       logger.error('AIContext', 'Failed to get AI status', String(error))
-      setAiStatus({
+      return {
         preferred_provider: 'none',
         openai_available: false,
         openai_api_key_set: false,
         phi_silica_available: false,
         phi_silica_ready: false,
         active_provider: 'none'
-      })
-    } finally {
-      setIsLoading(false)
+      }
     }
   }, [])
 
-  // Initial status load once settings are loaded
+  const fetchStatus = useCallback(async () => {
+    setAiStatus(await loadStatus())
+    setIsLoading(false)
+  }, [loadStatus])
+
+  // User/settings-initiated refresh: surface the loading state immediately,
+  // then fetch.
+  const refreshStatus = useCallback(async () => {
+    setIsLoading(true)
+    await fetchStatus()
+  }, [fetchStatus])
+
+  // Initial status load once settings are loaded. `isLoading` already starts
+  // true; applying the result inside the promise callback (post-await) keeps it
+  // off the synchronous-setState-in-effect path.
   useEffect(() => {
-    if (settingsLoaded) {
-      refreshStatus()
-    }
-  }, [settingsLoaded, refreshStatus])
+    if (!settingsLoaded) return
+    let cancelled = false
+    void loadStatus().then(status => {
+      if (cancelled) return
+      setAiStatus(status)
+      setIsLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [settingsLoaded, loadStatus])
 
   // Refresh status when relevant settings change
   useEffect(() => {
