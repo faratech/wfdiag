@@ -94,9 +94,7 @@ jobs:
 
       - name: Install dependencies
         shell: pwsh
-        run: |
-          if (Test-Path package-lock.json) { Remove-Item package-lock.json }
-          npm install
+        run: npm ci
 
       - name: Build frontend
         run: npm run build
@@ -163,9 +161,7 @@ jobs:
 
       - name: Install dependencies
         shell: pwsh
-        run: |
-          if (Test-Path package-lock.json) { Remove-Item package-lock.json }
-          npm install
+        run: npm ci
 
       - name: Build frontend
         run: npm run build

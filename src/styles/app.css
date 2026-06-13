@@ -32,6 +32,8 @@ html.is-dark, html.dk {
   --statusbar-h: 26px;
   --rail-w: 248px;
   --rail-w-collapsed: 56px;
+  /* Fluid screen gutter: 14px at narrow windows, 24px from ~960px up */
+  --gutter: clamp(14px, 2.5vw, 24px);
 
   /* Mica = base color + low-opacity tint over wallpaper */
   --mica-tint: rgba(252, 252, 253, 0.78);
@@ -108,8 +110,9 @@ html.is-dark, html.dk {
   position: fixed;
   inset: 0;
   display: grid;
-  /* OS titlebar kept — demo .titlebar element omitted, so no titlebar row */
-  grid-template-rows: 1fr;
+  /* Custom titlebar row (decorations: false); auto collapses to 0 in
+     plain-browser dev where the Titlebar component renders nothing */
+  grid-template-rows: auto 1fr;
   background: var(--wf-page-bg) var(--wf-wallpaper) no-repeat fixed center top / cover;
   color: var(--wf-text);
   font-feature-settings: "ss01", "cv11";
@@ -361,12 +364,18 @@ html.is-dark .sysinfo { background: rgba(255,255,255,0.04); }
   display: flex; flex-direction: column;
   min-width: 0;
   min-height: 0;
+  /* The screens' @container rules resolve against the CONTENT width (the
+     rail changes available space independent of the viewport). Nothing
+     position:fixed renders inside .content-area — keep it that way, or it
+     would start positioning against this container. */
+  container-type: inline-size;
+  container-name: content;
 }
 
 /* ===== Command bar — Win11 toolbar with subtle hover surfaces ===== */
 .command-bar {
   display: flex; align-items: center; gap: 6px;
-  padding: 10px 20px;
+  padding: 10px var(--gutter);
   background: var(--mica-alt);
   backdrop-filter: blur(40px) saturate(180%);
   -webkit-backdrop-filter: blur(40px) saturate(180%);
@@ -410,7 +419,7 @@ html.is-dark .cb-btn:hover { background: rgba(255,255,255,0.06); }
 /* ===== Page header ===== */
 .page-header {
   display: flex; align-items: flex-start; justify-content: space-between;
-  padding: 22px 24px 10px;
+  padding: 22px var(--gutter) 10px;
   flex-shrink: 0;
 }
 .page-header h1 {
@@ -431,7 +440,7 @@ html.is-dark .cb-btn:hover { background: rgba(255,255,255,0.06); }
 .scrollable {
   flex: 1;
   overflow: auto;
-  padding: 12px 24px 24px;
+  padding: 12px var(--gutter) var(--gutter);
   min-height: 0;
 }
 .scrollable::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -581,10 +590,11 @@ html.is-dark .scrollable::-webkit-scrollbar-thumb { background: rgba(255,255,255
 /* ===== Diagnostic two-panel ===== */
 .split-pane {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
   gap: 12px;
   flex: 1;
   min-height: 0;
+  margin: 0 var(--gutter) 12px;
 }
 .diag-list {
   background: var(--surface-card);
@@ -737,7 +747,7 @@ html.is-dark .diag-item.selected { background: rgba(15,108,189,0.24); }
 /* ===== Data tables ===== */
 .kv-grid {
   display: grid;
-  grid-template-columns: 200px 1fr;
+  grid-template-columns: minmax(110px, 200px) minmax(0, 1fr);
   gap: 0;
   font-size: 13px;
 }
@@ -927,7 +937,7 @@ html.is-dark .proc-bar { background: rgba(255,255,255,0.08); }
 /* ===== Monitor charts ===== */
 .charts-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
   gap: 12px;
 }
 .chart-card {
@@ -1003,7 +1013,7 @@ html.is-dark .btn-icon:hover { background: rgba(255,255,255,0.07); }
 /* ===== Empty/Hero scan state ===== */
 .scan-hero {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  flex: 1; margin: 12px 24px 24px;
+  flex: 1; margin: 12px var(--gutter) var(--gutter);
   padding: 32px;
   text-align: center;
   background: var(--content-bg);
@@ -1117,7 +1127,7 @@ html.is-dark .scan-hero .ring::after { background: #2a2a2c; }
 /* ===== History ===== */
 .history-row {
   display: grid;
-  grid-template-columns: 16px 130px 1fr 80px 80px 80px;
+  grid-template-columns: 16px minmax(90px, 130px) minmax(0, 1fr) 60px 60px 64px;
   gap: 12px;
   align-items: center;
   padding: 10px 14px;
@@ -1133,9 +1143,9 @@ html.is-dark .scan-hero .ring::after { background: #2a2a2c; }
 .history-row .stat.failed { color: var(--wf-error-feature); }
 
 /* ===== AI chat ===== */
-.chat-shell { display: flex; flex-direction: column; height: 100%; }
+.chat-shell { display: flex; flex-direction: column; height: 100%; min-height: min(360px, 45vh); }
 .chat-msgs { flex: 1; overflow: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
-.chat-msg { display: flex; gap: 10px; max-width: 80%; }
+.chat-msg { display: flex; gap: 10px; max-width: min(560px, 92%); }
 .chat-msg.user { align-self: flex-end; flex-direction: row-reverse; }
 .chat-msg .av {
   width: 28px; height: 28px; border-radius: 50%;
@@ -1180,6 +1190,45 @@ html.is-dark .scan-hero .ring::after { background: #2a2a2c; }
 }
 .chat-input input:focus { outline: none; border-color: var(--wf-paletteColor1); box-shadow: var(--wf-shadow-focus-ring); }
 
+/* Agentic chat: tool activity chips + streaming caret */
+.tool-chips { display: flex; flex-direction: column; gap: 4px; padding: 0 2px; }
+.tool-chips-label { font-size: 10.5px; color: var(--wf-text-muted); }
+.tool-chip-row { display: flex; gap: 4px; flex-wrap: wrap; }
+.tool-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10.5px; padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline-strong);
+  background: var(--wf-input-bg);
+  color: var(--wf-text-muted);
+  cursor: pointer;
+}
+.tool-chip.running { color: var(--wf-paletteColor1); border-color: var(--wf-paletteColor1); }
+.tool-chip.done { color: var(--wf-success-feature); }
+.tool-chip.failed { color: var(--error-fg, #c42b1c); }
+.tool-chip-ms { color: var(--wf-text-muted); }
+.tool-chip-detail {
+  font-family: var(--wf-font-mono, monospace); font-size: 10.5px;
+  max-height: 160px; overflow: auto;
+  margin: 0; padding: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: var(--wf-input-bg);
+  white-space: pre-wrap; word-break: break-word;
+}
+.bubble.streaming::after,
+.report-body.streaming::after {
+  content: '▍';
+  margin-left: 2px;
+  color: var(--wf-paletteColor1);
+  animation: chat-caret-blink 1s steps(2) infinite;
+}
+.report-body { font-size: 12.5px; line-height: 1.55; }
+.report-body h2 { font-size: 13px; margin: 10px 0 4px; }
+.report-body ul, .report-body ol { margin: 4px 0; padding-left: 18px; }
+@keyframes chat-caret-blink { 0% { opacity: 1; } 50% { opacity: 0; } }
+.chat-error { color: var(--error-fg, #c42b1c); }
+
 .chat-suggestions { display: flex; gap: 6px; padding: 0 14px 8px; flex-wrap: wrap; }
 .suggest {
   font-size: 12px;
@@ -1213,8 +1262,461 @@ html.accent-emerald { --wf-paletteColor1: #0f8a5a; --wf-paletteAccent1: #0a6c46;
 }
 .modal-card { box-shadow: var(--elev-3); }
 
-/* ===== Toast stack ===== */
-.toast-stack { position: fixed; z-index: 200; }
+/* ===== Toast stack v2 — flex column, close button, timeout bar ===== */
+.toast-stack {
+  position: fixed; z-index: 200;
+  bottom: 36px; right: 24px;
+  display: flex; flex-direction: column-reverse; gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  position: relative;
+  bottom: auto; right: auto;
+  pointer-events: auto;
+  min-width: 260px; max-width: 380px;
+  padding: 10px 12px 12px 14px;
+  overflow: hidden;
+}
+.toast.exiting { animation: toast-out 160ms ease-in forwards; }
+@keyframes toast-out { to { transform: translateY(8px); opacity: 0; } }
+.toast .toast-body { flex: 1; min-width: 0; }
+.toast .toast-close {
+  flex-shrink: 0;
+  align-self: flex-start;
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  background: transparent; border: 0; border-radius: 4px;
+  color: rgba(255,255,255,0.75);
+  cursor: pointer;
+  font-size: 11px;
+}
+.toast .toast-close:hover { background: rgba(255,255,255,0.16); color: white; }
+.toast .toast-timer {
+  position: absolute; left: 0; bottom: 0;
+  height: 3px;
+  background: rgba(255,255,255,0.45);
+  animation: toast-timer linear forwards;
+}
+.toast:hover .toast-timer { animation-play-state: paused; }
+@keyframes toast-timer { from { width: 100%; } to { width: 0; } }
 .toast.toast-error   { background: rgba(179,22,58,0.96); }
 .toast.toast-warning { background: rgba(138,90,0,0.96); }
 .toast.toast-success { background: rgba(14,107,63,0.96); }
+
+/* ===== Focus visibility ===== */
+button:focus-visible,
+[role="button"]:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+.nav-item:focus-visible,
+.cb-btn:focus-visible,
+.diag-item:focus-visible {
+  outline: none;
+  box-shadow: var(--wf-shadow-focus-ring);
+}
+
+/* ===== Reduced motion ===== */
+@media (prefers-reduced-motion: reduce) {
+  .scan-hero::after,
+  .scan-hero .ring::before,
+  .status-dot.pending,
+  .scan-hero .task-line::before { animation: none !important; }
+  .toast, .toast.exiting, .modal-overlay, .modal-card, .palette-overlay { animation-duration: 1ms !important; }
+  .stat-card, .stat-card:hover { transform: none; }
+  * { transition-duration: 1ms !important; }
+}
+
+/* ===== Kbd chips ===== */
+.kbd {
+  font-family: var(--wf-font-mono);
+  font-size: 10px;
+  padding: 1px 5px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 3px;
+  background: rgba(255,255,255,0.5);
+  color: var(--wf-text-muted);
+  white-space: nowrap;
+}
+html.is-dark .kbd { background: rgba(0,0,0,0.3); }
+
+/* ===== Skeleton loaders ===== */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--neutral-bg);
+  border-radius: 4px;
+}
+.skeleton::after {
+  content: "";
+  position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
+  transform: translateX(-100%);
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+html.is-dark .skeleton::after {
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.07), transparent);
+}
+@keyframes skeleton-shimmer { to { transform: translateX(100%); } }
+.skeleton.text { height: 13px; }
+.skeleton.block { border-radius: 8px; }
+
+/* ===== Tooltip ===== */
+.tooltip-wrap { position: relative; display: inline-flex; }
+.nav-list .tooltip-wrap { width: 100%; }
+.tooltip-wrap .tooltip {
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%) translateY(2px);
+  padding: 5px 9px;
+  border-radius: 4px;
+  background: var(--acrylic-strong);
+  backdrop-filter: blur(40px) saturate(180%);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--elev-2);
+  color: var(--wf-text);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  display: flex; align-items: center; gap: 7px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease, transform 120ms ease;
+  transition-delay: 0ms;
+  z-index: 400;
+}
+.tooltip-wrap:hover .tooltip,
+.tooltip-wrap:focus-within .tooltip {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+  transition-delay: 350ms;
+}
+.tooltip-wrap.tip-right .tooltip {
+  bottom: auto; left: calc(100% + 7px); top: 50%;
+  transform: translateY(-50%) translateX(-2px);
+}
+.tooltip-wrap.tip-right:hover .tooltip,
+.tooltip-wrap.tip-right:focus-within .tooltip {
+  transform: translateY(-50%) translateX(0);
+}
+
+/* ===== Empty state ===== */
+.empty-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center;
+  padding: 48px 24px;
+  color: var(--wf-text-muted);
+}
+.empty-state .es-icon {
+  font-size: 30px;
+  width: 64px; height: 64px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--neutral-bg);
+  color: var(--wf-text-muted);
+  margin-bottom: 14px;
+}
+.empty-state .es-title { font-size: 15px; font-weight: 600; color: var(--wf-text); margin: 0 0 4px; }
+.empty-state .es-sub { font-size: 13px; margin: 0; max-width: 420px; line-height: 1.5; }
+.empty-state .es-actions { display: flex; gap: 8px; margin-top: 16px; }
+
+/* ===== Modal v2 — animation, form rows, footer ===== */
+@keyframes modal-in {
+  from { transform: scale(0.96) translateY(6px); opacity: 0; }
+  to   { transform: scale(1) translateY(0); opacity: 1; }
+}
+@keyframes modal-out {
+  from { transform: scale(1) translateY(0); opacity: 1; }
+  to   { transform: scale(0.97) translateY(4px); opacity: 0; }
+}
+@keyframes overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes overlay-out { from { opacity: 1; } to { opacity: 0; } }
+.modal-overlay { animation: overlay-in 140ms ease-out; }
+.modal-overlay.closing { animation: overlay-out 140ms ease-in forwards; }
+.modal-card { animation: modal-in 160ms cubic-bezier(0.2, 0, 0, 1); }
+.modal-overlay.closing .modal-card { animation: modal-out 140ms ease-in forwards; }
+.modal-body { padding: 16px; max-height: 70vh; overflow: auto; }
+.modal-footer {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--hairline);
+}
+.form-row {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--hairline);
+  gap: 8px 16px;
+}
+.form-row:last-child { border-bottom: none; }
+.form-row .hint { font-size: 11px; color: var(--wf-text-muted); }
+/* Inputs size to the modal instead of a hardcoded 260px; when a row is too
+   narrow for label + field they wrap, with the field staying right-aligned */
+.form-row .field-input {
+  width: clamp(160px, 48%, 260px);
+  margin-left: auto;
+}
+.form-row .field-input[type="number"] { width: 90px; flex: none; }
+.settings-section-title {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--wf-text-muted);
+  padding: 14px 0 4px;
+  border-bottom: 1px solid var(--hairline);
+}
+.settings-section-title:first-child { padding-top: 0; }
+.field-input {
+  padding: 7px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--hairline-strong);
+  background: var(--wf-input-bg);
+  color: var(--wf-text);
+  font-size: 13px;
+  font-family: inherit;
+  transition: border-color 100ms ease, box-shadow 100ms ease;
+}
+.field-input:focus {
+  outline: none;
+  border-color: var(--wf-paletteColor1);
+  box-shadow: 0 0 0 3px rgba(15,108,189,0.18);
+}
+
+/* ===== Command palette ===== */
+.palette-overlay {
+  position: fixed; inset: 0; z-index: 350;
+  background: rgba(0,0,0,0.35);
+  backdrop-filter: blur(2px);
+  display: flex; justify-content: center;
+  padding-top: 12vh;
+  animation: overlay-in 120ms ease-out;
+}
+.palette {
+  width: min(560px, 92vw);
+  max-height: 60vh;
+  align-self: flex-start;
+  display: flex; flex-direction: column;
+  background: var(--acrylic-strong);
+  backdrop-filter: blur(60px) saturate(180%);
+  -webkit-backdrop-filter: blur(60px) saturate(180%);
+  border: 1px solid var(--hairline-strong);
+  border-radius: 10px;
+  box-shadow: var(--elev-3);
+  overflow: hidden;
+  animation: modal-in 140ms cubic-bezier(0.2, 0, 0, 1);
+}
+.palette-input {
+  display: flex; align-items: center; gap: 10px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--hairline);
+}
+.palette-input i { color: var(--wf-text-muted); font-size: 14px; }
+.palette-input input {
+  flex: 1;
+  border: 0; outline: none;
+  background: transparent;
+  color: var(--wf-text);
+  font-size: 15px;
+  font-family: inherit;
+}
+.palette-input input::placeholder { color: var(--wf-text-muted); }
+.palette-list { flex: 1; overflow: auto; padding: 6px; }
+.palette-section {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+  font-weight: 700; color: var(--wf-text-muted);
+  padding: 10px 12px 4px;
+}
+.palette-item {
+  display: flex; align-items: center; gap: 11px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0; border-radius: 6px;
+  background: transparent;
+  color: var(--wf-text);
+  font-family: inherit; font-size: 13.5px;
+  cursor: pointer;
+  text-align: left;
+}
+.palette-item .pi-icon {
+  width: 18px; text-align: center;
+  color: var(--wf-text-muted);
+  font-size: 13px;
+}
+.palette-item .pi-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-item .pi-hint { margin-left: auto; display: flex; gap: 3px; }
+.palette-item.active { background: rgba(15,108,189,0.12); }
+html.is-dark .palette-item.active { background: rgba(15,108,189,0.26); }
+.palette-item.active .pi-icon { color: var(--wf-paletteColor1); }
+.palette-item:disabled { opacity: 0.45; cursor: not-allowed; }
+.palette-match { color: var(--wf-paletteColor1); font-weight: 700; }
+.palette-empty { padding: 28px 16px; text-align: center; color: var(--wf-text-muted); font-size: 13px; }
+.palette-foot {
+  display: flex; align-items: center; gap: 14px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--hairline);
+  font-size: 11px;
+  color: var(--wf-text-muted);
+}
+.palette-foot span { display: inline-flex; align-items: center; gap: 5px; }
+
+/* ===== Disabled affordance ===== */
+.cb-btn:disabled, .btn:disabled, .nav-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  color: var(--wf-text-muted);
+}
+.nav-item:disabled:hover, .btn:disabled:hover { background: transparent; }
+
+/* ===== Sortable table headers ===== */
+.proc-table thead th .th-sort {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: transparent; border: 0; padding: 0;
+  font: inherit; color: inherit;
+  text-transform: inherit; letter-spacing: inherit;
+  cursor: pointer;
+}
+.proc-table thead th .th-sort:hover { color: var(--wf-paletteColor1); }
+
+/* ===== Chat sender labels ===== */
+.chat-msg .msg-col { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.chat-msg .msg-sender { font-size: 10.5px; font-weight: 600; color: var(--wf-text-muted); padding: 0 2px; }
+.chat-msg.user .msg-sender { text-align: right; }
+.chat-msg .bubble h4 { margin: 8px 0 4px; font-size: 13px; }
+.chat-msg .bubble ul, .chat-msg .bubble ol { margin: 4px 0; padding-left: 20px; }
+.chat-msg .bubble li { margin: 2px 0; }
+.chat-msg .bubble code {
+  font-family: var(--wf-font-mono);
+  font-size: 0.92em;
+  background: rgba(15,108,189,0.10);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.chat-msg.user .bubble code { background: rgba(255,255,255,0.18); }
+
+/* ===== Scan category progress chips ===== */
+.scan-cats {
+  display: flex; flex-wrap: wrap; gap: 6px; justify-content: center;
+  max-width: 560px;
+  margin-bottom: 14px;
+}
+.scan-cats .tag { font-weight: 500; }
+.scan-cats .tag.done { background: var(--ok-bg); color: var(--ok-fg); border-color: var(--ok-border); }
+
+/* ============================================================================
+   Fluid layout — utilities, screen grids, and container-query breakpoints.
+   All thresholds resolve against the CONTENT AREA width (container "content",
+   declared on .content-area), not the viewport: the nav rail (248px/56px)
+   changes available space independent of window size.
+   ========================================================================== */
+
+/* Screen padding utilities (replace hardcoded inline `padding: 0 24px …`) */
+.screen-pad { padding: 0 var(--gutter) var(--gutter); }
+.screen-toolbar { padding: 0 var(--gutter) 12px; }
+.screen-strip { padding: 0 var(--gutter); margin-bottom: 12px; }
+
+/* Fluid filter/search inputs (replace inline width: 220-240px) */
+.filter-input { width: clamp(140px, 28cqi, 240px); }
+
+/* Secondary query container for blocks whose width depends on their pane,
+   not the content area (History's Scan Sessions list) */
+.cq-block { container-type: inline-size; container-name: block; }
+
+/* Long-content overflow: prose containers wrap anywhere; .code-block keeps
+   white-space: pre + its own scrollbars (deliberately NOT in this list) */
+.bubble,
+.report-body,
+.ai-panel .ai-body,
+.issue-card .desc,
+.issue-card .reco,
+.kv-grid .v,
+.tool-chips-label {
+  overflow-wrap: anywhere;
+}
+/* markdownLite emits bare <pre> inside reports — wrap instead of overflowing */
+.report-body pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: rgba(0, 0, 0, 0.06);
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-family: var(--wf-font-mono, monospace);
+  font-size: 11.5px;
+}
+
+/* --- History screen: two panes that stack when the content area is narrow */
+.history-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+/* Previous/Current diff panes: auto-fit stacks them intrinsically when the
+   parent pane is narrow — no breakpoint needed */
+.diff-cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 8px;
+}
+.history-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --- AI screen: chat + sidebar, stacking with chat first */
+.ai-grid { display: flex; gap: 14px; min-height: 0; }
+.ai-chat-col { flex: 2 1 420px; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.ai-side-col { flex: 1 1 260px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+/* --- Processes table: fixed layout so long paths truncate instead of
+   forcing horizontal overflow (an overflow-x wrapper would break the
+   position:sticky header, which sticks to .scrollable) */
+.proc-table { table-layout: fixed; }
+.proc-table th:nth-child(2) { width: 70px; }   /* PID */
+.proc-table th:nth-child(3) { width: 140px; }  /* CPU + bar */
+.proc-table th:nth-child(4) { width: 150px; }  /* Memory */
+.proc-table th:nth-child(5) { width: 84px; }   /* Threads */
+.proc-table th:nth-child(6) { width: 110px; }  /* User */
+.proc-table .pname > div { min-width: 0; }
+.proc-table .pname > div > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proc-table td:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --- Container-query breakpoints (content-area width) --- */
+
+/* AI screen stacks: chat above the Models/Report/Privacy column */
+@container content (max-width: 860px) {
+  .ai-grid { flex-direction: column; }
+  .ai-chat-col { flex: 0 0 auto; }
+  .ai-chat-col .chat-shell { height: min(56vh, 460px); }
+}
+
+/* History panes stack: sessions list above the diff panel */
+@container content (max-width: 760px) {
+  .history-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Diagnostics split-pane stacks: list above detail */
+@container content (max-width: 680px) {
+  .split-pane {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(150px, 36%) minmax(0, 1fr);
+  }
+}
+
+/* Processes: drop the lowest-value columns when space runs out.
+   nth-child indices are coupled to the column order in ProcessesScreen.tsx. */
+@container content (max-width: 640px) {
+  .proc-table th:nth-child(5), .proc-table td:nth-child(5),
+  .proc-table th:nth-child(6), .proc-table td:nth-child(6) { display: none; }
+}
+
+/* Diagnostic key/value pairs stack at very narrow detail panes */
+@container content (max-width: 480px) {
+  .kv-grid { grid-template-columns: minmax(0, 1fr); }
+  .kv-grid .k { border-bottom: 0; padding-bottom: 0; }
+}
+
+/* History rows inside a narrow sessions pane (container "block" =
+   .cq-block on the Scan Sessions wf-block in HistoryScreen.tsx): tighter
+   columns, hide the Time column (6th child in header AND data rows). */
+@container block (max-width: 560px) {
+  .history-row { grid-template-columns: 16px minmax(80px, 110px) minmax(0, 1fr) 48px 48px; }
+  .history-row > :nth-child(6) { display: none; }
+}

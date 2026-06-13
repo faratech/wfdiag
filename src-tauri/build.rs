@@ -8,9 +8,13 @@ fn main() {
     // - Microsoft.Windows.AI.Text.LanguageModelResponse class
     // - etc.
     //
-    // These APIs require:
-    // - AI Dev Gallery installed (provides Windows App SDK AI runtime)
-    // - App packaged as MSIX with systemAIModels capability
-
-    tauri_build::build()
+    // These APIs require package identity + the systemAIModels capability:
+    // either full MSIX packaging, or a sparse identity package registered with
+    // Add-AppxPackage -ExternalLocation (build-cross.py build-sparse). The
+    // custom application manifest below embeds the <msix> element that ties a
+    // directly-launched loose exe to that sparse identity.
+    let attributes = tauri_build::Attributes::new().windows_attributes(
+        tauri_build::WindowsAttributes::new().app_manifest(include_str!("windows-app.manifest")),
+    );
+    tauri_build::try_build(attributes).expect("failed to run tauri-build");
 }

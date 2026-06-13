@@ -16,7 +16,7 @@ export interface LogEntry {
   level: LogLevel
   context: string
   message: string
-  data?: any
+  data?: unknown
 }
 
 class Logger {
@@ -42,7 +42,7 @@ class Logger {
     return this.currentLevel
   }
 
-  private log(level: LogLevel, context: string, message: string, data?: any) {
+  private log(level: LogLevel, context: string, message: string, data?: unknown) {
     if (level < this.currentLevel) {
       return
     }
@@ -67,38 +67,38 @@ class Logger {
 
       switch (level) {
         case LogLevel.DEBUG:
-          // eslint-disable-next-line no-console
+           
           console.debug(logMessage, data || '')
           break
         case LogLevel.INFO:
-          // eslint-disable-next-line no-console
+           
           console.info(logMessage, data || '')
           break
         case LogLevel.WARN:
-          // eslint-disable-next-line no-console
+           
           console.warn(logMessage, data || '')
           break
         case LogLevel.ERROR:
-          // eslint-disable-next-line no-console
+           
           console.error(logMessage, data || '')
           break
       }
     }
   }
 
-  debug(context: string, message: string, data?: any) {
+  debug(context: string, message: string, data?: unknown) {
     this.log(LogLevel.DEBUG, context, message, data)
   }
 
-  info(context: string, message: string, data?: any) {
+  info(context: string, message: string, data?: unknown) {
     this.log(LogLevel.INFO, context, message, data)
   }
 
-  warn(context: string, message: string, data?: any) {
+  warn(context: string, message: string, data?: unknown) {
     this.log(LogLevel.WARN, context, message, data)
   }
 
-  error(context: string, message: string, data?: any) {
+  error(context: string, message: string, data?: unknown) {
     this.log(LogLevel.ERROR, context, message, data)
   }
 
@@ -123,10 +123,10 @@ const logger = Logger.getInstance()
 
 export const setLogLevel = (level: LogLevel) => logger.setLevel(level)
 export const getLogLevel = () => logger.getLevel()
-export const debug = (context: string, message: string, data?: any) => logger.debug(context, message, data)
-export const info = (context: string, message: string, data?: any) => logger.info(context, message, data)
-export const warn = (context: string, message: string, data?: any) => logger.warn(context, message, data)
-export const error = (context: string, message: string, data?: any) => logger.error(context, message, data)
+export const debug = (context: string, message: string, data?: unknown) => logger.debug(context, message, data)
+export const info = (context: string, message: string, data?: unknown) => logger.info(context, message, data)
+export const warn = (context: string, message: string, data?: unknown) => logger.warn(context, message, data)
+export const error = (context: string, message: string, data?: unknown) => logger.error(context, message, data)
 export const getLogs = (level?: LogLevel) => logger.getLogs(level)
 export const clearLogs = () => logger.clearLogs()
 export const exportLogs = () => logger.exportLogs()

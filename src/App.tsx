@@ -1,12 +1,18 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { AppProvider, useAppContext } from './contexts/AppContext'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
 import { AIProvider } from './contexts/AIContext'
 import { ToastProvider } from './contexts/ToastContext'
 import { useDiagnostics } from './hooks/useDiagnostics'
 import { useScanner } from './hooks/useScanner'
+import { useGlobalShortcuts } from './hooks/useGlobalShortcuts'
+import { useMediaQuery } from './hooks/useMediaQuery'
+import { useUpdateCheck } from './hooks/useUpdateCheck'
 import type { TabValue } from './components'
-import { SettingsDialog, AboutDialog } from './components'
+import { SettingsDialog, AboutDialog, Tooltip, Kbd } from './components'
+import { CommandPalette } from './components/CommandPalette'
+import { ShortcutHelp } from './components/ShortcutHelp'
+import { Titlebar } from './components/Titlebar'
 import { NAV_TAB_ICON } from './ui/diagnostic-icons'
 import { DiagnosticsScreen } from './screens/DiagnosticsScreen'
 import { MonitorScreen } from './screens/MonitorScreen'
@@ -35,7 +41,7 @@ const PAGE_META: Record<TabValue, { title: string; sub: string }> = {
 
 const AppContent: React.FC = () => {
   const {
-    selectedTab, setSelectedTab, systemInfo, results, isRunning, currentProgress, currentTaskName,
+    selectedTab, setSelectedTab, systemInfo, results, sessionId, isRunning, currentProgress, currentTaskName,
     scanStartTime, scanEndTime, issues, navRailCollapsed, setNavRailCollapsed,
     showSettings, setShowSettings, showAbout, setShowAbout, settings, saveSettings,
   } = useAppContext()
@@ -43,15 +49,45 @@ const AppContent: React.FC = () => {
   const { detectIssues, copyToClipboard, exportResults, shareToWindowsForum, emailReport, generateSupportPackage } = useDiagnostics()
   const { runQuickScan, runFullScan, stopScan } = useScanner()
 
-  // Detect issues whenever results change to a non-empty set
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [helpOpen, setHelpOpen] = useState(false)
+  const updateInfo = useUpdateCheck()
+  // Auto-collapse the rail on narrow windows. The user's stored preference
+  // (navRailCollapsed in localStorage) is never written by this path, so it
+  // restores by itself when the window widens again.
+  const forceCollapsed = useMediaQuery('(max-width: 1100px)')
+  const railCollapsed = navRailCollapsed || forceCollapsed
+  useGlobalShortcuts({
+    onTogglePalette: () => setPaletteOpen(o => !o),
+    onShowHelp: () => setHelpOpen(true),
+  })
+
+  // Re-detect issues once per scan, when its results first arrive. Keying on
+  // the session id (not the result COUNT) is essential: the quick-scan task set
+  // is fixed, so every scan yields the same count — a count-based guard would
+  // refresh issues only on the first scan and then go stale on every re-scan.
   const resultCount = Object.keys(results).length
-  const lastDetect = useRef(0)
+  const lastDetect = useRef<string | null>(null)
   useEffect(() => {
-    if (resultCount > 0 && resultCount !== lastDetect.current) {
-      lastDetect.current = resultCount
+    if (resultCount > 0 && sessionId && sessionId !== lastDetect.current) {
+      lastDetect.current = sessionId
       detectIssues()
     }
-  }, [resultCount, detectIssues])
+  }, [resultCount, sessionId, detectIssues])
+
+  // "Quick Scan" from the tray menu (backend shows the window, then emits)
+  const runQuickScanRef = useRef(runQuickScan)
+  useEffect(() => {
+    runQuickScanRef.current = runQuickScan
+  }, [runQuickScan])
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    import('@tauri-apps/api/event')
+      .then(({ listen }) => listen('tray://quick-scan', () => runQuickScanRef.current()))
+      .then(fn => { unlisten = fn })
+      .catch(() => {}) // not running under Tauri (plain vite dev)
+    return () => unlisten?.()
+  }, [])
 
   const resultValues = Object.values(results)
   const passed = resultValues.filter(r => r.success).length
@@ -64,26 +100,38 @@ const AppContent: React.FC = () => {
 
   return (
     <div className="app-window">
-      <div className={`app-body ${navRailCollapsed ? 'rail-collapsed' : ''}`}>
+      <Titlebar />
+      <div className={`app-body ${railCollapsed ? 'rail-collapsed' : ''}`}>
         {/* Nav rail */}
-        <nav className="nav-rail">
+        <nav className="nav-rail" aria-label="Primary">
           <div className="rail-brand">
             <div className="rail-brand-mark"><img src="/wf-ds/icon-only.png" alt="" /></div>
             <div className="rail-brand-text">
               <div className="b1">WindowsForum</div>
-              <div className="b2">Diagnostics · 2.2.0</div>
+              <div className="b2">Diagnostics · 2.5.0</div>
             </div>
           </div>
 
           <div className="rail-section-title">Workspace</div>
           <div className="nav-list">
-            {TABS.map(t => (
-              <button key={t.id} className={`nav-item ${selectedTab === t.id ? 'active' : ''}`} onClick={() => setSelectedTab(t.id)} title={t.label}>
-                <i className={`fa-solid ${NAV_TAB_ICON[t.id]} item-icon`} />
-                <span className="item-label">{t.label}</span>
-                {t.id === 'issues' && issueCount > 0 && <span className="item-badge">{issueCount}</span>}
-              </button>
-            ))}
+            {TABS.map((t, i) => {
+              const btn = (
+                <button
+                  key={t.id}
+                  className={`nav-item ${selectedTab === t.id ? 'active' : ''}`}
+                  onClick={() => setSelectedTab(t.id)}
+                  aria-label={t.label}
+                  aria-current={selectedTab === t.id ? 'page' : undefined}
+                >
+                  <i className={`fa-solid ${NAV_TAB_ICON[t.id]} item-icon`} aria-hidden="true" />
+                  <span className="item-label">{t.label}</span>
+                  {t.id === 'issues' && issueCount > 0 && <span className="item-badge">{issueCount}</span>}
+                </button>
+              )
+              return railCollapsed
+                ? <Tooltip key={t.id} content={t.label} shortcut={`Ctrl+${i + 1}`} side="right">{btn}</Tooltip>
+                : btn
+            })}
           </div>
 
           <div className="rail-section-title">Tools</div>
@@ -110,44 +158,70 @@ const AppContent: React.FC = () => {
             </div>
             <button className="nav-item" onClick={() => setShowSettings(true)}><i className="fa-solid fa-gear item-icon" /><span className="item-label">Settings</span></button>
             <button className="nav-item" onClick={() => setShowAbout(true)}><i className="fa-solid fa-circle-info item-icon" /><span className="item-label">About</span></button>
-            <button className="nav-item" onClick={() => setNavRailCollapsed(!navRailCollapsed)}>
-              <i className={`fa-solid ${navRailCollapsed ? 'fa-angles-right' : 'fa-angles-left'} item-icon`} />
-              <span className="item-label">Collapse</span>
-            </button>
+            {/* Hidden while the narrow window forces a collapse — toggling a
+                preference with no visible effect would just confuse */}
+            {!forceCollapsed && (
+              <button className="nav-item" onClick={() => setNavRailCollapsed(!navRailCollapsed)}>
+                <i className={`fa-solid ${navRailCollapsed ? 'fa-angles-right' : 'fa-angles-left'} item-icon`} />
+                <span className="item-label">Collapse</span>
+              </button>
+            )}
           </div>
         </nav>
 
         {/* Content */}
         <main className="content-area">
-          <div className="command-bar">
-            <div className="cb-group">
-              <button className="cb-btn primary" onClick={() => runQuickScan()} disabled={isRunning}>
-                <i className="fa-solid fa-bolt" /> Quick Scan
-              </button>
-              <button className="cb-btn" onClick={() => runFullScan()} disabled={isRunning}>
-                <i className="fa-solid fa-list-check" /> Full Scan
-              </button>
+          <div className="command-bar" role="toolbar" aria-label="Actions">
+            <div className="cb-group" role="group" aria-label="Scan">
+              <Tooltip content="Run the essential checks" shortcut="Ctrl+Shift+Q">
+                <button className="cb-btn primary" onClick={() => runQuickScan()} disabled={isRunning}>
+                  <i className="fa-solid fa-bolt" aria-hidden="true" /> Quick Scan
+                </button>
+              </Tooltip>
+              <Tooltip content="Run every available diagnostic" shortcut="Ctrl+Shift+F">
+                <button className="cb-btn" onClick={() => runFullScan()} disabled={isRunning}>
+                  <i className="fa-solid fa-list-check" aria-hidden="true" /> Full Scan
+                </button>
+              </Tooltip>
               {isRunning && (
-                <button className="cb-btn danger" onClick={() => stopScan()}><i className="fa-solid fa-stop" /> Stop</button>
+                <button className="cb-btn danger" onClick={() => stopScan()}><i className="fa-solid fa-stop" aria-hidden="true" /> Stop</button>
               )}
             </div>
-            <div className="cb-divider" />
-            <div className="cb-group">
-              <button className="cb-btn" onClick={() => copyToClipboard()} disabled={!hasResults}><i className="fa-solid fa-copy" /> Copy</button>
-              <button className="cb-btn" onClick={() => exportResults()} disabled={!hasResults}><i className="fa-solid fa-file-export" /> Export</button>
-              <button className="cb-btn" onClick={() => shareToWindowsForum()} disabled={!hasResults}><i className="fa-solid fa-share-nodes" /> Share</button>
-              <button className="cb-btn" onClick={() => emailReport()} disabled={!hasResults}><i className="fa-solid fa-envelope" /> Email</button>
+            <div className="cb-divider" role="presentation" />
+            <div className="cb-group" role="group" aria-label="Report">
+              {([
+                ['Copy report to clipboard', 'fa-copy', 'Copy', copyToClipboard],
+                ['Export report to a file', 'fa-file-export', 'Export', exportResults],
+                ['Share results to WindowsForum', 'fa-share-nodes', 'Share', shareToWindowsForum],
+                ['Email the report', 'fa-envelope', 'Email', emailReport],
+              ] as const).map(([tip, icon, label, action]) => (
+                <Tooltip key={label} content={hasResults ? tip : 'Run a scan first'}>
+                  <button className="cb-btn" onClick={() => action()} disabled={!hasResults}>
+                    <i className={`fa-solid ${icon}`} aria-hidden="true" /> {label}
+                  </button>
+                </Tooltip>
+              ))}
             </div>
-            <div className="cb-divider" />
+            <div className="cb-divider" role="presentation" />
             <div className="cb-group">
-              <button className="cb-btn" onClick={() => setSelectedTab('history')}><i className="fa-solid fa-code-compare" /> Compare</button>
+              <Tooltip content="Compare scans over time">
+                <button className="cb-btn" onClick={() => setSelectedTab('history')}><i className="fa-solid fa-code-compare" aria-hidden="true" /> Compare</button>
+              </Tooltip>
             </div>
             <div className="cb-spacer" />
             <div className="cb-group">
-              <button className="cb-btn" onClick={() => setThemeMode(isDark ? 'light' : 'dark')}>
-                <i className={`fa-solid ${isDark ? 'fa-sun' : 'fa-moon'}`} />
-                {isDark ? 'Light' : 'Dark'}
-              </button>
+              <Tooltip content="Search commands and diagnostics" shortcut="Ctrl+K">
+                <button className="cb-btn" onClick={() => setPaletteOpen(true)} aria-label="Open command palette">
+                  <i className="fa-solid fa-magnifying-glass" aria-hidden="true" /> Search
+                  <span className="meta"><Kbd keys="Ctrl+K" /></span>
+                </button>
+              </Tooltip>
+              <Tooltip content={`Switch to ${isDark ? 'light' : 'dark'} theme`}>
+                <button className="cb-btn" onClick={() => setThemeMode(isDark ? 'light' : 'dark')} aria-label={`Switch to ${isDark ? 'light' : 'dark'} theme`}>
+                  <i className={`fa-solid ${isDark ? 'fa-sun' : 'fa-moon'}`} aria-hidden="true" />
+                  {isDark ? 'Light' : 'Dark'}
+                </button>
+              </Tooltip>
             </div>
           </div>
 
@@ -166,19 +240,21 @@ const AppContent: React.FC = () => {
             </div>
           </div>
 
+          <div aria-busy={isRunning} style={{ display: 'contents' }}>
           {selectedTab === 'diagnostics' && <DiagnosticsScreen />}
           {selectedTab === 'monitoring' && <MonitorScreen />}
           {selectedTab === 'processes' && <ProcessesScreen />}
           {selectedTab === 'ai' && <AIScreen />}
           {selectedTab === 'issues' && <IssuesScreen />}
           {selectedTab === 'history' && <HistoryScreen />}
+          </div>
         </main>
 
         {/* Status bar */}
-        <div className={`status-bar ${isRunning ? 'scanning' : ''}`}>
+        <div className={`status-bar ${isRunning ? 'scanning' : ''}`} role="status">
           <div className="sb-segments">
             {isRunning ? (
-              <div className="sb-seg"><i className="fa-solid fa-circle-notch fa-spin" /> Running: {currentTaskName || '…'}</div>
+              <div className="sb-seg"><i className="fa-solid fa-circle-notch fa-spin" aria-hidden="true" /> Running: {currentTaskName || '…'}</div>
             ) : (
               <>
                 <div className="sb-seg ok"><i className="fa-solid fa-circle-check" /> <strong>{passed}</strong> passed</div>
@@ -197,9 +273,11 @@ const AppContent: React.FC = () => {
         open={showSettings}
         onOpenChange={setShowSettings}
         settings={settings}
-        onSave={async (s) => { await saveSettings(s); setShowSettings(false) }}
+        onSave={async (s) => { await saveSettings(s); setThemeMode((s.theme as 'dark' | 'light' | 'auto') || 'dark'); setShowSettings(false) }}
       />
-      <AboutDialog open={showAbout} onOpenChange={setShowAbout} />
+      <AboutDialog open={showAbout} onOpenChange={setShowAbout} updateInfo={updateInfo} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      <ShortcutHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   )
 }

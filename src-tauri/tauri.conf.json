@@ -22,7 +22,7 @@
                                }
                },
     "productName":  "WindowsForum Diagnostics",
-    "version": "2.2.0",
+    "version": "2.5.0",
     "identifier":  "com.windowsforum.diagnostics",
     "plugins":  {
 
@@ -40,11 +40,11 @@
                                     "title":  "WindowsForum Diagnostic Tool",
                                     "width":  1200,
                                     "height":  800,
-                                    "minWidth":  900,
-                                    "minHeight":  600,
+                                    "minWidth":  720,
+                                    "minHeight":  540,
                                     "resizable":  true,
                                     "fullscreen":  false,
-                                    "decorations":  true,
+                                    "decorations":  false,
                                     "transparent":  false,
                                     "skipTaskbar":  false,
                                     "alwaysOnTop":  false,

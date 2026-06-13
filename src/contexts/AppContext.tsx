@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { type TabValue, type SettingsData } from '../components'
+import * as logger from '../utils/logger'
 
 export interface SystemInfo {
   computer_name: string
@@ -23,6 +24,17 @@ export interface TaskResult {
   duration_ms: number
 }
 
+export interface RemediationSummary {
+  id: string
+  label: string
+  description: string
+  tier: 'open_tool' | 'auto_safe' | 'repair'
+  admin_required: boolean
+  requires_restart: boolean
+  long_running: boolean
+  maintenance: boolean
+}
+
 export interface Issue {
   id?: string
   title: string
@@ -31,17 +43,13 @@ export interface Issue {
   category: string
   recommendation?: string
   detected: boolean
+  /** Diagnostic tasks this issue was derived from (used by "Ask AI") */
+  source_tasks?: string[]
+  /** The vetted remediation for this issue, when one applies */
+  remediation?: RemediationSummary
 }
 
 // Global search result type
-export interface SearchResult {
-  type: 'diagnostic' | 'issue' | 'history' | 'setting'
-  title: string
-  description?: string
-  navigateTo?: TabValue
-  data?: any
-}
-
 interface AppContextType {
   // State
   selectedTab: TabValue
@@ -60,6 +68,10 @@ interface AppContextType {
   setCurrentProgress: (progress: number) => void
   currentTaskName: string
   setCurrentTaskName: (name: string) => void
+  // Per-task status of the current scan, keyed by task id (drives the
+  // per-category progress chips in the scanning hero)
+  taskStatuses: Record<string, 'running' | 'done'>
+  setTaskStatuses: React.Dispatch<React.SetStateAction<Record<string, 'running' | 'done'>>>
   isMonitoringActive: boolean
   setIsMonitoringActive: (active: boolean) => void
   showComparison: boolean
@@ -87,16 +99,16 @@ interface AppContextType {
   // NavRail state
   navRailCollapsed: boolean
   setNavRailCollapsed: (collapsed: boolean) => void
-  // Global search state
-  globalSearchQuery: string
-  setGlobalSearchQuery: (query: string) => void
-  globalSearchResults: SearchResult[]
-  performGlobalSearch: (query: string) => void
-  // Search highlight state
-  highlightedTaskId: string | null
-  setHighlightedTaskId: (id: string | null) => void
-  searchHighlight: string
-  setSearchHighlight: (text: string) => void
+  // The diagnostic selected in the detail pane; also the target of the command
+  // palette's "View Result" deep-link (set directly, so no transient flag)
+  selectedDiagnosticId: string | null
+  setSelectedDiagnosticId: (id: string | null) => void
+  // Deep-link from "Explain this scan" into the AI screen's report panel
+  pendingScanReport: boolean
+  setPendingScanReport: (pending: boolean) => void
+  // Deep-link from an issue's "Ask AI" into the agentic chat (pre-seeded prompt)
+  pendingChatPrompt: string | null
+  setPendingChatPrompt: (prompt: string | null) => void
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined)
@@ -122,6 +134,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const [isRunning, setIsRunning] = useState(false)
   const [currentProgress, setCurrentProgress] = useState(0)
   const [currentTaskName, setCurrentTaskName] = useState('')
+  const [taskStatuses, setTaskStatuses] = useState<Record<string, 'running' | 'done'>>({})
   const [isMonitoringActive, setIsMonitoringActive] = useState(false)
 
   // Wrapper to stop monitoring when leaving the monitoring tab
@@ -165,62 +178,18 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     localStorage.setItem('navRailCollapsed', JSON.stringify(collapsed))
   }
 
-  // Global search state
-  const [globalSearchQuery, setGlobalSearchQuery] = useState('')
-  const [globalSearchResults, setGlobalSearchResults] = useState<SearchResult[]>([])
+  // Task to open in the diagnostics detail pane on next render — set by the
+  // command palette to deep-link into a specific result, consumed (and
+  // cleared) by DiagnosticsScreen
+  const [selectedDiagnosticId, setSelectedDiagnosticId] = useState<string | null>(null)
 
-  // Search highlight state
-  const [highlightedTaskId, setHighlightedTaskId] = useState<string | null>(null)
-  const [searchHighlight, setSearchHighlight] = useState('')
+  // "Explain this scan" pressed — consumed (and cleared) by ScanReportPanel,
+  // which auto-generates the report when this is set
+  const [pendingScanReport, setPendingScanReport] = useState(false)
 
-  // Perform global search across diagnostics, issues, and history
-  const performGlobalSearch = (query: string) => {
-    if (!query.trim()) {
-      setGlobalSearchResults([])
-      return
-    }
-
-    const lowerQuery = query.toLowerCase()
-    const searchResults: SearchResult[] = []
-
-    // Search in diagnostic results
-    Object.entries(results).forEach(([taskId, result]) => {
-      const task = availableTasks.find(t => t.id === taskId)
-      if (task) {
-        const matchesName = task.name.toLowerCase().includes(lowerQuery)
-        const matchesDesc = task.description.toLowerCase().includes(lowerQuery)
-        const matchesOutput = typeof result.output === 'string' && result.output.toLowerCase().includes(lowerQuery)
-
-        if (matchesName || matchesDesc || matchesOutput) {
-          searchResults.push({
-            type: 'diagnostic',
-            title: task.name,
-            description: task.description,
-            navigateTo: 'diagnostics',
-            data: { taskId, result },
-          })
-        }
-      }
-    })
-
-    // Search in issues
-    issues.forEach((issue) => {
-      const matchesTitle = issue.title.toLowerCase().includes(lowerQuery)
-      const matchesDesc = issue.description.toLowerCase().includes(lowerQuery)
-
-      if (matchesTitle || matchesDesc) {
-        searchResults.push({
-          type: 'issue',
-          title: issue.title,
-          description: issue.description,
-          navigateTo: 'issues',
-          data: issue,
-        })
-      }
-    })
-
-    setGlobalSearchResults(searchResults.slice(0, 10)) // Limit to 10 results
-  }
+  // An issue's "Ask AI" pressed — consumed (and cleared) by AIScreen, which
+  // sends it into the agentic chat
+  const [pendingChatPrompt, setPendingChatPrompt] = useState<string | null>(null)
 
   // Load settings from backend on startup
   useEffect(() => {
@@ -228,9 +197,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       try {
         const savedSettings = await invoke<SettingsData>('load_settings')
         setSettings(prev => ({ ...prev, ...savedSettings }))
-        console.log('Settings loaded from backend:', savedSettings)
+        // Don't log the settings object itself — it can contain the API key
+        logger.debug('AppContext', 'Settings loaded from backend')
       } catch (error) {
-        console.error('Failed to load settings:', error)
+        logger.error('AppContext', 'Failed to load settings', String(error))
       } finally {
         setSettingsLoaded(true)
       }
@@ -247,25 +217,25 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       if (newSettings.openAiApiKey) {
         try {
           await invoke('store_api_key', { key: newSettings.openAiApiKey })
-          console.log('API key stored in keyring')
+          logger.debug('AppContext', 'API key stored in keyring')
         } catch (keyError) {
-          console.warn('Failed to store API key in keyring:', keyError)
+          logger.warn('AppContext', 'Failed to store API key in keyring', String(keyError))
           // Don't throw - settings are still saved, just keyring failed
         }
       } else if (settings.openAiApiKey && !newSettings.openAiApiKey) {
         // API key was cleared
         try {
           await invoke('clear_api_key')
-          console.log('API key cleared from keyring')
+          logger.debug('AppContext', 'API key cleared from keyring')
         } catch (keyError) {
-          console.warn('Failed to clear API key from keyring:', keyError)
+          logger.warn('AppContext', 'Failed to clear API key from keyring', String(keyError))
         }
       }
 
       setSettings(newSettings)
-      console.log('Settings saved to backend:', newSettings)
+      logger.debug('AppContext', 'Settings saved to backend')
     } catch (error) {
-      console.error('Failed to save settings:', error)
+      logger.error('AppContext', 'Failed to save settings', String(error))
       throw error
     }
   }
@@ -287,6 +257,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     setCurrentProgress,
     currentTaskName,
     setCurrentTaskName,
+    taskStatuses,
+    setTaskStatuses,
     isMonitoringActive,
     setIsMonitoringActive,
     showComparison,
@@ -313,14 +285,12 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     settingsLoaded,
     navRailCollapsed,
     setNavRailCollapsed,
-    globalSearchQuery,
-    setGlobalSearchQuery,
-    globalSearchResults,
-    performGlobalSearch,
-    highlightedTaskId,
-    setHighlightedTaskId,
-    searchHighlight,
-    setSearchHighlight,
+    selectedDiagnosticId,
+    setSelectedDiagnosticId,
+    pendingScanReport,
+    setPendingScanReport,
+    pendingChatPrompt,
+    setPendingChatPrompt,
   }
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>
