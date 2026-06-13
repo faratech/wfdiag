@@ -1,6 +1,32 @@
 import { useCallback } from 'react'
 import { useAIContext, AIProvider } from '../contexts/AIContext'
 
+// Prompt templates are module constants (stable identity) so the analysis
+// callbacks below don't need them as dependencies.
+const MONITORING_PROMPT_TEMPLATE = `Analyze these Windows system monitoring stats. Provide a brief assessment (3-4 sentences) of:
+1. Overall system health
+2. Any concerns or bottlenecks
+3. Recommendations if any issues are detected
+
+System Stats:
+`
+
+const PROCESS_PROMPT_TEMPLATE = `Analyze these running Windows processes. Provide a brief assessment (3-4 sentences) of:
+1. High resource consumers that may need attention
+2. Any suspicious or unnecessary processes
+3. Optimization suggestions
+
+Top Processes:
+`
+
+const COMPARISON_PROMPT_TEMPLATE = `Compare these two Windows diagnostic scans. Provide a brief assessment (3-4 sentences) of:
+1. What has improved since the previous scan
+2. What has degraded or needs attention
+3. Overall health trend
+
+Scan Comparison:
+`
+
 /**
  * Convenience hook for AI operations
  * Provides simplified access to AI context with additional helpers
@@ -27,38 +53,10 @@ export const useAI = () => {
     [context]
   )
 
-  /**
-   * Get cached interpretation for a diagnostic (doesn't trigger fetch)
-   */
-  const getCachedDiagnosticInterpretation = useCallback(
-    (taskId: string): string | null => {
-      const cacheKey = `diagnostic:${taskId}`
-      return context.interpretations[cacheKey] ?? null
-    },
-    [context.interpretations]
-  )
-
-  /**
-   * Check if a diagnostic interpretation is currently loading
-   */
-  const isDiagnosticLoading = useCallback(
-    (taskId: string): boolean => {
-      const cacheKey = `diagnostic:${taskId}`
-      return context.isAnalyzing[cacheKey] ?? false
-    },
-    [context.isAnalyzing]
-  )
-
-  /**
-   * Get error for a diagnostic interpretation
-   */
-  const getDiagnosticError = useCallback(
-    (taskId: string): string | null => {
-      const cacheKey = `diagnostic:${taskId}`
-      return context.errors[cacheKey] ?? null
-    },
-    [context.errors]
-  )
+  // NOTE: cached-lookup helpers keyed by bare `diagnostic:${taskId}` /
+  // `section:${name}` were removed — AIContext keys include a content hash
+  // (see diagnosticCacheKey/sectionCacheKey exports there), so the bare keys
+  // never matched anything. Use those exported helpers for lookups.
 
   /**
    * Request AI interpretation for a section
@@ -79,28 +77,6 @@ export const useAI = () => {
   )
 
   /**
-   * Get cached section interpretation
-   */
-  const getCachedSectionInterpretation = useCallback(
-    (sectionName: string): string | null => {
-      const cacheKey = `section:${sectionName}`
-      return context.interpretations[cacheKey] ?? null
-    },
-    [context.interpretations]
-  )
-
-  /**
-   * Check if a section interpretation is currently loading
-   */
-  const isSectionLoading = useCallback(
-    (sectionName: string): boolean => {
-      const cacheKey = `section:${sectionName}`
-      return context.isAnalyzing[cacheKey] ?? false
-    },
-    [context.isAnalyzing]
-  )
-
-  /**
    * Get provider display name
    */
   const getProviderDisplayName = useCallback((provider: AIProvider): string => {
@@ -118,13 +94,6 @@ export const useAI = () => {
   // Monitoring Analysis
   // ============================================================================
   const MONITORING_CACHE_KEY = '__monitoring_analysis__'
-  const MONITORING_PROMPT_TEMPLATE = `Analyze these Windows system monitoring stats. Provide a brief assessment (3-4 sentences) of:
-1. Overall system health
-2. Any concerns or bottlenecks
-3. Recommendations if any issues are detected
-
-System Stats:
-`
 
   const requestMonitoringAnalysis = useCallback(
     async (statsJson: string, forceRefresh = false): Promise<string | null> => {
@@ -157,13 +126,6 @@ System Stats:
   // Process Analysis
   // ============================================================================
   const PROCESS_CACHE_KEY = '__process_analysis__'
-  const PROCESS_PROMPT_TEMPLATE = `Analyze these running Windows processes. Provide a brief assessment (3-4 sentences) of:
-1. High resource consumers that may need attention
-2. Any suspicious or unnecessary processes
-3. Optimization suggestions
-
-Top Processes:
-`
 
   const requestProcessAnalysis = useCallback(
     async (processesJson: string, forceRefresh = false): Promise<string | null> => {
@@ -196,13 +158,6 @@ Top Processes:
   // Comparison Analysis
   // ============================================================================
   const COMPARISON_CACHE_KEY = '__comparison_analysis__'
-  const COMPARISON_PROMPT_TEMPLATE = `Compare these two Windows diagnostic scans. Provide a brief assessment (3-4 sentences) of:
-1. What has improved since the previous scan
-2. What has degraded or needs attention
-3. Overall health trend
-
-Scan Comparison:
-`
 
   const requestComparisonAnalysis = useCallback(
     async (comparisonJson: string, forceRefresh = false): Promise<string | null> => {
@@ -251,14 +206,9 @@ Scan Comparison:
 
     // Diagnostic operations
     requestDiagnosticInterpretation,
-    getCachedDiagnosticInterpretation,
-    isDiagnosticLoading,
-    getDiagnosticError,
 
     // Section operations
     requestSectionInterpretation,
-    getCachedSectionInterpretation,
-    isSectionLoading,
 
     // Health operations
     explainHealth: context.explainHealth,

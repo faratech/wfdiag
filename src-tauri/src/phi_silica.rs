@@ -6,9 +6,14 @@
 //! Note: This requires:
 //! - A Copilot+ PC with NPU hardware (40+ TOPS)
 //! - Windows 11 24H2/25H2 or later
-//! - AI Dev Gallery installed (provides Windows App SDK AI runtime)
-//! - App must be packaged as MSIX with systemAIModels capability
-//! - Limited Access Feature (LAF) token from Microsoft
+//! - Registered package identity (the Microsoft Store build) with the
+//!   systemAIModels capability — proven non-negotiable: even direct DLL
+//!   activation returns 0x80070005 in an unpackaged process
+//! - Limited Access Feature (LAF) token from Microsoft (bound to the Store
+//!   package family name)
+//!
+//! Loose/portable builds cannot use Phi Silica; the AI service routes them
+//! to Foundry Local or OpenAI instead.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,10 +22,52 @@ use crate::error::DiagError;
 /// LAF constants for Phi Silica access
 #[cfg(windows)]
 const LAF_FEATURE_ID: &str = "com.microsoft.windows.ai.languagemodel";
+/// Built-in fallback token. A Microsoft-issued token is tied to a specific
+/// package family, so the real one is supplied at runtime via the
+/// `phiSilicaLafToken` setting or the `WFDIAG_LAF_TOKEN` env var.
 #[cfg(windows)]
 const LAF_TOKEN: &str = "edibyiYSeHx+qsGpzHNoCQ==";
+/// Fallback publisher id, used only when the running package's family name is
+/// unavailable. Normally derived at runtime from the package identity.
 #[cfg(windows)]
-const LAF_PUBLISHER_ID: &str = "t6j5qexy2jpp2"; // From package family name: 32827MikeFara.WindowsForumDiagnostics_t6j5qexy2jpp2
+const LAF_PUBLISHER_ID: &str = "t6j5qexy2jpp2";
+
+/// The LAF token to use: env var first (handy for testing an approved token
+/// without editing settings), then the `phiSilicaLafToken` setting, then the
+/// built-in fallback.
+#[cfg(windows)]
+fn configured_laf_token() -> String {
+    if let Ok(token) = std::env::var("WFDIAG_LAF_TOKEN")
+        && !token.trim().is_empty()
+    {
+        return token;
+    }
+    crate::commands::settings::get_settings_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|content| {
+            serde_json::from_str::<crate::commands::settings::AppSettings>(&content).ok()
+        })
+        .and_then(|settings| settings.phi_silica_laf_token)
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| LAF_TOKEN.to_string())
+}
+
+/// Publisher id hash from the running package's family name
+/// (`<name>_<hash>`). A Microsoft-issued LAF token validates against this, so
+/// it must match the actual identity rather than a hardcoded guess.
+#[cfg(windows)]
+fn current_publisher_id() -> String {
+    use windows::ApplicationModel::Package;
+    Package::Current()
+        .ok()
+        .and_then(|pkg| pkg.Id().ok())
+        .and_then(|id| id.FamilyName().ok())
+        .and_then(|family| family.to_string().rsplit('_').next().map(str::to_string))
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| LAF_PUBLISHER_ID.to_string())
+}
 
 /// Response from checking Phi Silica availability
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,34 +95,21 @@ pub struct PhiSilicaAnalysisResponse {
 /// Get Windows build number
 #[cfg(windows)]
 fn get_windows_build() -> Option<u32> {
-    use winreg::enums::HKEY_LOCAL_MACHINE;
     use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let key = hklm.open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion").ok()?;
+    let key = hklm
+        .open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion")
+        .ok()?;
     let build_str: String = key.get_value("CurrentBuildNumber").ok()?;
     build_str.parse().ok()
-}
-
-/// Check if AI Dev Gallery is installed
-#[allow(dead_code)]
-#[cfg(windows)]
-fn check_ai_dev_gallery_installed() -> bool {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    std::process::Command::new("powershell")
-        .args(["-Command", "(Get-AppxPackage -Name 'Microsoft.AIDevGallery').Name"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-        .unwrap_or(false)
 }
 
 /// Initialize WinRT runtime (required before using WinRT APIs)
 #[cfg(windows)]
 fn ensure_winrt_initialized() {
-    use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+    use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
     // RoInitialize is safe to call multiple times - it will return S_FALSE if already initialized
     // Use multi-threaded apartment for Windows App SDK AI APIs
     let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
@@ -83,7 +117,8 @@ fn ensure_winrt_initialized() {
 
 /// Track if bootstrapper has been initialized
 #[cfg(windows)]
-static BOOTSTRAPPER_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static BOOTSTRAPPER_INITIALIZED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Track if LAF has been unlocked
 #[cfg(windows)]
@@ -94,9 +129,7 @@ static LAF_UNLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 #[cfg(windows)]
 fn try_unlock_laf() -> (bool, String) {
     use std::sync::atomic::Ordering;
-    use windows::ApplicationModel::{
-        LimitedAccessFeatureStatus, LimitedAccessFeatures,
-    };
+    use windows::ApplicationModel::{LimitedAccessFeatureStatus, LimitedAccessFeatures};
     use windows_core::HSTRING;
 
     // Only try once
@@ -105,15 +138,18 @@ fn try_unlock_laf() -> (bool, String) {
     }
 
     let feature_id = HSTRING::from(LAF_FEATURE_ID);
-    let token = HSTRING::from(LAF_TOKEN);
+    let token = HSTRING::from(configured_laf_token());
     let attestation = HSTRING::from(format!(
         "{} has registered their use of {} with Microsoft and agrees to the terms of use.",
-        LAF_PUBLISHER_ID, LAF_FEATURE_ID
+        current_publisher_id(),
+        LAF_FEATURE_ID
     ));
 
     match LimitedAccessFeatures::TryUnlockFeature(&feature_id, &token, &attestation) {
         Ok(result) => {
-            let status = result.Status().unwrap_or(LimitedAccessFeatureStatus::Unknown);
+            let status = result
+                .Status()
+                .unwrap_or(LimitedAccessFeatureStatus::Unknown);
             let status_name = match status {
                 LimitedAccessFeatureStatus::Available => "Available",
                 LimitedAccessFeatureStatus::AvailableWithoutToken => "AvailableWithoutToken",
@@ -126,14 +162,23 @@ fn try_unlock_laf() -> (bool, String) {
                 || status == LimitedAccessFeatureStatus::AvailableWithoutToken
             {
                 LAF_UNLOCKED.store(true, Ordering::SeqCst);
-                (true, format!("LAF unlocked successfully (status: {})", status_name))
+                (
+                    true,
+                    format!("LAF unlocked successfully (status: {})", status_name),
+                )
             } else {
-                (false, format!("LAF unlock returned status: {}", status_name))
+                (
+                    false,
+                    format!("LAF unlock returned status: {}", status_name),
+                )
             }
         }
         Err(e) => {
             let code = e.code().0 as u32;
-            (false, format!("LAF unlock failed: 0x{:08X}: {}", code, e.message()))
+            (
+                false,
+                format!("LAF unlock failed: 0x{:08X}: {}", code, e.message()),
+            )
         }
     }
 }
@@ -143,9 +188,9 @@ fn try_unlock_laf() -> (bool, String) {
 #[cfg(windows)]
 fn init_windows_app_sdk() -> Result<(), String> {
     use std::sync::atomic::Ordering;
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::HMODULE;
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows::core::PCWSTR;
 
     // Only initialize once
     if BOOTSTRAPPER_INITIALIZED.load(Ordering::SeqCst) {
@@ -209,83 +254,228 @@ fn init_windows_app_sdk() -> Result<(), String> {
 /// Get the app's installation directory (where the exe and bundled DLLs are)
 #[cfg(windows)]
 fn get_app_directory() -> Option<std::path::PathBuf> {
-    std::env::current_exe().ok()?.parent().map(|p| p.to_path_buf())
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|p| p.to_path_buf())
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+const DLL_ARCH: &str = "x64";
+#[cfg(all(windows, target_arch = "aarch64"))]
+const DLL_ARCH: &str = "arm64";
+#[cfg(all(windows, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
+const DLL_ARCH: &str = "unknown";
+
+/// Install directories of the Windows App SDK framework packages this app
+/// depends on. With package identity (full MSIX or the sparse package), the
+/// framework's AI DLLs are already on disk here — so we never need to ship
+/// our own copies. Empty when the process has no identity.
+#[cfg(windows)]
+fn framework_package_dirs() -> Vec<std::path::PathBuf> {
+    use windows::ApplicationModel::Package;
+
+    let mut dirs = Vec::new();
+    let Ok(current) = Package::Current() else {
+        return dirs;
+    };
+    let Ok(deps) = current.Dependencies() else {
+        return dirs;
+    };
+    for dep in deps {
+        let is_runtime = dep
+            .Id()
+            .and_then(|id| id.Name())
+            .map(|name| name.to_string().starts_with("Microsoft.WindowsAppRuntime"))
+            .unwrap_or(false);
+        if is_runtime && let Ok(path) = dep.InstalledPath() {
+            dirs.push(std::path::PathBuf::from(path.to_string()));
+        }
+    }
+    dirs
+}
+
+/// Candidate directories for the Windows App SDK AI DLLs, in priority order.
+///
+/// The installed framework package comes FIRST: with package identity (the
+/// Store build), the package graph resolves the exact framework version the
+/// manifest declares, which is the supported configuration. Bundled copies
+/// next to the exe are the fallback for MSIX layouts that ship their own
+/// DLLs (the historically proven configuration) or machines where the
+/// framework package is missing.
+#[cfg(windows)]
+fn dll_search_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = framework_package_dirs();
+    if let Some(app_dir) = get_app_directory() {
+        dirs.push(app_dir.clone());
+        dirs.push(app_dir.join("ai-sdk-dlls").join(DLL_ARCH));
+        dirs.push(app_dir.join("ai-sdk").join(DLL_ARCH));
+    }
+    dirs
 }
 
 /// Cached state for DLL loading
 #[cfg(windows)]
-static AI_TEXT_DLL_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static AI_TEXT_DLL_LOADED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Store the loaded DLL module handle
 #[cfg(windows)]
 static mut AI_TEXT_DLL_MODULE: Option<windows::Win32::Foundation::HMODULE> = None;
 
-/// Try to load the AI DLL from our app's bundled directory
+/// Load a DLL by bare name first (resolves from the framework package via the
+/// package graph when the process has identity), then from each candidate
+/// directory. Returns the module handle on the first success.
+#[cfg(windows)]
+fn load_ai_dll(
+    dll_name: &str,
+    search_dirs: &[std::path::PathBuf],
+) -> Option<windows::Win32::Foundation::HMODULE> {
+    use windows::Win32::System::LibraryLoader::{
+        LOAD_WITH_ALTERED_SEARCH_PATH, LoadLibraryExW, LoadLibraryW,
+    };
+    use windows_core::{HSTRING, PCWSTR};
+
+    // Bare name FIRST — with package identity this resolves from the package
+    // graph (framework package or the MSIX's own root), the supported path.
+    let wide = HSTRING::from(dll_name);
+    if let Ok(module) = unsafe { LoadLibraryW(PCWSTR::from_raw(wide.as_ptr())) } {
+        log_phi_silica(&format!(
+            "Loaded {} via package graph (bare name)",
+            dll_name
+        ));
+        return Some(module);
+    }
+
+    // Explicit candidate paths as fallback (framework dirs, then bundled
+    // copies next to the exe). LOAD_WITH_ALTERED_SEARCH_PATH resolves the
+    // DLL's own imports from its directory.
+    for dir in search_dirs {
+        let dll_path = dir.join(dll_name);
+        if !dll_path.exists() {
+            continue;
+        }
+        let path_wide: Vec<u16> = dll_path
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        match unsafe {
+            LoadLibraryExW(
+                PCWSTR::from_raw(path_wide.as_ptr()),
+                None,
+                LOAD_WITH_ALTERED_SEARCH_PATH,
+            )
+        } {
+            Ok(module) => {
+                log_phi_silica(&format!("Loaded {} from {:?}", dll_name, dll_path));
+                return Some(module);
+            }
+            Err(e) => log_phi_silica(&format!(
+                "Failed to load {} from {:?}: {}",
+                dll_name,
+                dll_path,
+                e.message()
+            )),
+        }
+    }
+    None
+}
+
+/// Ensure the AI Text DLL is loaded — from the package graph / framework
+/// package or, failing that, a bundled copy next to the exe.
 #[cfg(windows)]
 fn try_direct_dll_activation() -> Result<(), String> {
     use std::sync::atomic::Ordering;
-    use windows::Win32::System::LibraryLoader::LoadLibraryW;
-    use windows_core::PCWSTR;
 
-    // Only load once
+    // Only load once (the flag is set only on success, so a DLL that becomes
+    // available later is still picked up on a subsequent attempt)
     if AI_TEXT_DLL_LOADED.load(Ordering::SeqCst) {
         return Ok(());
     }
 
-    log_phi_silica("Attempting to load bundled AI DLLs...");
+    let search_dirs = dll_search_dirs();
+    log_phi_silica(&format!("DLL search dirs: {:?}", search_dirs));
 
-    // Get app directory where bundled DLLs are
-    let app_dir = get_app_directory()
-        .ok_or_else(|| DiagError::ai_unavailable("phi_silica", "Failed to get app directory"))?;
+    // Load WindowsAppRuntime first so the Text DLL's static import resolves
+    let _ = load_ai_dll("Microsoft.WindowsAppRuntime.dll", &search_dirs);
 
-    log_phi_silica(&format!("App directory: {:?}", app_dir));
-
-    // Load the DLLs in dependency order
-    let dlls = [
-        "Microsoft.WindowsAppRuntime.dll",
-        "Microsoft.Windows.AI.Text.dll",
-    ];
-
-    for dll_name in &dlls {
-        let dll_path = app_dir.join(dll_name);
-        if !dll_path.exists() {
-            log_phi_silica(&format!("DLL not found: {:?}", dll_path));
-            continue;
+    match load_ai_dll("Microsoft.Windows.AI.Text.dll", &search_dirs) {
+        Some(module) => {
+            unsafe { AI_TEXT_DLL_MODULE = Some(module) };
+            AI_TEXT_DLL_LOADED.store(true, Ordering::SeqCst);
+            log_phi_silica("AI Text DLL loaded");
+            Ok(())
         }
+        None => Err(DiagError::ai_unavailable(
+            "phi_silica",
+            format!(
+                "Microsoft.Windows.AI.Text.dll could not be loaded from the framework package, \
+                 next to the exe, or ai-sdk-dlls\\{}",
+                DLL_ARCH
+            ),
+        )
+        .into()),
+    }
+}
 
-        log_phi_silica(&format!("Loading: {:?}", dll_path));
+/// Create LanguageModel via standard WinRT activation (RoGetActivationFactory).
+/// This is the supported path and works whenever the process has package
+/// identity — full MSIX install OR the self-registered sparse package — with
+/// the Windows App SDK framework resolvable.
+#[cfg(windows)]
+fn create_language_model_winrt() -> Result<crate::windows_ai_bindings::LanguageModel, String> {
+    use crate::windows_ai_bindings::LanguageModel;
 
-        let dll_path_wide: Vec<u16> = dll_path.to_string_lossy()
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+    log_phi_silica("Creating LanguageModel via standard WinRT activation...");
+    let op = LanguageModel::CreateAsync().map_err(|e| {
+        format!(
+            "CreateAsync (WinRT path) failed: 0x{:08X} {}",
+            e.code().0 as u32,
+            e.message()
+        )
+    })?;
+    wait_for_async_blocking(op)
+}
 
-        unsafe {
-            match LoadLibraryW(PCWSTR::from_raw(dll_path_wide.as_ptr())) {
-                Ok(module) => {
-                    log_phi_silica(&format!("Loaded: {}", dll_name));
-                    if dll_name == &"Microsoft.Windows.AI.Text.dll" {
-                        AI_TEXT_DLL_MODULE = Some(module);
-                    }
-                },
-                Err(e) => log_phi_silica(&format!("Failed to load {}: {}", dll_name, e.message())),
-            }
+/// Create a LanguageModel, preferring DllGetActivationFactory on the loaded
+/// AI Text DLL and falling back to standard WinRT activation.
+///
+/// The direct-DLL path goes FIRST because it is the configuration the MSIX
+/// build has always shipped and verified (RoGetActivationFactory has
+/// historically returned E_ACCESSDENIED for third-party apps even with
+/// identity). Both paths require registered package identity at the API
+/// level — an unpackaged process gets 0x80070005 from either, which is why
+/// loose builds don't route here at all.
+#[cfg(windows)]
+fn create_language_model() -> Result<crate::windows_ai_bindings::LanguageModel, String> {
+    match create_language_model_direct() {
+        Ok(model) => {
+            log_phi_silica("LanguageModel created via direct DLL activation");
+            Ok(model)
+        }
+        Err(direct_err) => {
+            log_phi_silica(&format!(
+                "Direct DLL activation failed ({}); falling back to WinRT activation",
+                direct_err
+            ));
+            create_language_model_winrt().map_err(|winrt_err| {
+                format!(
+                    "Phi Silica model creation failed. Direct DLL path: {} | WinRT path: {}",
+                    direct_err, winrt_err
+                )
+            })
         }
     }
-
-    AI_TEXT_DLL_LOADED.store(true, Ordering::SeqCst);
-    log_phi_silica("Bundled DLLs loaded");
-
-    Ok(())
 }
 
 /// Create LanguageModel using DllGetActivationFactory from bundled DLL
 /// This bypasses RoGetActivationFactory entirely, like CsWinRT does
 #[cfg(windows)]
 fn create_language_model_direct() -> Result<crate::windows_ai_bindings::LanguageModel, String> {
-    use windows::Win32::System::LibraryLoader::GetProcAddress;
-    use windows_core::{Interface, HSTRING};
     use crate::windows_ai_bindings::{ILanguageModelStatics, LanguageModel};
+    use windows::Win32::System::LibraryLoader::GetProcAddress;
+    use windows_core::{HSTRING, Interface};
 
     log_phi_silica("Creating LanguageModel via DllGetActivationFactory...");
 
@@ -298,19 +488,24 @@ fn create_language_model_direct() -> Result<crate::windows_ai_bindings::Language
     // DllGetActivationFactory signature:
     // HRESULT DllGetActivationFactory(HSTRING classId, IActivationFactory** factory)
     type DllGetActivationFactoryFn = unsafe extern "system" fn(
-        class_id: *mut std::ffi::c_void,      // HSTRING (passed by value, it's a pointer)
-        factory: *mut *mut std::ffi::c_void,  // IActivationFactory**
+        class_id: *mut std::ffi::c_void, // HSTRING (passed by value, it's a pointer)
+        factory: *mut *mut std::ffi::c_void, // IActivationFactory**
     ) -> windows_core::HRESULT;
 
     let proc = unsafe { GetProcAddress(module, windows::core::s!("DllGetActivationFactory")) };
     let get_factory: DllGetActivationFactoryFn = match proc {
         Some(p) => unsafe {
-            std::mem::transmute::<
-                unsafe extern "system" fn() -> isize,
-                DllGetActivationFactoryFn
-            >(p)
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, DllGetActivationFactoryFn>(
+                p,
+            )
         },
-        None => return Err(DiagError::ai_unavailable("phi_silica", "DllGetActivationFactory not found in DLL").into()),
+        None => {
+            return Err(DiagError::ai_unavailable(
+                "phi_silica",
+                "DllGetActivationFactory not found in DLL",
+            )
+            .into());
+        }
     };
 
     log_phi_silica("Got DllGetActivationFactory");
@@ -323,27 +518,41 @@ fn create_language_model_direct() -> Result<crate::windows_ai_bindings::Language
 
     let mut factory_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
 
-    log_phi_silica(&format!("Calling DllGetActivationFactory with class: {}", class_name));
+    log_phi_silica(&format!(
+        "Calling DllGetActivationFactory with class: {}",
+        class_name
+    ));
 
     let hr = unsafe { get_factory(hstring_raw, &mut factory_ptr) };
 
     if hr.is_err() {
-        log_phi_silica(&format!("DllGetActivationFactory failed: 0x{:08X}", hr.0 as u32));
-        return Err(DiagError::ai_unavailable("phi_silica", format!("DllGetActivationFactory failed: 0x{:08X}", hr.0 as u32)).into());
+        log_phi_silica(&format!(
+            "DllGetActivationFactory failed: 0x{:08X}",
+            hr.0 as u32
+        ));
+        return Err(DiagError::ai_unavailable(
+            "phi_silica",
+            format!("DllGetActivationFactory failed: 0x{:08X}", hr.0 as u32),
+        )
+        .into());
     }
 
     if factory_ptr.is_null() {
-        return Err(DiagError::ai_unavailable("phi_silica", "DllGetActivationFactory returned null factory").into());
+        return Err(DiagError::ai_unavailable(
+            "phi_silica",
+            "DllGetActivationFactory returned null factory",
+        )
+        .into());
     }
 
     log_phi_silica("Got activation factory, querying for ILanguageModelStatics...");
 
     // Cast to IActivationFactory and then query for ILanguageModelStatics
-    let factory: windows_core::IInspectable = unsafe {
-        windows_core::IInspectable::from_raw(factory_ptr)
-    };
+    let factory: windows_core::IInspectable =
+        unsafe { windows_core::IInspectable::from_raw(factory_ptr) };
 
-    let statics: ILanguageModelStatics = factory.cast()
+    let statics: ILanguageModelStatics = factory
+        .cast()
         .map_err(|e| format!("Failed to get ILanguageModelStatics: {}", e.message()))?;
 
     log_phi_silica("Got ILanguageModelStatics, calling CreateAsync...");
@@ -351,14 +560,16 @@ fn create_language_model_direct() -> Result<crate::windows_ai_bindings::Language
     // Call CreateAsync
     let async_op = unsafe {
         let mut result = std::mem::zeroed();
-        let vtable = statics.as_raw() as *const *const crate::windows_ai_bindings::ILanguageModelStatics_Vtbl;
-        let hr = ((**vtable).CreateAsync)(
-            statics.as_raw(),
-            &mut result,
-        );
+        let vtable = statics.as_raw()
+            as *const *const crate::windows_ai_bindings::ILanguageModelStatics_Vtbl;
+        let hr = ((**vtable).CreateAsync)(statics.as_raw(), &mut result);
         if hr.is_err() {
             log_phi_silica(&format!("CreateAsync call failed: 0x{:08X}", hr.0 as u32));
-            return Err(DiagError::ai_unavailable("phi_silica", format!("CreateAsync failed: 0x{:08X}", hr.0 as u32)).into());
+            return Err(DiagError::ai_unavailable(
+                "phi_silica",
+                format!("CreateAsync failed: 0x{:08X}", hr.0 as u32),
+            )
+            .into());
         }
         windows_future::IAsyncOperation::<LanguageModel>::from_raw(result)
     };
@@ -380,9 +591,25 @@ fn create_language_model_direct() -> Result<crate::windows_ai_bindings::Language
 // the failure path. They are kept SEPARATE so the frontend's PhiSilicaStatus.error_code
 // is populated correctly instead of error info being mislabeled into ready_state.
 fn check_phi_silica_safe() -> (bool, String, Option<String>, Option<String>) {
-    use crate::windows_ai_bindings::{LanguageModel, AIFeatureReadyState};
+    use crate::windows_ai_bindings::{AIFeatureReadyState, LanguageModel};
 
     log_phi_silica("=== check_phi_silica_safe called ===");
+
+    // Without registered package identity the Windows AI APIs deny access
+    // (0x80070005) on every activation path, so don't probe further — report
+    // the real reason and what to do about it.
+    if !crate::sparse_identity::has_package_identity() {
+        log_phi_silica("No package identity — Phi Silica unavailable");
+        return (
+            false,
+            "Phi Silica requires the Microsoft Store version of this app (Windows AI APIs \
+             need registered package identity). For local AI in this build, install \
+             Foundry Local (winget install Microsoft.FoundryLocal)."
+                .to_string(),
+            None,
+            Some("NO_PACKAGE_IDENTITY".to_string()),
+        );
+    }
 
     // Ensure WinRT is initialized before calling any WinRT APIs
     ensure_winrt_initialized();
@@ -395,7 +622,10 @@ fn check_phi_silica_safe() -> (bool, String, Option<String>, Option<String>) {
     // Try to pre-load the AI DLL directly to ensure it's available for activation
     match try_direct_dll_activation() {
         Ok(()) => log_phi_silica("Direct DLL activation succeeded"),
-        Err(e) => log_phi_silica(&format!("Direct DLL activation failed (continuing anyway): {}", e)),
+        Err(e) => log_phi_silica(&format!(
+            "Direct DLL activation failed (continuing anyway): {}",
+            e
+        )),
     }
 
     let build = get_windows_build().unwrap_or(0);
@@ -403,7 +633,10 @@ fn check_phi_silica_safe() -> (bool, String, Option<String>, Option<String>) {
 
     // Try to unlock Limited Access Feature BEFORE accessing Phi Silica APIs
     let (laf_success, laf_message) = try_unlock_laf();
-    log_phi_silica(&format!("LAF unlock: success={}, msg={}", laf_success, laf_message));
+    log_phi_silica(&format!(
+        "LAF unlock: success={}, msg={}",
+        laf_success, laf_message
+    ));
 
     // Store LAF status for error reporting
     let laf_status_str = if laf_success {
@@ -415,10 +648,15 @@ fn check_phi_silica_safe() -> (bool, String, Option<String>, Option<String>) {
     // Phi Silica requires Windows 11 24H2 (build 26100+) with a Copilot+ PC
     if build < 26100 {
         log_phi_silica("Build too old, returning");
-        return (false, format!(
-            "Phi Silica requires Windows 11 24H2 or later (build 26100+). Current build: {}",
-            build
-        ), None, None);
+        return (
+            false,
+            format!(
+                "Phi Silica requires Windows 11 24H2 or later (build 26100+). Current build: {}",
+                build
+            ),
+            None,
+            None,
+        );
     }
 
     // Use GetReadyState() like AI Dev Gallery does - this is the correct way to check
@@ -428,22 +666,54 @@ fn check_phi_silica_safe() -> (bool, String, Option<String>, Option<String>) {
             log_phi_silica(&format!("GetReadyState succeeded: state={:?}", state.0));
             // GetReadyState succeeded → these are READY STATES, not errors (error_code None).
             if state == AIFeatureReadyState::Ready {
-                (true, format!("Phi Silica is ready. Build: {}", build), Some("Ready".to_string()), None)
+                (
+                    true,
+                    format!("Phi Silica is ready. Build: {}", build),
+                    Some("Ready".to_string()),
+                    None,
+                )
             } else if state == AIFeatureReadyState::NotReady {
                 // Model needs to be downloaded/initialized
-                (true, format!("Phi Silica available but not ready. Build: {}", build), Some("NotReady".to_string()), None)
+                (
+                    true,
+                    format!("Phi Silica available but not ready. Build: {}", build),
+                    Some("NotReady".to_string()),
+                    None,
+                )
             } else if state == AIFeatureReadyState::DisabledByUser {
-                (false, format!("Phi Silica disabled by user. Build: {}", build), Some("DisabledByUser".to_string()), None)
+                (
+                    false,
+                    format!("Phi Silica disabled by user. Build: {}", build),
+                    Some("DisabledByUser".to_string()),
+                    None,
+                )
             } else if state == AIFeatureReadyState::NotSupportedOnCurrentSystem {
-                (false, format!("Phi Silica not supported on this system (requires Copilot+ PC with NPU). Build: {}", build), Some("NotSupportedOnCurrentSystem".to_string()), None)
+                (
+                    false,
+                    format!(
+                        "Phi Silica not supported on this system (requires Copilot+ PC with NPU). Build: {}",
+                        build
+                    ),
+                    Some("NotSupportedOnCurrentSystem".to_string()),
+                    None,
+                )
             } else {
-                (false, format!("Phi Silica unknown state: {:?}. Build: {}", state.0, build), Some(format!("Unknown({})", state.0)), None)
+                (
+                    false,
+                    format!("Phi Silica unknown state: {:?}. Build: {}", state.0, build),
+                    Some(format!("Unknown({})", state.0)),
+                    None,
+                )
             }
         }
         Err(e) => {
             // GetReadyState failed → carry the HRESULT/LAF in error_code, ready_state None.
             let code = e.code().0 as u32;
-            log_phi_silica(&format!("GetReadyState FAILED: 0x{:08X} {}", code, e.message()));
+            log_phi_silica(&format!(
+                "GetReadyState FAILED: 0x{:08X} {}",
+                code,
+                e.message()
+            ));
 
             // GetReadyState() resolves its factory through RoGetActivationFactory, which is
             // blocked for third-party apps and returns exactly these HRESULTs — yet real
@@ -452,19 +722,27 @@ fn check_phi_silica_safe() -> (bool, String, Option<String>, Option<String>) {
             // direct path so the availability gate matches what inference can actually do
             // (otherwise we false-negative on working Copilot+ PCs).
             if code == 0x80040154 || code == 0x80070005 {
-                log_phi_silica("GetReadyState blocked (Ro path); attempting direct DLL activation...");
+                log_phi_silica(
+                    "GetReadyState blocked (Ro path); attempting direct DLL activation...",
+                );
                 match create_language_model_direct() {
                     Ok(_) => {
                         log_phi_silica("Direct DLL activation succeeded — Phi Silica IS available");
                         return (
                             true,
-                            format!("Phi Silica is ready (via direct DLL activation). Build: {}", build),
+                            format!(
+                                "Phi Silica is ready (via direct DLL activation). Build: {}",
+                                build
+                            ),
                             Some("Ready".to_string()),
                             None,
                         );
                     }
                     Err(direct_err) => {
-                        log_phi_silica(&format!("Direct DLL activation also failed: {}", direct_err));
+                        log_phi_silica(&format!(
+                            "Direct DLL activation also failed: {}",
+                            direct_err
+                        ));
                     }
                 }
             }
@@ -472,22 +750,40 @@ fn check_phi_silica_safe() -> (bool, String, Option<String>, Option<String>) {
             if code == 0x80040154 {
                 // CLASS_E_CLASSNOTREGISTERED - API not available
                 // This happens when the Windows AI runtime is not present
-                (false, format!(
-                    "Phi Silica API not registered (0x{:08X}). Build: {}. \
+                (
+                    false,
+                    format!(
+                        "Phi Silica API not registered (0x{:08X}). Build: {}. \
                      Requires Copilot+ PC with Windows AI features enabled.",
-                    code, build
-                ), None, Some(format!("0x{:08X}", code)))
+                        code, build
+                    ),
+                    None,
+                    Some(format!("0x{:08X}", code)),
+                )
             } else if code == 0x80070005 {
                 // E_ACCESSDENIED - LAF unlock may have failed
-                (false, format!(
-                    "Phi Silica access denied (0x80070005). {}. Build: {}.",
-                    laf_status_str, build
-                ), None, Some(format!("LAF_REQUIRED ({})", laf_status_str)))
+                (
+                    false,
+                    format!(
+                        "Phi Silica access denied (0x80070005). {}. Build: {}.",
+                        laf_status_str, build
+                    ),
+                    None,
+                    Some(format!("LAF_REQUIRED ({})", laf_status_str)),
+                )
             } else {
-                (false, format!(
-                    "Failed to check Phi Silica: 0x{:08X}: {}. {}. Build: {}",
-                    code, e.message(), laf_status_str, build
-                ), None, Some(format!("0x{:08X}", code)))
+                (
+                    false,
+                    format!(
+                        "Failed to check Phi Silica: 0x{:08X}: {}. {}. Build: {}",
+                        code,
+                        e.message(),
+                        laf_status_str,
+                        build
+                    ),
+                    None,
+                    Some(format!("0x{:08X}", code)),
+                )
             }
         }
     }
@@ -525,33 +821,53 @@ fn wait_for_async_blocking<T>(op: windows_future::IAsyncOperation<T>) -> Result<
 where
     T: windows_core::RuntimeType,
 {
-    use std::time::Duration;
     use std::thread::sleep;
+    use std::time::Duration;
     use windows_core::Interface;
-    use windows_future::{IAsyncInfo, AsyncStatus};
+    use windows_future::{AsyncStatus, IAsyncInfo};
 
     // Poll the async operation
-    let info: IAsyncInfo = op.cast().map_err(|e| format!("Failed to cast to IAsyncInfo: {}", e.message()))?;
+    let info: IAsyncInfo = op
+        .cast()
+        .map_err(|e| format!("Failed to cast to IAsyncInfo: {}", e.message()))?;
 
     loop {
-        let status = info.Status().map_err(|e| format!("Failed to get status: {}", e.message()))?;
+        let status = info
+            .Status()
+            .map_err(|e| format!("Failed to get status: {}", e.message()))?;
         match status {
             AsyncStatus::Completed => {
-                return op.GetResults().map_err(|e| format!("Failed to get results: {}", e.message()));
+                return op
+                    .GetResults()
+                    .map_err(|e| format!("Failed to get results: {}", e.message()));
             }
             AsyncStatus::Error => {
-                let hr = info.ErrorCode().map_err(|e| format!("Failed to get error: {}", e.message()))?;
-                return Err(DiagError::ai_unavailable("phi_silica", format!("Async operation failed: 0x{:08X}", hr.0 as u32)).into());
+                let hr = info
+                    .ErrorCode()
+                    .map_err(|e| format!("Failed to get error: {}", e.message()))?;
+                return Err(DiagError::ai_unavailable(
+                    "phi_silica",
+                    format!("Async operation failed: 0x{:08X}", hr.0 as u32),
+                )
+                .into());
             }
             AsyncStatus::Canceled => {
-                return Err(DiagError::ai_unavailable("phi_silica", "Async operation was canceled").into());
+                return Err(DiagError::ai_unavailable(
+                    "phi_silica",
+                    "Async operation was canceled",
+                )
+                .into());
             }
             AsyncStatus::Started => {
                 // Still running, wait a bit
                 sleep(Duration::from_millis(10));
             }
             _ => {
-                return Err(DiagError::ai_unavailable("phi_silica", format!("Unknown async status: {:?}", status)).into());
+                return Err(DiagError::ai_unavailable(
+                    "phi_silica",
+                    format!("Unknown async status: {:?}", status),
+                )
+                .into());
             }
         }
     }
@@ -559,54 +875,92 @@ where
 
 /// Blocking wait for an async operation with progress - runs in spawn_blocking to be Send-safe
 #[cfg(windows)]
-fn wait_for_async_with_progress_blocking<T, P>(op: windows_future::IAsyncOperationWithProgress<T, P>) -> Result<T, String>
+pub(crate) fn wait_for_async_with_progress_blocking<T, P>(
+    op: windows_future::IAsyncOperationWithProgress<T, P>,
+) -> Result<T, String>
 where
     T: windows_core::RuntimeType,
     P: windows_core::RuntimeType,
 {
-    use std::time::Duration;
     use std::thread::sleep;
+    use std::time::Duration;
     use windows_core::Interface;
-    use windows_future::{IAsyncInfo, AsyncStatus};
+    use windows_future::{AsyncStatus, IAsyncInfo};
 
     // Poll the async operation
-    let info: IAsyncInfo = op.cast().map_err(|e| format!("Failed to cast to IAsyncInfo: {}", e.message()))?;
+    let info: IAsyncInfo = op
+        .cast()
+        .map_err(|e| format!("Failed to cast to IAsyncInfo: {}", e.message()))?;
 
     loop {
-        let status = info.Status().map_err(|e| format!("Failed to get status: {}", e.message()))?;
+        let status = info
+            .Status()
+            .map_err(|e| format!("Failed to get status: {}", e.message()))?;
         match status {
             AsyncStatus::Completed => {
-                return op.GetResults().map_err(|e| format!("Failed to get results: {}", e.message()));
+                return op
+                    .GetResults()
+                    .map_err(|e| format!("Failed to get results: {}", e.message()));
             }
             AsyncStatus::Error => {
-                let hr = info.ErrorCode().map_err(|e| format!("Failed to get error: {}", e.message()))?;
-                return Err(DiagError::ai_unavailable("phi_silica", format!("Async operation failed: 0x{:08X}", hr.0 as u32)).into());
+                let hr = info
+                    .ErrorCode()
+                    .map_err(|e| format!("Failed to get error: {}", e.message()))?;
+                return Err(DiagError::ai_unavailable(
+                    "phi_silica",
+                    format!("Async operation failed: 0x{:08X}", hr.0 as u32),
+                )
+                .into());
             }
             AsyncStatus::Canceled => {
-                return Err(DiagError::ai_unavailable("phi_silica", "Async operation was canceled").into());
+                return Err(DiagError::ai_unavailable(
+                    "phi_silica",
+                    "Async operation was canceled",
+                )
+                .into());
             }
             AsyncStatus::Started => {
                 // Still running, wait a bit
                 sleep(Duration::from_millis(10));
             }
             _ => {
-                return Err(DiagError::ai_unavailable("phi_silica", format!("Unknown async status: {:?}", status)).into());
+                return Err(DiagError::ai_unavailable(
+                    "phi_silica",
+                    format!("Unknown async status: {:?}", status),
+                )
+                .into());
             }
         }
     }
 }
 
-/// Log to file for debugging MSIX apps
+/// File logging for debugging MSIX apps, opt-in via `WFDIAG_AI_LOG=1` so
+/// production runs don't write to C:\temp on every AI call.
 #[cfg(windows)]
 fn log_phi_silica(msg: &str) {
     use std::fs::OpenOptions;
     use std::io::Write;
-    // Use C:\temp which should be accessible
+    use std::sync::OnceLock;
+
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let enabled = *ENABLED.get_or_init(|| {
+        std::env::var("WFDIAG_AI_LOG")
+            .map(|v| !v.trim().is_empty() && v != "0")
+            .unwrap_or(false)
+    });
+    if !enabled {
+        return;
+    }
+
     let log_path = std::path::Path::new("C:\\temp\\phi-silica-rust.log");
-    // Create dir if needed
     let _ = std::fs::create_dir_all("C:\\temp");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
-        let _ = writeln!(file, "[{}] {}", crate::timestamp::format_time(std::time::SystemTime::now()), msg);
+        let _ = writeln!(
+            file,
+            "[{}] {}",
+            crate::timestamp::format_time(std::time::SystemTime::now()),
+            msg
+        );
     }
 }
 
@@ -655,27 +1009,45 @@ pub async fn generate_response(prompt: &str) -> Result<String, String> {
         use crate::windows_ai_bindings::LanguageModelResponseStatus;
         use windows_core::HSTRING;
 
-        // Ensure WinRT is initialized and LAF is unlocked
+        // Identity is a hard requirement — fail fast with the real reason
+        // instead of a bare 0x80070005 from deep inside the runtime.
+        if !crate::sparse_identity::has_package_identity() {
+            return Err(DiagError::ai_unavailable(
+                "phi_silica",
+                "Phi Silica requires the Microsoft Store version of this app",
+            )
+            .into());
+        }
+
+        // Ensure WinRT is initialized, the App SDK bootstrapper has been
+        // attempted, and LAF is unlocked
         ensure_winrt_initialized();
+        let _ = init_windows_app_sdk();
         let _ = try_unlock_laf();
 
-        // Create model using direct DLL activation
-        let model = create_language_model_direct()?;
+        // Create model: direct DLL activation first (proven MSIX
+        // configuration), WinRT activation as fallback
+        let model = create_language_model()?;
 
         // Generate response
         let prompt_hstring = HSTRING::from(prompt_owned.as_str());
-        let response_op = model.GenerateResponseAsync(&prompt_hstring)
+        let response_op = model
+            .GenerateResponseAsync(&prompt_hstring)
             .map_err(|e| format!("Failed to start response generation: {}", e.message()))?;
 
         let response = wait_for_async_with_progress_blocking(response_op)?;
 
         // Check status
-        let status = response.Status()
+        let status = response
+            .Status()
             .map_err(|e| format!("Failed to get response status: {}", e.message()))?;
 
         match status {
-            s if s == LanguageModelResponseStatus::Complete || s == LanguageModelResponseStatus::InProgress => {
-                let text = response.Text()
+            s if s == LanguageModelResponseStatus::Complete
+                || s == LanguageModelResponseStatus::InProgress =>
+            {
+                let text = response
+                    .Text()
                     .map_err(|e| format!("Failed to get response text: {}", e.message()))?;
                 Ok(text.to_string())
             }
@@ -703,18 +1075,14 @@ pub async fn generate_response(prompt: &str) -> Result<String, String> {
                 }
                 .into())
             }
-            s if s == LanguageModelResponseStatus::Error => {
-                Err(DiagError::AiAnalysisFailed {
-                    reason: "An error occurred during generation".to_string(),
-                }
-                .into())
+            s if s == LanguageModelResponseStatus::Error => Err(DiagError::AiAnalysisFailed {
+                reason: "An error occurred during generation".to_string(),
             }
-            _ => {
-                Err(DiagError::AiAnalysisFailed {
-                    reason: format!("Unknown response status: {:?}", status),
-                }
-                .into())
+            .into()),
+            _ => Err(DiagError::AiAnalysisFailed {
+                reason: format!("Unknown response status: {:?}", status),
             }
+            .into()),
         }
     })
     .await
@@ -747,9 +1115,9 @@ pub async fn ensure_phi_silica() -> Result<String, String> {
 #[cfg(windows)]
 pub async fn check_phi_silica_updates() -> Result<String, String> {
     use std::ptr;
-    use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{HSTRING, PCWSTR};
 
     let uri = HSTRING::from("ms-settings:windowsupdate");
     let open = HSTRING::from("open");
@@ -766,7 +1134,10 @@ pub async fn check_phi_silica_updates() -> Result<String, String> {
 
         // ShellExecuteW returns a value > 32 on success
         if result.0 as i32 <= 32 {
-            return Err(format!("Failed to open Windows Update: error code {}", result.0 as i32));
+            return Err(format!(
+                "Failed to open Windows Update: error code {}",
+                result.0 as i32
+            ));
         }
     }
 
@@ -789,35 +1160,60 @@ fn get_diagnostic_list_for_prompt() -> String {
 
     // Provide enhanced descriptions for common diagnostics so Phi Silica knows what data they contain
     let enhanced_descriptions: std::collections::HashMap<&str, &str> = [
-        ("physical_memory", "RAM capacity, speed, manufacturer, modules installed"),
+        (
+            "physical_memory",
+            "RAM capacity, speed, manufacturer, modules installed",
+        ),
         ("comp_system", "Computer manufacturer, model, system type"),
         ("os_info", "Windows version, build number, install date"),
         ("processor", "CPU name, cores, speed, architecture"),
-        ("logical_disk", "Drive letters, total/free space, file system"),
+        (
+            "logical_disk",
+            "Drive letters, total/free space, file system",
+        ),
         ("disk_drive", "Physical disk model, size, interface type"),
-        ("network_adapter", "Network cards, MAC addresses, connection status"),
-        ("systeminfo", "Full system summary including RAM, CPU, OS, network"),
+        (
+            "network_adapter",
+            "Network cards, MAC addresses, connection status",
+        ),
+        (
+            "systeminfo",
+            "Full system summary including RAM, CPU, OS, network",
+        ),
         ("bios", "BIOS version, manufacturer, release date"),
         ("ipconfig", "IP addresses, DNS servers, gateway"),
-        ("installed_programs", "List of installed software with versions"),
+        (
+            "installed_programs",
+            "List of installed software with versions",
+        ),
         ("services", "Windows services and their status"),
         ("processes", "Running processes and resource usage"),
         ("drivers_list", "Installed drivers and versions"),
-        ("windows_update", "Windows Update history and pending updates"),
+        (
+            "windows_update",
+            "Windows Update history and pending updates",
+        ),
         ("event_logs", "Recent system/application event logs"),
         ("startup_command", "Programs that run at startup"),
         ("firewall_status", "Windows Firewall status and rules"),
-    ].into_iter().collect();
+    ]
+    .into_iter()
+    .collect();
 
     // Group by category with enhanced descriptions
-    let mut by_category: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut by_category: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     for task in tasks {
         // Use enhanced description if available, otherwise use default
-        let desc = enhanced_descriptions.get(task.id.as_str())
+        let desc = enhanced_descriptions
+            .get(task.id.as_str())
             .map(|d| d.to_string())
             .unwrap_or_else(|| task.description.clone());
         let entry = format!("{}: {}", task.id, desc);
-        by_category.entry(task.category.clone()).or_default().push(entry);
+        by_category
+            .entry(task.category.clone())
+            .or_default()
+            .push(entry);
     }
 
     for (category, entries) in by_category {
@@ -857,7 +1253,13 @@ fn extract_ram_essentials(text: &str) -> String {
     let mut total_capacity: u64 = 0;
 
     // Key fields to extract
-    let key_fields = ["Capacity", "Speed", "Manufacturer", "MemoryType", "FormFactor"];
+    let key_fields = [
+        "Capacity",
+        "Speed",
+        "Manufacturer",
+        "MemoryType",
+        "FormFactor",
+    ];
 
     // Split into instances (WMI output has multiple objects)
     let instances: Vec<&str> = text.split("---").collect();
@@ -898,7 +1300,11 @@ fn extract_ram_essentials(text: &str) -> String {
 
         if !module_info.is_empty() {
             module_count += 1;
-            result.push_str(&format!("Module {}: {}\n", module_count, module_info.join(", ")));
+            result.push_str(&format!(
+                "Module {}: {}\n",
+                module_count,
+                module_info.join(", ")
+            ));
         }
     }
 
@@ -910,12 +1316,12 @@ fn extract_ram_essentials(text: &str) -> String {
         // Fallback: try to extract just capacity values from raw text
         let mut capacities = Vec::new();
         for line in text.lines() {
-            if line.contains("Capacity") {
-                if let Some(val) = line.split(':').nth(1).or_else(|| line.split('=').nth(1)) {
-                    let val = val.trim();
-                    if let Ok(bytes) = val.parse::<u64>() {
-                        capacities.push(bytes / (1024 * 1024 * 1024));
-                    }
+            if line.contains("Capacity")
+                && let Some(val) = line.split(':').nth(1).or_else(|| line.split('=').nth(1))
+            {
+                let val = val.trim();
+                if let Ok(bytes) = val.parse::<u64>() {
+                    capacities.push(bytes / (1024 * 1024 * 1024));
                 }
             }
         }
@@ -932,19 +1338,40 @@ fn extract_ram_essentials(text: &str) -> String {
 
 /// Extract essential computer system info
 fn extract_comp_system_essentials(text: &str) -> String {
-    let key_fields = ["Manufacturer", "Model", "SystemType", "TotalPhysicalMemory", "Name", "Domain"];
+    let key_fields = [
+        "Manufacturer",
+        "Model",
+        "SystemType",
+        "TotalPhysicalMemory",
+        "Name",
+        "Domain",
+    ];
     extract_key_fields(text, &key_fields)
 }
 
 /// Extract essential processor info
 fn extract_processor_essentials(text: &str) -> String {
-    let key_fields = ["Name", "NumberOfCores", "NumberOfLogicalProcessors", "MaxClockSpeed", "Architecture", "Manufacturer"];
+    let key_fields = [
+        "Name",
+        "NumberOfCores",
+        "NumberOfLogicalProcessors",
+        "MaxClockSpeed",
+        "Architecture",
+        "Manufacturer",
+    ];
     extract_key_fields(text, &key_fields)
 }
 
 /// Extract essential disk info
 fn extract_disk_essentials(text: &str) -> String {
-    let key_fields = ["DeviceID", "Size", "FreeSpace", "FileSystem", "VolumeName", "DriveType"];
+    let key_fields = [
+        "DeviceID",
+        "Size",
+        "FreeSpace",
+        "FileSystem",
+        "VolumeName",
+        "DriveType",
+    ];
     extract_key_fields(text, &key_fields)
 }
 
@@ -982,60 +1409,66 @@ fn parse_diagnostic_ids(response: &str) -> Vec<String> {
 
     // Try to find JSON array in response
     if let Some(start) = response.find('[')
-        && let Some(end) = response[start..].find(']') {
-            let array_str = &response[start..start + end + 1];
-            // Parse as JSON array
-            if let Ok(arr) = serde_json::from_str::<Vec<String>>(array_str) {
-                // Validate each ID against our known tasks
-                for id in arr {
-                    let id_lower = id.to_lowercase();
-                    // Exact match
-                    if valid_ids.contains(&id.as_str()) {
-                        if !ids.contains(&id) {
-                            ids.push(id);
-                        }
-                    } else {
-                        // Try to find best match
-                        if let Some(matched) = find_best_match(&id_lower, &valid_ids)
-                            && !ids.contains(&matched) {
-                                ids.push(matched);
-                            }
+        && let Some(end) = response[start..].find(']')
+    {
+        let array_str = &response[start..start + end + 1];
+        // Parse as JSON array
+        if let Ok(arr) = serde_json::from_str::<Vec<String>>(array_str) {
+            // Validate each ID against our known tasks
+            for id in arr {
+                let id_lower = id.to_lowercase();
+                // Exact match
+                if valid_ids.contains(&id.as_str()) {
+                    if !ids.contains(&id) {
+                        ids.push(id);
                     }
-                }
-                if !ids.is_empty() {
-                    return ids;
+                } else {
+                    // Try to find best match
+                    if let Some(matched) = find_best_match(&id_lower, &valid_ids)
+                        && !ids.contains(&matched)
+                    {
+                        ids.push(matched);
+                    }
                 }
             }
-            // Try parsing as Value and extract strings
-            if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(array_str) {
-                for item in arr {
-                    if let serde_json::Value::String(s) = item {
-                        let s_lower = s.to_lowercase();
-                        if valid_ids.contains(&s.as_str()) {
-                            if !ids.contains(&s) {
-                                ids.push(s);
-                            }
-                        } else if let Some(matched) = find_best_match(&s_lower, &valid_ids)
-                            && !ids.contains(&matched) {
-                                ids.push(matched);
-                            }
-                    }
-                }
-                if !ids.is_empty() {
-                    return ids;
-                }
+            if !ids.is_empty() {
+                return ids;
             }
         }
+        // Try parsing as Value and extract strings
+        if let Ok(serde_json::Value::Array(arr)) =
+            serde_json::from_str::<serde_json::Value>(array_str)
+        {
+            for item in arr {
+                if let serde_json::Value::String(s) = item {
+                    let s_lower = s.to_lowercase();
+                    if valid_ids.contains(&s.as_str()) {
+                        if !ids.contains(&s) {
+                            ids.push(s);
+                        }
+                    } else if let Some(matched) = find_best_match(&s_lower, &valid_ids)
+                        && !ids.contains(&matched)
+                    {
+                        ids.push(matched);
+                    }
+                }
+            }
+            if !ids.is_empty() {
+                return ids;
+            }
+        }
+    }
 
     // Fallback: look for known task IDs mentioned in the response
     for task_id in &valid_ids {
-        if (response.contains(&format!("\"{}\"", task_id)) ||
-           response.contains(&format!("'{}'", task_id)) ||
-           response.to_lowercase().contains(&format!(" {} ", task_id)) ||
-           response.to_lowercase().contains(&format!("[{}]", task_id)))
-            && !ids.contains(&task_id.to_string()) {
-                ids.push(task_id.to_string());
-            }
+        if (response.contains(&format!("\"{}\"", task_id))
+            || response.contains(&format!("'{}'", task_id))
+            || response.to_lowercase().contains(&format!(" {} ", task_id))
+            || response.to_lowercase().contains(&format!("[{}]", task_id)))
+            && !ids.contains(&task_id.to_string())
+        {
+            ids.push(task_id.to_string());
+        }
     }
 
     ids
@@ -1099,10 +1532,9 @@ fn find_best_match(input: &str, valid_ids: &[&str]) -> Option<String> {
     ];
 
     for (term, task_id) in mappings {
-        if input.contains(term)
-            && valid_ids.contains(task_id) {
-                return Some(task_id.to_string());
-            }
+        if input.contains(term) && valid_ids.contains(task_id) {
+            return Some(task_id.to_string());
+        }
     }
 
     None
@@ -1120,15 +1552,25 @@ fn suggest_diagnostics_for_question(question: &str) -> Vec<&'static str> {
     let mut suggestions = Vec::new();
 
     // Computer/system info questions
-    if question.contains("make") || question.contains("model") || question.contains("computer")
-        || question.contains("laptop") || question.contains("desktop") || question.contains("pc")
-        || question.contains("device") || question.contains("machine") {
+    if question.contains("make")
+        || question.contains("model")
+        || question.contains("computer")
+        || question.contains("laptop")
+        || question.contains("desktop")
+        || question.contains("pc")
+        || question.contains("device")
+        || question.contains("machine")
+    {
         suggestions.extend(["comp_system", "bios", "baseboard", "os_info"]);
     }
 
     // CPU questions
-    if question.contains("cpu") || question.contains("processor") || question.contains("core")
-        || question.contains("speed") || question.contains("ghz") {
+    if question.contains("cpu")
+        || question.contains("processor")
+        || question.contains("core")
+        || question.contains("speed")
+        || question.contains("ghz")
+    {
         suggestions.extend(["processor", "comp_system"]);
     }
 
@@ -1138,32 +1580,54 @@ fn suggest_diagnostics_for_question(question: &str) -> Vec<&'static str> {
     }
 
     // Storage questions
-    if question.contains("disk") || question.contains("storage") || question.contains("drive")
-        || question.contains("ssd") || question.contains("hdd") || question.contains("space") {
+    if question.contains("disk")
+        || question.contains("storage")
+        || question.contains("drive")
+        || question.contains("ssd")
+        || question.contains("hdd")
+        || question.contains("space")
+    {
         suggestions.extend(["logical_disk", "disk_drive", "disk_partition"]);
     }
 
     // Network questions
-    if question.contains("network") || question.contains("wifi") || question.contains("ethernet")
-        || question.contains("ip") || question.contains("internet") || question.contains("adapter") {
+    if question.contains("network")
+        || question.contains("wifi")
+        || question.contains("ethernet")
+        || question.contains("ip")
+        || question.contains("internet")
+        || question.contains("adapter")
+    {
         suggestions.extend(["network_adapter", "ipconfig"]);
     }
 
     // Security questions
-    if question.contains("security") || question.contains("firewall") || question.contains("virus")
-        || question.contains("protect") || question.contains("safe") {
+    if question.contains("security")
+        || question.contains("firewall")
+        || question.contains("virus")
+        || question.contains("protect")
+        || question.contains("safe")
+    {
         suggestions.extend(["firewall_status", "services", "startup_command"]);
     }
 
     // Performance questions
-    if question.contains("performance") || question.contains("slow") || question.contains("fast")
-        || question.contains("speed") || question.contains("optimize") {
+    if question.contains("performance")
+        || question.contains("slow")
+        || question.contains("fast")
+        || question.contains("speed")
+        || question.contains("optimize")
+    {
         suggestions.extend(["performance", "processes", "services"]);
     }
 
     // OS/Windows questions
-    if question.contains("windows") || question.contains("version") || question.contains("build")
-        || question.contains("update") || question.contains("os") {
+    if question.contains("windows")
+        || question.contains("version")
+        || question.contains("build")
+        || question.contains("update")
+        || question.contains("os")
+    {
         suggestions.extend(["os_info", "systeminfo", "windows_update"]);
     }
 
@@ -1173,8 +1637,11 @@ fn suggest_diagnostics_for_question(question: &str) -> Vec<&'static str> {
     }
 
     // Software questions
-    if question.contains("software") || question.contains("program") || question.contains("app")
-        || question.contains("install") {
+    if question.contains("software")
+        || question.contains("program")
+        || question.contains("app")
+        || question.contains("install")
+    {
         suggestions.extend(["installed_programs", "store_apps"]);
     }
 
@@ -1203,7 +1670,7 @@ pub async fn analyze_with_phi_silica(prompt: String) -> Result<PhiSilicaAnalysis
 
     let planning_prompt = if !suggested_ids.is_empty() {
         format!(
-r#"User question: "{}"
+            r#"User question: "{}"
 
 Suggested diagnostics based on keywords: {:?}
 
@@ -1215,7 +1682,7 @@ Select 3-6 diagnostics. Output ONLY a JSON array. Example: ["comp_system", "os_i
         )
     } else {
         format!(
-r#"User question: "{}"
+            r#"User question: "{}"
 
 Available diagnostics:
 {}
@@ -1271,21 +1738,27 @@ Select 3-6 diagnostics to answer this question. Output ONLY a JSON array. Exampl
         }
     }
 
-    log_phi_silica(&format!("Ran {} diagnostics, {} chars", diagnostics_run.len(), diagnostic_results.len()));
+    log_phi_silica(&format!(
+        "Ran {} diagnostics, {} chars",
+        diagnostics_run.len(),
+        diagnostic_results.len()
+    ));
 
     // STEP 4: Send results back to Phi Silica for analysis (compact prompt)
     let analysis_prompt = format!(
-r#"USER'S QUESTION: {}
+        r#"USER'S QUESTION: {}
 
 SYSTEM DATA:
 {}
 
 INSTRUCTIONS: Answer the user's question above using ONLY the system data provided. Do NOT make up information. Do NOT change or rephrase the question. Be direct and specific."#,
-        prompt,
-        diagnostic_results
+        prompt, diagnostic_results
     );
 
-    log_phi_silica(&format!("Analysis prompt size: {} chars", analysis_prompt.len()));
+    log_phi_silica(&format!(
+        "Analysis prompt size: {} chars",
+        analysis_prompt.len()
+    ));
     log_phi_silica("Step 4: Getting final analysis from Phi Silica...");
     let final_response = generate_response(&analysis_prompt).await?;
     log_phi_silica("Analysis complete");
@@ -1306,7 +1779,14 @@ async fn run_with_default_diagnostics(prompt: &str) -> Result<PhiSilicaAnalysisR
     let default_diagnostics: Vec<&str> = if !suggested.is_empty() {
         suggested.into_iter().take(MAX_DIAGNOSTICS).collect()
     } else {
-        vec!["comp_system", "os_info", "processor", "physical_memory", "logical_disk", "network_adapter"]
+        vec![
+            "comp_system",
+            "os_info",
+            "processor",
+            "physical_memory",
+            "logical_disk",
+            "network_adapter",
+        ]
     };
 
     let mut diagnostic_results = String::new();
@@ -1323,14 +1803,13 @@ async fn run_with_default_diagnostics(prompt: &str) -> Result<PhiSilicaAnalysisR
     }
 
     let analysis_prompt = format!(
-r#"USER'S QUESTION: {}
+        r#"USER'S QUESTION: {}
 
 SYSTEM DATA:
 {}
 
 INSTRUCTIONS: Answer the user's question above using ONLY the system data provided. Do NOT make up information. Do NOT change or rephrase the question. Be direct and specific."#,
-        prompt,
-        diagnostic_results
+        prompt, diagnostic_results
     );
 
     let response = generate_response(&analysis_prompt).await?;

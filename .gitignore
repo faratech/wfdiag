@@ -148,7 +148,6 @@ coverage/
 **/*.rs.bk
 *.orig
 Cargo.lock.orig
-src-tauri/Cargo.lock
 src-tauri/.cargo/
 
 # =============================================================================
@@ -192,6 +191,9 @@ docker-compose.override.yml
 .netlify/
 .clinic/
 profile/
+
+# Playwright MCP session artifacts (console logs + page snapshots)
+.playwright-mcp/
 
 # =============================================================================
 # Package Manager Alternatives (we use npm)

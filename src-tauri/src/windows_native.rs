@@ -1,5 +1,5 @@
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[allow(dead_code)]
 pub struct WindowsNativeAPI;
@@ -27,8 +27,12 @@ impl WindowsNativeAPI {
                 (
                     mem_status.ullTotalPhys,
                     mem_status.ullAvailPhys,
-                    mem_status.ullTotalPageFile.saturating_sub(mem_status.ullTotalPhys),
-                    mem_status.ullAvailPageFile.saturating_sub(mem_status.ullAvailPhys),
+                    mem_status
+                        .ullTotalPageFile
+                        .saturating_sub(mem_status.ullTotalPhys),
+                    mem_status
+                        .ullAvailPageFile
+                        .saturating_sub(mem_status.ullAvailPhys),
                     mem_status.dwMemoryLoad,
                 )
             } else {
@@ -45,8 +49,8 @@ impl WindowsNativeAPI {
         let uptime_seconds = unsafe { GetTickCount64() / 1000 };
 
         // Get architecture information
-        let arch_info = crate::architecture::get_architecture_info()
-            .unwrap_or_else(|_| crate::architecture::ArchitectureInfo {
+        let arch_info = crate::architecture::get_architecture_info().unwrap_or_else(|_| {
+            crate::architecture::ArchitectureInfo {
                 process_arch: crate::architecture::ProcessorArchitecture::Unknown,
                 native_arch: crate::architecture::ProcessorArchitecture::Unknown,
                 is_emulated: false,
@@ -56,7 +60,8 @@ impl WindowsNativeAPI {
                 processor_count: std::thread::available_parallelism()
                     .map(|p| p.get() as u32)
                     .unwrap_or(1),
-            });
+            }
+        });
 
         Ok(json!({
             "computer_name": std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Unknown".to_string()),
@@ -95,8 +100,8 @@ impl WindowsNativeAPI {
 
     /// Get Windows version info from registry
     fn get_windows_version_from_registry(&self) -> (String, String) {
-        use winreg::enums::HKEY_LOCAL_MACHINE;
         use winreg::RegKey;
+        use winreg::enums::HKEY_LOCAL_MACHINE;
 
         let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
         if let Ok(key) = hklm.open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion") {
@@ -121,15 +126,16 @@ impl WindowsNativeAPI {
 
     /// Get Windows build number from registry
     fn get_windows_build_number(&self) -> u32 {
-        use winreg::enums::HKEY_LOCAL_MACHINE;
         use winreg::RegKey;
+        use winreg::enums::HKEY_LOCAL_MACHINE;
 
         let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
         if let Ok(key) = hklm.open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
             && let Ok(build) = key.get_value::<String, _>("CurrentBuild")
-                && let Ok(build_num) = build.parse::<u32>() {
-                    return build_num;
-                }
+            && let Ok(build_num) = build.parse::<u32>()
+        {
+            return build_num;
+        }
         0
     }
 
@@ -193,14 +199,15 @@ impl WindowsNativeAPI {
 
     /// Check if this is a server edition
     fn is_server_edition(&self) -> bool {
-        use winreg::enums::HKEY_LOCAL_MACHINE;
         use winreg::RegKey;
+        use winreg::enums::HKEY_LOCAL_MACHINE;
 
         let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
         if let Ok(key) = hklm.open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
-            && let Ok(product_name) = key.get_value::<String, _>("ProductName") {
-                return product_name.to_lowercase().contains("server");
-            }
+            && let Ok(product_name) = key.get_value::<String, _>("ProductName")
+        {
+            return product_name.to_lowercase().contains("server");
+        }
         false
     }
 
@@ -222,10 +229,10 @@ impl WindowsNativeAPI {
 
     /// Get disk space information using native Windows APIs
     pub fn get_disk_space(&self) -> Result<Value> {
-        use windows::core::PCWSTR;
         use windows::Win32::Storage::FileSystem::{
             GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDriveStringsW,
         };
+        use windows::core::PCWSTR;
         // Drive type constants (not exported as named constants in windows crate 0.62)
         const DRIVE_FIXED: u32 = 3;
         const DRIVE_REMOVABLE: u32 = 2;
@@ -298,7 +305,9 @@ impl WindowsNativeAPI {
 
     /// Get network adapter information using native Windows APIs
     pub fn get_network_adapters(&self) -> Result<Value> {
-        use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+        use windows::Win32::NetworkManagement::IpHelper::{
+            FreeMibTable, GetIfTable2, MIB_IF_TABLE2,
+        };
 
         let mut adapters = Vec::new();
 

@@ -1,24 +1,22 @@
 //! Native WMI wrapper using windows-rs crate directly
 //! Replaces the wmi crate with direct COM calls
 
-use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow};
+use serde_json::{Value, json};
 use std::collections::HashMap;
-use windows::core::{BSTR, PCWSTR};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoSetProxyBlanket,
-    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, EOAC_NONE, RPC_C_AUTHN_LEVEL_DEFAULT,
-    RPC_C_IMP_LEVEL_IMPERSONATE,
-};
-use windows::Win32::System::Wmi::{
-    IWbemClassObject, IWbemLocator, IWbemServices,
-    WbemLocator, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY,
-    WBEM_INFINITE,
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+    CoSetProxyBlanket, EOAC_NONE, RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE,
 };
 use windows::Win32::System::Variant::{
-    VARIANT, VariantClear, VT_BOOL, VT_BSTR, VT_I1, VT_I2, VT_I4, VT_I8, VT_NULL, VT_EMPTY,
-    VT_UI1, VT_UI2, VT_UI4, VT_UI8, VT_R4, VT_R8, VT_ARRAY, VT_DATE,
+    VARIANT, VT_ARRAY, VT_BOOL, VT_BSTR, VT_DATE, VT_EMPTY, VT_I1, VT_I2, VT_I4, VT_I8, VT_NULL,
+    VT_R4, VT_R8, VT_UI1, VT_UI2, VT_UI4, VT_UI8, VariantClear,
 };
+use windows::Win32::System::Wmi::{
+    IWbemClassObject, IWbemLocator, IWbemServices, WBEM_FLAG_FORWARD_ONLY,
+    WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_INFINITE, WbemLocator,
+};
+use windows::core::{BSTR, PCWSTR};
 
 // Thread-local COM initialization state
 thread_local! {
@@ -41,7 +39,8 @@ fn ensure_com_initialized() -> Result<()> {
                     let code = hr.0 as u32;
                     // 0x80010106 = RPC_E_CHANGED_MODE - COM already initialized in different mode
                     // This is OK - we can still use WMI
-                    if code != 0x80010106 && code != 1 { // 1 = S_FALSE
+                    if code != 0x80010106 && code != 1 {
+                        // 1 = S_FALSE
                         // Only log, don't fail - COM might still work
                         eprintln!("CoInitializeEx returned: 0x{:08X}", code);
                     }
@@ -93,14 +92,16 @@ impl WmiConnection {
                     &BSTR::new(),
                     None,
                 )
-                .map_err(|e| anyhow!("Failed to connect to WMI namespace '{}': {}", namespace, e))?;
+                .map_err(|e| {
+                    anyhow!("Failed to connect to WMI namespace '{}': {}", namespace, e)
+                })?;
 
             // Set security on the proxy
             // CoSetProxyBlanket(proxy, authn_svc, authz_svc, server_princ_name, authn_level, imp_level, auth_info, capabilities)
             CoSetProxyBlanket(
                 &services,
-                10,  // RPC_C_AUTHN_WINNT
-                0,   // RPC_C_AUTHZ_NONE
+                10, // RPC_C_AUTHN_WINNT
+                0,  // RPC_C_AUTHZ_NONE
                 PCWSTR::null(),
                 RPC_C_AUTHN_LEVEL_DEFAULT,
                 RPC_C_IMP_LEVEL_IMPERSONATE,
@@ -119,9 +120,8 @@ impl WmiConnection {
     /// Execute a WQL query and return results as JSON
     pub fn query(&self, wql: &str) -> Result<Vec<HashMap<String, Value>>> {
         // Wrap entire query in catch_unwind for safety
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.query_internal(wql)
-        }));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.query_internal(wql)));
 
         match result {
             Ok(r) => r,
@@ -150,11 +150,7 @@ impl WmiConnection {
                 let mut objects: [Option<IWbemClassObject>; 1] = [None];
                 let mut returned: u32 = 0;
 
-                let hr = enumerator.Next(
-                    WBEM_INFINITE,
-                    &mut objects,
-                    &mut returned,
-                );
+                let hr = enumerator.Next(WBEM_INFINITE, &mut objects, &mut returned);
 
                 if hr.is_err() || returned == 0 {
                     break;
@@ -244,7 +240,7 @@ impl WmiConnection {
                     // Use the windows crate's safe BSTR handling
                     let bstr = &variant.Anonymous.Anonymous.Anonymous.bstrVal;
                     // BSTR len() returns 0 for null/empty, and to_string() is safe
-                    if bstr.len() == 0 {
+                    if bstr.is_empty() {
                         json!("")
                     } else {
                         json!(bstr.to_string())
@@ -253,7 +249,7 @@ impl WmiConnection {
 
                 VT_I1 => {
                     let i = variant.Anonymous.Anonymous.Anonymous.cVal;
-                    json!(i as i8)
+                    json!(i)
                 }
 
                 VT_I2 => {
@@ -318,7 +314,7 @@ impl WmiConnection {
     fn safearray_to_json(&self, variant: &VARIANT) -> Value {
         unsafe {
             use windows::Win32::System::Ole::{
-                SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayGetElement,
+                SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
             };
 
             let psa = variant.Anonymous.Anonymous.Anonymous.parray;
@@ -348,12 +344,14 @@ impl WmiConnection {
             let mut arr = Vec::new();
 
             for i in lbound..=ubound {
-                let idx = i as i32;
+                let idx = i;
 
                 if base_vt == VT_BSTR.0 {
                     // SafeArrayGetElement for BSTR returns a copy that we own
                     let mut bstr: BSTR = BSTR::new();
-                    if SafeArrayGetElement(psa, &idx, &mut bstr as *mut _ as *mut std::ffi::c_void).is_ok() {
+                    if SafeArrayGetElement(psa, &idx, &mut bstr as *mut _ as *mut std::ffi::c_void)
+                        .is_ok()
+                    {
                         // BSTR::to_string() handles null and empty cases
                         let s = bstr.to_string();
                         arr.push(json!(s));
@@ -361,52 +359,72 @@ impl WmiConnection {
                     }
                 } else if base_vt == VT_I4.0 {
                     let mut val: i32 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void).is_ok() {
+                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
+                        .is_ok()
+                    {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_UI1.0 {
                     let mut val: u8 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void).is_ok() {
+                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
+                        .is_ok()
+                    {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_UI2.0 {
                     let mut val: u16 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void).is_ok() {
+                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
+                        .is_ok()
+                    {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_UI4.0 {
                     let mut val: u32 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void).is_ok() {
+                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
+                        .is_ok()
+                    {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_I2.0 {
                     let mut val: i16 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void).is_ok() {
+                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
+                        .is_ok()
+                    {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_I8.0 {
                     let mut val: i64 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void).is_ok() {
+                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
+                        .is_ok()
+                    {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_UI8.0 {
                     let mut val: u64 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void).is_ok() {
+                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
+                        .is_ok()
+                    {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_R4.0 {
                     let mut val: f32 = 0.0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void).is_ok() {
+                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
+                        .is_ok()
+                    {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_R8.0 {
                     let mut val: f64 = 0.0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void).is_ok() {
+                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
+                        .is_ok()
+                    {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_BOOL.0 {
                     let mut val: i16 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void).is_ok() {
+                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
+                        .is_ok()
+                    {
                         arr.push(json!(val != 0));
                     }
                 }
@@ -414,7 +432,10 @@ impl WmiConnection {
             }
 
             if arr.is_empty() && count > 0 {
-                json!(format!("[Array: {} elements, type 0x{:04X}]", count, base_vt))
+                json!(format!(
+                    "[Array: {} elements, type 0x{:04X}]",
+                    count, base_vt
+                ))
             } else {
                 json!(arr)
             }
@@ -443,7 +464,10 @@ pub fn wmi_query_class(class_name: &str) -> Result<Vec<HashMap<String, Value>>> 
 
 #[allow(dead_code)]
 pub fn get_string(props: &HashMap<String, Value>, key: &str) -> Option<String> {
-    props.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+    props
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 #[allow(dead_code)]

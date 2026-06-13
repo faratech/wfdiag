@@ -1,6 +1,6 @@
 [package]
 name = "wfdiag-tauri"
-version = "2.2.0"
+version = "2.5.0"
 description = "WindowsForum Diagnostic Tool"
 authors = ["WindowsForum"]
 edition = "2024"
@@ -20,23 +20,24 @@ name = "debug_diagnostics"
 path = "src/bin/debug_diagnostics.rs"
 
 [build-dependencies]
-tauri-build = { version = "2.5", features = [] }
+tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
 # Tauri framework
-tauri = { version = "2.9", features = [] }
+tauri = { version = "2.11", features = ["tray-icon"] }
 
 # Tauri v2 plugins
-tauri-plugin-fs = "2.4"
-tauri-plugin-dialog = "2.6.0"
+tauri-plugin-fs = "2.5"
+tauri-plugin-dialog = "2.7"
 tauri-plugin-clipboard-manager = "2.3"
 tauri-plugin-shell = "2.3"
+tauri-plugin-notification = "2"
 
 # Date/time utilities
 chrono = "0.4"
 
 # Async runtime
-tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
 futures = "0.3"
 
 # Serialization
@@ -46,14 +47,26 @@ serde_json = "1.0"
 # Utilities
 anyhow = "1.0"
 thiserror = "2.0"
+# Already in the tree transitively (async-openai, tauri) — direct use for the
+# GitHub update check, version comparison, and the native Anthropic/Gemini clients
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "stream"] }
+semver = "1"
+# SSE parsing for Anthropic/Gemini streaming (already in the tree via async-openai)
+eventsource-stream = "0.2"
+# CancellationToken for stoppable AI chat turns
+tokio-util = "0.7"
 uuid = { version = "1.20.0", features = ["v4"] }
-rand = "0.9"
 base64 = "0.22"
 url = "2.5"
 dirs = "6.0"
 
-# OpenAI integration - using Responses API
-async-openai = { version = "0.32", default-features = false, features = ["native-tls", "responses"] }
+# OpenAI integration — Responses API for cloud OpenAI/Foundry Local one-shot,
+# chat-completion for the generic OpenAI-compatible providers (OpenRouter,
+# Ollama, Groq, …) which do not serve /v1/responses
+async-openai = { version = "0.41", default-features = false, features = ["native-tls", "responses", "chat-completion"] }
+# keyring stays on 3.x: v4 split the crate into keyring-core + per-store
+# crates and is explicitly not meant for direct app use yet. Only used as a
+# Linux dev convenience anyway (Windows builds use DPAPI).
 keyring = "3.6"
 
 # Windows-specific dependencies
@@ -85,6 +98,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Ole",
     "Win32_System_Variant",
     "Win32_System_Wmi",
+    "Win32_Storage_Packaging_Appx",
     "Foundation",
     "Foundation_Collections",
     "ApplicationModel",

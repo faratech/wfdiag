@@ -3,19 +3,24 @@
 mod architecture;
 mod commands;
 pub mod diagnostics;
-pub mod error;
-pub mod state;
-#[cfg(windows)]
+// dpapi self-gates internally (non-Windows stubs); the module stays
+// cross-platform because ProviderKeyId names the keyring entries too
 mod dpapi;
 mod encrypted_storage;
+pub mod error;
+mod issue_catalog;
 mod issue_detector;
-mod issue_fixer;
 mod native_diagnostics;
 pub mod native_monitor;
-pub mod openai_integration;
+mod remediation;
 pub mod results_storage;
 mod security;
+#[cfg(windows)]
+mod sparse_identity;
+pub mod state;
 pub mod timestamp;
+mod tray;
+mod update_check;
 mod windows_native;
 #[cfg(windows)]
 mod wmi_native;
@@ -27,14 +32,19 @@ mod windows_ai_bindings;
 
 // Unified AI service layer
 mod ai_cache;
+mod ai_chat;
+mod ai_fix_plan;
 mod ai_prompts;
+pub mod ai_providers;
+mod ai_report;
 mod ai_service;
+mod ai_tools;
 
 use crate::diagnostics::{DiagnosticTask, TaskResult};
 use crate::error::DiagError;
-use crate::issue_detector::Issue;
+use crate::issue_catalog::Issue;
 use native_monitor::{NetworkConnection, SystemMonitor};
-use results_storage::{ComparisonResult, ScanRecord, ScanStorage, ScanSummary};
+use results_storage::{ComparisonResult, ScanRecord, ScanStorage, ScanSummary, TaskTrend};
 use std::collections::HashMap;
 use tauri::Emitter;
 use tauri::State;
@@ -206,10 +216,26 @@ async fn start_diagnostics(
 
     let mut current = state.current_session.lock().await;
     *current = Some(session);
+    drop(current);
+
+    // Only one session is ever active; dropping stale entries here keeps the
+    // cancellation set from growing across scans.
+    state.cancelled_sessions.lock().await.clear();
 
     println!("Diagnostic session {} started successfully", session_id);
 
     Ok(session_id)
+}
+
+/// Cancel a running diagnostic session. Cancellation is task-granular:
+/// tasks already in flight finish normally, queued tasks are skipped, and the
+/// pending `run_diagnostics_parallel` call resolves quickly with the results
+/// collected so far.
+#[tauri::command]
+async fn cancel_diagnostics(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    println!("Cancelling diagnostic session: {}", session_id);
+    state.cancelled_sessions.lock().await.insert(session_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -223,7 +249,9 @@ async fn run_diagnostic_task(
     let task = tasks
         .iter()
         .find(|t| t.id == task_id)
-        .ok_or_else(|| DiagError::TaskNotFound { task_id: task_id.clone() })?;
+        .ok_or_else(|| DiagError::TaskNotFound {
+            task_id: task_id.clone(),
+        })?;
 
     // Emit progress event
     window
@@ -284,6 +312,21 @@ async fn run_diagnostics_parallel(
             let session_id = session_id.clone();
 
             async move {
+                // Skip queued tasks of a cancelled session before doing any work.
+                // No events are emitted: the frontend has already torn down its
+                // progress UI when it requested cancellation.
+                if state_clone
+                    .cancelled_sessions
+                    .lock()
+                    .await
+                    .contains(&session_id)
+                {
+                    return Err::<(String, TaskResult), String>(format!(
+                        "session {} cancelled",
+                        session_id
+                    ));
+                }
+
                 // Find task details
                 let task = match tasks_ref.iter().find(|t| t.id == task_id) {
                     Some(task) => task,
@@ -300,7 +343,10 @@ async fn run_diagnostics_parallel(
                             }),
                         );
                         return Err::<(String, TaskResult), String>(
-                            DiagError::TaskNotFound { task_id: task_id.clone() }.into(),
+                            DiagError::TaskNotFound {
+                                task_id: task_id.clone(),
+                            }
+                            .into(),
                         );
                     }
                 };
@@ -326,10 +372,10 @@ async fn run_diagnostics_parallel(
                 // NEW session, mixing two scans' results.
                 {
                     let mut current = state_clone.current_session.lock().await;
-                    if let Some(ref mut session) = *current {
-                        if session.session_id == session_id {
-                            session.results.insert(task_id.clone(), result.clone());
-                        }
+                    if let Some(ref mut session) = *current
+                        && session.session_id == session_id
+                    {
+                        session.results.insert(task_id.clone(), result.clone());
                     }
                 }
 
@@ -415,20 +461,28 @@ async fn get_uptime() -> Result<serde_json::Value, String> {
     }))
 }
 
+/// Run a remediation from the vetted catalog. The Repair-tier confirmation
+/// gate is enforced in remediation::execute, not here and not in the UI.
 #[tauri::command]
-async fn fix_issue(issue_id: String) -> Result<issue_fixer::FixResult, String> {
-    let fixer = issue_fixer::IssueFixer::new();
-    fixer
-        .fix_issue(&issue_id)
-        .await
-        .map_err(|e| DiagError::task_failed(format!("fix_{}", issue_id), e.to_string()).into())
+async fn run_remediation(
+    remediation_id: String,
+    confirmed: Option<bool>,
+) -> Result<remediation::FixOutcome, String> {
+    remediation::execute(
+        &remediation_id,
+        confirmed.unwrap_or(false),
+        &remediation::RealRunner,
+    )
+    .await
 }
 
+/// The full remediation catalog (the Maintenance section renders the
+/// `maintenance: true` subset).
 #[tauri::command]
-fn get_fixable_issue_ids() -> Result<Vec<String>, String> {
-    Ok(issue_fixer::fixable_issue_ids()
+fn get_remediations() -> Result<Vec<remediation::RemediationSummary>, String> {
+    Ok(remediation::remediations()
         .iter()
-        .map(|s| s.to_string())
+        .map(|spec| spec.summary())
         .collect())
 }
 
@@ -712,12 +766,61 @@ async fn clear_scan_history(state: State<'_, AppState>) -> Result<String, String
 }
 
 #[tauri::command]
+async fn update_scan_tags(
+    state: State<'_, AppState>,
+    scan_id: String,
+    tags: Vec<String>,
+) -> Result<(), String> {
+    let storage = state.scan_storage.lock().await;
+    match storage.as_ref() {
+        Some(storage) => storage.update_tags(&scan_id, tags),
+        None => {
+            let error = state.scan_storage_error.lock().await;
+            Err(DiagError::storage(
+                "update_tags",
+                error.as_deref().unwrap_or("Storage initialization failed"),
+            )
+            .into())
+        }
+    }
+}
+
+#[tauri::command]
+async fn get_task_trends(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<TaskTrend>, String> {
+    // Cap the window: every scan in it is loaded and decrypted
+    let limit = limit.unwrap_or(10).min(20);
+    let storage = state.scan_storage.lock().await;
+    match storage.as_ref() {
+        Some(storage) => storage.task_failure_trends(limit),
+        None => {
+            let error = state.scan_storage_error.lock().await;
+            Err(DiagError::storage(
+                "task_trends",
+                error.as_deref().unwrap_or("Storage initialization failed"),
+            )
+            .into())
+        }
+    }
+}
+
+#[tauri::command]
 async fn detect_issues(state: State<'_, AppState>) -> Result<Vec<Issue>, String> {
     let current = state.current_session.lock().await;
     if let Some(ref session) = *current {
-        let issue_detector = issue_detector::IssueDetector::new();
-        let issues = issue_detector.detect_issues(&session.results);
-        Ok(issues)
+        // The OS dependencies live here, not in the detectors: inject the
+        // clock and the temp-dir entry count so detection stays pure.
+        let temp_file_count = std::fs::read_dir(std::env::temp_dir())
+            .ok()
+            .map(|entries| entries.count());
+        let ctx = issue_catalog::DetectCtx {
+            results: &session.results,
+            now: timestamp::Timestamp::now(),
+            temp_file_count,
+        };
+        Ok(issue_catalog::detect_all(&ctx))
     } else {
         Err(DiagError::NoActiveSession.into())
     }
@@ -767,6 +870,17 @@ async fn get_architecture_info() -> Result<serde_json::Value, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Phi Silica is Store-only: it requires registered package identity, and
+    // an unpackaged process is denied (0x80070005) even on the direct DLL
+    // activation path. Loose builds therefore do not attempt any identity
+    // registration — the AI service routes them to Foundry Local or OpenAI.
+    #[cfg(windows)]
+    if sparse_identity::has_package_identity() {
+        println!("Package identity: present");
+    } else {
+        println!("Package identity: none (Phi Silica unavailable; local AI via Foundry Local)");
+    }
+
     // Initialize scan storage gracefully - don't crash if it fails
     let (scan_storage, scan_storage_error) = match ScanStorage::new() {
         Ok(storage) => (Some(storage), None),
@@ -787,7 +901,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_shell::init())
-        .setup(|_app| {
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            tray::setup_tray(app.handle())?;
             // Pre-initialize NPU detection in background to avoid delay on first monitoring start
             #[cfg(windows)]
             std::thread::spawn(|| {
@@ -795,23 +911,36 @@ pub fn run() {
             });
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == "main"
+                && tray::close_to_tray_enabled()
+            {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::settings::save_settings,
             commands::settings::load_settings,
             commands::settings::store_api_key,
             commands::settings::load_api_key,
             commands::settings::clear_api_key,
+            commands::settings::store_provider_api_key,
+            commands::settings::clear_provider_api_key,
             get_system_info,
             get_architecture_info,
             get_available_tasks,
             start_diagnostics,
+            cancel_diagnostics,
             run_diagnostic_task,
             run_diagnostics_parallel,
             get_session_results,
             commands::export::export_results,
             commands::export::save_results_to_file,
             get_uptime,
-            fix_issue,
+            run_remediation,
+            get_remediations,
             restart_as_admin,
             start_monitoring,
             stop_monitoring,
@@ -822,9 +951,9 @@ pub fn run() {
             load_scan,
             compare_scans,
             clear_scan_history,
-            openai_integration::analyze_with_openai,
-            openai_integration::analyze_system_with_ai,
-            openai_integration::get_ai_provider_status,
+            update_scan_tags,
+            get_task_trends,
+            ai_providers::ollama::ai_list_ollama_models,
             phi_silica::check_phi_silica_available,
             phi_silica::ensure_phi_silica,
             phi_silica::analyze_with_phi_silica,
@@ -836,10 +965,18 @@ pub fn run() {
             ai_service::ai_explain_health,
             ai_service::ai_set_preference,
             ai_service::ai_clear_cache,
+            ai_service::ai_prioritize_issues,
+            ai_fix_plan::ai_propose_fix_plan,
+            // Agentic AI chat (streaming via ai-chat:// events)
+            ai_chat::ai_chat_send,
+            ai_chat::ai_chat_cancel,
+            ai_chat::ai_chat_new_session,
+            ai_chat::ai_chat_get_history,
+            ai_report::ai_generate_report,
             detect_issues,
-            get_fixable_issue_ids,
             copy_minidumps_to_desktop,
             open_url,
+            update_check::check_for_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

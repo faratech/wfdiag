@@ -36,23 +36,16 @@ This application supports both x64 and ARM64 Windows architectures with native b
 - Architecture module in `src-tauri/src/architecture.rs` provides helper functions
 
 ### Version Management
-Automated scripts to bump version numbers across all project files:
+Automated script to bump version numbers across all project files:
 
-**PowerShell (Windows):**
-- **Bump version**: `.\bump-version.ps1 2.1.4` - Updates version in all 8 project files
-- **Dry run**: `.\bump-version.ps1 2.1.4 -DryRun` - Preview changes without modifying files
-
-**Bash (Linux/macOS/Git Bash):**
-- **Bump version**: `./bump-version.sh 2.1.4` - Updates version in all 8 project files
-- **Dry run**: `./bump-version.sh 2.1.4 --dry-run` - Preview changes without modifying files
+- **Bump version**: `python3 scripts/bump-version.py 2.3.0` - Updates version in all 10 project files
+- **Dry run**: `python3 scripts/bump-version.py 2.3.0 --dry-run` - Preview changes without modifying files
 
 **Files automatically updated:**
-- package.json, package-lock.json (NPM)
-- Cargo.toml, tauri.conf.json (Rust/Tauri)
+- version.json, package.json, package-lock.json (NPM)
+- src-tauri/Cargo.toml, src-tauri/tauri.conf.json, src-tauri/tauri.msix.conf.json (Rust/Tauri)
 - AppxManifest.xml (Windows Store - gets .0 suffix)
-- App.tsx, AboutDialog.tsx, NavigationHeader.tsx (Frontend)
-
-See `VERSION-BUMP.md` for detailed documentation.
+- src/App.tsx, src/components/AboutDialog.tsx, README.md (Frontend/docs)
 
 ### CI/CD Releases
 The main release workflow is `build-and-publish-store.yml`:
@@ -80,35 +73,57 @@ This is a Tauri v2 application with a clear separation between frontend and back
 
 ### Frontend (src/)
 - **React 19** with TypeScript for UI
-- **Fluent UI React Components** (@fluentui/react-components) for Windows-native look
+- **Custom CSS design system** in `src/styles/colors_and_type.css` (tokens) + `src/styles/app.css` (components) — Windows 11 Fluent/Mica aesthetic, light/dark themes. No component library; Font Awesome for icons.
 - **Tauri v2 API** for IPC communication with backend
-- **Chart.js** with react-chartjs-2 for real-time system monitoring graphs
-- Single-page application in `App.tsx` handling all UI logic
-- Real-time monitoring component in `SystemMonitoring.tsx`
-- OpenAI integration component in `OpenAIIntegration.tsx`
-- Uses Vite for fast development and optimized production builds
+- `App.tsx` is a thin shell (nav rail, command bar, custom titlebar, status bar); each screen lives in `src/screens/*.tsx` (Diagnostics, Monitor, Processes, AI, Issues, History)
+- Shared state in `src/contexts/` (AppContext, AIContext, ThemeContext, ToastContext); behavior in `src/hooks/` (useScanner, useDiagnostics, useMonitoring, useAI, useCommands, useGlobalShortcuts, …)
+- Reusable primitives in `src/components/ui/` (Modal, Button, Tooltip, Skeleton, EmptyState, Kbd) plus CommandPalette, ShortcutHelp, Titlebar in `src/components/`
+- Uses Vite for fast development and optimized production builds; Vitest + Testing Library for unit tests (`npm test`), ESLint flat config (`npm run lint`)
 
 ### Backend (src-tauri/)
-- **Tauri v2** with lib.rs/main.rs structure for mobile support
+- **Tauri v2** with lib.rs/main_tauri.rs structure
 - **Pure Rust** implementation for system diagnostics
 - **lib.rs**: Main application logic and Tauri command handlers
-- **main.rs**: Entry point that calls the run function from lib.rs
+- **main_tauri.rs**: Entry point that calls the run function from lib.rs
+- **commands/**: Command modules (export.rs, settings.rs)
 - **diagnostics.rs**: Core diagnostic task definitions and execution logic
 - **native_diagnostics.rs**: Windows-specific diagnostic implementations
 - **wmi_native.rs**: Native WMI wrapper using Windows COM APIs (IWbemLocator, IWbemServices)
 - **windows_native.rs**: Direct Windows API bindings and wrappers
 - **architecture.rs**: CPU architecture detection (x64, ARM64) and emulation detection
-- **monitoring.rs**: Real-time system monitoring with CPU, memory, disk, and network stats
-- **openai_integration.rs**: OpenAI Responses API integration for AI-powered system analysis
-- **results_storage.rs**: Scan results storage and comparison system
+- **native_monitor.rs**: Real-time system monitoring with CPU, memory, disk, network and NPU stats
+- **ai_service.rs / ai_cache.rs / ai_prompts.rs**: Unified AI layer (provider routing, response cache, budget-aware prompts)
+- **ai_providers/**: One client module per provider (openai, anthropic, gemini, openai_compat, ollama, foundry, phi) + `capabilities()` table, `resolve_config()`, shared discovery/SSE helpers; **phi_silica.rs**: on-device Phi Silica WinRT
+- **ai_chat.rs / ai_tools.rs**: Agentic chat (backend session store, streaming tool loop) and its READ-ONLY tool registry
+- **ai_report.rs**: One-click AI scan health report (deterministic context assembly, no tool loop)
+- **issue_catalog.rs / issue_detector.rs**: Issue engine — `issue_catalog.rs` is the single
+  registry (~28 `IssueSpec`s: metadata + remediation mapping; invariants enforced by tests);
+  `issue_detector.rs` holds the pure detect fns (deterministic: clock + temp-file count are
+  injected via `DetectCtx`, never read inside detectors)
+- **remediation.rs**: Tiered remediation catalog (OpenTool | AutoSafe | Repair). Every command
+  is a compile-time constant. The Repair tier REQUIRES `confirmed: true` — the gate lives in
+  `remediation::execute`, not the UI. Commands run through the injectable `CommandRunner`
+  (tests use a recorder; `RealRunner` adds CREATE_NO_WINDOW + timeouts). `maintenance: true`
+  entries appear in the Issues screen's always-available Maintenance list
+- **ai_fix_plan.rs**: AI-proposed fix plans — the model only ever emits catalog IDs, which
+  `parse_fix_plan` validates against the remediation catalog and detected issues; execution is
+  always user-initiated through the normal confirm flow
+- **results_storage.rs**: Scan results storage, comparison, tags, failure trends
+- **state.rs**: AppState (current session, monitor, scan storage, cancelled sessions)
+- **tray.rs**: System tray (Show/Hide, Quick Scan, Exit) and close-to-tray handling
+- **update_check.rs**: GitHub-release update check (silent for Store installs via SignatureKind)
+- **sparse_identity.rs**: `has_package_identity()` — Phi Silica availability gate
+- **windows_ai_bindings.rs**: GENERATED by windows-bindgen — never hand-edit
 
-### Key Dependencies (Latest Versions)
-- Tauri: v2.9 (Tauri framework)
-- sysinfo: v0.37 (system information)
+### Key Dependencies
+- Tauri: v2.11 (Tauri framework; plugins: fs, dialog, clipboard-manager, shell, notification)
 - windows: v0.62 (Windows API bindings with native WMI support via Win32::System::Wmi)
 - winreg: v0.55 (Windows Registry access)
-- async-openai: v0.30 (OpenAI API client)
-- tokio: v1.48 (Async runtime)
+- async-openai: v0.41 (features: native-tls, responses, chat-completion — the chat-completion
+  feature is REQUIRED for the generic OpenAI-compatible providers; OpenRouter/Ollama/etc. do
+  not serve /v1/responses)
+- reqwest v0.13 + eventsource-stream (native Anthropic/Gemini clients with SSE streaming)
+- tokio: v1.52 (Async runtime); tokio-util (CancellationToken for stoppable chat turns)
 
 ### Key Architectural Decisions
 1. **Tauri v2 Migration**: Uses new plugin architecture with separate packages for filesystem, dialog, clipboard, process, and shell
@@ -153,25 +168,32 @@ The application organizes diagnostics into these categories:
 ## Important Implementation Details
 
 ### Tauri Commands
-All backend functionality is exposed through these Tauri commands in `lib.rs`:
-- `get_system_info`: Basic system information and admin status
+All backend functionality is exposed through Tauri commands registered in `lib.rs` (see the
+`invoke_handler` list there for the authoritative set). Key ones:
+- `get_system_info` / `get_architecture_info`: System information, admin status, CPU architecture
 - `get_available_tasks`: List of all diagnostic tasks
 - `start_diagnostics`: Begin a new diagnostic session
-- `run_diagnostic_task`: Execute a specific diagnostic
+- `cancel_diagnostics`: Cancel a running session (task-granular: in-flight tasks finish, queued tasks skip)
+- `run_diagnostic_task` / `run_diagnostics_parallel`: Execute diagnostics (parallel is the main path)
 - `get_session_results`: Retrieve results from current session
-- `export_results`: Export in JSON/Text/Forum format
-- `save_results_to_file`: Save results to disk
-- `get_uptime`: System uptime information
-- `restart_as_admin`: Elevate to administrator privileges
-- `start_monitoring`: Begin real-time system monitoring
-- `stop_monitoring`: Stop real-time monitoring
-- `get_current_stats`: Get current system statistics
-- `get_network_connections`: Get active network connections
-- `analyze_with_openai`: Legacy OpenAI analysis
-- `analyze_system_with_ai`: OpenAI Responses API with function calling
-- `list_scan_history`: List all saved diagnostic scan summaries
-- `load_scan`: Load a specific scan by ID with full results
-- `compare_scans`: Compare two scans and find differences
+- `commands::export::export_results` / `save_results_to_file`: Export in JSON/Text/HTML, path-validated saves
+- `get_uptime`, `restart_as_admin`, `fix_issue`, `get_fixable_issue_ids`
+- `start_monitoring` / `stop_monitoring` / `get_current_stats` / `get_network_connections`
+- `save_current_scan`, `list_scan_history`, `load_scan`, `compare_scans`, `clear_scan_history`,
+  `update_scan_tags`, `get_task_trends`
+- `check_for_update`: GitHub-release update check (no-op for Store installs and debug builds)
+- `commands::settings::*`: load/save settings; per-provider API key storage
+  (`store_provider_api_key` / `clear_provider_api_key` with provider ∈ openai, anthropic,
+  gemini, custom_openai; legacy `store_api_key`/`load_api_key`/`clear_api_key` = OpenAI)
+- AI one-shot: `ai_get_status` (incl. the per-provider `providers` array),
+  `ai_analyze_diagnostic`, `ai_analyze_section`, `ai_explain_health`, `ai_set_preference`,
+  `ai_clear_cache`, `ai_list_ollama_models`, plus `phi_silica::*`
+- AI chat (streaming): `ai_chat_send` returns an ack immediately, then events
+  `ai-chat://delta` (coalesced text), `ai-chat://tool` (activity), `ai-chat://done`,
+  `ai-chat://error` (camelCase payloads pinned by serde tests); `ai_chat_cancel`,
+  `ai_chat_new_session`, `ai_chat_get_history` (render projection for rehydration)
+- AI report: `ai_generate_report` (cached → full text in the ack; else streams via
+  `ai-report://delta|done|error`)
 
 ### Windows API Integration
 The backend makes extensive use of Windows APIs through the `windows` crate:
@@ -191,41 +213,60 @@ The backend makes extensive use of Windows APIs through the `windows` crate:
 
 ## Development Tips
 
-1. **Frontend Changes**: Most UI logic is in `App.tsx`. The component is large but well-organized by feature
+1. **Frontend Changes**: Screens live in `src/screens/`, shared state in `src/contexts/`, behavior in `src/hooks/`, primitives in `src/components/ui/`. `App.tsx` is only the shell.
 2. **Adding Diagnostics**: New diagnostics go in `diagnostics.rs` with implementation in `native_diagnostics.rs`
 3. **Windows APIs**: Use existing patterns in `windows_native.rs` for new API calls
 4. **Error Handling**: Always provide fallbacks - diagnostics should never crash the app
-5. **Testing**: Manual testing required due to system-specific nature of diagnostics
+5. **Testing**: `npm test` (Vitest) for frontend units; `cargo test` runs on Windows only (CI windows-latest job). On a Linux dev box verify Rust with `PATH=/usr/lib/llvm-20/bin:$PATH cargo xwin check|clippy --target x86_64-pc-windows-msvc`. System-specific diagnostics still need manual testing on Windows.
 6. **Performance**: Keep diagnostic batches small (5 tasks) to maintain UI responsiveness
 7. **Tauri v2 Imports**: Use `@tauri-apps/api/core` for invoke, plugin packages for specific features
 8. **Real-time Updates**: Use Tauri events (`emit` from backend, `listen` in frontend) for streaming data
 9. **Monitoring Cleanup**: System monitoring automatically stops when switching tabs or when app is hidden (visibility change API)
+10. **Generated Code**: `src-tauri/src/windows_ai_bindings.rs` is generated by `windows-bindgen` — never hand-edit it (changes are lost on regeneration). The `try_into().unwrap()` at ~line 2090 is upstream codegen and unreachable in practice.
 
 ## Phi Silica (On-Device AI) Integration
 
 ### Overview
 Phi Silica is Microsoft's on-device AI model available on Copilot+ PCs (Windows 11 24H2+, build 26100+). It uses the `Microsoft.Windows.AI.Text.LanguageModel` WinRT API.
 
-### Current Status: ✅ WORKING (December 2025)
+### Current Status: ✅ WORKING — Microsoft Store build ONLY (decided June 2026)
 
-The integration is **complete and working** on both ARM64 and x64 Copilot+ PCs!
+**Phi Silica requires registered package identity. There is no bypass.** This
+was settled empirically: a bare unpackaged exe gets `0x80070005`
+(E_ACCESSDENIED) from BOTH activation paths — standard WinRT activation AND
+`DllGetActivationFactory` on the bundled DLLs. The DLL-bundling trick only
+bypasses the activation-*factory* lookup; the API itself checks identity.
+Do not re-litigate this; the failed experiment was commit 96ca754.
 
-### The Solution: Direct DLL Activation
+Consequences (the shipped architecture):
+- **Store/MSIX build**: Phi Silica works (identity + `systemAIModels` + LAF token).
+- **Loose/portable exe**: never attempts Phi Silica. `phi_silica.rs`
+  short-circuits with "requires the Microsoft Store version" when
+  `has_package_identity()` is false, and the AI service routes to
+  Foundry Local → OpenAI instead.
+- **Sparse identity packages** are dev-only tooling for testing the Store
+  path on a loose exe (see below) — not a shipping mechanism.
 
-The key breakthrough was understanding that **standard WinRT activation (`RoGetActivationFactory`) doesn't work** for Windows App SDK classes from third-party apps. The solution is to use `DllGetActivationFactory` directly from bundled DLLs, which is exactly how Microsoft's CsWinRT projection works with `WindowsAppSDKSelfContained=true`.
+### Activation (inside the Store build)
 
-**What works:**
-1. Bundle Windows App SDK 2.0-experimental3 DLLs with the app
-2. Load `Microsoft.Windows.AI.Text.dll` from app directory
-3. Call `DllGetActivationFactory("Microsoft.Windows.AI.Text.LanguageModel")` directly
-4. Use the returned factory to create LanguageModel instances
+`create_language_model()` tries `DllGetActivationFactory` on the resolved AI
+Text DLL first (the configuration the MSIX build has always shipped —
+`RoGetActivationFactory` has historically returned E_ACCESSDENIED for
+third-party apps even with identity), then falls back to standard WinRT
+activation. DLL search order is framework package dirs first, then bundled
+copies next to the exe (`dll_search_dirs()`).
 
-**Why this works:** The bundled DLLs are Microsoft-signed and contain the full implementation. By calling their activation factory directly, we bypass the WinRT activation tables that block third-party apps.
+The Microsoft-issued LAF token is bound to the full Store Package Family Name
+`32827MikeFara.WindowsForumDiagnostics_t6j5qexy2jpp2` (name + publisher hash,
+not just publisher). Token resolution: `WFDIAG_LAF_TOKEN` env var →
+`phiSilicaLafToken` setting → built-in fallback.
 
 ### Files Involved
-- **`src-tauri/src/phi_silica.rs`**: Main implementation with `create_language_model_direct()` function
+- **`src-tauri/src/phi_silica.rs`**: Main implementation (identity gate, dual-path activation, LAF unlock)
+- **`src-tauri/src/sparse_identity.rs`**: `has_package_identity()` (slim — self-registration was removed with the Store-only decision)
+- **`src-tauri/src/update_check.rs`**: `is_store_install()` — identity + `SignatureKind == Store` (identity alone is true for sparse-registered dev exes too)
 - **`src-tauri/src/windows_ai_bindings.rs`**: Auto-generated WinRT bindings via `windows-bindgen` 0.65
-- **`scripts/build-cross.py`**: Build script that bundles Windows App SDK DLLs
+- **`scripts/build-cross.py`**: Build script (MSIX bundling; `BUNDLE_AI_DLLS = False` for loose exes)
 
 ### Bundled DLLs (per architecture)
 The MSIX package includes these DLLs for both x64 and ARM64:
@@ -236,31 +277,6 @@ The MSIX package includes these DLLs for both x64 and ARM64:
 - `WinRT.Runtime.dll` (~1.4-1.6 MB)
 
 ### Technical Implementation
-
-#### Direct DLL Activation (the key!)
-```rust
-fn create_language_model_direct() -> Result<LanguageModel, String> {
-    // Load bundled DLL from app directory
-    let app_dir = std::env::current_exe()?.parent()?;
-    let dll_path = app_dir.join("Microsoft.Windows.AI.Text.dll");
-    let module = LoadLibraryW(dll_path)?;
-
-    // Get DllGetActivationFactory export
-    let get_factory = GetProcAddress(module, "DllGetActivationFactory");
-
-    // Create HSTRING for class name
-    let class_name = HSTRING::from("Microsoft.Windows.AI.Text.LanguageModel");
-
-    // Get activation factory directly from DLL (bypasses RoGetActivationFactory!)
-    let mut factory_ptr = null_mut();
-    get_factory(class_name.as_raw(), &mut factory_ptr);
-
-    // Query for ILanguageModelStatics and call CreateAsync
-    let statics: ILanguageModelStatics = factory.cast()?;
-    let async_op = statics.CreateAsync()?;
-    wait_for_async_blocking(async_op)
-}
-```
 
 #### Manifest Configuration
 ```xml
@@ -285,26 +301,23 @@ fn create_language_model_direct() -> Result<LanguageModel, String> {
 ### Requirements
 1. **Windows 11 24H2** (build 26100+)
 2. **Copilot+ PC** with NPU (40+ TOPS) - ARM64 or x64
-3. **MSIX packaging** with `systemAIModels` capability and bundled DLLs
-
-### LAF Token (Not Required!)
-Originally thought to be required, but the direct DLL activation approach works without LAF approval:
-- LAF unlock returns "Unavailable"
-- But Phi Silica works anyway because we bypass RoGetActivationFactory
+3. **Registered package identity** (Microsoft Store build) with the `systemAIModels` capability — non-negotiable
+4. **LAF token** bound to the Store PFN for generation on the stable framework
 
 ### Error Codes Reference
 | Code | Name | Meaning |
 |------|------|---------|
-| `0x80040154` | CLASS_E_CLASSNOTREGISTERED | WinRT class not found - need bundled DLLs |
-| `0x80070005` | E_ACCESSDENIED | Using RoGetActivationFactory - switch to DllGetActivationFactory |
-| `0x80070032` | ERROR_NOT_SUPPORTED | Bootstrap API not supported for packaged apps |
+| `0x80040154` | CLASS_E_CLASSNOTREGISTERED | WinRT class not found - framework/bundled DLLs missing |
+| `0x80070005` | E_ACCESSDENIED | No package identity (any activation path), or LAF not unlocked at generation |
+| `0x80070032` | ERROR_NOT_SUPPORTED | Bootstrap API not supported for packaged apps; also `Add-AppxPackage` on a sparse MSIX without `-ExternalLocation` |
 
 ### Historical Approaches (What Didn't Work)
 
 1. **RoGetActivationFactory with PackageDependency** → `0x80070005` (blocked for third-party)
-2. **LAF token unlock** → Returns "Unavailable" for third-party apps
-3. **Loading DLL without using DllGetActivationFactory** → Still uses RoGetActivationFactory internally
-4. **Bootstrapper initialization** → `0x80070032` (not supported for packaged apps)
+2. **Bundled-DLL `DllGetActivationFactory` from an UNPACKAGED exe** → `0x80070005` — the bypass only skips the factory lookup; the API gates on identity (commit 96ca754, June 2026)
+3. **LAF token unlock under sparse Developer identity with a different package name** → "Unavailable" (token binds to the full Store PFN, name included)
+4. **Self-registering sparse package at startup for shipped loose exes** → worked mechanically, but requires trusting the self-signed cert and conflicts with an installed Store app (same identity) — abandoned in favor of Store-only
+5. **Bootstrapper initialization** → `0x80070032` (not supported for packaged apps)
 
 ### Build Commands
 ```bash
@@ -313,7 +326,80 @@ python3 scripts/build-cross.py build-all --build-msix --sign
 
 # Just rebuild MSIX (without recompiling)
 python3 scripts/build-cross.py build-msix --sign
+
+# DEV ONLY: sparse identity packages to test the Store path on a loose exe
+python3 scripts/build-cross.py build-sparse --sign
 ```
+
+### Sparse Packaging (DEV TOOLING ONLY)
+`build-sparse` creates per-arch "package with external location" identity
+packages so a developer can test the Store-identity Phi Silica path without a
+Store install: the exe stays loose on disk and a tiny signed MSIX (manifest +
+logos only, `AllowExternalContent=true`) grants it the Store identity when
+registered via `Install-SparseIdentity.ps1` (which uses
+`Add-AppxPackage -ExternalLocation`; without that flag registration fails
+with `0x80070032`). Prerequisites: the self-signed cert trusted once
+(Trusted Root, admin) and the real Store app uninstalled first (one
+registration per identity). The exe's embedded application manifest
+(`src-tauri/windows-app.manifest`) carries the matching `<msix>` element —
+without it Windows cannot attach identity to a directly-launched process.
+Gotchas encoded in the manifests: concrete per-arch `ProcessorArchitecture`
+(neutral breaks x64-on-ARM64 WinAppSDK resolution) and `MinVersion
+10.0.26100.0` (lower values silently drop the systemai capability).
+There is no in-app self-registration: shipped loose exes do not attempt to
+gain identity (Store-only decision).
+
+### AI Providers (2.5.0+: seven providers)
+
+| Provider (wire id) | Runs | Auth | Tools | Streaming | Budget (chars) |
+|---|---|---|---|---|---|
+| `phi_silica` | on-device NPU (Store build only) | package identity | no | no | 2,500 |
+| `foundry_local` | local server | none | no (unverified) | yes | 12,000 |
+| `ollama` | local server | none | yes | yes | 12,000 |
+| `custom_openai` | any /v1/chat/completions server | optional key | yes | yes | 24,000 |
+| `openai` | cloud | API key | yes | yes | 48,000 |
+| `anthropic` | cloud (native Messages API) | API key | yes | yes | 48,000 |
+| `gemini` | cloud (native generateContent) | API key | yes | yes | 48,000 |
+| `deepseek` | cloud (OpenAI-compatible) | API key | yes | yes | 48,000 |
+
+`ai_providers::capabilities()` is the single source of truth for this table.
+Auto routing is local-first: Phi → Foundry → Ollama → custom → OpenAI →
+Anthropic → Gemini; the pure decision lives in `route_provider()`
+(unit-tested, takes a `ProviderAvailability` struct); probing stays lazy in
+`determine_active_provider_with_key()`. An explicit (non-Auto) preference
+never falls back to another provider. Wire strings are pinned per-variant
+with explicit `#[serde(rename)]` — `rename_all = "snake_case"` would emit
+`"open_a_i"` for OpenAI (a real bug fixed in 2.5.0; do not reintroduce).
+
+Provider gotchas encoded in the clients (don't relearn these):
+- Anthropic: `max_tokens` REQUIRED; never send `temperature`; branch on
+  `stop_reason == "refusal"` BEFORE reading content; default model constant
+  `ANTHROPIC_DEFAULT_MODEL` in `ai_providers/anthropic.rs`.
+- Gemini: auth via `x-goog-api-key` HEADER (never `?key=` — keys must not
+  appear in URLs); assistant role is `"model"`; `functionResponse.response`
+  must be a JSON object; no tool-call ids (synthesized as `name#index`).
+- Generic/custom + Ollama use `/v1/chat/completions` (they do not serve
+  `/v1/responses`); OpenAI/Foundry one-shot keeps the Responses API. No token
+  cap goes on the wire (current OpenAI models reject `max_tokens`, compat
+  servers don't all know `max_completion_tokens`).
+- The Foundry Local port is dynamic by design; it is discovered via
+  `foundry service status` or the `localAiEndpoint` setting — never hardcode
+  it (resolution lives in `ai_providers/foundry.rs`).
+- Ollama has no default model: the `ollamaModel` setting, else the first
+  entry from `/api/tags`, else an error telling the user to pull a model.
+
+API keys: one DPAPI file / keyring entry per provider via the closed
+`ProviderKeyId` set (`dpapi.rs`); OpenAI keeps the legacy `credentials.bin`
+name so existing installs need no migration. Keys NEVER land in
+settings.json — `settings_for_disk()` strips them (tested invariant).
+
+Agentic chat safety: the tool registry in `ai_tools.rs` is strictly
+READ-ONLY (no `fix_issue`, no mutations) and chat-triggered diagnostic runs
+are never written into the scan session. The loop is bounded: 4 tool
+iterations × 8 calls, 45 s per-tool timeout, concurrency 3, then a forced
+final answer. When Phi Silica is unavailable the status message says why
+("requires the Microsoft Store version") and what to do (`winget install
+Microsoft.FoundryLocal`).
 
 ### Testing
 ```powershell
@@ -323,7 +409,8 @@ Get-AppxPackage *WindowsForumDiagnostics* | Remove-AppxPackage
 # Install new version
 Add-AppxPackage -Path "C:\code\WindowsForum_Diagnostics_2.1.5.msixbundle"
 
-# Check logs at C:\temp\phi-silica-rust.log
+# Phi Silica debug log is OPT-IN: set WFDIAG_AI_LOG=1, then check
+# C:\temp\phi-silica-rust.log
 ```
 
 ### Supported Hardware
