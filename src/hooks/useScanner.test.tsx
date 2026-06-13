@@ -245,3 +245,61 @@ describe('useScanner scan lock', () => {
     expect(startCalls()).toHaveLength(2)
   })
 })
+
+describe('useScanner quick-scan detection coverage', () => {
+  const quickTaskIds = () =>
+    (startCalls()[0]?.[1] as { taskIds: string[] } | undefined)?.taskIds ?? []
+
+  it('always includes the issue-detection source tasks in a quick scan', async () => {
+    const detectionIds = [
+      'event_codes_critical', 'services', 'performance',
+      'startup_command', 'hosts_file', 'firewall_status',
+    ]
+    contextValue = makeContext({
+      availableTasks: [
+        { id: 'os_info', name: 'OS Info', admin_required: false },
+        ...detectionIds.map(id => ({ id, name: id, admin_required: false })),
+      ],
+    })
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'session-1'
+      if (cmd === 'run_diagnostics_parallel') return []
+      return undefined
+    })
+
+    const useScanner = await loadHook()
+    const { result } = renderHook(() => useScanner())
+    await act(async () => {
+      await result.current.runQuickScan()
+    })
+
+    for (const id of detectionIds) {
+      expect(quickTaskIds()).toContain(id)
+    }
+  })
+
+  it('unions detection sources into a customised quick-scan list', async () => {
+    contextValue = makeContext({
+      settings: { autoSave: false, maxConcurrentTasks: 2, quickScanTasks: ['os_info'] },
+      availableTasks: [
+        { id: 'os_info', name: 'OS Info', admin_required: false },
+        { id: 'defender_status', name: 'Defender', admin_required: false },
+      ],
+    })
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'session-1'
+      if (cmd === 'run_diagnostics_parallel') return []
+      return undefined
+    })
+
+    const useScanner = await loadHook()
+    const { result } = renderHook(() => useScanner())
+    await act(async () => {
+      await result.current.runQuickScan()
+    })
+
+    // 'defender_status' is a detection source, so it runs even though the user's
+    // custom quick list only named 'os_info'.
+    expect(quickTaskIds()).toContain('defender_status')
+  })
+})

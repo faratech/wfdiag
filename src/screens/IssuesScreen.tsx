@@ -247,6 +247,29 @@ export const IssuesScreen: React.FC = () => {
           </div>
         )}
 
+        {/* ---- Admin-gated checks notice ---- */}
+        {issues.length > 0 && !systemInfo?.is_admin && (
+          <div className="issue-card info" style={{ alignItems: 'center' }}>
+            <div className="swatch" />
+            <div className="body">
+              <div className="title-row">
+                <i className="fa-solid fa-user-shield" style={{ color: 'var(--wf-paletteColor1)' }} />
+                <h3>Some checks need administrator access</h3>
+              </div>
+              <p className="desc">
+                Crash dumps (BSOD), SMART &amp; disk health, system-file (DISM) and battery
+                checks only run when the app is elevated, so they were skipped. Restart as
+                administrator to include them.
+              </p>
+            </div>
+            <div className="actions" style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'stretch' }}>
+              <button className="btn primary" onClick={() => { void restartAsAdmin() }}>
+                <i className="fa-solid fa-user-shield" /> Restart as administrator
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* ---- Detected issues ---- */}
         {detected.map((issue, idx) => {
           const sev = issue.severity
