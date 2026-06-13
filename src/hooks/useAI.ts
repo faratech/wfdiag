@@ -1,6 +1,32 @@
 import { useCallback } from 'react'
 import { useAIContext, AIProvider } from '../contexts/AIContext'
 
+// Prompt templates are module constants (stable identity) so the analysis
+// callbacks below don't need them as dependencies.
+const MONITORING_PROMPT_TEMPLATE = `Analyze these Windows system monitoring stats. Provide a brief assessment (3-4 sentences) of:
+1. Overall system health
+2. Any concerns or bottlenecks
+3. Recommendations if any issues are detected
+
+System Stats:
+`
+
+const PROCESS_PROMPT_TEMPLATE = `Analyze these running Windows processes. Provide a brief assessment (3-4 sentences) of:
+1. High resource consumers that may need attention
+2. Any suspicious or unnecessary processes
+3. Optimization suggestions
+
+Top Processes:
+`
+
+const COMPARISON_PROMPT_TEMPLATE = `Compare these two Windows diagnostic scans. Provide a brief assessment (3-4 sentences) of:
+1. What has improved since the previous scan
+2. What has degraded or needs attention
+3. Overall health trend
+
+Scan Comparison:
+`
+
 /**
  * Convenience hook for AI operations
  * Provides simplified access to AI context with additional helpers
@@ -68,13 +94,6 @@ export const useAI = () => {
   // Monitoring Analysis
   // ============================================================================
   const MONITORING_CACHE_KEY = '__monitoring_analysis__'
-  const MONITORING_PROMPT_TEMPLATE = `Analyze these Windows system monitoring stats. Provide a brief assessment (3-4 sentences) of:
-1. Overall system health
-2. Any concerns or bottlenecks
-3. Recommendations if any issues are detected
-
-System Stats:
-`
 
   const requestMonitoringAnalysis = useCallback(
     async (statsJson: string, forceRefresh = false): Promise<string | null> => {
@@ -107,13 +126,6 @@ System Stats:
   // Process Analysis
   // ============================================================================
   const PROCESS_CACHE_KEY = '__process_analysis__'
-  const PROCESS_PROMPT_TEMPLATE = `Analyze these running Windows processes. Provide a brief assessment (3-4 sentences) of:
-1. High resource consumers that may need attention
-2. Any suspicious or unnecessary processes
-3. Optimization suggestions
-
-Top Processes:
-`
 
   const requestProcessAnalysis = useCallback(
     async (processesJson: string, forceRefresh = false): Promise<string | null> => {
@@ -146,13 +158,6 @@ Top Processes:
   // Comparison Analysis
   // ============================================================================
   const COMPARISON_CACHE_KEY = '__comparison_analysis__'
-  const COMPARISON_PROMPT_TEMPLATE = `Compare these two Windows diagnostic scans. Provide a brief assessment (3-4 sentences) of:
-1. What has improved since the previous scan
-2. What has degraded or needs attention
-3. Overall health trend
-
-Scan Comparison:
-`
 
   const requestComparisonAnalysis = useCallback(
     async (comparisonJson: string, forceRefresh = false): Promise<string | null> => {

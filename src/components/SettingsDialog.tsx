@@ -46,33 +46,33 @@ const ModelSelect: React.FC<{
   )
 }
 
-export const SettingsDialog: React.FC<SettingsDialogProps> = ({ open, onOpenChange, settings, onSave }) => {
+export const SettingsDialog: React.FC<SettingsDialogProps> = (props) =>
+  props.open ? <SettingsDialogInner {...props} /> : null
+
+// Mounted only while open (SettingsDialog gates on it), so the draft and the
+// configured-provider selection seed straight from the live settings on mount
+// — no in-render reseeding of a long-lived dialog.
+const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange, settings, onSave }) => {
   const [draft, setDraft] = useState<SettingsData>(settings)
   const [saving, setSaving] = useState(false)
   const [ollamaModels, setOllamaModels] = useState<string[]>([])
-  // Which provider's fields are shown in "Provider setup" — presentation
-  // only, not persisted. Follows the active provider when it's concrete.
-  const [configProvider, setConfigProvider] = useState<AIProviderId>('openai')
+  // Which provider's fields are shown in "Provider setup" — presentation only,
+  // not persisted. Seeds from the active provider when it's concrete.
+  const [configProvider, setConfigProvider] = useState<AIProviderId>(() =>
+    settings.preferredAIProvider && settings.preferredAIProvider !== 'auto'
+      ? settings.preferredAIProvider
+      : 'openai'
+  )
 
+  // Populate the Ollama model dropdown on open; a missing or stopped Ollama
+  // simply leaves the free-text input in place.
   useEffect(() => {
-    if (open) {
-      setDraft(settings)
-      if (settings.preferredAIProvider && settings.preferredAIProvider !== 'auto') {
-        setConfigProvider(settings.preferredAIProvider)
-      }
-    }
-  }, [open, settings])
-
-  // Populate the Ollama model dropdown when the dialog opens; a missing or
-  // stopped Ollama simply leaves the free-text input in place.
-  useEffect(() => {
-    if (!open) return
     let cancelled = false
     invoke<string[]>('ai_list_ollama_models')
       .then(models => { if (!cancelled) setOllamaModels(models) })
       .catch(() => { if (!cancelled) setOllamaModels([]) })
     return () => { cancelled = true }
-  }, [open])
+  }, [])
 
   const set = <K extends keyof SettingsData>(k: K, v: SettingsData[K]) =>
     setDraft(d => ({ ...d, [k]: v }))

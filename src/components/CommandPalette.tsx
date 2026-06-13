@@ -30,7 +30,9 @@ const Highlighted: React.FC<{ text: string; indices: number[] }> = ({ text, indi
   )
 }
 
-export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose }) => {
+// Mounted only while open (the wrapper below gates on it), so query/selection
+// start fresh every time — no in-render reset of leftover state.
+const CommandPaletteBody: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const commands = useCommands()
   const [query, setQuery] = useState('')
   const [activeIdx, setActiveIdx] = useState(0)
@@ -38,14 +40,12 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose })
   const listRef = useRef<HTMLDivElement>(null)
   const restoreRef = useRef<HTMLElement | null>(null)
 
+  // Capture the element to restore focus to, then focus the input — once, on
+  // mount (i.e. when the palette opens).
   useEffect(() => {
-    if (open) {
-      restoreRef.current = document.activeElement as HTMLElement | null
-      setQuery('')
-      setActiveIdx(0)
-      requestAnimationFrame(() => inputRef.current?.focus())
-    }
-  }, [open])
+    restoreRef.current = document.activeElement as HTMLElement | null
+    requestAnimationFrame(() => inputRef.current?.focus())
+  }, [])
 
   const close = () => {
     onClose()
@@ -87,8 +87,6 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose })
   const flat = useMemo(() => grouped.flatMap(([, items]) => items), [grouped])
   const active = flat[Math.min(activeIdx, flat.length - 1)]
 
-  useEffect(() => { setActiveIdx(0) }, [query])
-
   useEffect(() => {
     const el = listRef.current?.querySelector('.palette-item.active')
     el?.scrollIntoView({ block: 'nearest' })
@@ -116,8 +114,6 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose })
     }
   }
 
-  if (!open) return null
-
   return (
     <div className="palette-overlay" onClick={close}>
       <div
@@ -134,7 +130,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose })
             type="text"
             placeholder="Search commands, screens and diagnostics…"
             value={query}
-            onChange={e => setQuery(e.target.value)}
+            onChange={e => { setQuery(e.target.value); setActiveIdx(0) }}
             role="combobox"
             aria-expanded="true"
             aria-controls="palette-listbox"
@@ -175,3 +171,6 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose })
     </div>
   )
 }
+
+export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose }) =>
+  open ? <CommandPaletteBody onClose={onClose} /> : null
