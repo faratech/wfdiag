@@ -12,6 +12,7 @@ const setPendingChatPrompt = vi.fn()
 const setSelectedTab = vi.fn()
 const setFixingIssue = vi.fn()
 const detectIssues = vi.fn().mockResolvedValue(undefined)
+const restartAsAdmin = vi.fn().mockResolvedValue(undefined)
 const showToast = { showInfo: vi.fn(), showWarning: vi.fn(), showError: vi.fn() }
 const prioritizeIssues = vi.fn().mockResolvedValue('1. Fix the disk first')
 
@@ -29,6 +30,7 @@ const safeRemediation: RemediationSummary = {
 }
 
 let issues: Issue[]
+let isAdmin = true
 
 vi.mock('../contexts/AppContext', async () => ({
   useAppContext: () => ({
@@ -37,7 +39,7 @@ vi.mock('../contexts/AppContext', async () => ({
     fixingIssue: null,
     setFixingIssue,
     isRunning: false,
-    systemInfo: { computer_name: 'PC', os_version: 'Win11', is_admin: true },
+    systemInfo: { computer_name: 'PC', os_version: 'Win11', is_admin: isAdmin },
     setPendingChatPrompt,
     setSelectedTab,
     settings: { openAiApiKey: 'sk-test' },
@@ -50,7 +52,7 @@ vi.mock('../contexts/ToastContext', () => ({
   useToast: () => showToast,
 }))
 vi.mock('../hooks/useDiagnostics', () => ({
-  useDiagnostics: () => ({ detectIssues, restartAsAdmin: vi.fn() }),
+  useDiagnostics: () => ({ detectIssues, restartAsAdmin }),
 }))
 vi.mock('../hooks/useScanner', () => ({
   useScanner: () => ({ runQuickScan: vi.fn() }),
@@ -81,6 +83,7 @@ function makeIssues(): Issue[] {
 beforeEach(() => {
   vi.clearAllMocks()
   issues = makeIssues()
+  isAdmin = true
   invokeMock.mockImplementation((cmd: string) => {
     switch (cmd) {
       case 'get_remediations':
@@ -160,5 +163,22 @@ describe('IssuesScreen remediation flow', () => {
     fireEvent.click(screen.getByRole('button', { name: /Prioritize/ }))
     await waitFor(() => expect(prioritizeIssues).toHaveBeenCalled())
     await waitFor(() => expect(screen.getByText(/Fix the disk first/)).toBeInTheDocument())
+  })
+})
+
+describe('IssuesScreen admin-gated checks notice', () => {
+  it('shows the elevation notice when not admin and a scan has run', () => {
+    isAdmin = false
+    render(<IssuesScreen />)
+    expect(screen.getByText(/need administrator access/i)).toBeInTheDocument()
+    const restart = screen.getByRole('button', { name: /Restart as administrator/i })
+    fireEvent.click(restart)
+    expect(restartAsAdmin).toHaveBeenCalled()
+  })
+
+  it('hides the elevation notice when the app is elevated', () => {
+    isAdmin = true
+    render(<IssuesScreen />)
+    expect(screen.queryByText(/need administrator access/i)).not.toBeInTheDocument()
   })
 })

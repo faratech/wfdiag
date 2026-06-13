@@ -6,15 +6,28 @@ import { isPermissionGranted, requestPermission, sendNotification } from '@tauri
 import { useAppContext, type TaskResult } from '../contexts/AppContext'
 import * as logger from '../utils/logger'
 
+// Inventory tasks shown as the quick-scan baseline.
+const QUICK_INVENTORY_TASKS = [
+  'comp_system', 'os_info', 'processor', 'physical_memory',
+  'disk_drive', 'logical_disk', 'network_adapter', 'systeminfo',
+]
+
+// Cheap, non-admin sources that feed the issue detectors. Unioned into EVERY
+// quick scan (see runQuickScan) so the Issues screen isn't empty after a Quick
+// Scan just because most detectors had no source data. The heavier sources
+// (event_logs, windows_update, drivers_list) and the admin-only ones (minidump,
+// chkdsk, dism_health, battery_report, disk_fragmentation) stay full-scan-only.
+const DETECTION_SOURCE_TASKS = [
+  'logical_disk', 'network_adapter', 'pending_reboot', 'device_errors',
+  'defender_status', 'event_codes_critical', 'services', 'performance',
+  'startup_command', 'hosts_file', 'firewall_status',
+]
+
 // Default Quick Scan task IDs (used when no custom list is configured). Module
 // scope keeps the reference stable so callbacks needn't depend on it.
-const DEFAULT_QUICK_SCAN_TASKS = [
-  'comp_system', 'os_info', 'processor', 'physical_memory', 'disk_drive',
-  'logical_disk', 'network_adapter', 'systeminfo',
-  // Cheap, high-signal detection sources (registry/WMI lookups); the
-  // heavier event_codes_critical scan stays full-scan-only
-  'pending_reboot', 'device_errors', 'defender_status'
-]
+const DEFAULT_QUICK_SCAN_TASKS = Array.from(
+  new Set([...QUICK_INVENTORY_TASKS, ...DETECTION_SOURCE_TASKS])
+)
 
 // Mirror scan progress onto the Windows taskbar button. All calls are
 // best-effort: failures (missing permission, non-Tauri dev context) must
@@ -276,9 +289,12 @@ export const useScanner = () => {
   ])
 
   const runQuickScan = useCallback(async () => {
-    // Use custom quick scan tasks from settings, or fall back to defaults
+    // Use custom quick scan tasks from settings, or fall back to defaults, then
+    // always union in the detection sources so the Issues screen has data to
+    // work with even when the quick list was customised.
     const customTasks = settings.quickScanTasks
-    const taskIdsToRun = (customTasks && customTasks.length > 0) ? customTasks : DEFAULT_QUICK_SCAN_TASKS
+    const base = (customTasks && customTasks.length > 0) ? customTasks : DEFAULT_QUICK_SCAN_TASKS
+    const taskIdsToRun = Array.from(new Set([...base, ...DETECTION_SOURCE_TASKS]))
 
     // Filter to only tasks that exist in availableTasks
     const quickTasks = availableTasks
