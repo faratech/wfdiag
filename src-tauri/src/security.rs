@@ -10,7 +10,23 @@ use std::process::Command;
 /// 2. Falls back to Windows-1252 for OEM code page output
 #[cfg(windows)]
 pub fn decode_windows_output(bytes: &[u8]) -> String {
-    // Try UTF-8 first (modern tools may output UTF-8)
+    // UTF-16LE first: sfc.exe (and some other system tools) emit UTF-16,
+    // which the UTF-8/1252 paths would garble into interleaved NULs.
+    // Heuristic: even length + NULs dominating the odd byte positions.
+    if bytes.len() >= 4 && bytes.len().is_multiple_of(2) {
+        let probe = &bytes[..bytes.len().min(64)];
+        let odd_nuls = probe.iter().skip(1).step_by(2).filter(|b| **b == 0).count();
+        if odd_nuls > probe.len() / 4 {
+            let units: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            return String::from_utf16_lossy(&units)
+                .trim_start_matches('\u{feff}')
+                .to_string();
+        }
+    }
+    // Try UTF-8 (modern tools may output UTF-8)
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_string();
     }
@@ -488,6 +504,17 @@ impl SecureCommandExecutor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(windows)]
+    fn decode_handles_utf16le_sfc_output() {
+        use super::decode_windows_output;
+        let text = "Windows Resource Protection did not find any integrity violations.";
+        let utf16: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        assert_eq!(decode_windows_output(&utf16), text);
+        // Plain UTF-8 still passes through unchanged
+        assert_eq!(decode_windows_output(b"plain ascii"), "plain ascii");
+    }
+
     use super::*;
 
     #[test]

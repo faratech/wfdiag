@@ -279,7 +279,10 @@ fn build_system_prompt(
                   - You have read-only access; you cannot change this system.\n\
                   - For fixable problems point to the app's Issues tab (it has vetted one-click \
                   fixes) or give standard, reversible Windows guidance. Flag anything \
-                  destructive clearly.";
+                  destructive clearly.\n\
+                  - list_remediations shows the vetted fixes; reference them by label, but only \
+                  the user can run them, and 'repair'-tier fixes always require their explicit \
+                  confirmation.";
     format!("{}\n\n{}\n\n{}\n\n{}", base, data, answers, safety)
 }
 

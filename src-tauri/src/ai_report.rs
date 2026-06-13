@@ -17,7 +17,7 @@ use crate::ai_providers::{ChatMessage, ProviderCaps, ToolCall};
 use crate::ai_service::AIProvider;
 use crate::ai_tools::{ToolExecutor, ToolFuture};
 use crate::diagnostics::TaskResult;
-use crate::issue_detector::{Issue, IssueDetector, IssueSeverity};
+use crate::issue_catalog::{DetectCtx, Issue, IssueSeverity, detect_all};
 use crate::results_storage::{ComparisonResult, ScanRecord, ScanStorage};
 use crate::state::AppState;
 use serde::Serialize;
@@ -308,7 +308,12 @@ pub async fn ai_generate_report(
     } else {
         (caps.context_budget_chars / 2).min(20_000)
     };
-    let issues = IssueDetector::new().detect_issues(&results);
+    let detect_ctx = DetectCtx {
+        results: &results,
+        now: crate::timestamp::Timestamp::now(),
+        temp_file_count: None,
+    };
+    let issues = detect_all(&detect_ctx);
     let context = build_report_context(&results, &issues, comparison.as_ref(), data_budget);
 
     let system = if compact {
@@ -379,7 +384,7 @@ pub async fn ai_generate_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::issue_detector::IssueSeverity;
+    use crate::issue_catalog::IssueSeverity;
 
     fn result(success: bool, output: &str, error: Option<&str>) -> TaskResult {
         TaskResult {
@@ -399,6 +404,8 @@ mod tests {
             description: format!("{} description", title),
             recommendation: format!("{} fix", title),
             detected,
+            source_tasks: None,
+            remediation: None,
         }
     }
 
