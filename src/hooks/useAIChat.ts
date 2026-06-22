@@ -62,6 +62,7 @@ export function useAIChat() {
   const [sessionId, setSessionId] = useState<string | null>(persistentSessionId)
 
   const sessionIdRef = useRef<string | null>(persistentSessionId)
+  const streamingRef = useRef(false)
   // Accumulated delta text per messageId, applied on a throttled flush.
   const pendingTextRef = useRef<Map<string, string>>(new Map())
   const pendingDoneRef = useRef<Map<string, DonePayload>>(new Map())
@@ -70,6 +71,11 @@ export function useAIChat() {
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const apiKeyRef = useRef<string | undefined>(settings.openAiApiKey)
   useEffect(() => { apiKeyRef.current = settings.openAiApiKey }, [settings.openAiApiKey])
+
+  const setStreaming = useCallback((value: boolean) => {
+    streamingRef.current = value
+    setIsStreaming(value)
+  }, [])
 
   const adoptSession = useCallback((id: string) => {
     persistentSessionId = id
@@ -189,7 +195,7 @@ export function useAIChat() {
             if (!matched) pendingDoneRef.current.set(p.messageId, p)
             return next
           })
-          setIsStreaming(false)
+          setStreaming(false)
         }),
         listen<ErrorPayload>('ai-chat://error', event => {
           const p = event.payload
@@ -204,7 +210,7 @@ export function useAIChat() {
             if (!matched) pendingErrorRef.current.set(p.messageId, p.message)
             return next
           })
-          setIsStreaming(false)
+          setStreaming(false)
         }),
       ]
       const resolved = await Promise.all(handlers)
@@ -224,7 +230,7 @@ export function useAIChat() {
         flushTimerRef.current = null
       }
     }
-  }, [scheduleFlush, flushDeltas, applyTool, bufferTool])
+  }, [scheduleFlush, flushDeltas, applyTool, bufferTool, setStreaming])
 
   // Rehydrate an existing conversation after a screen remount.
   useEffect(() => {
@@ -251,7 +257,7 @@ export function useAIChat() {
 
   const send = useCallback(async (text: string) => {
     const trimmed = text.trim()
-    if (!trimmed || isStreaming || !aiEnabled) return
+    if (!trimmed || streamingRef.current || !aiEnabled) return
     setMessages(prev => [...prev, {
       id: `local_${Date.now()}_${prev.length}`,
       role: 'user',
@@ -259,7 +265,7 @@ export function useAIChat() {
       streaming: false,
       tools: [],
     }])
-    setIsStreaming(true)
+    setStreaming(true)
     try {
       // Establish the session id BEFORE sending so no early event is
       // filtered out by the sessionId guard.
@@ -277,10 +283,10 @@ export function useAIChat() {
       const assistant = buildAssistantMessage(ack.messageId)
       setMessages(prev => [...prev, assistant])
       if (!assistant.streaming) {
-        setIsStreaming(false)
+        setStreaming(false)
       }
     } catch (err) {
-      setIsStreaming(false)
+      setStreaming(false)
       setMessages(prev => [...prev, {
         id: `err_${Date.now()}`,
         role: 'assistant',
@@ -290,7 +296,7 @@ export function useAIChat() {
         error: String(err),
       }])
     }
-  }, [aiEnabled, isStreaming, adoptSession, buildAssistantMessage])
+  }, [aiEnabled, adoptSession, buildAssistantMessage, setStreaming])
 
   const stop = useCallback(async () => {
     const sid = sessionIdRef.current
@@ -311,11 +317,11 @@ export function useAIChat() {
       pendingErrorRef.current.clear()
       pendingToolsRef.current.clear()
       setMessages([])
-      setIsStreaming(false)
+      setStreaming(false)
     } catch (err) {
       logger.error('useAIChat', 'Failed to start a new conversation', String(err))
     }
-  }, [adoptSession])
+  }, [adoptSession, setStreaming])
 
   return { messages, send, stop, newConversation, isStreaming, sessionId, aiEnabled }
 }

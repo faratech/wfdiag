@@ -111,6 +111,7 @@ describe('ScanReportPanel', () => {
     render(<ScanReportPanel />)
     fireEvent.click(screen.getByRole('button', { name: /Explain this scan/ }))
     await waitFor(() => expect(screen.getByText('Cached verdict.')).toBeInTheDocument())
+    expect(screen.getByText('Cached verdict.').closest('.scan-report-content')).toBeTruthy()
   })
 
   it('shows backend errors with a retry action', async () => {

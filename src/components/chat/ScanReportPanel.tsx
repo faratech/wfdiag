@@ -24,7 +24,7 @@ export const ScanReportPanel: React.FC = () => {
   }, [pendingScanReport, setPendingScanReport, hasResults, aiEnabled, generating, generate])
 
   return (
-    <div className="wf-block">
+    <div className="wf-block scan-report-panel">
       <header className="wf-block-header">
         <span className="accent-bar" />
         <span>Scan Report</span>
@@ -39,7 +39,7 @@ export const ScanReportPanel: React.FC = () => {
           </span>
         )}
       </header>
-      <div style={{ padding: 12, fontSize: 12.5 }}>
+      <div className="scan-report-body">
         {!hasResults && !report ? (
           <div style={{ color: 'var(--wf-text-muted)' }}>
             Run a scan, then generate an AI health report: top issues, what changed since the
@@ -55,7 +55,7 @@ export const ScanReportPanel: React.FC = () => {
             </div>
           </div>
         ) : report || generating ? (
-          <div className={`report-body${generating ? ' streaming' : ''}`} aria-busy={generating}>
+          <div className={`report-body scan-report-content${generating ? ' streaming' : ''}`} aria-busy={generating}>
             {report
               ? renderMarkdownLite(report)
               : <span style={{ color: 'var(--wf-text-muted)' }}><i className="fa-solid fa-circle-notch fa-spin" aria-hidden="true" /> Reading scan data…</span>}

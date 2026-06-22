@@ -16,6 +16,8 @@ export interface UseMonitoringOptions {
   onStats?: (stats: SystemStats) => void
   /** Component name for logging */
   componentName?: string
+  /** Include per-process GPU/NPU adapter stats. This is intentionally opt-in. */
+  includeProcessAdapterStats?: boolean
 }
 
 export interface UseMonitoringResult {
@@ -38,7 +40,12 @@ export interface UseMonitoringResult {
 }
 
 export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoringResult {
-  const { autoStart = false, onStats, componentName = 'useMonitoring' } = options
+  const {
+    autoStart = false,
+    onStats,
+    componentName = 'useMonitoring',
+    includeProcessAdapterStats = false,
+  } = options
 
   const [isActive, setIsActive] = useState(false)
   const [stats, setStats] = useState<SystemStats | null>(null)
@@ -46,22 +53,27 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
 
   // Refs for cleanup and preventing double-initialization
   const unlistenRef = useRef<UnlistenFn | null>(null)
+  const leaseRef = useRef<number | null>(null)
   const hasAutoStarted = useRef(false)
   const isMountedRef = useRef(true)
 
   // Start monitoring
   const start = useCallback(async () => {
-    if (isActive) return
+    if (isActive || leaseRef.current !== null) return
 
     try {
       setIsLoading(true)
-      await invoke('start_monitoring')
+      const leaseId = await invoke<number>('start_monitoring', { includeProcessAdapterStats })
+      leaseRef.current = leaseId
 
       if (!isMountedRef.current) {
         // Component unmounted during async call
-        await invoke('stop_monitoring').catch(err =>
+        await invoke('stop_monitoring', { leaseId }).catch(err =>
           logger.error(componentName, 'Failed to stop monitoring after unmount', err)
         )
+        if (leaseRef.current === leaseId) {
+          leaseRef.current = null
+        }
         return
       }
 
@@ -88,17 +100,24 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
       unlistenRef.current = unlisten
       setIsActive(true)
     } catch (error) {
+      const leaseId = leaseRef.current
+      if (leaseId !== null) {
+        leaseRef.current = null
+        await invoke('stop_monitoring', { leaseId }).catch(err =>
+          logger.error(componentName, 'Failed to stop monitoring after start error', err)
+        )
+      }
       logger.error(componentName, 'Failed to start monitoring', error)
     } finally {
       if (isMountedRef.current) {
         setIsLoading(false)
       }
     }
-  }, [isActive, onStats, componentName])
+  }, [isActive, onStats, componentName, includeProcessAdapterStats])
 
   // Stop monitoring
   const stop = useCallback(async () => {
-    if (!isActive) return
+    if (!isActive && leaseRef.current === null) return
 
     // Clean up event listener
     if (unlistenRef.current) {
@@ -107,7 +126,9 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
     }
 
     try {
-      await invoke('stop_monitoring')
+      const leaseId = leaseRef.current
+      leaseRef.current = null
+      await invoke('stop_monitoring', leaseId !== null ? { leaseId } : {})
     } catch (error) {
       logger.error(componentName, 'Failed to stop monitoring', error)
     }
@@ -160,10 +181,15 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
         unlistenRef.current = null
       }
 
-      // Stop monitoring if active
-      invoke('stop_monitoring').catch(error =>
-        logger.error(componentName, 'Failed to stop monitoring on cleanup', error)
-      )
+      // Stop only the monitoring stream this hook started. A later hook mount
+      // has a newer lease and the backend will ignore this stale cleanup.
+      const leaseId = leaseRef.current
+      if (leaseId !== null) {
+        leaseRef.current = null
+        invoke('stop_monitoring', { leaseId }).catch(error =>
+          logger.error(componentName, 'Failed to stop monitoring on cleanup', error)
+        )
+      }
     }
   }, [componentName])
 

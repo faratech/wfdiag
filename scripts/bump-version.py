@@ -46,6 +46,43 @@ def update_json_file(file_path: Path, new_version: str, dry_run: bool) -> bool:
         return False
 
 
+def update_package_lock(file_path: Path, new_version: str, dry_run: bool) -> bool:
+    """Update package-lock.json root and packages[""].version fields."""
+    if not file_path.exists():
+        print(f"  Warning: File not found: {file_path}")
+        return False
+
+    try:
+        data = json.loads(file_path.read_text(encoding='utf-8'))
+        old_root = data.get('version', 'unknown')
+        packages = data.get('packages')
+        root_package = packages.get('') if isinstance(packages, dict) else None
+        old_package = root_package.get('version', 'unknown') if isinstance(root_package, dict) else 'missing'
+
+        if old_root == new_version and old_package == new_version:
+            print(f"  Skipped (already {new_version}): {file_path}")
+            return True
+
+        if dry_run:
+            print(
+                f"  [DRY RUN] Would update: {file_path} "
+                f"(root {old_root} -> {new_version}, package {old_package} -> {new_version})"
+            )
+        else:
+            data['version'] = new_version
+            if isinstance(root_package, dict):
+                root_package['version'] = new_version
+            file_path.write_text(json.dumps(data, indent=4) + '\n', encoding='utf-8')
+            print(
+                f"  Updated: {file_path} "
+                f"(root {old_root} -> {new_version}, package {old_package} -> {new_version})"
+            )
+        return True
+    except Exception as e:
+        print(f"  Error updating {file_path}: {e}")
+        return False
+
+
 def update_cargo_toml(file_path: Path, new_version: str, dry_run: bool) -> bool:
     """Update version in Cargo.toml."""
     if not file_path.exists():
@@ -117,7 +154,12 @@ def update_msix_conf(file_path: Path, new_version: str, dry_run: bool) -> bool:
 
 
 def update_appx_manifest(file_path: Path, new_version: str, dry_run: bool) -> bool:
-    """Update version in AppxManifest.xml (adds .0 suffix)."""
+    """Update the package Identity version in AppxManifest.xml (adds .0 suffix).
+
+    Do not rewrite every Version/MinVersion attribute: TargetDeviceFamily and
+    PackageDependency MinVersion values are OS/framework versions, not the app
+    version.
+    """
     if not file_path.exists():
         print(f"  Warning: File not found: {file_path}")
         return False
@@ -127,19 +169,25 @@ def update_appx_manifest(file_path: Path, new_version: str, dry_run: bool) -> bo
 
         # AppxManifest uses X.Y.Z.0 format
         version_with_suffix = f"{new_version}.0"
-        pattern = r'(Version=")[^"]+(")'
+        pattern = r'(<Identity\b[^>]*\bVersion=")([^"]+)(")'
 
-        match = re.search(pattern, content)
+        match = re.search(pattern, content, flags=re.DOTALL)
         if not match:
-            print(f"  Warning: Version pattern not found in: {file_path}")
+            print(f"  Warning: Identity Version pattern not found in: {file_path}")
             return False
 
-        old_version = content[match.start(1)+len('Version="'):match.end(2)-1]
+        old_version = match.group(2)
 
         if dry_run:
             print(f"  [DRY RUN] Would update: {file_path} ({old_version} -> {version_with_suffix})")
         else:
-            new_content = re.sub(pattern, f'\\g<1>{version_with_suffix}\\g<2>', content)
+            new_content = re.sub(
+                pattern,
+                f'\\g<1>{version_with_suffix}\\g<3>',
+                content,
+                count=1,
+                flags=re.DOTALL,
+            )
             file_path.write_text(new_content, encoding='utf-8')
             print(f"  Updated: {file_path} ({old_version} -> {version_with_suffix})")
 
@@ -215,7 +263,7 @@ def main():
 
     # 3. package-lock.json
     total_count += 1
-    if update_json_file(script_dir / 'package-lock.json', new_version, dry_run):
+    if update_package_lock(script_dir / 'package-lock.json', new_version, dry_run):
         success_count += 1
 
     # 4. src-tauri/Cargo.toml

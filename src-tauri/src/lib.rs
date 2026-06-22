@@ -34,11 +34,16 @@ mod windows_ai_bindings;
 mod ai_cache;
 mod ai_chat;
 mod ai_fix_plan;
+mod ai_grounding;
 mod ai_prompts;
 pub mod ai_providers;
 mod ai_report;
 mod ai_service;
 mod ai_tools;
+mod mcp_client;
+
+#[cfg(windows)]
+mod adapter_monitor;
 
 use crate::diagnostics::{DiagnosticTask, TaskResult};
 use crate::error::DiagError;
@@ -46,6 +51,7 @@ use crate::issue_catalog::Issue;
 use native_monitor::{NetworkConnection, SystemMonitor};
 use results_storage::{ComparisonResult, ScanRecord, ScanStorage, ScanSummary, TaskTrend};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use tauri::Emitter;
 use tauri::State;
 
@@ -218,10 +224,6 @@ async fn start_diagnostics(
     *current = Some(session);
     drop(current);
 
-    // Only one session is ever active; dropping stale entries here keeps the
-    // cancellation set from growing across scans.
-    state.cancelled_sessions.lock().await.clear();
-
     println!("Diagnostic session {} started successfully", session_id);
 
     Ok(session_id)
@@ -253,11 +255,17 @@ async fn run_diagnostic_task(
             task_id: task_id.clone(),
         })?;
 
+    let session_id = {
+        let current = state.current_session.lock().await;
+        current.as_ref().map(|s| s.session_id.clone())
+    };
+
     // Emit progress event
     window
         .emit(
             "task-progress",
             serde_json::json!({
+                "session_id": &session_id,
                 "task_id": &task_id,
                 "status": "running",
                 "task_name": &task.name,
@@ -279,6 +287,7 @@ async fn run_diagnostic_task(
         .emit(
             "task-progress",
             serde_json::json!({
+                "session_id": &session_id,
                 "task_id": &task_id,
                 "status": "completed",
                 "success": result.success,
@@ -299,7 +308,7 @@ async fn run_diagnostics_parallel(
 ) -> Result<Vec<(String, TaskResult)>, String> {
     use futures::stream::{self, StreamExt};
 
-    let max_concurrent = max_concurrent.unwrap_or(5); // Default to 5 concurrent tasks
+    let max_concurrent = max_concurrent.unwrap_or(5).clamp(1, 16); // Default to 5, bounded
     let tasks = std::sync::Arc::new(diagnostics::get_all_tasks());
 
     // Create futures for each diagnostic task
@@ -337,6 +346,7 @@ async fn run_diagnostics_parallel(
                         let _ = window_clone.emit(
                             "task-progress",
                             serde_json::json!({
+                                "session_id": &session_id,
                                 "task_id": &task_id,
                                 "status": "completed",
                                 "success": false,
@@ -356,6 +366,7 @@ async fn run_diagnostics_parallel(
                     .emit(
                         "task-progress",
                         serde_json::json!({
+                            "session_id": &session_id,
                             "task_id": &task_id,
                             "status": "running",
                             "task_name": &task.name,
@@ -384,6 +395,7 @@ async fn run_diagnostics_parallel(
                     .emit(
                         "task-progress",
                         serde_json::json!({
+                            "session_id": &session_id,
                             "task_id": &task_id,
                             "status": "completed",
                             "success": result.success,
@@ -410,6 +422,8 @@ async fn run_diagnostics_parallel(
             Err(e) => eprintln!("Task failed: {}", e),
         }
     }
+
+    state.cancelled_sessions.lock().await.remove(&session_id);
 
     Ok(successful_results)
 }
@@ -548,7 +562,9 @@ async fn restart_as_admin() -> Result<(), String> {
 async fn start_monitoring(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+    include_process_adapter_stats: Option<bool>,
+) -> Result<u64, String> {
+    let lease_id = state.monitoring_lease.fetch_add(1, Ordering::SeqCst) + 1;
     let mut monitor_opt = state.system_monitor.lock().await;
 
     // Create a new monitor if none exists
@@ -558,15 +574,23 @@ async fn start_monitoring(
 
     // Start monitoring
     if let Some(monitor) = monitor_opt.as_ref() {
-        monitor.start_monitoring().await;
-        Ok(())
+        monitor
+            .start_monitoring(include_process_adapter_stats.unwrap_or(false))
+            .await;
+        Ok(lease_id)
     } else {
         Err(DiagError::monitor_failed("Failed to create system monitor").into())
     }
 }
 
 #[tauri::command]
-async fn stop_monitoring(state: State<'_, AppState>) -> Result<(), String> {
+async fn stop_monitoring(lease_id: Option<u64>, state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(lease_id) = lease_id
+        && state.monitoring_lease.load(Ordering::SeqCst) != lease_id
+    {
+        return Ok(());
+    }
+
     let monitor_opt = state.system_monitor.lock().await;
 
     if let Some(monitor) = monitor_opt.as_ref() {
@@ -828,18 +852,44 @@ async fn detect_issues(state: State<'_, AppState>) -> Result<Vec<Issue>, String>
 
 #[tauri::command]
 async fn open_url(url: String) -> Result<(), String> {
+    let parsed =
+        url::Url::parse(&url).map_err(|_| DiagError::internal("Invalid URL".to_string()))?;
+    match parsed.scheme() {
+        "http" | "https" | "mailto" => {}
+        scheme => {
+            return Err(
+                DiagError::internal(format!("URL scheme '{}' is not allowed", scheme)).into(),
+            );
+        }
+    }
+
     #[cfg(target_os = "windows")]
     {
-        // Use PowerShell's Start-Process which handles URLs with special characters better
-        // This avoids issues with & and other chars in mailto: URLs
-        std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!("Start-Process '{}'", url.replace("'", "''")),
-            ])
-            .spawn()
-            .map_err(|e| DiagError::internal(format!("Failed to open URL: {}", e)))?;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use windows::core::PCWSTR;
+
+        let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+        let target: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+
+        unsafe {
+            let result = ShellExecuteW(
+                None,
+                PCWSTR(verb.as_ptr()),
+                PCWSTR(target.as_ptr()),
+                PCWSTR(std::ptr::null()),
+                PCWSTR(std::ptr::null()),
+                SW_SHOWNORMAL,
+            );
+
+            if result.0 as i32 <= 32 {
+                return Err(DiagError::internal(format!(
+                    "Failed to open URL. Error code: {}",
+                    result.0 as i32
+                ))
+                .into());
+            }
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -897,6 +947,9 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(app_state)
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_main_window(app);
+        }))
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())

@@ -30,6 +30,10 @@ export interface ProcessInfo {
   memory_mb: number
   virtual_memory_mb: number
   shared_memory_mb: number
+  gpu_percent: number
+  gpu_memory_mb: number
+  npu_percent: number
+  npu_memory_mb: number
   cpu_time_secs: number
   start_time: number
   status: string
@@ -75,9 +79,16 @@ export interface SystemStats {
   disks: DiskInfo[]
   network_upload_kb: number
   network_download_kb: number
+  gpu_available: boolean
+  gpu_name: string | null
+  gpu_utilization: number | null
+  gpu_memory_used_mb: number
+  gpu_memory_total_mb: number
   npu_available: boolean
   npu_name: string | null
   npu_utilization: number | null
+  npu_memory_used_mb: number
+  npu_memory_total_mb: number
   top_processes: ProcessInfo[]
   timestamp: number
 }

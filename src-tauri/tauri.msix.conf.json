@@ -2,7 +2,7 @@
   "bundle": {
     "active": true,
     "targets": ["msix"],
-    "publisher": "CN=WindowsForum",
+    "publisher": "CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4",
     "windows": {
       "certificateThumbprint": null,
       "digestAlgorithm": "sha256",
@@ -13,9 +13,9 @@
       "wix": null,
       "nsis": null,
       "msix": {
-        "displayName": "WF Diagnostics",
-        "publisherDisplayName": "WindowsForum",
-        "identityName": "WindowsForum.WFDiagnostics",
+        "displayName": "WindowsForum Diagnostics",
+        "publisherDisplayName": "Mike Fara",
+        "identityName": "32827MikeFara.WindowsForumDiagnostics",
         "msixVersion": "2.5.0.0",
         "languages": ["en-US"],
         "capabilities": [

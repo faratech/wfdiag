@@ -3,13 +3,14 @@ import { useMonitoring } from '../hooks/useMonitoring'
 import type { SystemStats } from '../types/monitoring'
 import { Skeleton } from '../components/ui'
 import { ChartCard } from './ChartCard'
+import { formatBytesMb } from './util'
 
 const HISTORY = 60
 
-interface Series { cpu: number[]; mem: number[]; disk: number[]; net: number[]; npu: number[] }
+interface Series { cpu: number[]; mem: number[]; disk: number[]; net: number[]; gpu: number[]; npu: number[] }
 
 export const MonitorScreen: React.FC = () => {
-  const [series, setSeries] = useState<Series>({ cpu: [], mem: [], disk: [], net: [], npu: [] })
+  const [series, setSeries] = useState<Series>({ cpu: [], mem: [], disk: [], net: [], gpu: [], npu: [] })
   // Last non-null sample, kept so the header/cards don't blank out when the
   // monitoring hook momentarily reports null stats (e.g. while paused)
   const [lastStats, setLastStats] = useState<SystemStats | null>(null)
@@ -25,6 +26,7 @@ export const MonitorScreen: React.FC = () => {
       mem: push(prev.mem, s.memory_utilization),
       disk: push(prev.disk, s.disk_utilization),
       net: push(prev.net, (s.network_upload_kb + s.network_download_kb) / 1024),
+      gpu: push(prev.gpu, s.gpu_utilization ?? 0),
       npu: push(prev.npu, s.npu_utilization ?? 0),
     }))
   }, [])
@@ -45,6 +47,7 @@ export const MonitorScreen: React.FC = () => {
           {last && (
             <span style={{ fontSize: 12, color: 'var(--wf-text-muted)' }}>
               {last.per_cpu_utilization?.length || 0} threads · {last.memory_total_gb.toFixed(1)} GB RAM
+              {last.gpu_available ? ` · GPU: ${last.gpu_name ?? 'present'}` : ''}
               {last.npu_available ? ` · NPU: ${last.npu_name ?? 'present'}` : ''}
             </span>
           )}
@@ -60,7 +63,7 @@ export const MonitorScreen: React.FC = () => {
       <div className="scrollable screen-pad">
         {!last && (
           <div className="charts-grid" aria-hidden="true">
-            {Array.from({ length: 4 }, (_, i) => (
+            {Array.from({ length: 5 }, (_, i) => (
               <Skeleton key={i} variant="block" height={150} />
             ))}
           </div>
@@ -71,8 +74,11 @@ export const MonitorScreen: React.FC = () => {
           <ChartCard title="Memory" value={(last?.memory_utilization ?? 0).toFixed(1)} sub="%" color="#0e8fb8" series={series.mem} max={100} hint={last ? `${last.memory_used_gb.toFixed(1)} / ${last.memory_total_gb.toFixed(1)} GB used` : ''} />
           <ChartCard title="Disk" value={(last?.disk_utilization ?? 0).toFixed(1)} sub="%" color="#7a4cc9" series={series.disk} max={100} hint="Active disk time" />
           <ChartCard title="Network" value={(((last?.network_upload_kb ?? 0) + (last?.network_download_kb ?? 0)) / 1024).toFixed(2)} sub="MB/s" color="#0f8a5a" series={series.net} max={netMax} hint="Up + down throughput" />
+          {last?.gpu_available && (
+            <ChartCard title="GPU" value={(last?.gpu_utilization ?? 0).toFixed(1)} sub="%" color="#b04a7a" series={series.gpu} max={100} hint={last.gpu_memory_total_mb > 0 ? `${formatBytesMb(last.gpu_memory_used_mb)} / ${formatBytesMb(last.gpu_memory_total_mb)}` : (last.gpu_name ?? 'Graphics adapter')} />
+          )}
           {last?.npu_available && (
-            <ChartCard title="NPU" value={(last?.npu_utilization ?? 0).toFixed(1)} sub="%" color="#c98a00" series={series.npu} max={100} hint={last?.npu_name ?? 'Neural processing unit'} />
+            <ChartCard title="NPU" value={(last?.npu_utilization ?? 0).toFixed(1)} sub="%" color="#c98a00" series={series.npu} max={100} hint={last.npu_memory_total_mb > 0 ? `${formatBytesMb(last.npu_memory_used_mb)} / ${formatBytesMb(last.npu_memory_total_mb)}` : (last?.npu_name ?? 'Neural processing unit')} />
           )}
         </div>
         )}

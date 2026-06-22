@@ -32,6 +32,7 @@ tauri-plugin-dialog = "2.7"
 tauri-plugin-clipboard-manager = "2.3"
 tauri-plugin-shell = "2.3"
 tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2.4.2"
 
 # Date/time utilities
 chrono = "0.4"
@@ -64,14 +65,19 @@ dirs = "6.0"
 # chat-completion for the generic OpenAI-compatible providers (OpenRouter,
 # Ollama, Groq, …) which do not serve /v1/responses
 async-openai = { version = "0.41", default-features = false, features = ["native-tls", "responses", "chat-completion"] }
-# keyring stays on 3.x: v4 split the crate into keyring-core + per-store
-# crates and is explicitly not meant for direct app use yet. Only used as a
-# Linux dev convenience anyway (Windows builds use DPAPI).
-keyring = "3.6"
+# Non-Windows secure storage fallback. Windows builds use DPAPI instead.
+[target.'cfg(not(windows))'.dependencies]
+keyring-core = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", features = ["rt-tokio-crypto-rust"] }
 
 # Windows-specific dependencies
 [target.'cfg(windows)'.dependencies]
-winreg = "0.55"
+winreg = "0.56"
 encoding_rs = "0.8"
 windows-core = "0.62"
 windows-future = "0.3"
@@ -81,6 +87,7 @@ windows = { version = "0.62", features = [
     "Win32_Security",
     "Win32_Security_Cryptography",
     "Win32_System_Threading",
+    "Win32_System_EventLog",
     "Win32_System_SystemInformation",
     "Win32_System_Performance",
     "Win32_System_TaskScheduler",
@@ -89,6 +96,7 @@ windows = { version = "0.62", features = [
     "Win32_Storage_FileSystem",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    "Wdk_Graphics_Direct3D",
     "Wdk_System_SystemInformation",
     "Win32_System_ProcessStatus",
     "Win32_Graphics_DXCore",

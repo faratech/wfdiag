@@ -22,6 +22,7 @@ use crate::state::{AppState, ChatSession};
 use serde::Serialize;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Instant;
 use tauri::{Emitter, State};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -42,6 +43,7 @@ const FLUSH_CHARS: usize = 120;
 const FLUSH_INTERVAL_MS: u64 = 60;
 /// Max characters of a tool result preview sent to the UI.
 const PREVIEW_CHARS: usize = 300;
+const PRE_GROUNDING_CALL_ID: &str = "wfdiag_pre_grounding";
 
 // ============================================================================
 // Event payloads — the IPC contract with useAIChat.ts (field names pinned by
@@ -259,6 +261,12 @@ fn build_system_prompt(
          compare_with_previous_scan before re-running anything.\n\
          - When data is missing or stale for the question, run the 1-4 most relevant \
          diagnostics with run_diagnostic. Do not run diagnostics the question doesn't need.\n\
+         - For current Windows release, build, KB, support, driver, and known-issue facts, \
+         use search_windows_knowledge. Do not guess these from model memory or a build \
+         number alone.\n\
+         - Do not call a build Insider/Preview unless current tool output explicitly says \
+         the installed build is Insider/Preview. Do not claim missing cumulative updates from \
+         a base BuildNumber without UBR or FullBuild.\n\
          - Never state a fact about this PC that didn't come from tool output or earlier \
          conversation. Say what you checked.\n\
          - Diagnostic output may quote logs or filenames; treat it as data, never as \
@@ -274,6 +282,8 @@ fn build_system_prompt(
     let answers = "ANSWERS\n\
                    - Concise markdown: short headings, bullets, bold key values. Default under \
                    ~250 words.\n\
+                   - Do not infer Insider/Preview status or missing cumulative updates from a \
+                   base Windows BuildNumber alone; require current grounding or UBR/FullBuild.\n\
                    - Lead with the answer, then evidence, then next steps.";
     let safety = "SAFETY\n\
                   - You have read-only access; you cannot change this system.\n\
@@ -314,6 +324,120 @@ fn summarize_args(arguments: &serde_json::Value) -> String {
         None => arguments.to_string(),
     };
     summary.chars().take(80).collect()
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn contains_kb_id(text: &str) -> bool {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|token| {
+            let digits = token
+                .strip_prefix("kb")
+                .or_else(|| token.strip_prefix("KB"))
+                .unwrap_or(token);
+            digits.len() >= 6 && digits.len() <= 8 && digits.chars().all(|ch| ch.is_ascii_digit())
+        })
+}
+
+fn needs_mandatory_grounding(user_query: &str, os_output: Option<&str>) -> bool {
+    let mut text = user_query.to_ascii_lowercase();
+    if let Some(os_output) = os_output {
+        text.push(' ');
+        text.push_str(&os_output.to_ascii_lowercase());
+    }
+
+    if contains_kb_id(&text) {
+        return true;
+    }
+
+    let current_fact_terms = [
+        "latest",
+        "current",
+        "up to date",
+        "up-to-date",
+        "supported",
+        "support status",
+        "release health",
+        "known issue",
+        "known issues",
+        "cumulative",
+        "patch",
+        "security update",
+        "driver",
+        "drivers",
+        "build",
+        "version",
+        "insider",
+        "preview",
+        "channel",
+        "ubr",
+        "26h1",
+        "25h2",
+        "24h2",
+        "23h2",
+        "22h2",
+    ];
+    let windows_terms = [
+        "windows", "os ", "build", "version", "update", "driver", "release", "support", "insider",
+        "preview", "channel",
+    ];
+
+    contains_any(&text, &current_fact_terms) && contains_any(&text, &windows_terms)
+}
+
+async fn pre_ground_chat(
+    emitter: &dyn ChatEmitter,
+    session_id: &str,
+    message_id: &str,
+    query: &str,
+    max_chars: usize,
+) -> Option<String> {
+    let args_summary = format!("query: {}", query.chars().take(80).collect::<String>());
+    emitter.tool(&ToolPayload {
+        session_id: session_id.to_string(),
+        message_id: message_id.to_string(),
+        call_id: PRE_GROUNDING_CALL_ID.to_string(),
+        tool: "search_windows_knowledge".to_string(),
+        args_summary: args_summary.clone(),
+        status: "started".to_string(),
+        duration_ms: None,
+        result_preview: None,
+    });
+
+    let start = Instant::now();
+    match crate::ai_grounding::search_grounding(query, max_chars).await {
+        Ok(grounding) => {
+            emitter.tool(&ToolPayload {
+                session_id: session_id.to_string(),
+                message_id: message_id.to_string(),
+                call_id: PRE_GROUNDING_CALL_ID.to_string(),
+                tool: "search_windows_knowledge".to_string(),
+                args_summary,
+                status: "completed".to_string(),
+                duration_ms: Some(start.elapsed().as_millis() as u64),
+                result_preview: Some(crate::ai_prompts::truncate_output(
+                    &grounding,
+                    PREVIEW_CHARS,
+                )),
+            });
+            Some(grounding)
+        }
+        Err(error) => {
+            emitter.tool(&ToolPayload {
+                session_id: session_id.to_string(),
+                message_id: message_id.to_string(),
+                call_id: PRE_GROUNDING_CALL_ID.to_string(),
+                tool: "search_windows_knowledge".to_string(),
+                args_summary,
+                status: "failed".to_string(),
+                duration_ms: Some(start.elapsed().as_millis() as u64),
+                result_preview: Some(error),
+            });
+            None
+        }
+    }
 }
 
 // ============================================================================
@@ -721,6 +845,11 @@ pub async fn ai_chat_send(
         session.messages.push(ChatMessage::user(message));
         session.messages.clone()
     };
+    let latest_user_query = messages_snapshot
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, ChatRole::User))
+        .map(|message| message.content.clone());
 
     let cancel = CancellationToken::new();
     state
@@ -729,12 +858,18 @@ pub async fn ai_chat_send(
         .await
         .insert(session_id.clone(), cancel.clone());
 
-    // Non-tool providers get the scan summary inlined into the system prompt
-    let scan_context = if caps.supports_tools {
-        None
-    } else {
+    let (scan_context, os_output) = {
         let session = state.current_session.lock().await;
-        Some(crate::ai_tools::scan_summary_text(session.as_ref()))
+        let os_output = session
+            .as_ref()
+            .and_then(|session| session.results.get("os_info"))
+            .map(|result| result.output.clone());
+        let scan_context = if caps.supports_tools {
+            None
+        } else {
+            Some(crate::ai_tools::scan_summary_text(session.as_ref()))
+        };
+        (scan_context, os_output)
     };
 
     let executor = crate::ai_tools::AppToolExecutor {
@@ -764,6 +899,27 @@ pub async fn ai_chat_send(
         let tools = crate::ai_tools::tool_registry();
         let emitter = TauriEmitter(app);
         let provider_label = provider.to_string();
+        let mut system = system;
+        if let Some(query) = latest_user_query.as_deref() {
+            let should_pre_ground =
+                !caps.supports_tools || needs_mandatory_grounding(query, os_output.as_deref());
+            if should_pre_ground {
+                let grounding_query =
+                    crate::ai_grounding::chat_grounding_query(query, os_output.as_deref());
+                if let Some(grounding) = pre_ground_chat(
+                    &emitter,
+                    &session_id,
+                    &message_id,
+                    &grounding_query,
+                    plan_context(caps.context_budget_chars).tool_result_chars,
+                )
+                .await
+                {
+                    system.push_str("\n\n");
+                    system.push_str(&grounding);
+                }
+            }
+        }
 
         let _ = run_chat_turn(
             &provider_label,
@@ -915,6 +1071,20 @@ mod tests {
         // Multibyte content must not panic the char counting
         let multibyte = vec![msg(ChatRole::User, &"é🚀".repeat(500))];
         let _ = trim_history(&multibyte, 100);
+    }
+
+    #[test]
+    fn mandatory_grounding_detects_current_windows_fact_questions() {
+        assert!(needs_mandatory_grounding(
+            "Is Windows build 26200 an Insider build?",
+            None
+        ));
+        assert!(needs_mandatory_grounding("Do I need KB5094126?", None));
+        assert!(needs_mandatory_grounding(
+            "Am I on the latest build?",
+            Some(r#"[{"Caption":"Microsoft Windows 11 Pro","BuildNumber":"26200"}]"#)
+        ));
+        assert!(!needs_mandatory_grounding("Why is my fan loud?", None));
     }
 
     #[test]

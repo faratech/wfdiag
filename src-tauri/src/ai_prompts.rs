@@ -24,6 +24,15 @@ pub fn diagnostic_interpretation_prompt(
         "Summarize the findings and call out anything concerning, with the values that \
          matter. Keep response under 200 words."
     };
+    let task_hint = if task_name.to_ascii_lowercase().contains("windows update") {
+        "This diagnostic reports installed update/hotfix records from Windows, not a raw \
+         WindowsUpdate.log file. If installed_updates or hotfix_details contain entries, \
+         treat that as non-empty data and summarize the KB IDs, descriptions, and install dates. \
+         Do not ask for Get-WindowsUpdateLog unless the user specifically needs failure log \
+         analysis beyond installed update history.\n\n"
+    } else {
+        ""
+    };
 
     format!(
         r#"Analyze this Windows diagnostic:
@@ -31,10 +40,29 @@ pub fn diagnostic_interpretation_prompt(
 {task_name}:
 {output}
 
+{task_hint}
+Do not infer Windows release channel, Insider/Preview status, support status, or
+missing cumulative updates from a base BuildNumber alone. Require UBR/FullBuild
+or explicit live grounding before making those claims.
+
 {length_hint}"#,
         task_name = task_name,
         output = readable_output,
+        task_hint = task_hint,
         length_hint = length_hint
+    )
+}
+
+/// Prefix a prompt with live RAG context. The grounding text is already
+/// bounded and source-labeled by `ai_grounding`.
+pub fn attach_grounding(prompt: String, grounding: Option<&str>) -> String {
+    let Some(grounding) = grounding.map(str::trim).filter(|g| !g.is_empty()) else {
+        return prompt;
+    };
+    format!(
+        "{grounding}\n\nANALYSIS TASK\n{prompt}",
+        grounding = grounding,
+        prompt = prompt
     )
 }
 
@@ -113,6 +141,20 @@ fn render_object_as_text(obj: &serde_json::Map<String, serde_json::Value>, depth
         "Description",
         "Status",
         "State",
+        "ProductName",
+        "DisplayVersion",
+        "ReleaseId",
+        "CurrentBuild",
+        "CurrentBuildNumber",
+        "BuildNumber",
+        "UBR",
+        "HotFixID",
+        "InstalledOn",
+        "InstalledBy",
+        "EditionID",
+        "InstallationType",
+        "KnownRelease",
+        "InsiderEnrollment",
         "Capacity",
         "Size",
         "FreeSpace",
@@ -155,7 +197,7 @@ fn render_object_as_text(obj: &serde_json::Map<String, serde_json::Value>, depth
     }
 
     // Show other non-empty fields (limit to avoid bloat)
-    let max_other_fields = 10 - lines.len();
+    let max_other_fields = 10usize.saturating_sub(lines.len());
     let mut other_count = 0;
 
     for (key, val) in obj {
@@ -186,6 +228,14 @@ fn render_object_as_text(obj: &serde_json::Map<String, serde_json::Value>, depth
 
 /// Format a field name for display (CamelCase -> readable)
 fn format_field_name(name: &str) -> String {
+    match name {
+        "HotFixID" => return "Hot Fix ID".to_string(),
+        "UBR" => return "UBR".to_string(),
+        "OSArchitecture" => return "OS Architecture".to_string(),
+        "IPAddress" => return "IP Address".to_string(),
+        "MACAddress" => return "MAC Address".to_string(),
+        _ => {}
+    }
     // Add spaces before capitals
     let mut result = String::new();
     for (i, c) in name.chars().enumerate() {
@@ -410,5 +460,28 @@ mod tests {
         assert!(section_summary_prompt("Storage", &data, 20_000).contains("Under 200 words."));
         assert!(health_explanation_prompt(&data, 1_500).contains("under 120 words"));
         assert!(issue_prioritization_prompt(&data, 20_000).contains("Under 200 words."));
+    }
+
+    #[test]
+    fn attach_grounding_prefixes_prompt() {
+        let prompt = attach_grounding(
+            "Analyze this".to_string(),
+            Some("LIVE RAG GROUNDING\n- doc"),
+        );
+        assert!(prompt.starts_with("LIVE RAG GROUNDING"));
+        assert!(prompt.contains("ANALYSIS TASK\nAnalyze this"));
+        assert_eq!(attach_grounding("No rag".into(), None), "No rag");
+    }
+
+    #[test]
+    fn windows_update_prompt_treats_hotfixes_as_data() {
+        let prompt = diagnostic_interpretation_prompt(
+            "Windows Update History",
+            r#"{"installed_updates":[{"HotFixID":"KB5094126","Description":"Security Update","InstalledOn":"6/9/2026"}]}"#,
+            20_000,
+        );
+        assert!(prompt.contains("not a raw WindowsUpdate.log file"));
+        assert!(prompt.contains("treat that as non-empty data"));
+        assert!(prompt.contains("Hot Fix ID: KB5094126"));
     }
 }

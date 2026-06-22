@@ -126,7 +126,14 @@ pub(crate) fn parse_fix_plan(
         let Some(spec) = catalog.iter().find(|r| r.id == remediation_id) else {
             continue;
         };
-        if !detected.iter().any(|i| i.detected && i.id == issue_id) {
+        let Some(issue) = detected.iter().find(|i| i.detected && i.id == issue_id) else {
+            continue;
+        };
+        if issue
+            .remediation
+            .as_ref()
+            .is_none_or(|r| r.id != remediation_id)
+        {
             continue;
         }
         if !seen.insert((issue_id.to_string(), remediation_id.to_string())) {
@@ -232,6 +239,13 @@ mod tests {
         }
     }
 
+    fn detected_issue_with_remediation(id: &str, remediation_id: &str) -> Issue {
+        Issue {
+            remediation: crate::remediation::summary(remediation_id),
+            ..detected_issue(id)
+        }
+    }
+
     #[test]
     fn prompt_contains_only_detected_issues_and_all_ids() {
         let mut ok_issue = detected_issue("low_disk_space");
@@ -246,7 +260,10 @@ mod tests {
 
     #[test]
     fn parse_happy_path_and_fences() {
-        let detected = vec![detected_issue("dism_corruption")];
+        let detected = vec![detected_issue_with_remediation(
+            "dism_corruption",
+            "dism_restorehealth",
+        )];
         let text = r#"```json
 {"entries": [{"issue_id": "dism_corruption", "remediation_id": "dism_restorehealth", "rationale": "Repairs the store."}], "notes": "One repair."}
 ```"#;
@@ -259,16 +276,21 @@ mod tests {
 
     #[test]
     fn parse_drops_unknown_and_undetected_and_dedups() {
-        let detected = vec![detected_issue("dns_misconfigured")];
+        let detected = vec![
+            detected_issue_with_remediation("temp_files", "clear_temp_files"),
+            detected_issue("dns_misconfigured"),
+        ];
         let text = r#"{"entries": [
-            {"issue_id": "dns_misconfigured", "remediation_id": "flush_dns", "rationale": "a"},
-            {"issue_id": "dns_misconfigured", "remediation_id": "flush_dns", "rationale": "dup"},
-            {"issue_id": "dns_misconfigured", "remediation_id": "format_c_drive", "rationale": "invented"},
-            {"issue_id": "not_detected_issue", "remediation_id": "flush_dns", "rationale": "wrong issue"}
+            {"issue_id": "temp_files", "remediation_id": "clear_temp_files", "rationale": "a"},
+            {"issue_id": "temp_files", "remediation_id": "clear_temp_files", "rationale": "dup"},
+            {"issue_id": "temp_files", "remediation_id": "format_c_drive", "rationale": "invented"},
+            {"issue_id": "temp_files", "remediation_id": "flush_dns", "rationale": "unrelated"},
+            {"issue_id": "dns_misconfigured", "remediation_id": "flush_dns", "rationale": "no mapped remediation"},
+            {"issue_id": "not_detected_issue", "remediation_id": "clear_temp_files", "rationale": "wrong issue"}
         ], "notes": "n"}"#;
         let (entries, _) = parse_fix_plan(text, &detected, remediations());
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].remediation_id, "flush_dns");
+        assert_eq!(entries[0].remediation_id, "clear_temp_files");
     }
 
     #[test]
@@ -285,7 +307,7 @@ mod tests {
     #[test]
     fn parse_caps_entries_and_rationale() {
         let detected: Vec<Issue> = (0..12)
-            .map(|i| detected_issue(&format!("issue{}", i)))
+            .map(|i| detected_issue_with_remediation(&format!("issue{}", i), "flush_dns"))
             .collect();
         // Build 12 entries all pointing at a real remediation, with fake issue
         // ids that ARE detected (issue0..)

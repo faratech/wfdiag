@@ -273,7 +273,7 @@ pub async fn ai_generate_report(
 
     // Comparison baseline: explicit id, else the newest stored scan that is
     // not this session (auto-save may have stored the current scan already).
-    let comparison = {
+    let comparison_info = {
         let storage = state.scan_storage.lock().await;
         storage.as_ref().and_then(|storage| {
             let previous_id = match &previous_scan_id {
@@ -300,8 +300,15 @@ pub async fn ai_generate_report(
                 tags: Vec::new(),
                 results: results.clone(),
             };
-            Some(ScanStorage::compute_comparison(current, previous))
+            Some((
+                ScanStorage::compute_comparison(current, previous),
+                previous_id,
+            ))
         })
+    };
+    let (comparison, resolved_previous_scan_id) = match comparison_info {
+        Some((comparison, previous_id)) => (Some(comparison), Some(previous_id)),
+        None => (None, None),
     };
 
     let compact = caps.context_budget_chars <= 4_000;
@@ -325,7 +332,7 @@ pub async fn ai_generate_report(
     };
     let prompt = format!("Scan data:\n\n{}", context);
 
-    let cache_hash = report_cache_hash(&results, previous_scan_id.as_deref());
+    let cache_hash = report_cache_hash(&results, resolved_previous_scan_id.as_deref());
     let report_id = format!("report_{}", cache_hash);
     let cache_key = format!("report:{}:{}", provider, cache_hash);
     if let Some(cached) = crate::ai_service::cached_value(&cache_key) {

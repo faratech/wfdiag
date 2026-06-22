@@ -41,7 +41,7 @@ const PAGE_META: Record<TabValue, { title: string; sub: string }> = {
 
 const AppContent: React.FC = () => {
   const {
-    selectedTab, setSelectedTab, systemInfo, results, sessionId, isRunning, currentProgress, currentTaskName,
+    selectedTab, setSelectedTab, systemInfo, availableTasks, results, sessionId, isRunning, currentProgress, currentTaskName,
     scanStartTime, scanEndTime, issues, navRailCollapsed, setNavRailCollapsed,
     showSettings, setShowSettings, showAbout, setShowAbout, settings, saveSettings,
   } = useAppContext()
@@ -77,9 +77,22 @@ const AppContent: React.FC = () => {
 
   // "Quick Scan" from the tray menu (backend shows the window, then emits)
   const runQuickScanRef = useRef(runQuickScan)
+  const startupScanStartedRef = useRef(false)
   useEffect(() => {
     runQuickScanRef.current = runQuickScan
   }, [runQuickScan])
+  useEffect(() => {
+    if (
+      startupScanStartedRef.current ||
+      !settings.scanOnStartup ||
+      availableTasks.length === 0 ||
+      isRunning
+    ) {
+      return
+    }
+    startupScanStartedRef.current = true
+    runQuickScanRef.current()
+  }, [settings.scanOnStartup, availableTasks.length, isRunning])
   useEffect(() => {
     let unlisten: (() => void) | undefined
     import('@tauri-apps/api/event')

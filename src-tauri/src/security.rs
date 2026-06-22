@@ -1,6 +1,12 @@
 use anyhow::Result;
 use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::process::Stdio;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Decode Windows command output from OEM code page to UTF-8
 ///
@@ -206,12 +212,10 @@ impl SecureCommandExecutor {
         self.validate_arguments(cmd, args, config)?;
 
         // Build and execute command with security flags
-        let mut command = self.create_secure_command(&config.executable);
+        let mut command = self.create_secure_command(&config.executable)?;
         command.args(args);
 
-        command
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to execute command '{}': {}", cmd, e))
+        self.output_with_timeout(command, DEFAULT_COMMAND_TIMEOUT, cmd)
     }
 
     /// Validate PowerShell scripts against known safe patterns
@@ -225,7 +229,7 @@ impl SecureCommandExecutor {
             .get("powershell")
             .ok_or_else(|| anyhow::anyhow!("PowerShell not configured"))?;
 
-        let mut command = self.create_secure_command(&config.executable);
+        let mut command = self.create_secure_command(&config.executable)?;
         command.args([
             "-NoProfile",
             "-NonInteractive",
@@ -235,9 +239,7 @@ impl SecureCommandExecutor {
             script,
         ]);
 
-        command
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to execute PowerShell script: {}", e))
+        self.output_with_timeout(command, DEFAULT_COMMAND_TIMEOUT, "powershell")
     }
 
     fn validate_arguments(&self, cmd: &str, args: &[&str], config: &CommandConfig) -> Result<()> {
@@ -488,8 +490,9 @@ impl SecureCommandExecutor {
         matches!(arg, "C:" | "/status" | "/querysettings" | "-an" | "/all")
     }
 
-    pub fn create_secure_command(&self, executable: &str) -> Command {
-        let mut cmd = Command::new(executable);
+    pub fn create_secure_command(&self, executable: &str) -> Result<Command> {
+        let program = trusted_system_program(executable)?;
+        let mut cmd = Command::new(program);
 
         #[cfg(windows)]
         {
@@ -498,7 +501,141 @@ impl SecureCommandExecutor {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
 
-        cmd
+        Ok(cmd)
+    }
+
+    fn output_with_timeout(
+        &self,
+        mut command: Command,
+        timeout: Duration,
+        label: &str,
+    ) -> Result<std::process::Output> {
+        let stdout_path = unique_output_path(label, "stdout")?;
+        let stderr_path = unique_output_path(label, "stderr")?;
+        let stdout_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stdout_path)?;
+        let stderr_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stderr_path)?;
+
+        command.stdout(Stdio::from(stdout_file));
+        command.stderr(Stdio::from(stderr_file));
+
+        let mut child = command
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("Failed to execute command '{}': {}", label, e))?;
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| anyhow::anyhow!("Failed while waiting for '{}': {}", label, e))?
+            {
+                let stdout = fs::read(&stdout_path).unwrap_or_default();
+                let stderr = fs::read(&stderr_path).unwrap_or_default();
+                let _ = fs::remove_file(&stdout_path);
+                let _ = fs::remove_file(&stderr_path);
+                return Ok(std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(&stdout_path);
+                let _ = fs::remove_file(&stderr_path);
+                return Err(anyhow::anyhow!(
+                    "Command '{}' timed out after {} second(s)",
+                    label,
+                    timeout.as_secs()
+                ));
+            }
+
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+fn unique_output_path(label: &str, stream: &str) -> Result<PathBuf> {
+    let safe_label: String = label
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(std::env::temp_dir().join(format!(
+        "wfdiag_{}_{}_{}_{}.tmp",
+        std::process::id(),
+        nonce,
+        safe_label,
+        stream
+    )))
+}
+
+#[cfg(windows)]
+fn windows_root() -> PathBuf {
+    std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("WINDIR"))
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+}
+
+#[cfg(windows)]
+fn with_exe_extension(program: &str) -> String {
+    if program.to_ascii_lowercase().ends_with(".exe") {
+        program.to_string()
+    } else {
+        format!("{}.exe", program)
+    }
+}
+
+/// Resolve a fixed Windows executable to a trusted OS location. This avoids
+/// launching elevated diagnostics or remediations through the current directory
+/// or PATH search order.
+pub(crate) fn trusted_system_program(program: &str) -> Result<PathBuf> {
+    if program.contains('\\') || program.contains('/') || Path::new(program).is_absolute() {
+        return Err(anyhow::anyhow!(
+            "Trusted command names must not include paths: {}",
+            program
+        ));
+    }
+
+    #[cfg(windows)]
+    {
+        let root = windows_root();
+        let lower = program.to_ascii_lowercase();
+        let path = match lower.as_str() {
+            "powershell" | "powershell.exe" => root
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe"),
+            "wmic" | "wmic.exe" => root.join("System32").join("wbem").join("wmic.exe"),
+            "explorer" | "explorer.exe" => root.join("explorer.exe"),
+            _ => root.join("System32").join(with_exe_extension(program)),
+        };
+        if path.exists() {
+            Ok(path)
+        } else {
+            Err(anyhow::anyhow!(
+                "Trusted Windows command not found: {}",
+                path.display()
+            ))
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(PathBuf::from(program))
     }
 }
 

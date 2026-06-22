@@ -141,16 +141,8 @@ impl WindowsNativeAPI {
 
     /// Convert build number to Windows version name
     fn get_windows_version_name(&self, build: u32) -> String {
-        if build >= 26000 {
-            "Windows 11 (Insider)".to_string()
-        } else if build >= 25000 {
-            "Windows 11 24H2".to_string()
-        } else if build >= 24000 {
-            "Windows 11 23H2".to_string()
-        } else if build >= 23000 {
-            "Windows 11 22H2".to_string()
-        } else if build >= 22000 {
-            "Windows 11 21H2".to_string()
+        if build >= 22000 {
+            "Windows 11".to_string()
         } else if build >= 20000 {
             match build {
                 20348 => "Windows Server 2022".to_string(),

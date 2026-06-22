@@ -138,7 +138,7 @@ pub struct RealRunner;
 
 impl CommandRunner for RealRunner {
     fn spawn(&self, program: &str, args: &[&str]) -> anyhow::Result<()> {
-        let mut cmd = std::process::Command::new(program);
+        let mut cmd = std::process::Command::new(crate::security::trusted_system_program(program)?);
         cmd.args(args);
         #[cfg(windows)]
         {
@@ -159,18 +159,21 @@ impl CommandRunner for RealRunner {
         timeout: Duration,
     ) -> RunFuture<'a> {
         Box::pin(async move {
-            let mut cmd = tokio::process::Command::new(program);
+            let mut cmd =
+                tokio::process::Command::new(crate::security::trusted_system_program(program)?);
             cmd.args(args);
             #[cfg(windows)]
             {
                 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
-            let output = tokio::time::timeout(timeout, cmd.output())
+            cmd.kill_on_drop(true);
+            let child = cmd.spawn()?;
+            let output = tokio::time::timeout(timeout, child.wait_with_output())
                 .await
                 .map_err(|_| {
                     anyhow::anyhow!(
-                        "'{}' timed out after {} minute(s) — it may still be running",
+                        "'{}' timed out after {} minute(s) and was stopped",
                         program,
                         timeout.as_secs() / 60
                     )
@@ -758,7 +761,7 @@ fn reset_windows_update() -> anyhow::Result<FixResult> {
     let mut actions_taken = Vec::new();
 
     let run_quiet = |program: &str, args: &[&str]| -> anyhow::Result<bool> {
-        let mut cmd = std::process::Command::new(program);
+        let mut cmd = std::process::Command::new(crate::security::trusted_system_program(program)?);
         cmd.args(args);
         #[cfg(windows)]
         {

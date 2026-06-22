@@ -60,10 +60,31 @@ export interface AIProviderStatus {
   providers?: ProviderInfo[]
 }
 
+export interface GroundingTraceSource {
+  source: string
+  title: string
+  url?: string
+}
+
+export interface GroundingTrace {
+  enabled: boolean
+  query: string
+  source_count: number
+  sources: GroundingTraceSource[]
+  error?: string
+}
+
+export interface AIAnalysisMeta {
+  provider_used: AIProvider
+  cached: boolean
+  grounding?: GroundingTrace
+}
+
 export interface AIResponse {
   interpretation: string
   provider_used: AIProvider
   cached: boolean
+  grounding?: GroundingTrace
   error?: string
 }
 
@@ -81,7 +102,7 @@ interface AIContextType {
   setPreferredProvider: (provider: AIProviderPreference) => void
 
   // Analysis functions (on-demand)
-  analyzeDiagnostic: (taskId: string, taskName: string, output: string) => Promise<string>
+  analyzeDiagnostic: (taskId: string, taskName: string, output: string, forceRefresh?: boolean) => Promise<string>
   analyzeSection: (sectionName: string, sectionData: string) => Promise<string>
   explainHealth: (metricsData: string) => Promise<string>
   analyzeGeneric: (cacheKey: string, prompt: string, forceRefresh?: boolean) => Promise<string>
@@ -90,6 +111,7 @@ interface AIContextType {
   // Loading states per context_id
   isAnalyzing: Record<string, boolean>
   interpretations: Record<string, string>
+  analysisMeta: Record<string, AIAnalysisMeta>
   errors: Record<string, string>
 
   // Cache management
@@ -129,6 +151,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   // Analysis state
   const [isAnalyzing, setIsAnalyzing] = useState<Record<string, boolean>>({})
   const [interpretations, setInterpretations] = useState<Record<string, string>>({})
+  const [analysisMeta, setAnalysisMeta] = useState<Record<string, AIAnalysisMeta>>({})
   const [errors, setErrors] = useState<Record<string, string>>({})
 
   // Track previous settings to detect changes
@@ -321,6 +344,14 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         const response = await doInvoke()
         const interpretation = response.interpretation
         setInterpretations(prev => ({ ...prev, [cacheKey]: interpretation }))
+        setAnalysisMeta(prev => ({
+          ...prev,
+          [cacheKey]: {
+            provider_used: response.provider_used,
+            cached: response.cached,
+            grounding: response.grounding,
+          },
+        }))
         return interpretation
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error)
@@ -340,7 +371,8 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   const analyzeDiagnostic = useCallback(async (
     taskId: string,
     taskName: string,
-    output: string
+    output: string,
+    forceRefresh = false
   ): Promise<string> => {
     // Allow if AI is enabled and either backend says available OR we have an API key
     if (!aiEnabled || (!isAIAvailable && !hasApiKey)) {
@@ -350,7 +382,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     // Check if already cached (key includes a hash of the output so a re-scan with
     // different data for the same task does not return a stale interpretation).
     const cacheKey = diagnosticCacheKey(taskId, output)
-    if (interpretations[cacheKey]) {
+    if (!forceRefresh && interpretations[cacheKey]) {
       return interpretations[cacheKey]
     }
 
@@ -360,7 +392,8 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         taskName,
         diagnosticOutput: output,
         sessionId,
-        apiKey: settings.openAiApiKey || null
+        apiKey: settings.openAiApiKey || null,
+        forceRefresh
       })
     )
   }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
@@ -383,7 +416,8 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         sectionName,
         sectionData,
         sessionId,
-        apiKey: settings.openAiApiKey || null
+        apiKey: settings.openAiApiKey || null,
+        forceRefresh: false
       })
     )
   }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
@@ -402,7 +436,8 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       invoke<AIResponse>('ai_explain_health', {
         metricsData,
         sessionId,
-        apiKey: settings.openAiApiKey || null
+        apiKey: settings.openAiApiKey || null,
+        forceRefresh: false
       })
     )
   }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
@@ -428,7 +463,8 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         sectionName: cacheKey,
         sectionData: prompt,
         sessionId,
-        apiKey: settings.openAiApiKey || null
+        apiKey: settings.openAiApiKey || null,
+        forceRefresh
       })
     )
   }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
@@ -450,7 +486,8 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       invoke<AIResponse>('ai_prioritize_issues', {
         issuesData: issuesJson,
         sessionId,
-        apiKey: settings.openAiApiKey || null
+        apiKey: settings.openAiApiKey || null,
+        forceRefresh
       })
     )
   }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
@@ -465,10 +502,12 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         // Clear only for that session - but we only have one session in memory
         if (targetSessionId === sessionId) {
           setInterpretations({})
+          setAnalysisMeta({})
           setErrors({})
         }
       } else {
         setInterpretations({})
+        setAnalysisMeta({})
         setErrors({})
       }
     } catch (error) {
@@ -492,6 +531,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     prioritizeIssues,
     isAnalyzing,
     interpretations,
+    analysisMeta,
     errors,
     clearCache,
     sessionId,

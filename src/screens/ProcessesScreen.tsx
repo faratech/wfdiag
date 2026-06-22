@@ -4,11 +4,25 @@ import type { ProcessInfo } from '../types/monitoring'
 import { Skeleton } from '../components/ui'
 import { formatBytesMb } from './util'
 
-type SortKey = 'name' | 'pid' | 'cpu_percent' | 'memory_mb' | 'thread_count' | 'user'
+type SortKey =
+  | 'name'
+  | 'pid'
+  | 'cpu_percent'
+  | 'gpu_percent'
+  | 'gpu_memory_mb'
+  | 'npu_percent'
+  | 'npu_memory_mb'
+  | 'memory_mb'
+  | 'thread_count'
+  | 'user'
 type SortDir = 'asc' | 'desc'
 
 export const ProcessesScreen: React.FC = () => {
-  const { processes, isActive, toggle, refresh } = useMonitoring({ autoStart: true, componentName: 'ProcessesScreen' })
+  const { processes, stats, isActive, toggle, refresh } = useMonitoring({
+    autoStart: true,
+    componentName: 'ProcessesScreen',
+    includeProcessAdapterStats: true,
+  })
   const [sortBy, setSortBy] = useState<SortKey>('cpu_percent')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [search, setSearch] = useState('')
@@ -41,11 +55,35 @@ export const ProcessesScreen: React.FC = () => {
 
   const totalCpu = processes.reduce((s, p) => s + p.cpu_percent, 0)
   const totalMem = processes.reduce((s, p) => s + p.memory_mb, 0)
+  const showGpu = Boolean(stats?.gpu_available || processes.some(p => p.gpu_percent > 0 || p.gpu_memory_mb > 0))
+  const showNpu = Boolean(stats?.npu_available || processes.some(p => p.npu_percent > 0 || p.npu_memory_mb > 0))
 
   const cols: [SortKey, string][] = [
-    ['name', 'Process'], ['pid', 'PID'], ['cpu_percent', 'CPU'],
-    ['memory_mb', 'Memory'], ['thread_count', 'Threads'], ['user', 'User'],
+    ['name', 'Process'],
+    ['pid', 'PID'],
+    ['cpu_percent', 'CPU'],
+    ...(showGpu ? [['gpu_percent', 'GPU'], ['gpu_memory_mb', 'GPU Mem']] as [SortKey, string][] : []),
+    ...(showNpu ? [['npu_percent', 'NPU'], ['npu_memory_mb', 'NPU Mem']] as [SortKey, string][] : []),
+    ['memory_mb', 'Memory'],
+    ['thread_count', 'Threads'],
+    ['user', 'User'],
   ]
+  const summary = [
+    `Showing ${sorted.length} of ${processes.length}`,
+    `${totalCpu.toFixed(1)}% CPU`,
+    `${(totalMem / 1024).toFixed(1)} GB RAM`,
+    ...(showGpu ? [`${(stats?.gpu_utilization ?? 0).toFixed(1)}% GPU`] : []),
+    ...(showNpu ? [`${(stats?.npu_utilization ?? 0).toFixed(1)}% NPU`] : []),
+  ].join(' · ')
+
+  const renderPercentCell = (value: number) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end' }}>
+      <span>{value.toFixed(1)}%</span>
+      <div className={`proc-bar ${value > 10 ? 'warn' : ''} ${value > 25 ? 'danger' : ''}`}>
+        <span style={{ width: `${Math.min(100, value * 4)}%` }} />
+      </div>
+    </div>
+  )
 
   return (
     <>
@@ -60,7 +98,7 @@ export const ProcessesScreen: React.FC = () => {
             onChange={e => setSearch(e.target.value)}
           />
           <span style={{ fontSize: 12, color: 'var(--wf-text-muted)' }}>
-            Showing {sorted.length} of {processes.length} · {totalCpu.toFixed(1)}% CPU · {(totalMem / 1024).toFixed(1)} GB RAM
+            {summary}
           </span>
         </div>
         <div className="row-gap-12">
@@ -86,7 +124,7 @@ export const ProcessesScreen: React.FC = () => {
             <tbody>
               {processes.length === 0 && (
                 <tr>
-                  <td colSpan={6} style={{ padding: 14 }}>
+                  <td colSpan={cols.length} style={{ padding: 14 }}>
                     <Skeleton variant="text" count={8} height={22} />
                   </td>
                 </tr>
@@ -103,12 +141,19 @@ export const ProcessesScreen: React.FC = () => {
                     </div>
                   </td>
                   <td className="num">{p.pid}</td>
-                  <td className="num">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end' }}>
-                      <span>{p.cpu_percent.toFixed(1)}%</span>
-                      <div className={`proc-bar ${p.cpu_percent > 10 ? 'warn' : ''} ${p.cpu_percent > 25 ? 'danger' : ''}`}><span style={{ width: `${Math.min(100, p.cpu_percent * 4)}%` }} /></div>
-                    </div>
-                  </td>
+                  <td className="num">{renderPercentCell(p.cpu_percent)}</td>
+                  {showGpu && (
+                    <>
+                      <td className="num">{renderPercentCell(p.gpu_percent)}</td>
+                      <td className="num">{formatBytesMb(p.gpu_memory_mb)}</td>
+                    </>
+                  )}
+                  {showNpu && (
+                    <>
+                      <td className="num">{renderPercentCell(p.npu_percent)}</td>
+                      <td className="num">{formatBytesMb(p.npu_memory_mb)}</td>
+                    </>
+                  )}
                   <td className="num">
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end' }}>
                       <span>{formatBytesMb(p.memory_mb)}</span>

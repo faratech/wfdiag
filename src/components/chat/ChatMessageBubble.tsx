@@ -16,6 +16,11 @@ export const ChatMessageBubble: React.FC<{ message: ChatMessageVM }> = React.mem
       <div className="msg-col">
         <span className="msg-sender">{isUser ? 'You' : 'WF Assistant'}</span>
         {message.tools.length > 0 && <ToolActivityChips tools={message.tools} />}
+        {!isUser && message.streaming && (
+          <div className="ai-activity chat-reasoning" aria-live="polite">
+            <span><i className="fa-solid fa-circle-notch fa-spin" aria-hidden="true" /> Reasoning</span>
+          </div>
+        )}
         {showBubble && (
           <div className={`bubble${message.streaming ? ' streaming' : ''}`}>
             {message.error ? (

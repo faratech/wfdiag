@@ -21,6 +21,9 @@ The version is defined in `/version.json`:
 # Update all files from version.json
 node scripts/update-version.js
 
+# Update to a specific version
+node scripts/update-version.js 2.2.0
+
 # Or use npm script
 npm run update-version
 npm run version-sync
@@ -31,19 +34,27 @@ npm run version-sync
 # Update all files from version.json
 .\scripts\update-version.ps1
 
-# Update to a specific version (updates version.json first, then all files)
+# Update to a specific version
 .\scripts\update-version.ps1 -NewVersion "2.2.0"
+
+# Preview changes
+.\scripts\update-version.ps1 -NewVersion "2.2.0" -DryRun
 ```
 
 ## Files Updated
 
-Both scripts automatically update:
+All entry points delegate to `bump-version.py` and update:
 
+- `version.json` - Version source of truth
 - `package.json` - NPM package version
+- `package-lock.json` - NPM lockfile package version
 - `src-tauri/Cargo.toml` - Rust crate version and description
-- `tauri.conf.json` - Tauri root config version and product name
-- `src-tauri/tauri.conf.json` - Tauri source config version and product name  
+- `src-tauri/tauri.conf.json` - Tauri config version
+- `AppxManifest.xml` - MSIX Identity version only
+- `src/components/AboutDialog.tsx` - Version display
 - `src/App.tsx` - Version display in UI
+- `src-tauri/tauri.msix.conf.json` - Tauri MSIX version
+- `README.md` - Version references
 
 ## Workflow
 
@@ -52,7 +63,8 @@ Both scripts automatically update:
    # Option 1: Edit version.json manually, then run:
    npm run update-version
    
-   # Option 2: Use PowerShell with direct version parameter:
+   # Option 2: Use a direct version parameter:
+   node scripts/update-version.js 2.2.0
    .\scripts\update-version.ps1 -NewVersion "2.2.0"
    ```
 

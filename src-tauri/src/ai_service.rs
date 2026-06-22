@@ -120,6 +120,8 @@ pub struct AIResponse {
     pub provider_used: AIProvider,
     pub cached: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub grounding: Option<crate::ai_grounding::GroundingTrace>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -164,6 +166,7 @@ pub struct AIProviderStatus {
 static AI_SERVICE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static AI_CACHE: OnceLock<std::sync::Mutex<AICache>> = OnceLock::new();
 static USER_PREFERENCE: OnceLock<std::sync::Mutex<AIProviderPreference>> = OnceLock::new();
+const ANALYSIS_CACHE_VERSION: &str = "rag-v2";
 
 /// Initialize the AI service (call once at startup)
 /// Note: This is optional since OnceLock initializes lazily on first access
@@ -347,7 +350,7 @@ pub async fn determine_active_provider_with_key(
         AIProviderPreference::OpenAI => {
             avail.openai = frontend_openai_key || check_openai_available().await;
         }
-        AIProviderPreference::PhiSilica => avail.phi = check_phi_silica_available().0,
+        AIProviderPreference::PhiSilica => avail.phi = check_phi_silica_available().1,
         AIProviderPreference::FoundryLocal => {
             avail.foundry = check_foundry_local_available().await.is_some();
         }
@@ -359,7 +362,7 @@ pub async fn determine_active_provider_with_key(
         AIProviderPreference::Gemini => avail.gemini = check_gemini_available().await,
         AIProviderPreference::DeepSeek => avail.deepseek = check_deepseek_available().await,
         AIProviderPreference::Auto => {
-            avail.phi = check_phi_silica_available().0;
+            avail.phi = check_phi_silica_available().1;
             avail.foundry = !avail.phi && check_foundry_local_available().await.is_some();
             let local_won = avail.phi || avail.foundry;
             avail.ollama = !local_won && check_ollama_available().await.is_some();
@@ -413,7 +416,7 @@ pub async fn get_ai_status() -> AIProviderStatus {
     // lazy short-circuit here) and routing reuses the same snapshot instead
     // of re-probing via determine_active_provider
     let avail = ProviderAvailability {
-        phi: phi_available,
+        phi: phi_ready,
         foundry: foundry_endpoint.is_some(),
         ollama: ollama_endpoint.is_some(),
         custom: custom_endpoint.is_some(),
@@ -435,13 +438,7 @@ pub async fn get_ai_status() -> AIProviderStatus {
 
     // In Auto routing order, which is also a sensible display order
     let providers = vec![
-        provider_info(
-            AIProvider::PhiSilica,
-            phi_available,
-            phi_available,
-            None,
-            None,
-        ),
+        provider_info(AIProvider::PhiSilica, phi_ready, phi_available, None, None),
         provider_info(
             AIProvider::FoundryLocal,
             foundry_endpoint.is_some(),
@@ -535,17 +532,28 @@ pub async fn get_ai_status() -> AIProviderStatus {
 /// Generate cache key for a request. The provider is part of the key so a
 /// response truncated for one provider's budget is never served for another,
 /// and a hit always reports the provider that actually produced it.
-fn generate_cache_key(request: &AIRequest, session_id: &str, provider: AIProvider) -> String {
+fn generate_cache_key(
+    request: &AIRequest,
+    session_id: &str,
+    provider: AIProvider,
+    grounding: Option<&str>,
+) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
     request.data.hash(&mut hasher);
+    grounding.unwrap_or_default().hash(&mut hasher);
     let content_hash = hasher.finish();
 
     format!(
-        "{}:{:?}:{}:{}:{:x}",
-        session_id, request.context_type, request.context_id, provider, content_hash
+        "{}:{}:{:?}:{}:{}:{:x}",
+        session_id,
+        ANALYSIS_CACHE_VERSION,
+        request.context_type,
+        request.context_id,
+        provider,
+        content_hash
     )
 }
 
@@ -559,32 +567,75 @@ fn one_shot_data_budget(provider: AIProvider) -> usize {
     (budget / 2).clamp(800, 20_000)
 }
 
+fn one_shot_grounding_budget(provider: AIProvider, data_budget: usize) -> usize {
+    if provider == AIProvider::PhiSilica {
+        650
+    } else {
+        (data_budget / 3).clamp(1_200, 5_000)
+    }
+}
+
+fn one_shot_effective_data_budget(
+    provider: AIProvider,
+    data_budget: usize,
+    grounding: Option<&str>,
+) -> usize {
+    if provider == AIProvider::PhiSilica && grounding.is_some() {
+        800
+    } else {
+        data_budget
+    }
+}
+
 /// Analyze with the appropriate provider
 /// If api_key is provided, it counts as OpenAI availability for routing
 pub async fn analyze(
     request: AIRequest,
     session_id: &str,
     api_key: Option<String>,
+    force_refresh: bool,
 ) -> Result<AIResponse, String> {
     // Determine the provider first — it is part of the cache key
     let pref = get_user_preference();
     let frontend_key = api_key.as_deref().is_some_and(|k| !k.is_empty());
     let provider = determine_active_provider_with_key(pref, frontend_key).await;
+    let data_budget = one_shot_data_budget(provider);
 
-    let cache_key = generate_cache_key(&request, session_id, provider);
-    if let Ok(cache) = get_cache().lock()
+    let grounding = if provider == AIProvider::None {
+        None
+    } else {
+        crate::ai_grounding::analysis_grounding(
+            request.context_type,
+            request
+                .task_name
+                .as_deref()
+                .or(request.section_name.as_deref()),
+            &request.data,
+            one_shot_grounding_budget(provider, data_budget),
+        )
+        .await
+    };
+    let grounding_context = grounding
+        .as_ref()
+        .and_then(|grounding| grounding.prompt_context.as_deref());
+    let grounding_trace = grounding.as_ref().map(|grounding| grounding.trace.clone());
+
+    let cache_key = generate_cache_key(&request, session_id, provider, grounding_context);
+    if !force_refresh
+        && let Ok(mut cache) = get_cache().lock()
         && let Some(cached) = cache.get(&cache_key)
     {
         return Ok(AIResponse {
             interpretation: cached.clone(),
             provider_used: provider,
             cached: true,
+            grounding: grounding_trace,
             error: None,
         });
     }
 
     // Generate prompt based on context type, sized to the provider's budget
-    let data_budget = one_shot_data_budget(provider);
+    let data_budget = one_shot_effective_data_budget(provider, data_budget, grounding_context);
     let prompt = match request.context_type {
         ContextType::DiagnosticInterpretation => ai_prompts::diagnostic_interpretation_prompt(
             request.task_name.as_deref().unwrap_or("Unknown"),
@@ -604,6 +655,7 @@ pub async fn analyze(
         }
         ContextType::GeneralAnalysis => request.data.clone(),
     };
+    let prompt = ai_prompts::attach_grounding(prompt, grounding_context);
 
     // Resolve config (keys/endpoint/model) and call the provider client
     let result = match crate::ai_providers::resolve_config(provider, api_key).await {
@@ -622,13 +674,14 @@ pub async fn analyze(
         interpretation,
         provider_used: provider,
         cached: false,
+        grounding: grounding_trace,
         error: None,
     })
 }
 
 /// Read the shared AI response cache (used by the scan report).
 pub(crate) fn cached_value(key: &str) -> Option<String> {
-    get_cache().lock().ok().and_then(|cache| cache.get(key))
+    get_cache().lock().ok().and_then(|mut cache| cache.get(key))
 }
 
 /// Write to the shared AI response cache (used by the scan report).
@@ -667,6 +720,7 @@ pub async fn ai_analyze_diagnostic(
     diagnostic_output: String,
     session_id: String,
     api_key: Option<String>,
+    force_refresh: Option<bool>,
 ) -> Result<AIResponse, String> {
     let request = AIRequest {
         context_type: ContextType::DiagnosticInterpretation,
@@ -676,7 +730,13 @@ pub async fn ai_analyze_diagnostic(
         section_name: None,
     };
 
-    analyze(request, &session_id, api_key).await
+    analyze(
+        request,
+        &session_id,
+        api_key,
+        force_refresh.unwrap_or(false),
+    )
+    .await
 }
 
 /// Analyze a section (Hardware, System, Storage, Network)
@@ -686,6 +746,7 @@ pub async fn ai_analyze_section(
     section_data: String,
     session_id: String,
     api_key: Option<String>,
+    force_refresh: Option<bool>,
 ) -> Result<AIResponse, String> {
     let request = AIRequest {
         context_type: ContextType::SectionSummary,
@@ -695,7 +756,13 @@ pub async fn ai_analyze_section(
         section_name: Some(section_name),
     };
 
-    analyze(request, &session_id, api_key).await
+    analyze(
+        request,
+        &session_id,
+        api_key,
+        force_refresh.unwrap_or(false),
+    )
+    .await
 }
 
 /// Explain health scores
@@ -704,6 +771,7 @@ pub async fn ai_explain_health(
     metrics_data: String,
     session_id: String,
     api_key: Option<String>,
+    force_refresh: Option<bool>,
 ) -> Result<AIResponse, String> {
     let request = AIRequest {
         context_type: ContextType::HealthScoreExplanation,
@@ -713,7 +781,13 @@ pub async fn ai_explain_health(
         section_name: None,
     };
 
-    analyze(request, &session_id, api_key).await
+    analyze(
+        request,
+        &session_id,
+        api_key,
+        force_refresh.unwrap_or(false),
+    )
+    .await
 }
 
 /// Set AI provider preference
@@ -741,6 +815,7 @@ pub async fn ai_prioritize_issues(
     issues_data: String,
     session_id: String,
     api_key: Option<String>,
+    force_refresh: Option<bool>,
 ) -> Result<AIResponse, String> {
     let request = AIRequest {
         context_type: ContextType::IssuePrioritization,
@@ -749,7 +824,13 @@ pub async fn ai_prioritize_issues(
         task_name: None,
         section_name: None,
     };
-    analyze(request, &session_id, api_key).await
+    analyze(
+        request,
+        &session_id,
+        api_key,
+        force_refresh.unwrap_or(false),
+    )
+    .await
 }
 
 /// Clear AI cache
@@ -769,6 +850,11 @@ Guidelines:
 - Be direct and specific
 - Focus on actionable insights
 - Mention any anomalies or concerns, with the values that matter
+- Use live WindowsForum MCP grounding when present for current Windows release, KB, support, driver, and known-issue facts; cite source title/URL when using it
+- Do not infer release channel, Insider/pre-release status, support status, or update availability from a build number alone
+- Treat the grounding block as newer than model memory. If grounding lists Microsoft Support update-history pages for a build, do not call that build Insider/Preview unless those sources explicitly say the installed build is Insider/Preview
+- A base BuildNumber such as 26200 is not enough to decide patch compliance. Only compare updates when the diagnostic includes UBR or FullBuild
+- If live grounding is unavailable or inconclusive, say that instead of guessing
 - Be as brief as the data allows; never pad
 - Use technical but accessible language"#;
 

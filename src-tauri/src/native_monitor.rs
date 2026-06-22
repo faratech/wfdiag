@@ -4,10 +4,10 @@
 #![cfg(windows)]
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -88,9 +88,16 @@ pub struct SystemStats {
     pub disks: Vec<DiskInfo>,
     pub network_upload_kb: f64,
     pub network_download_kb: f64,
+    pub gpu_available: bool,
+    pub gpu_name: Option<String>,
+    pub gpu_utilization: Option<f32>,
+    pub gpu_memory_used_mb: f64,
+    pub gpu_memory_total_mb: f64,
     pub npu_available: bool,
     pub npu_name: Option<String>,
     pub npu_utilization: Option<f32>,
+    pub npu_memory_used_mb: f64,
+    pub npu_memory_total_mb: f64,
     pub top_processes: Vec<ProcessInfo>,
     /// All processes (kept for internal use). No frontend consumer reads this, so it is
     /// NOT serialized — otherwise the full process list would be encoded into every
@@ -149,6 +156,10 @@ pub struct ProcessInfo {
     pub memory_mb: f64,
     pub virtual_memory_mb: f64,
     pub shared_memory_mb: f64,
+    pub gpu_percent: f32,
+    pub gpu_memory_mb: f64,
+    pub npu_percent: f32,
+    pub npu_memory_mb: f64,
 
     // Timing
     pub cpu_time_secs: u64,
@@ -318,6 +329,7 @@ struct FastStats {
     all_processes: Vec<ProcessInfo>,
     disk_read_bytes: u64,
     disk_write_bytes: u64,
+    adapter_snapshot: crate::adapter_monitor::AdapterSnapshot,
 }
 
 // ============================================================================
@@ -344,12 +356,13 @@ pub struct SystemMonitor {
     cached_npu_util: Arc<Mutex<Option<CachedNpuUtilization>>>,
     // Cached fast-changing data
     cached_fast_stats: Arc<Mutex<Option<FastStats>>>,
+    include_process_adapter_stats: Arc<AtomicBool>,
     // Tick counter for tiered refresh
     tick_count: Arc<AtomicU64>,
     // Async update flags
-    disk_update_in_progress: Arc<std::sync::atomic::AtomicBool>,
-    npu_update_in_progress: Arc<std::sync::atomic::AtomicBool>,
-    fast_update_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    disk_update_in_progress: Arc<AtomicBool>,
+    npu_update_in_progress: Arc<AtomicBool>,
+    fast_update_in_progress: Arc<AtomicBool>,
     // Single-owner monitoring loop: handle to the currently-spawned loop (for immediate
     // abort on stop/restart) and a generation token so a superseded loop self-terminates
     // on its next tick even if the shared `monitoring` flag has been re-armed.
@@ -401,16 +414,17 @@ impl SystemMonitor {
             cached_disks: Arc::new(Mutex::new(None)),
             cached_npu_util: Arc::new(Mutex::new(None)),
             cached_fast_stats: Arc::new(Mutex::new(None)),
+            include_process_adapter_stats: Arc::new(AtomicBool::new(false)),
             tick_count: Arc::new(AtomicU64::new(0)),
-            disk_update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            npu_update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            fast_update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            disk_update_in_progress: Arc::new(AtomicBool::new(false)),
+            npu_update_in_progress: Arc::new(AtomicBool::new(false)),
+            fast_update_in_progress: Arc::new(AtomicBool::new(false)),
             monitor_task: Arc::new(Mutex::new(None)),
             generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    pub async fn start_monitoring(&self) {
+    pub async fn start_monitoring(&self, include_process_adapter_stats: bool) {
         // Single-owner: supersede any previously-running loop. Bump the generation so a
         // still-running old loop exits on its next tick even if `monitoring` is re-armed
         // below, and abort its task handle for immediate teardown. This makes repeated
@@ -427,6 +441,8 @@ impl SystemMonitor {
         let mut monitoring = self.monitoring.lock().await;
         *monitoring = true;
         drop(monitoring);
+        self.include_process_adapter_stats
+            .store(include_process_adapter_stats, Ordering::Relaxed);
 
         let app_handle = self.app_handle.clone();
         let monitoring_flag = Arc::clone(&self.monitoring);
@@ -438,6 +454,7 @@ impl SystemMonitor {
         let cached_disks = Arc::clone(&self.cached_disks);
         let cached_npu_util = Arc::clone(&self.cached_npu_util);
         let cached_fast_stats = Arc::clone(&self.cached_fast_stats);
+        let include_process_adapter_stats = Arc::clone(&self.include_process_adapter_stats);
         let tick_count = Arc::clone(&self.tick_count);
         let disk_update_in_progress = Arc::clone(&self.disk_update_in_progress);
         let npu_update_in_progress = Arc::clone(&self.npu_update_in_progress);
@@ -506,8 +523,9 @@ impl SystemMonitor {
             let pdh_clone = Arc::clone(&self.pdh_state);
             let net_clone = Arc::clone(&self.previous_network);
             let proc_clone = Arc::clone(&self.previous_processes);
+            let include_adapter_stats = self.include_process_adapter_stats.load(Ordering::Relaxed);
             let initial = tokio::task::spawn_blocking(move || {
-                compute_fast_stats(&pdh_clone, &net_clone, &proc_clone)
+                compute_fast_stats(&pdh_clone, &net_clone, &proc_clone, include_adapter_stats)
             })
             .await
             .ok();
@@ -543,6 +561,7 @@ impl SystemMonitor {
                     &cached_disks,
                     &cached_npu_util,
                     &cached_fast_stats,
+                    &include_process_adapter_stats,
                     &disk_update_in_progress,
                     &npu_update_in_progress,
                     &fast_update_in_progress,
@@ -581,6 +600,7 @@ impl SystemMonitor {
             &self.cached_disks,
             &self.cached_npu_util,
             &self.cached_fast_stats,
+            &self.include_process_adapter_stats,
             &self.disk_update_in_progress,
             &self.npu_update_in_progress,
             &self.fast_update_in_progress,
@@ -688,9 +708,10 @@ async fn collect_stats_optimized(
     cached_disks: &Arc<Mutex<Option<CachedDiskInfo>>>,
     cached_npu_util: &Arc<Mutex<Option<CachedNpuUtilization>>>,
     cached_fast_stats: &Arc<Mutex<Option<FastStats>>>,
-    disk_update_in_progress: &Arc<std::sync::atomic::AtomicBool>,
-    npu_update_in_progress: &Arc<std::sync::atomic::AtomicBool>,
-    fast_update_in_progress: &Arc<std::sync::atomic::AtomicBool>,
+    include_process_adapter_stats: &Arc<AtomicBool>,
+    disk_update_in_progress: &Arc<AtomicBool>,
+    npu_update_in_progress: &Arc<AtomicBool>,
+    fast_update_in_progress: &Arc<AtomicBool>,
     tick: u64,
 ) -> SystemStats {
     // 1. Get Fast Stats (CPU, Mem, Net, Proc) via non-blocking update
@@ -699,6 +720,7 @@ async fn collect_stats_optimized(
         previous_network,
         previous_processes,
         cached_fast_stats,
+        include_process_adapter_stats,
         fast_update_in_progress,
     )
     .await;
@@ -731,25 +753,33 @@ async fn collect_stats_optimized(
         0.0
     };
 
-    // 3. Get NPU Stats - run detection in blocking context if not yet initialized
-    let (npu_available, npu_name) = if let Some(info) = NPU_INFO.get() {
+    // 3. GPU/NPU adapter stats. D3DKMT is primary; the older WMI path remains
+    // as an NPU fallback on machines where D3DKMT does not expose the adapter.
+    let gpu_info = fast_stats.adapter_snapshot.gpu.as_ref();
+    let gpu_available = gpu_info.is_some();
+    let gpu_name = gpu_info.map(|gpu| gpu.name.clone());
+    let gpu_utilization = gpu_info.map(|gpu| gpu.utilization);
+    let (gpu_memory_used, gpu_memory_total) =
+        gpu_info.map(|gpu| gpu.meter_memory()).unwrap_or_default();
+
+    let d3d_npu = fast_stats.adapter_snapshot.npu.as_ref();
+    let (legacy_npu_available, legacy_npu_name) = if d3d_npu.is_some() {
+        (false, None)
+    } else if let Some(info) = NPU_INFO.get() {
         info.clone()
     } else {
         // First time - run detection in spawn_blocking since DXCore/WMI need proper thread context
         tokio::task::spawn_blocking(|| {
             let result = NPU_INFO
                 .get_or_init(|| {
-                    // Try DXCore first
                     if let Some((name, _)) = detect_npu_dxcore() {
                         return (true, Some(name));
                     }
-                    // Fall back to WMI
                     let (available, name, _) = detect_npu_wmi_fallback();
                     (available, name)
                 })
                 .clone();
 
-            // Also initialize NPU_LUID for utilization queries
             if result.0 {
                 if let Ok(wmi_con) = crate::wmi_native::WmiConnection::new() {
                     NPU_LUID.get_or_init(|| discover_npu_luid_with_wmi(&wmi_con));
@@ -763,11 +793,18 @@ async fn collect_stats_optimized(
         .await
         .unwrap_or((false, None))
     };
-    let npu_utilization = if npu_available {
+    let legacy_npu_utilization = if d3d_npu.is_none() && legacy_npu_available {
         get_npu_util_cached(cached_npu_util, npu_update_in_progress, tick).await
     } else {
         None
     };
+    let npu_available = d3d_npu.is_some() || legacy_npu_available;
+    let npu_name = d3d_npu.map(|npu| npu.name.clone()).or(legacy_npu_name);
+    let npu_utilization = d3d_npu
+        .map(|npu| npu.utilization)
+        .or(legacy_npu_utilization);
+    let (npu_memory_used, npu_memory_total) =
+        d3d_npu.map(|npu| npu.meter_memory()).unwrap_or_default();
 
     SystemStats {
         cpu_utilization: fast_stats.cpu_utilization,
@@ -786,9 +823,16 @@ async fn collect_stats_optimized(
         disks,
         network_upload_kb: fast_stats.network_upload_kb,
         network_download_kb: fast_stats.network_download_kb,
+        gpu_available,
+        gpu_name,
+        gpu_utilization,
+        gpu_memory_used_mb: gpu_memory_used as f64 / (1024.0 * 1024.0),
+        gpu_memory_total_mb: gpu_memory_total as f64 / (1024.0 * 1024.0),
         npu_available,
         npu_name,
         npu_utilization,
+        npu_memory_used_mb: npu_memory_used as f64 / (1024.0 * 1024.0),
+        npu_memory_total_mb: npu_memory_total as f64 / (1024.0 * 1024.0),
         top_processes: fast_stats.top_processes,
         all_processes: fast_stats.all_processes,
         timestamp: std::time::SystemTime::now()
@@ -805,6 +849,7 @@ fn compute_fast_stats(
     pdh_state: &Arc<std::sync::Mutex<PdhState>>,
     previous_network: &Arc<Mutex<NetworkState>>,
     previous_processes: &Arc<Mutex<ProcessCpuTimes>>,
+    include_process_adapter_stats: bool,
 ) -> FastStats {
     // 1. CPU & Swap (PDH)
     let cpu_count = *CPU_COUNT.get_or_init(|| unsafe {
@@ -827,13 +872,19 @@ fn compute_fast_stats(
     let (network_upload_kb, network_download_kb) =
         tauri::async_runtime::block_on(async { get_network_stats(previous_network).await });
 
-    // 4. Processes (returns all processes sorted by CPU)
+    // 4. Adapter and process stats. Refreshing the D3DKMT adapter state first
+    // lets per-process stats share the same detected adapter topology.
+    let adapter_snapshot = crate::adapter_monitor::refresh();
     let (all_procs, disk_read_bytes, disk_write_bytes) = tauri::async_runtime::block_on(async {
-        get_top_processes_optimized(memory_total, previous_processes).await
+        get_top_processes_optimized(
+            memory_total,
+            previous_processes,
+            include_process_adapter_stats,
+        )
+        .await
     });
 
-    // Top processes are the first 15 sorted by CPU usage
-    let top_processes: Vec<ProcessInfo> = all_procs.iter().take(15).cloned().collect();
+    let top_processes = select_top_processes(&all_procs, include_process_adapter_stats);
 
     FastStats {
         cpu_utilization,
@@ -850,7 +901,63 @@ fn compute_fast_stats(
         all_processes: all_procs,
         disk_read_bytes,
         disk_write_bytes,
+        adapter_snapshot,
     }
+}
+
+fn select_top_processes(
+    processes: &[ProcessInfo],
+    include_adapter_stats: bool,
+) -> Vec<ProcessInfo> {
+    const CPU_ROWS: usize = 15;
+    const EXTENDED_ROWS: usize = 40;
+    const ADAPTER_ROWS: usize = 15;
+
+    let mut selected = Vec::with_capacity(if include_adapter_stats {
+        EXTENDED_ROWS.min(processes.len())
+    } else {
+        CPU_ROWS.min(processes.len())
+    });
+    let mut seen = HashSet::new();
+
+    for process in processes.iter().take(CPU_ROWS) {
+        if seen.insert(process.pid) {
+            selected.push(process.clone());
+        }
+    }
+
+    if !include_adapter_stats {
+        return selected;
+    }
+
+    let mut add_by_metric = |metric: fn(&ProcessInfo) -> f32| {
+        let mut rows: Vec<&ProcessInfo> = processes.iter().collect();
+        rows.sort_by(|a, b| {
+            metric(b)
+                .partial_cmp(&metric(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        for process in rows
+            .into_iter()
+            .filter(|process| metric(process) > 0.0)
+            .take(ADAPTER_ROWS)
+        {
+            if selected.len() >= EXTENDED_ROWS {
+                break;
+            }
+            if seen.insert(process.pid) {
+                selected.push(process.clone());
+            }
+        }
+    };
+
+    add_by_metric(|process| process.gpu_percent);
+    add_by_metric(|process| process.gpu_memory_mb as f32);
+    add_by_metric(|process| process.npu_percent);
+    add_by_metric(|process| process.npu_memory_mb as f32);
+
+    selected
 }
 
 async fn get_fast_stats_cached(
@@ -858,7 +965,8 @@ async fn get_fast_stats_cached(
     previous_network: &Arc<Mutex<NetworkState>>,
     previous_processes: &Arc<Mutex<ProcessCpuTimes>>,
     cached: &Arc<Mutex<Option<FastStats>>>,
-    update_in_progress: &Arc<std::sync::atomic::AtomicBool>,
+    include_process_adapter_stats: &Arc<AtomicBool>,
+    update_in_progress: &Arc<AtomicBool>,
 ) -> FastStats {
     // If no update is in progress, spawn one
     if !update_in_progress.swap(true, std::sync::atomic::Ordering::Acquire) {
@@ -867,10 +975,11 @@ async fn get_fast_stats_cached(
         let proc_clone = Arc::clone(previous_processes);
         let cached_clone = Arc::clone(cached);
         let flag_clone = Arc::clone(update_in_progress);
+        let include_adapter_stats = include_process_adapter_stats.load(Ordering::Relaxed);
 
         tokio::spawn(async move {
             let stats = tokio::task::spawn_blocking(move || {
-                compute_fast_stats(&pdh_clone, &net_clone, &proc_clone)
+                compute_fast_stats(&pdh_clone, &net_clone, &proc_clone, include_adapter_stats)
             })
             .await
             .ok();
@@ -901,6 +1010,7 @@ async fn get_fast_stats_cached(
         all_processes: Vec::new(),
         disk_read_bytes: 0,
         disk_write_bytes: 0,
+        adapter_snapshot: crate::adapter_monitor::AdapterSnapshot::default(),
     })
 }
 
@@ -1450,9 +1560,20 @@ fn query_all_processes_optimized() -> Vec<NativeProcessInfo> {
 async fn get_top_processes_optimized(
     total_memory: u64,
     previous_processes: &Arc<Mutex<ProcessCpuTimes>>,
+    include_process_adapter_stats: bool,
 ) -> (Vec<ProcessInfo>, u64, u64) {
     let native_procs = query_all_processes_optimized();
     let now = Instant::now();
+    let adapter_processes: Vec<(u32, u64)> = if include_process_adapter_stats {
+        native_procs
+            .iter()
+            .map(|process| (process.pid, process.create_time))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let adapter_stats =
+        crate::adapter_monitor::process_stats(&adapter_processes, include_process_adapter_stats);
 
     let mut prev = previous_processes.lock().await;
     let mut processes = Vec::with_capacity(native_procs.len());
@@ -1512,6 +1633,7 @@ async fn get_top_processes_optimized(
 
         // Calculate shared memory (working set - private bytes)
         let shared_memory = proc.working_set.saturating_sub(proc.private_bytes);
+        let adapter = adapter_stats.get(&proc.pid).copied().unwrap_or_default();
 
         let name_lower = proc.name.to_lowercase();
 
@@ -1527,6 +1649,10 @@ async fn get_top_processes_optimized(
             memory_mb: proc.working_set as f64 / (1024.0 * 1024.0),
             virtual_memory_mb: proc.virtual_size as f64 / (1024.0 * 1024.0),
             shared_memory_mb: shared_memory as f64 / (1024.0 * 1024.0),
+            gpu_percent: adapter.gpu_percent,
+            gpu_memory_mb: adapter.gpu_memory as f64 / (1024.0 * 1024.0),
+            npu_percent: adapter.npu_percent,
+            npu_memory_mb: adapter.npu_memory as f64 / (1024.0 * 1024.0),
             cpu_time_secs,
             start_time: start_time as i64,
             status: "Running".to_string(),
@@ -1579,7 +1705,8 @@ pub async fn get_all_processes(
         }
     });
 
-    let (processes, _, _) = get_top_processes_optimized(total_memory, previous_processes).await;
+    let (processes, _, _) =
+        get_top_processes_optimized(total_memory, previous_processes, false).await;
     processes
 }
 

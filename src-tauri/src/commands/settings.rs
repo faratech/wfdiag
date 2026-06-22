@@ -25,7 +25,12 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[cfg(not(windows))]
-use keyring::{Entry, Error as KeyringError};
+use keyring_core::{Entry, Error as KeyringError};
+#[cfg(not(windows))]
+use std::sync::OnceLock;
+
+#[cfg(not(windows))]
+static KEYRING_STORE_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 /// Application settings that persist across sessions
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +186,46 @@ pub fn get_settings_path() -> Result<PathBuf, String> {
     Ok(settings_dir.join("settings.json"))
 }
 
+#[cfg(not(windows))]
+fn ensure_keyring_store() -> Result<(), String> {
+    KEYRING_STORE_INIT.get_or_init(init_keyring_store).clone()
+}
+
+#[cfg(not(windows))]
+fn init_keyring_store() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let store = apple_native_keyring_store::keychain::Store::new()
+            .map_err(|e| DiagError::api_key("access", e.to_string()))?;
+        keyring_core::set_default_store(store);
+        return Ok(());
+    }
+
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
+    {
+        let store = zbus_secret_service_keyring_store::Store::new()
+            .map_err(|e| DiagError::api_key("access", e.to_string()))?;
+        keyring_core::set_default_store(store);
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err(DiagError::PlatformNotSupported {
+        operation: "system keyring".to_string(),
+    }
+    .into())
+}
+
+#[cfg(not(windows))]
+fn provider_keyring_entry(id: ProviderKeyId) -> Result<Entry, String> {
+    ensure_keyring_store()?;
+    Entry::new("wfdiag-tauri", id.keyring_user())
+        .map_err(|e| DiagError::api_key("access", e.to_string()).into())
+}
+
 /// Store or clear one provider key in the platform secret store.
 /// `Some("")` means "clear"; `None` means "not provided, leave untouched".
 fn persist_provider_key(id: ProviderKeyId, key: Option<&str>) -> Result<(), String> {
@@ -196,13 +241,12 @@ fn persist_provider_key(id: ProviderKeyId, key: Option<&str>) -> Result<(), Stri
     #[cfg(not(windows))]
     {
         if !key.is_empty() {
-            let entry = Entry::new("wfdiag-tauri", id.keyring_user())
-                .map_err(|e| DiagError::api_key("store", e.to_string()))?;
+            let entry = provider_keyring_entry(id)?;
             entry
                 .set_password(key)
                 .map_err(|e| DiagError::api_key("store", e.to_string()).into())
         } else {
-            if let Ok(entry) = Entry::new("wfdiag-tauri", id.keyring_user()) {
+            if let Ok(entry) = provider_keyring_entry(id) {
                 let _ = entry.delete_credential();
             }
             Ok(())
@@ -218,7 +262,7 @@ pub async fn load_provider_key_internal(id: ProviderKeyId) -> Option<String> {
     }
     #[cfg(not(windows))]
     {
-        let entry = Entry::new("wfdiag-tauri", id.keyring_user()).ok()?;
+        let entry = provider_keyring_entry(id).ok()?;
         match entry.get_password() {
             Ok(pwd) if !pwd.is_empty() => Some(pwd),
             _ => None,
@@ -352,8 +396,7 @@ pub async fn clear_api_key() -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
-        let entry = Entry::new("wfdiag-tauri", ProviderKeyId::OpenAI.keyring_user())
-            .map_err(|e| DiagError::api_key("access", e.to_string()))?;
+        let entry = provider_keyring_entry(ProviderKeyId::OpenAI)?;
         match entry.delete_credential() {
             Ok(_) | Err(KeyringError::NoEntry) => Ok(()),
             Err(e) => Err(DiagError::api_key("clear", e.to_string()).into()),
