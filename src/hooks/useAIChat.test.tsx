@@ -8,6 +8,7 @@ const invokeMock = vi.fn()
 type Handler = (event: { payload: unknown }) => void
 let eventHandlers: Map<string, Handler>
 let unlistenSpies: Array<ReturnType<typeof vi.fn>>
+let mockSettings: Record<string, unknown>
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
@@ -21,7 +22,7 @@ vi.mock('@tauri-apps/api/event', () => ({
   },
 }))
 vi.mock('../contexts/AppContext', () => ({
-  useAppContext: () => ({ settings: { openAiApiKey: 'sk-test' } }),
+  useAppContext: () => ({ settings: mockSettings }),
 }))
 
 function fire(event: string, payload: unknown) {
@@ -66,6 +67,7 @@ beforeEach(() => {
   eventHandlers = new Map()
   unlistenSpies = []
   invokeMock.mockReset()
+  mockSettings = { openAiApiKey: 'sk-test', aiEnabled: true }
   mockBackend()
 })
 
@@ -263,5 +265,19 @@ describe('useAIChat', () => {
     expect(result.current.isStreaming).toBe(false)
     const last = result.current.messages[result.current.messages.length - 1]
     expect(last?.error).toContain('No AI provider available')
+  })
+
+  it('does not send when AI insights are disabled', async () => {
+    mockSettings = { openAiApiKey: 'sk-test', aiEnabled: false }
+    const useAIChat = await loadHook()
+    const { result } = renderHook(() => useAIChat())
+    await waitFor(() => expect(eventHandlers.size).toBe(4))
+
+    await act(async () => { await result.current.send('hello') })
+
+    expect(invokeMock).not.toHaveBeenCalledWith('ai_chat_new_session')
+    expect(invokeMock).not.toHaveBeenCalledWith('ai_chat_send', expect.anything())
+    expect(result.current.messages).toHaveLength(0)
+    expect(result.current.isStreaming).toBe(false)
   })
 })

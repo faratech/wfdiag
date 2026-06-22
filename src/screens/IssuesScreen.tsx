@@ -30,13 +30,12 @@ const TIER_ICON: Record<RemediationSummary['tier'], string> = {
 export const IssuesScreen: React.FC = () => {
   const {
     issues, results, fixingIssue, setFixingIssue, isRunning, systemInfo,
-    setPendingChatPrompt, setSelectedTab,
+    setPendingChatPrompt, setSelectedTab, settings,
   } = useAppContext()
   const { prioritizeIssues } = useAIContext()
   const { detectIssues, restartAsAdmin } = useDiagnostics()
   const { runQuickScan } = useScanner()
   const { showInfo, showWarning, showError } = useToast()
-  const { settings } = useAppContext()
 
   const [maintenance, setMaintenance] = useState<RemediationSummary[]>([])
   const [confirming, setConfirming] = useState<RemediationSummary | null>(null)
@@ -55,6 +54,7 @@ export const IssuesScreen: React.FC = () => {
   const passed = issues.filter(i => !i.detected)
   const critical = detected.filter(i => i.severity.toLowerCase() === 'critical').length
   const warnings = detected.filter(i => i.severity.toLowerCase() === 'warning').length
+  const aiEnabled = settings.aiEnabled ?? true
 
   // ---- remediation execution (the backend enforces the Repair gate) ----
   const runRemediation = useCallback(async (remediation: RemediationSummary, confirmed: boolean) => {
@@ -100,6 +100,10 @@ export const IssuesScreen: React.FC = () => {
 
   // ---- AI: per-issue chat handoff ----
   const askAi = (issue: Issue) => {
+    if (!aiEnabled) {
+      showError('AI disabled', 'Enable AI insights in Settings to use AI assistance.')
+      return
+    }
     let prompt = `Help me with this issue found by a diagnostic scan:\n${JSON.stringify({
       id: issue.id, severity: issue.severity, title: issue.title, description: issue.description,
     })}`
@@ -117,6 +121,10 @@ export const IssuesScreen: React.FC = () => {
 
   // ---- AI: triage + fix plan ----
   const runTriage = async (force = false) => {
+    if (!aiEnabled) {
+      showError('AI disabled', 'Enable AI insights in Settings to use AI assistance.')
+      return
+    }
     setTriageBusy(true)
     try {
       const payload = JSON.stringify(detected.map(i => ({
@@ -132,6 +140,10 @@ export const IssuesScreen: React.FC = () => {
   }
 
   const runPlan = async () => {
+    if (!aiEnabled) {
+      showError('AI disabled', 'Enable AI insights in Settings to use AI assistance.')
+      return
+    }
     setPlanBusy(true)
     setPlan(null)
     try {
@@ -193,10 +205,10 @@ export const IssuesScreen: React.FC = () => {
             <header className="wf-block-header">
               <span className="accent-bar" /><span>AI Assistance</span>
               <span className="count" style={{ display: 'flex', gap: 6 }}>
-                <button className="btn ghost" disabled={triageBusy} onClick={() => { void runTriage(!!triage) }}>
+                <button className="btn ghost" disabled={triageBusy || !aiEnabled} onClick={() => { void runTriage(!!triage) }}>
                   {triageBusy ? <i className="fa-solid fa-circle-notch fa-spin" /> : <i className="fa-solid fa-ranking-star" />} Prioritize
                 </button>
-                <button className="btn ghost" disabled={planBusy} onClick={() => { void runPlan() }}>
+                <button className="btn ghost" disabled={planBusy || !aiEnabled} onClick={() => { void runPlan() }}>
                   {planBusy ? <i className="fa-solid fa-circle-notch fa-spin" /> : <i className="fa-solid fa-list-check" />} Propose fix plan
                 </button>
               </span>
@@ -301,7 +313,7 @@ export const IssuesScreen: React.FC = () => {
                       : <><i className={`fa-solid ${TIER_ICON[remediation.tier]}`} /> {remediation.label}</>}
                   </button>
                 )}
-                <button className="btn ghost" onClick={() => askAi(issue)}>
+                <button className="btn ghost" disabled={!aiEnabled} onClick={() => askAi(issue)}>
                   <i className="fa-solid fa-comment-dots" /> Ask AI
                 </button>
               </div>

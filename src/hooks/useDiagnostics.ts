@@ -88,20 +88,23 @@ ${content}
     }
 
     try {
+      const exportFormat = settings.exportFormat || 'text'
       const content = await invoke<string>('export_results', {
-        format: settings.exportFormat || 'text',
+        format: exportFormat,
         includeRaw: true
       })
 
-      const fullReport = `=== WindowsForum Diagnostic Report ===
+      const fileContent = exportFormat === 'text'
+        ? `=== WindowsForum Diagnostic Report ===
 Generated: ${new Date().toLocaleString()}
 Computer: ${systemInfo?.computer_name}
 OS: ${systemInfo?.os_version}
 Admin Mode: ${systemInfo?.is_admin ? 'Yes' : 'No'}
 ${content}`
+        : content
 
-      const extension = settings.exportFormat === 'json' ? 'json' :
-                       settings.exportFormat === 'html' ? 'html' : 'txt'
+      const extension = exportFormat === 'json' ? 'json' :
+                       exportFormat === 'html' ? 'html' : 'txt'
 
       const filePath = await save({
         defaultPath: `wf-diagnostics-${new Date().toISOString().split('T')[0]}.${extension}`,
@@ -115,7 +118,7 @@ ${content}`
         // Use backend to write files (no fs:scope restrictions)
         await invoke('save_results_to_file', {
           path: filePath,
-          content: fullReport
+          content: fileContent
         })
         showSuccess('Export Complete', `Results saved to ${filePath}`)
       }

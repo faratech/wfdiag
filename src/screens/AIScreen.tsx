@@ -53,7 +53,7 @@ function providerDetail(p: ProviderInfo, phiMessage?: string): string {
 export const AIScreen: React.FC = () => {
   const { aiStatus, activeProvider } = useAIContext()
   const { setShowSettings, pendingChatPrompt, setPendingChatPrompt } = useAppContext()
-  const { messages, send, stop, newConversation, isStreaming } = useAIChat()
+  const { messages, send, stop, newConversation, isStreaming, aiEnabled } = useAIChat()
   const [input, setInput] = useState('')
   const endRef = useRef<HTMLDivElement>(null)
 
@@ -62,15 +62,17 @@ export const AIScreen: React.FC = () => {
   // "Ask AI" deep-link from the Issues screen: consume once (clear BEFORE
   // sending so a re-render can never double-fire)
   useEffect(() => {
-    if (pendingChatPrompt && !isStreaming) {
+    if (pendingChatPrompt && aiEnabled && !isStreaming) {
       const prompt = pendingChatPrompt
       setPendingChatPrompt(null)
       void send(prompt)
+    } else if (pendingChatPrompt && !aiEnabled) {
+      setPendingChatPrompt(null)
     }
-  }, [pendingChatPrompt, isStreaming, send, setPendingChatPrompt])
+  }, [pendingChatPrompt, aiEnabled, isStreaming, send, setPendingChatPrompt])
 
   const submit = (text: string) => {
-    if (!text.trim() || isStreaming) return
+    if (!text.trim() || isStreaming || !aiEnabled) return
     setInput('')
     void send(text)
   }
@@ -87,7 +89,7 @@ export const AIScreen: React.FC = () => {
           <span className="count" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span className="tag"><span className="status-dot success" style={{ boxShadow: 'none' }} /> {PROVIDER_TAGS[activeProvider]}</span>
             {messages.length > 0 && (
-              <button className="btn ghost" title="New conversation" onClick={() => { void newConversation() }}>
+              <button className="btn ghost" title="New conversation" disabled={!aiEnabled} onClick={() => { void newConversation() }}>
                 <i className="fa-solid fa-plus" aria-hidden="true" /> New
               </button>
             )}
@@ -112,16 +114,16 @@ export const AIScreen: React.FC = () => {
             <div ref={endRef} />
           </div>
           <div className="chat-suggestions">
-            {suggestions.map(s => <button key={s} className="suggest" disabled={isStreaming} onClick={() => submit(s)}>{s}</button>)}
+            {suggestions.map(s => <button key={s} className="suggest" disabled={isStreaming || !aiEnabled} onClick={() => submit(s)}>{s}</button>)}
           </div>
           <form className="chat-input" onSubmit={e => { e.preventDefault(); submit(input) }}>
-            <input type="text" placeholder="Ask about any diagnostic, error or trend…" value={input} onChange={e => setInput(e.target.value)} />
+            <input type="text" placeholder="Ask about any diagnostic, error or trend…" value={input} onChange={e => setInput(e.target.value)} disabled={!aiEnabled} />
             {isStreaming ? (
               <button type="button" className="btn" onClick={() => { void stop() }}>
                 <i className="fa-solid fa-stop" aria-hidden="true" /> Stop
               </button>
             ) : (
-              <button type="submit" className="btn primary"><i className="fa-solid fa-paper-plane" /> Send</button>
+              <button type="submit" className="btn primary" disabled={!aiEnabled}><i className="fa-solid fa-paper-plane" /> Send</button>
             )}
           </form>
         </div>
