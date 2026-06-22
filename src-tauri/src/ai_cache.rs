@@ -40,14 +40,25 @@ impl AICache {
     }
 
     /// Get a cached value if it exists and hasn't expired
-    pub fn get(&self, key: &str) -> Option<String> {
-        self.entries.get(key).and_then(|entry| {
-            if entry.created_at.elapsed() < self.ttl {
-                Some(entry.value.clone())
-            } else {
-                None // Expired
-            }
-        })
+    pub fn get(&mut self, key: &str) -> Option<String> {
+        let expired = self
+            .entries
+            .get(key)
+            .is_some_and(|entry| entry.created_at.elapsed() >= self.ttl);
+        if expired {
+            self.entries.remove(key);
+            self.access_order.retain(|k| k != key);
+            return None;
+        }
+
+        let value = {
+            let entry = self.entries.get_mut(key)?;
+            entry.access_count = entry.access_count.saturating_add(1);
+            entry.value.clone()
+        };
+        self.access_order.retain(|k| k != key);
+        self.access_order.push(key.to_string());
+        Some(value)
     }
 
     /// Insert a value into the cache
@@ -158,6 +169,20 @@ mod tests {
         // key1 should be evicted
         assert_eq!(cache.get("key1"), None);
         assert_eq!(cache.get("key2"), Some("value2".to_string()));
+        assert_eq!(cache.get("key3"), Some("value3".to_string()));
+    }
+
+    #[test]
+    fn test_cache_get_refreshes_lru_order() {
+        let mut cache = AICache::new(2);
+        cache.insert("key1".to_string(), "value1".to_string());
+        cache.insert("key2".to_string(), "value2".to_string());
+
+        assert_eq!(cache.get("key1"), Some("value1".to_string()));
+        cache.insert("key3".to_string(), "value3".to_string());
+
+        assert_eq!(cache.get("key1"), Some("value1".to_string()));
+        assert_eq!(cache.get("key2"), None);
         assert_eq!(cache.get("key3"), Some("value3".to_string()));
     }
 

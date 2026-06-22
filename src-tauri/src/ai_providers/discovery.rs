@@ -39,16 +39,19 @@ pub(crate) fn probe_endpoint(base: &str) -> bool {
     use std::net::{TcpStream, ToSocketAddrs};
     use std::time::Duration;
 
-    let Some(scheme_end) = base.find("://") else {
+    let Ok(url) = url::Url::parse(base) else {
         return false;
     };
-    let host_port = &base[scheme_end + 3..];
-    let host_port = if host_port.contains(':') {
-        host_port.to_string()
-    } else {
-        format!("{}:80", host_port)
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
     };
-    match host_port.to_socket_addrs() {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let Some(port) = url.port_or_known_default() else {
+        return false;
+    };
+    match (host, port).to_socket_addrs() {
         Ok(mut addrs) => {
             addrs.any(|a| TcpStream::connect_timeout(&a, Duration::from_secs(2)).is_ok())
         }
@@ -102,5 +105,16 @@ mod tests {
         );
         assert_eq!(normalize_base_url("   "), None);
         assert_eq!(normalize_base_url("/v1"), None);
+    }
+
+    #[test]
+    fn probe_parses_host_and_port_from_path_prefixed_urls() {
+        let url = url::Url::parse("https://openrouter.ai/api").unwrap();
+        assert_eq!(url.host_str(), Some("openrouter.ai"));
+        assert_eq!(url.port_or_known_default(), Some(443));
+
+        let url = url::Url::parse("http://127.0.0.1:12345/openai/v1").unwrap();
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+        assert_eq!(url.port_or_known_default(), Some(12345));
     }
 }

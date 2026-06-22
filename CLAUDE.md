@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Development
 - **Run development server**: `npm run tauri dev` - Starts both Vite dev server and Tauri in development mode
 - **Build for production**: `npm run tauri build` - Creates optimized production build with exe, MSI, and NSIS installers
-- **Build for Microsoft Store**: `npm run tauri build -- --bundles msix` - Creates MSIX package for Store submission
+- **Build Store/Phi MSIX**: `python3 scripts/build-cross.py build-all --build-msix --sign` - Creates the Store-compatible MSIX bundle with `systemAIModels`
+- **Build basic Tauri MSIX**: `npm run tauri build -- --bundles msix` - Creates a basic MSIX using `src-tauri/tauri.msix.conf.json`; not the Phi Silica Store package
 - **Build MSI installer only**: `npm run tauri build -- --bundles msi` - Creates MSI for direct distribution
 - **Build NSIS installer only**: `npm run tauri build -- --bundles nsis` - Creates NSIS installer
 - **Build exe only**: `cd src-tauri && cargo build --release` - Builds just the exe without installers
@@ -284,11 +285,11 @@ The MSIX package includes these DLLs for both x64 and ARM64:
          IgnorableNamespaces="uap rescap systemai">
   <Dependencies>
     <!-- Both Universal and Desktop required for systemAIModels capability -->
-    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26226.0" />
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.26100.0" MaxVersionTested="10.0.26226.0" />
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26226.0" />
-    <!-- Optional: Framework dependency (not strictly required since we bundle DLLs) -->
-    <PackageDependency Name="Microsoft.WindowsAppRuntime.2.0-experimental3"
-                       MinVersion="0.676.658.0"
+    <!-- Framework dependency used by the Store MSIX bundle workflow -->
+    <PackageDependency Name="Microsoft.WindowsAppRuntime.1.8"
+                       MinVersion="8000.675.1142.0"
                        Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
   </Dependencies>
   <Capabilities>

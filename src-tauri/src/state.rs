@@ -9,6 +9,7 @@ use crate::results_storage::ScanStorage;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use tokio::sync::Mutex;
 
 /// Information about the current system
@@ -55,6 +56,7 @@ impl ChatSession {
 pub struct AppState {
     pub current_session: Arc<Mutex<Option<DiagnosticSession>>>,
     pub system_monitor: Arc<Mutex<Option<SystemMonitor>>>,
+    pub monitoring_lease: Arc<AtomicU64>,
     pub scan_storage: Arc<Mutex<Option<ScanStorage>>>,
     pub scan_storage_error: Arc<Mutex<Option<String>>>,
     /// Session ids cancelled via `cancel_diagnostics`. Queued tasks of a
@@ -72,6 +74,7 @@ impl AppState {
         Self {
             current_session: Arc::new(Mutex::new(None)),
             system_monitor: Arc::new(Mutex::new(None)),
+            monitoring_lease: Arc::new(AtomicU64::new(0)),
             scan_storage: Arc::new(Mutex::new(scan_storage)),
             scan_storage_error: Arc::new(Mutex::new(scan_storage_error)),
             cancelled_sessions: Arc::new(Mutex::new(HashSet::new())),

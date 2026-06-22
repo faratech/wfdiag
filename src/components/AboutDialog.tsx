@@ -34,6 +34,12 @@ export const AboutDialog: React.FC<AboutDialogProps> = ({ open, onOpenChange, up
             Download v{updateInfo.version}
           </Button>
         )}
+        <Button onClick={() => { void invoke('open_url', { url: 'https://windowsforum.com/' }) }}>
+          <i className="fa-solid fa-globe" /> WindowsForum
+        </Button>
+        <Button onClick={() => { void invoke('open_url', { url: 'https://github.com/faratech/wfdiag' }) }}>
+          <i className="fa-brands fa-github" /> GitHub
+        </Button>
         <Button variant={updateInfo ? 'default' : 'primary'} onClick={() => onOpenChange(false)}>Close</Button>
       </div>
     </div>

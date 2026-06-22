@@ -176,6 +176,8 @@ pub fn detect_pending_windows_updates(ctx: &DetectCtx) -> Option<Detection> {
 }
 
 pub fn detect_firewall_disabled(ctx: &DetectCtx) -> Option<Detection> {
+    let mut disabled_products = Vec::new();
+    let mut enabled_seen = false;
     for firewall in task_array(ctx, "firewall_status")? {
         // Windows Security Center productState is a packed bitfield, NOT a
         // single enum value. The enabled/disabled state is the second byte
@@ -183,13 +185,23 @@ pub fn detect_firewall_disabled(ctx: &DetectCtx) -> Option<Detection> {
         if let Some(product_state) = firewall["productState"].as_u64() {
             let enabled_byte = (product_state >> 8) & 0xFF;
             let firewall_on = (enabled_byte & 0x10) != 0;
-            if !firewall_on {
-                return Some(Detection::new(format!(
-                    "'{}' is disabled.",
-                    firewall["displayName"].as_str().unwrap_or("Firewall")
-                )));
+            if firewall_on {
+                enabled_seen = true;
+            } else {
+                disabled_products.push(
+                    firewall["displayName"]
+                        .as_str()
+                        .unwrap_or("Firewall")
+                        .to_string(),
+                );
             }
         }
+    }
+    if !enabled_seen && !disabled_products.is_empty() {
+        return Some(Detection::new(format!(
+            "{} disabled.",
+            disabled_products.join(", ")
+        )));
     }
     None
 }
@@ -261,7 +273,7 @@ pub fn detect_disk_unhealthy(ctx: &DetectCtx) -> Option<Detection> {
     let health = task_object(ctx, "chkdsk")?;
     for disk in health["disks"].as_array()? {
         // MSFT_PhysicalDisk HealthStatus: 0 Healthy, 1 Warning, 2 Unhealthy
-        match disk["HealthStatus"].as_u64() {
+        match json_u64(&disk["HealthStatus"]) {
             Some(1) => {
                 return Some(Detection::new(format!(
                     "Disk '{}' reports degraded health.",
@@ -279,6 +291,52 @@ pub fn detect_disk_unhealthy(ctx: &DetectCtx) -> Option<Detection> {
             }
             _ => {}
         }
+
+        let health_text = disk["HealthStatusText"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if health_text == "warning" {
+            return Some(Detection::new(format!(
+                "Disk '{}' reports degraded health.",
+                disk["Model"].as_str().unwrap_or("Unknown")
+            )));
+        }
+        if health_text == "unhealthy" {
+            return Some(Detection::with_severity(
+                format!(
+                    "Disk '{}' reports UNHEALTHY status. Back up your data immediately.",
+                    disk["Model"].as_str().unwrap_or("Unknown")
+                ),
+                IssueSeverity::Critical,
+            ));
+        }
+
+        let operational_codes: Vec<u64> = match &disk["OperationalStatus"] {
+            Value::Array(states) => states.iter().filter_map(json_u64).collect(),
+            other => json_u64(other).into_iter().collect(),
+        };
+        if operational_codes.contains(&6) {
+            return Some(Detection::with_severity(
+                format!(
+                    "Disk '{}' reports an operational error. Back up your data immediately.",
+                    disk["Model"].as_str().unwrap_or("Unknown")
+                ),
+                IssueSeverity::Critical,
+            ));
+        }
+        if operational_codes.iter().any(|code| matches!(*code, 3 | 4)) {
+            return Some(Detection::new(format!(
+                "Disk '{}' reports degraded operational status.",
+                disk["Model"].as_str().unwrap_or("Unknown")
+            )));
+        }
+    }
+    if health["errors_found"].as_bool() == Some(true) {
+        return Some(Detection::new(
+            "Disk health check reported errors.".to_string(),
+        ));
     }
     None
 }
@@ -787,6 +845,16 @@ mod tests {
             r#"[{"displayName": "Windows Firewall", "productState": 256}]"#,
         );
         assert!(detect_firewall_disabled(&ctx(&results)).is_some());
+        // If Security Center lists an old disabled product next to an enabled
+        // active firewall, do not false-alarm.
+        let results = results_with(
+            "firewall_status",
+            r#"[
+                {"displayName": "Old Firewall", "productState": 256},
+                {"displayName": "Windows Firewall", "productState": 4096}
+            ]"#,
+        );
+        assert!(detect_firewall_disabled(&ctx(&results)).is_none());
     }
 
     #[test]
@@ -887,6 +955,19 @@ mod tests {
         );
         assert!(detect_smart_failure_predicted(&ctx(&results)).is_none());
         assert!(detect_disk_unhealthy(&ctx(&results)).is_none());
+        // OperationalStatus 3/4/6 are degraded even when HealthStatus remains
+        // Healthy on some Storage Management providers.
+        let results = results_with(
+            "chkdsk",
+            r#"{"disks": [{"Model": "SSD E", "OperationalStatus": [3], "HealthStatus": 0}]}"#,
+        );
+        assert!(detect_disk_unhealthy(&ctx(&results)).is_some());
+        let results = results_with(
+            "chkdsk",
+            r#"{"disks": [{"Model": "SSD F", "OperationalStatus": [6], "HealthStatus": 0}]}"#,
+        );
+        let d = detect_disk_unhealthy(&ctx(&results)).expect("operational error");
+        assert_eq!(d.severity, Some(IssueSeverity::Critical));
     }
 
     #[test]

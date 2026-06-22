@@ -1,9 +1,10 @@
 import React, { useState } from 'react'
 import type { DiagnosticTask, TaskResult } from '../contexts/AppContext'
-import { useAIContext, diagnosticCacheKey } from '../contexts/AIContext'
+import { useAIContext, diagnosticCacheKey, type AIAnalysisMeta } from '../contexts/AIContext'
 import { taskIcon } from '../ui/diagnostic-icons'
 import { formatDuration, parseOutput, toKeyValues } from './util'
 import * as logger from '../utils/logger'
+import { renderMarkdownLite } from '../utils/markdownLite'
 
 export interface DiagItem extends DiagnosticTask {
   result: TaskResult
@@ -12,7 +13,17 @@ export interface DiagItem extends DiagnosticTask {
 export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
   const [tab, setTab] = useState<'output' | 'raw'>('output')
   const [aiOpen, setAiOpen] = useState(true)
-  const { analyzeDiagnostic, isAnalyzing, interpretations, errors, isAIAvailable, aiEnabled, activeProvider } = useAIContext()
+  const [feedback, setFeedback] = useState<'up' | 'down' | null>(null)
+  const {
+    analyzeDiagnostic,
+    isAnalyzing,
+    interpretations,
+    analysisMeta,
+    errors,
+    isAIAvailable,
+    aiEnabled,
+    activeProvider,
+  } = useAIContext()
 
   const success = item.result.success
   const parsed = parseOutput(item.result.output)
@@ -21,20 +32,24 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
   // spinner/result/error land under a key this component never reads
   const cacheKey = diagnosticCacheKey(item.id, item.result.output)
   const aiText = interpretations[cacheKey]
+  const aiMeta = analysisMeta[cacheKey]
   const aiBusy = !!isAnalyzing[cacheKey]
   const aiErr = errors[cacheKey]
 
   // Tab resets to 'output' when a different diagnostic is selected because the
   // parent remounts this component with key={item.id} (see DiagnosticsScreen).
 
-  const runAi = () => {
-    if (!aiText && !aiBusy) {
+  const runAi = (forceRefresh = false) => {
+    if ((!aiText || forceRefresh) && !aiBusy) {
+      if (forceRefresh) setFeedback(null)
       // Failures surface via errors[cacheKey]; the catch only silences the
       // duplicate unhandled-rejection noise
-      analyzeDiagnostic(item.id, item.name, item.result.output).catch(err =>
+      analyzeDiagnostic(item.id, item.name, item.result.output, forceRefresh).catch(err =>
         logger.error('DiagnosticDetail', 'AI interpretation failed', String(err)))
     }
   }
+
+  const providerLabel = providerLabelFor(aiMeta?.provider_used ?? activeProvider)
 
   return (
     <div className="diag-detail">
@@ -111,15 +126,49 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
             <div className="ai-panel">
               <div className="ai-panel-head">
                 <img src="/wf-ds/chatgpt-bot-avatar.webp" alt="" />
-                <span>AI Analysis · {activeProvider === 'phi_silica' ? 'on-device (Phi Silica)' : 'cloud'}</span>
-                <button className="btn-icon" style={{ marginLeft: 'auto' }} onClick={() => setAiOpen(false)} title="Collapse"><i className="fa-solid fa-minus" /></button>
+                <span>AI Analysis · {providerLabel}</span>
+                <div className="ai-panel-actions" style={{ marginLeft: 'auto' }}>
+                  {aiText && (
+                    <>
+                      <button
+                        className={`btn-icon ${feedback === 'up' ? 'active' : ''}`}
+                        onClick={() => setFeedback(value => value === 'up' ? null : 'up')}
+                        title="Good analysis"
+                        aria-label="Good analysis"
+                        aria-pressed={feedback === 'up'}
+                      >
+                        <i className="fa-solid fa-thumbs-up" />
+                      </button>
+                      <button
+                        className={`btn-icon ${feedback === 'down' ? 'active' : ''}`}
+                        onClick={() => setFeedback(value => value === 'down' ? null : 'down')}
+                        title="Bad analysis"
+                        aria-label="Bad analysis"
+                        aria-pressed={feedback === 'down'}
+                      >
+                        <i className="fa-solid fa-thumbs-down" />
+                      </button>
+                      <button
+                        className="btn-icon"
+                        onClick={() => runAi(true)}
+                        disabled={aiBusy}
+                        title="Retry analysis"
+                        aria-label="Retry analysis"
+                      >
+                        <i className={`fa-solid ${aiBusy ? 'fa-circle-notch fa-spin' : 'fa-rotate-right'}`} />
+                      </button>
+                    </>
+                  )}
+                  <button className="btn-icon" onClick={() => setAiOpen(false)} title="Collapse" aria-label="Collapse AI analysis"><i className="fa-solid fa-minus" /></button>
+                </div>
               </div>
               <div className="ai-body">
                 {aiErr && <p style={{ color: 'var(--err-fg)' }}>{aiErr}</p>}
-                {!aiErr && aiBusy && <p><i className="fa-solid fa-circle-notch fa-spin" /> Analyzing…</p>}
-                {!aiErr && !aiBusy && aiText && <div style={{ whiteSpace: 'pre-wrap' }}>{aiText}</div>}
+                {!aiErr && aiBusy && <AIActivity providerLabel={providerLabel} />}
+                {!aiErr && !aiBusy && aiMeta && <AITrace meta={aiMeta} />}
+                {!aiErr && !aiBusy && aiText && <div className="report-body">{renderMarkdownLite(aiText)}</div>}
                 {!aiErr && !aiBusy && !aiText && (
-                  <button className="btn" onClick={runAi}><i className="fa-solid fa-wand-magic-sparkles" /> Interpret this diagnostic</button>
+                  <button className="btn" onClick={() => runAi()}><i className="fa-solid fa-wand-magic-sparkles" /> Interpret this diagnostic</button>
                 )}
               </div>
             </div>
@@ -131,6 +180,62 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
           )
         )}
       </div>
+    </div>
+  )
+}
+
+function providerLabelFor(provider: string): string {
+  if (provider === 'phi_silica') return 'on-device (Phi Silica)'
+  if (provider === 'foundry_local') return 'local (Foundry)'
+  if (provider === 'ollama') return 'local (Ollama)'
+  if (provider === 'custom_openai') return 'custom API'
+  if (provider === 'none') return 'not configured'
+  return 'cloud'
+}
+
+const AIActivity: React.FC<{ providerLabel: string }> = ({ providerLabel }) => (
+  <div className="ai-activity" aria-live="polite">
+    <span><i className="fa-solid fa-circle-notch fa-spin" /> Fetching live grounding through WindowsForum MCP</span>
+    <span><i className="fa-solid fa-brain" /> Reasoning with {providerLabel}</span>
+  </div>
+)
+
+const AITrace: React.FC<{ meta: AIAnalysisMeta }> = ({ meta }) => {
+  const grounding = meta.grounding
+  return (
+    <div className="ai-trace">
+      <div className="ai-trace-row">
+        <span><i className="fa-solid fa-brain" /> Reasoning summary</span>
+        <span>{meta.cached ? 'cached response' : 'fresh response'}</span>
+      </div>
+      <p>
+        Compared the diagnostic values with available live grounding, then generated the final answer.
+        Raw private model reasoning is not exposed by providers.
+      </p>
+      {grounding && (
+        <details open>
+          <summary>
+            <i className="fa-solid fa-screwdriver-wrench" /> Tool call: WindowsForum MCP grounding
+            <span>{grounding.source_count} source{grounding.source_count === 1 ? '' : 's'}</span>
+          </summary>
+          {grounding.query && <div className="ai-trace-query">Query: {grounding.query}</div>}
+          {grounding.error && <div className="ai-trace-error">{grounding.error}</div>}
+          {grounding.sources.length > 0 && (
+            <ul>
+              {grounding.sources.map((source, index) => (
+                <li key={`${source.url ?? source.title}-${index}`}>
+                  {source.url ? (
+                    <a href={source.url} target="_blank" rel="noreferrer">{source.title}</a>
+                  ) : (
+                    <span>{source.title}</span>
+                  )}
+                  <small>{source.source}</small>
+                </li>
+              ))}
+            </ul>
+          )}
+        </details>
+      )}
     </div>
   )
 }

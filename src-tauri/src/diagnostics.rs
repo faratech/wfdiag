@@ -256,8 +256,8 @@ pub fn get_all_tasks() -> Vec<DiagnosticTask> {
         },
         DiagnosticTask {
             id: "windows_update".to_string(),
-            name: "Windows Update Log".to_string(),
-            description: "Windows Update history".to_string(),
+            name: "Windows Update History".to_string(),
+            description: "Installed Windows updates and hotfix history".to_string(),
             category: "Logs".to_string(),
             admin_required: false,
         },
@@ -360,7 +360,7 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
 
         match task_id_owned.as_str() {
             "comp_system" => diagnostics.run_wmi_query("Win32_ComputerSystem", None),
-            "os_info" => diagnostics.run_wmi_query("Win32_OperatingSystem", None),
+            "os_info" => diagnostics.get_operating_system_info(),
             "bios" => diagnostics.run_wmi_query("Win32_BIOS", None),
             "baseboard" => diagnostics.run_wmi_query("Win32_BaseBoard", None),
             "processor" => diagnostics.run_wmi_query("Win32_Processor", None),

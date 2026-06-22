@@ -262,7 +262,6 @@ jobs:
 
             # Create AppxManifest.xml
             $manifest = @"
-          <?xml version="1.0" encoding="utf-8"?>
           <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
                    xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
                    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
@@ -305,6 +304,7 @@ jobs:
           </Package>
           "@
             $manifest | Out-File -Encoding utf8 "$targetDir/AppxManifest.xml"
+            [xml](Get-Content -Raw "$targetDir/AppxManifest.xml") | Out-Null
           }
 
           # Find Windows SDK
@@ -344,6 +344,9 @@ jobs:
   publish-to-store:
     needs: [build-x64, create-release]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
     if: needs.build-x64.outputs.publish_to_store == 'true' && needs.create-release.result == 'success'
     steps:
       - name: Trigger Store publish workflow

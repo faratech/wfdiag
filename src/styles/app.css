@@ -805,6 +805,88 @@ html.is-dark .code-block { background: rgba(0,0,0,0.35); }
   padding: 1px 5px;
   border-radius: 3px;
 }
+.ai-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.btn-icon.active {
+  color: var(--wf-paletteColor1);
+  background: rgba(15,108,189,0.12);
+}
+.ai-activity {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px;
+  color: var(--wf-text-muted);
+  font-size: 12px;
+}
+.ai-activity span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: rgba(255,255,255,0.45);
+}
+html.is-dark .ai-activity span { background: rgba(0,0,0,0.18); }
+.chat-reasoning { margin: 2px 0 6px; }
+.ai-trace {
+  margin: 0 0 12px;
+  padding: 9px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.42);
+  color: var(--wf-text-muted);
+  font-size: 12px;
+}
+html.is-dark .ai-trace { background: rgba(0,0,0,0.16); }
+.ai-trace-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--wf-text);
+  font-weight: 600;
+}
+.ai-trace p { margin: 5px 0 8px; }
+.ai-trace details {
+  border-top: 1px solid var(--hairline);
+  padding-top: 7px;
+}
+.ai-trace summary {
+  cursor: pointer;
+  color: var(--wf-text);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.ai-trace summary span {
+  margin-left: auto;
+  color: var(--wf-text-muted);
+  font-weight: 400;
+}
+.ai-trace-query,
+.ai-trace-error {
+  margin-top: 7px;
+  font-family: var(--wf-font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.ai-trace-error { color: var(--err-fg); }
+.ai-trace ul {
+  margin: 7px 0 0;
+  padding-left: 18px;
+}
+.ai-trace li { margin: 4px 0; }
+.ai-trace a { color: var(--wf-paletteColor1); }
+.ai-trace small {
+  display: block;
+  margin-top: 1px;
+  color: var(--wf-text-muted);
+}
 .ai-panel .ai-tags { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
 /* ===== Tags / Badges — Win11 InfoBadge with strong contrast ===== */
 .tag {
@@ -1688,7 +1770,30 @@ html.is-dark .palette-item.active { background: rgba(15,108,189,0.26); }
 /* --- AI screen: chat + sidebar, stacking with chat first */
 .ai-grid { display: flex; gap: 14px; min-height: 0; }
 .ai-chat-col { flex: 2 1 420px; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.ai-side-col { flex: 1 1 260px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.ai-side-col { flex: 1 1 260px; display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; }
+.scan-report-panel { min-width: 0; }
+.scan-report-body { padding: 12px; font-size: 12.5px; min-width: 0; }
+.scan-report-content {
+  max-height: min(52vh, 520px);
+  overflow: auto;
+  padding-right: 4px;
+}
+.scan-report-content::-webkit-scrollbar { width: 8px; height: 8px; }
+.scan-report-content::-webkit-scrollbar-track { background: transparent; }
+.scan-report-content::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,0.18);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.scan-report-content::-webkit-scrollbar-thumb:hover {
+  background: rgba(0,0,0,0.32);
+  background-clip: padding-box;
+}
+html.is-dark .scan-report-content::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.18);
+  background-clip: padding-box;
+}
 
 /* --- Processes table: fixed layout so long paths truncate instead of
    forcing horizontal overflow (an overflow-x wrapper would break the

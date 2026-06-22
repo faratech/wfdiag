@@ -61,6 +61,24 @@ pub fn tool_registry() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "search_windows_knowledge".into(),
+            description: "Live RAG search through WindowsForum MCP, including proxied Microsoft \
+                          KB/support material. Use for current Windows release, build, KB, \
+                          support, known-issue, driver, and troubleshooting facts instead of \
+                          guessing from memory."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Focused Windows question or diagnostic fact to ground",
+                    }
+                },
+                "required": ["query"],
+            }),
+        },
+        ToolSpec {
             name: "get_scan_summary".into(),
             description: "Summarize the current session's scan: which diagnostics ran, which \
                           passed or failed, and how old the scan is. Check this before \
@@ -193,6 +211,14 @@ impl AppToolExecutor {
             &scan_summary_text(session.as_ref()),
             self.max_result_chars,
         ))
+    }
+
+    async fn search_windows_knowledge(&self, arguments: &Value) -> Result<String, String> {
+        let query = arguments
+            .get("query")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "search_windows_knowledge requires a query".to_string())?;
+        crate::ai_grounding::search_grounding(query, self.max_result_chars).await
     }
 
     async fn get_detected_issues(&self) -> Result<String, String> {
@@ -355,6 +381,7 @@ impl ToolExecutor for AppToolExecutor {
         Box::pin(async move {
             match call.name.as_str() {
                 "run_diagnostic" => self.run_diagnostic(&call.arguments).await,
+                "search_windows_knowledge" => self.search_windows_knowledge(&call.arguments).await,
                 "get_scan_summary" => self.get_scan_summary().await,
                 "get_detected_issues" => self.get_detected_issues().await,
                 "compare_with_previous_scan" => self.compare_with_previous_scan().await,
@@ -380,6 +407,7 @@ mod tests {
             names,
             vec![
                 "run_diagnostic",
+                "search_windows_knowledge",
                 "get_scan_summary",
                 "get_detected_issues",
                 "compare_with_previous_scan",

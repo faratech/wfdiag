@@ -90,6 +90,7 @@ export const useScanner = () => {
 
   // Track the current running session to prevent race conditions
   const currentSessionRef = useRef<string | null>(null)
+  const cancelledSessionRef = useRef<string | null>(null)
   const isRunningRef = useRef<boolean>(false)
   // Track auto-save delay for cleanup. The delay is AWAITED inside runDiagnostics
   // (not fire-and-forget), so cancelling must RESOLVE the pending promise — merely
@@ -137,6 +138,7 @@ export const useScanner = () => {
     const lockId = `lock_${Date.now()}_${Math.random().toString(36).slice(2)}`
     scanLockOwner = lockId
     isRunningRef.current = true
+    cancelledSessionRef.current = null
     setIsRunning(true)
     setCurrentProgress(0)
     setResults({})
@@ -162,14 +164,19 @@ export const useScanner = () => {
       const totalTasks = taskIds.length
 
       unlisten = await listen<{
+        session_id: string
         task_id: string
         status: 'running' | 'completed'
         task_name?: string
         success?: boolean
       }>('task-progress', event => {
         // Only process events for the current session
-        if (currentSessionRef.current !== newSessionId) {
+        if (event.payload.session_id !== newSessionId || currentSessionRef.current !== newSessionId) {
           logger.debug('useScanner', 'Ignoring event from old session')
+          return
+        }
+
+        if (cancelledSessionRef.current === newSessionId) {
           return
         }
 
@@ -197,17 +204,19 @@ export const useScanner = () => {
           return
         }
 
-        const resultsObj = scanResults.reduce((acc, [taskId, result]) => {
-          acc[taskId] = result
-          return acc
-        }, {} as Record<string, TaskResult>)
+        if (cancelledSessionRef.current !== newSessionId) {
+          const resultsObj = scanResults.reduce((acc, [taskId, result]) => {
+            acc[taskId] = result
+            return acc
+          }, {} as Record<string, TaskResult>)
 
-        setResults(resultsObj)
+          setResults(resultsObj)
 
-        const resultList = Object.values(resultsObj)
-        const passedCount = resultList.filter(r => r.success).length
-        if (settings.showNotifications) {
-          notifyScanComplete(passedCount, resultList.length - passedCount)
+          const resultList = Object.values(resultsObj)
+          const passedCount = resultList.filter(r => r.success).length
+          if (settings.showNotifications) {
+            notifyScanComplete(passedCount, resultList.length - passedCount)
+          }
         }
       } finally {
         // Always cleanup listener
@@ -217,10 +226,11 @@ export const useScanner = () => {
         }
       }
 
-      setCurrentProgress(100)
+      const wasCancelled = cancelledSessionRef.current === newSessionId
+      setCurrentProgress(wasCancelled ? 0 : 100)
       setTaskbarProgress(null)
 
-      if (settings.autoSave) {
+      if (settings.autoSave && !wasCancelled) {
         // Awaited (not fire-and-forget) so the scan lock is held through the
         // auto-save, yet always released by the finally below. stopScan and
         // unmount cancel the delay early via clearAutoSaveTimeout.
@@ -248,6 +258,11 @@ export const useScanner = () => {
       if (currentSessionRef.current === newSessionId) {
         setScanEndTime(Date.now())
         setIsRunning(false)
+        setCurrentTaskName('')
+        currentSessionRef.current = null
+      }
+      if (cancelledSessionRef.current === newSessionId) {
+        cancelledSessionRef.current = null
       }
     } catch (error) {
       logger.error('useScanner', 'Failed to start diagnostics', error)
@@ -264,6 +279,7 @@ export const useScanner = () => {
       setIsRunning(false)
       setTaskbarProgress(null)
       currentSessionRef.current = null
+      cancelledSessionRef.current = null
     } finally {
       isRunningRef.current = false
       // Release the cross-instance lock only if this scan still owns it
@@ -314,28 +330,25 @@ export const useScanner = () => {
 
   const stopScan = useCallback(() => {
     const sessionId = currentSessionRef.current
-    currentSessionRef.current = null
     // Cancel any pending auto-save (resolves the awaited delay so the in-flight
     // runDiagnostics call can unwind and release the scan lock)
     clearAutoSaveTimeout()
     // Tell the backend to skip this session's queued tasks; in-flight tasks
     // finish and the pending run_diagnostics_parallel invoke resolves quickly.
     if (sessionId) {
+      cancelledSessionRef.current = sessionId
       invoke('cancel_diagnostics', { sessionId }).catch(error =>
         logger.error('useScanner', 'Failed to cancel diagnostics session', error)
       )
     }
-    isRunningRef.current = false
-    setIsRunning(false)
-    setCurrentProgress(0)
-    setCurrentTaskName('')
     setTaskbarProgress(null)
-  }, [setIsRunning, setCurrentProgress, setCurrentTaskName, clearAutoSaveTimeout])
+  }, [clearAutoSaveTimeout])
 
   const clearResults = useCallback(() => {
     // Cancel any pending auto-save
     clearAutoSaveTimeout()
     currentSessionRef.current = null
+    cancelledSessionRef.current = null
     setResults({})
     setSessionId(null)
     setCurrentProgress(0)
@@ -377,6 +390,7 @@ export const useScanner = () => {
     return () => {
       isRunningRef.current = false
       currentSessionRef.current = null
+      cancelledSessionRef.current = null
       if (autoSaveTimeoutRef.current !== null) {
         clearTimeout(autoSaveTimeoutRef.current)
         autoSaveTimeoutRef.current = null

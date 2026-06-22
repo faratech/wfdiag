@@ -34,6 +34,7 @@ export function useScanReport(): ScanReportState {
   const [error, setError] = useState<string | null>(null)
   const aiEnabled = settings.aiEnabled ?? true
   const reportIdRef = useRef<string | null>(null)
+  const generatingRef = useRef(false)
   const pendingReportEventsRef = useRef<Map<string, {
     text: string
     done?: ReportDone
@@ -43,6 +44,11 @@ export function useScanReport(): ScanReportState {
   useEffect(() => { apiKeyRef.current = settings.openAiApiKey }, [settings.openAiApiKey])
 
   const hasResults = Object.keys(results).length > 0
+
+  const setGeneratingState = useCallback((value: boolean) => {
+    generatingRef.current = value
+    setGenerating(value)
+  }, [])
 
   const bufferReportDelta = useCallback((payload: ReportDelta) => {
     const pending = pendingReportEventsRef.current.get(payload.reportId) ?? { text: '' }
@@ -71,11 +77,11 @@ export function useScanReport(): ScanReportState {
     }
     if (pending.error) {
       setError(pending.error)
-      setGenerating(false)
+      setGeneratingState(false)
     } else if (pending.done) {
-      setGenerating(false)
+      setGeneratingState(false)
     }
-  }, [])
+  }, [setGeneratingState])
 
   useEffect(() => {
     let disposed = false
@@ -96,7 +102,7 @@ export function useScanReport(): ScanReportState {
             return
           }
           if (event.payload.reportId !== reportIdRef.current) return
-          setGenerating(false)
+          setGeneratingState(false)
         }),
         listen<ReportError>('ai-report://error', event => {
           if (!reportIdRef.current) {
@@ -105,7 +111,7 @@ export function useScanReport(): ScanReportState {
           }
           if (event.payload.reportId !== reportIdRef.current) return
           setError(event.payload.message)
-          setGenerating(false)
+          setGeneratingState(false)
         }),
       ])
       if (disposed) {
@@ -119,16 +125,17 @@ export function useScanReport(): ScanReportState {
       disposed = true
       unlistens.forEach(u => u())
     }
-  }, [bufferReportDelta, bufferReportDone, bufferReportError])
+  }, [bufferReportDelta, bufferReportDone, bufferReportError, setGeneratingState])
 
   const generate = useCallback(async () => {
+    if (generatingRef.current) return
     if (!aiEnabled) {
-      setGenerating(false)
+      setGeneratingState(false)
       return
     }
     setError(null)
     setReport('')
-    setGenerating(true)
+    setGeneratingState(true)
     reportIdRef.current = null
     pendingReportEventsRef.current.clear()
     try {
@@ -140,15 +147,15 @@ export function useScanReport(): ScanReportState {
       if (ack.report) {
         // Cache hit — full text, no events coming
         setReport(ack.report)
-        setGenerating(false)
+        setGeneratingState(false)
       } else {
         applyBufferedReportEvents(ack.reportId)
       }
     } catch (err) {
       setError(String(err))
-      setGenerating(false)
+      setGeneratingState(false)
     }
-  }, [aiEnabled, applyBufferedReportEvents])
+  }, [aiEnabled, applyBufferedReportEvents, setGeneratingState])
 
   const copy = useCallback(async () => {
     try {

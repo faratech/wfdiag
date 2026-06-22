@@ -1,14 +1,40 @@
 use crate::wmi_native::WmiConnection;
 use anyhow::Result;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use windows::Win32::System::EventLog::{
+    EVT_HANDLE, EvtClose, EvtNext, EvtQuery, EvtQueryChannelPath, EvtQueryReverseDirection,
+    EvtRender, EvtRenderEventXml,
+};
 use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+use windows::core::PCWSTR;
 // Performance counter imports removed - not used in current implementation
 use winreg::RegKey;
 use winreg::enums::*;
 
 pub struct NativeDiagnostics;
+
+struct EventLogHandle(EVT_HANDLE);
+
+impl Drop for EventLogHandle {
+    fn drop(&mut self) {
+        // Best-effort cleanup; closing an event log handle cannot affect diagnostics.
+        let _ = unsafe { EvtClose(self.0) };
+    }
+}
+
+#[derive(Debug)]
+struct EventRecord {
+    source: String,
+    code: u64,
+    time_iso: String,
+    time_secs: i64,
+    level: Option<u64>,
+    sample_message: String,
+    event_data: serde_json::Map<String, Value>,
+}
 
 #[allow(dead_code)]
 impl NativeDiagnostics {
@@ -35,12 +61,58 @@ impl NativeDiagnostics {
         Ok(Value::Array(json_results))
     }
 
+    pub fn get_operating_system_info(&self) -> Result<Value> {
+        let mut value = self.run_wmi_query("Win32_OperatingSystem", None)?;
+        let registry = self.windows_release_registry_info();
+        if let Value::Array(rows) = &mut value
+            && let Some(Value::Object(first)) = rows.first_mut()
+        {
+            for (key, value) in registry {
+                first.insert(key, value);
+            }
+        }
+        Ok(value)
+    }
+
+    fn windows_release_registry_info(&self) -> serde_json::Map<String, Value> {
+        let mut out = serde_json::Map::new();
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        let Ok(key) = hklm.open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion") else {
+            return out;
+        };
+
+        for name in [
+            "ProductName",
+            "DisplayVersion",
+            "ReleaseId",
+            "CurrentBuild",
+            "CurrentBuildNumber",
+            "EditionID",
+            "InstallationType",
+        ] {
+            if let Ok(value) = key.get_value::<String, _>(name) {
+                out.insert(name.to_string(), json!(value));
+            }
+        }
+        if let Ok(ubr) = key.get_value::<u32, _>("UBR") {
+            out.insert("UBR".to_string(), json!(ubr));
+            let build = out
+                .get("CurrentBuild")
+                .or_else(|| out.get("CurrentBuildNumber"))
+                .and_then(Value::as_str);
+            if let Some(build) = build {
+                out.insert("FullBuild".to_string(), json!(format!("{build}.{ubr}")));
+            }
+        }
+        out
+    }
+
     /// High-signal System-log event codes for issue detection, aggregated by
     /// (source, code) over the last 7 days. Deliberately separate from the
     /// `event_logs` task (Error-type-only, 50-row cap): Kernel-Power 41 is a
     /// Critical-level record, so no Type filter is used here. Time filtering
-    /// happens in Rust (WQL datetime literals are error-prone); per-source
-    /// WHERE clauses keep the scans bounded.
+    /// happens in the Event Log query, which avoids the slow unbounded WMI
+    /// `Win32_NTLogEvent` sweep.
     pub fn get_critical_event_codes(&self) -> Result<Value> {
         const WINDOW_DAYS: i64 = 7;
         const ROW_CAP: usize = 100;
@@ -53,73 +125,24 @@ impl NativeDiagnostics {
             ("Service Control Manager", &[7031, 7034]),
         ];
 
-        fn value_as_u64(v: Option<&Value>) -> Option<u64> {
-            match v {
-                Some(Value::Number(n)) => n.as_u64(),
-                Some(Value::String(s)) => s.parse().ok(),
-                _ => None,
-            }
-        }
-
-        let wmi_con = WmiConnection::new()?;
-        let cutoff = crate::timestamp::Timestamp::now().secs - WINDOW_DAYS * 24 * 3600;
         let mut events: Vec<Value> = Vec::new();
 
         for (source, codes) in TARGETS {
-            let mut wql = format!(
-                "SELECT TimeGenerated, SourceName, EventCode, Message FROM Win32_NTLogEvent \
-                 WHERE Logfile='System' AND SourceName='{}'",
-                source
-            );
-            if !codes.is_empty() {
-                let clause = codes
-                    .iter()
-                    .map(|c| format!("EventCode={}", c))
-                    .collect::<Vec<_>>()
-                    .join(" OR ");
-                wql.push_str(&format!(" AND ({})", clause));
-            }
-            // A missing source or empty log is normal — skip, don't fail the task
-            let Ok(rows) = wmi_con.query(&wql) else {
-                continue;
-            };
-
-            // Aggregate by event code: count, most recent, sample message.
-            // The WQL has no ORDER BY, so rows arrive in arbitrary order — apply
-            // the 7-day cutoff FIRST and let the cap bound the recent rows we
-            // process, otherwise a batch of old rows could exhaust the cap and
-            // hide genuinely recent events.
-            let mut groups: std::collections::HashMap<u64, (u64, i64, String)> =
-                std::collections::HashMap::new();
-            let mut kept = 0usize;
-            for row in rows {
-                if kept >= ROW_CAP {
-                    break;
-                }
-                let Some(time) = row
-                    .get("TimeGenerated")
-                    .and_then(|v| v.as_str())
-                    .and_then(crate::timestamp::parse_wmi_datetime)
-                else {
-                    continue;
+            let records =
+                match Self::query_event_records("System", source, codes, WINDOW_DAYS, ROW_CAP) {
+                    Ok(records) => records,
+                    Err(e) => {
+                        eprintln!("Failed to query critical events for {}: {}", source, e);
+                        continue;
+                    }
                 };
-                if time.secs < cutoff {
-                    continue;
-                }
-                kept += 1;
-                let code = value_as_u64(row.get("EventCode")).unwrap_or(0);
-                let message: String = row
-                    .get("Message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .chars()
-                    .take(300)
-                    .collect();
-                let entry = groups.entry(code).or_insert((0, 0, String::new()));
+            let mut groups: HashMap<u64, (u64, i64, String)> = HashMap::new();
+            for record in records {
+                let entry = groups.entry(record.code).or_insert((0, 0, String::new()));
                 entry.0 += 1;
-                if time.secs >= entry.1 {
-                    entry.1 = time.secs;
-                    entry.2 = message;
+                if record.time_secs >= entry.1 {
+                    entry.1 = record.time_secs;
+                    entry.2 = record.sample_message;
                 }
             }
             for (code, (count, last_seen, sample_message)) in groups {
@@ -134,6 +157,156 @@ impl NativeDiagnostics {
         }
 
         Ok(json!({ "window_days": WINDOW_DAYS, "events": events }))
+    }
+
+    fn query_event_records(
+        channel: &str,
+        source: &str,
+        codes: &[u32],
+        window_days: i64,
+        row_cap: usize,
+    ) -> Result<Vec<EventRecord>> {
+        let mut predicates = vec![format!(
+            "Provider[@Name='{}']",
+            source.replace('\'', "&apos;")
+        )];
+        if !codes.is_empty() {
+            let code_predicate = codes
+                .iter()
+                .map(|code| format!("EventID={}", code))
+                .collect::<Vec<_>>()
+                .join(" or ");
+            predicates.push(format!("({})", code_predicate));
+        }
+        Self::query_channel_events(channel, &predicates, window_days, row_cap)
+    }
+
+    fn query_recent_error_events(
+        channel: &str,
+        window_days: i64,
+        row_cap: usize,
+    ) -> Result<Vec<EventRecord>> {
+        Self::query_channel_events(
+            channel,
+            &["(Level=1 or Level=2)".to_string()],
+            window_days,
+            row_cap,
+        )
+    }
+
+    fn query_channel_events(
+        channel: &str,
+        system_predicates: &[String],
+        window_days: i64,
+        row_cap: usize,
+    ) -> Result<Vec<EventRecord>> {
+        let window_ms = window_days * 24 * 60 * 60 * 1000;
+        let mut predicates = Vec::with_capacity(system_predicates.len() + 1);
+        predicates.push(format!(
+            "TimeCreated[timediff(@SystemTime) <= {}]",
+            window_ms
+        ));
+        predicates.extend(system_predicates.iter().cloned());
+        let xpath = format!("*[System[{}]]", predicates.join(" and "));
+
+        let channel_w = wide_null(channel);
+        let xpath_w = wide_null(&xpath);
+        let query = unsafe {
+            EvtQuery(
+                None,
+                PCWSTR(channel_w.as_ptr()),
+                PCWSTR(xpath_w.as_ptr()),
+                EvtQueryChannelPath.0 | EvtQueryReverseDirection.0,
+            )
+        }?;
+        let query = EventLogHandle(query);
+
+        let mut records = Vec::new();
+        let mut handles = [0isize; 16];
+        while records.len() < row_cap {
+            let mut returned = 0u32;
+            if unsafe { EvtNext(query.0, &mut handles, 250, 0, &mut returned) }.is_err()
+                || returned == 0
+            {
+                break;
+            }
+
+            for raw_handle in handles.iter().take(returned as usize) {
+                let event_handle = EVT_HANDLE(*raw_handle);
+                let record = Self::render_event_record(event_handle);
+                let _ = unsafe { EvtClose(event_handle) };
+
+                if let Some(record) = record {
+                    records.push(record);
+                    if records.len() >= row_cap {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(records)
+    }
+
+    fn render_event_record(event_handle: EVT_HANDLE) -> Option<EventRecord> {
+        let xml = Self::render_event_xml(event_handle).ok()?;
+        let source = xml_attr(&xml, "Provider", "Name")?;
+        let code = xml_text(&xml, "EventID")?.parse::<u64>().ok()?;
+        let time_iso = xml_attr(&xml, "TimeCreated", "SystemTime")?;
+        let time_secs = crate::timestamp::Timestamp::from_iso_string(&time_iso)
+            .ok()?
+            .secs;
+        let event_data = xml_event_data(&xml);
+        let sample_message =
+            event_data_summary(&event_data).unwrap_or_else(|| format!("{} event {}", source, code));
+
+        Some(EventRecord {
+            source,
+            code,
+            time_iso,
+            time_secs,
+            level: xml_text(&xml, "Level").and_then(|level| level.parse().ok()),
+            sample_message,
+            event_data,
+        })
+    }
+
+    fn render_event_xml(event_handle: EVT_HANDLE) -> Result<String> {
+        let mut buffer_used = 0u32;
+        let mut property_count = 0u32;
+        let _ = unsafe {
+            EvtRender(
+                None,
+                event_handle,
+                EvtRenderEventXml.0,
+                0,
+                None,
+                &mut buffer_used,
+                &mut property_count,
+            )
+        };
+        if buffer_used == 0 {
+            return Err(anyhow::anyhow!("Event XML render returned no buffer"));
+        }
+
+        let mut buffer = vec![0u16; (buffer_used as usize).div_ceil(2)];
+        unsafe {
+            EvtRender(
+                None,
+                event_handle,
+                EvtRenderEventXml.0,
+                buffer_used,
+                Some(buffer.as_mut_ptr().cast()),
+                &mut buffer_used,
+                &mut property_count,
+            )
+        }?;
+
+        let len = buffer
+            .iter()
+            .position(|ch| *ch == 0)
+            .unwrap_or(buffer.len());
+        Ok(String::from_utf16_lossy(&buffer[..len]))
     }
 
     /// Pending-reboot detection via the canonical registry markers.
@@ -414,39 +587,30 @@ impl NativeDiagnostics {
     }
 
     pub fn get_event_logs(&self) -> Result<Value> {
-        let wmi_con = WmiConnection::new()?;
-
+        const WINDOW_DAYS: i64 = 7;
+        const ROW_CAP_PER_LOG: usize = 50;
         let mut all_events = Vec::new();
 
-        // Query System events
-        match wmi_con.query(
-            "SELECT TimeGenerated, Type, SourceName, EventCode, Message FROM Win32_NTLogEvent WHERE Logfile='System' AND Type='Error'"
-        ) {
-            Ok(results) => {
-                for result in results.into_iter().take(50) {
-                    let mut event_info: serde_json::Map<String, Value> = result.into_iter().collect();
-                    event_info.insert("LogFile".to_string(), json!("System"));
-                    all_events.push(Value::Object(event_info));
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to query System events: {}", e);
-            }
-        }
-
-        // Query Application events
-        match wmi_con.query(
-            "SELECT TimeGenerated, Type, SourceName, EventCode, Message FROM Win32_NTLogEvent WHERE Logfile='Application' AND Type='Error'"
-        ) {
-            Ok(results) => {
-                for result in results.into_iter().take(50) {
-                    let mut event_info: serde_json::Map<String, Value> = result.into_iter().collect();
-                    event_info.insert("LogFile".to_string(), json!("Application"));
-                    all_events.push(Value::Object(event_info));
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to query Application events: {}", e);
+        for log_file in ["System", "Application"] {
+            let Ok(records) =
+                Self::query_recent_error_events(log_file, WINDOW_DAYS, ROW_CAP_PER_LOG)
+            else {
+                continue;
+            };
+            for record in records {
+                all_events.push(json!({
+                    "LogFile": log_file,
+                    "TimeGenerated": record.time_iso,
+                    "Type": match record.level {
+                        Some(1) => "Critical",
+                        Some(2) => "Error",
+                        _ => "Unknown",
+                    },
+                    "SourceName": record.source,
+                    "EventCode": record.code,
+                    "Message": record.sample_message,
+                    "EventData": record.event_data,
+                }));
             }
         }
 
@@ -1637,6 +1801,7 @@ impl NativeDiagnostics {
                     Value::Object(obj)
                 })
                 .collect();
+            update_info["summary"] = Self::windows_update_hotfix_summary(&hotfixes);
             update_info["installed_updates"] = json!(hotfixes);
             // Also provide as hotfix_details for frontend compatibility
             update_info["hotfix_details"] = json!(hotfixes);
@@ -1660,6 +1825,35 @@ impl NativeDiagnostics {
         }
 
         Ok(update_info)
+    }
+
+    fn windows_update_hotfix_summary(hotfixes: &[Value]) -> Value {
+        let latest = hotfixes
+            .iter()
+            .filter_map(|hotfix| {
+                let key = hotfix
+                    .get("InstalledOn")
+                    .and_then(Value::as_str)
+                    .and_then(Self::parse_hotfix_date_key)?;
+                Some((key, hotfix.clone()))
+            })
+            .max_by_key(|(key, _)| *key)
+            .map(|(_, hotfix)| hotfix);
+
+        json!({
+            "installed_update_count": hotfixes.len(),
+            "data_source": "Win32_QuickFixEngineering installed hotfix records",
+            "latest_installed_update": latest,
+        })
+    }
+
+    fn parse_hotfix_date_key(value: &str) -> Option<u32> {
+        let mut parts = value.split('/');
+        let month = parts.next()?.parse::<u32>().ok()?;
+        let day = parts.next()?.parse::<u32>().ok()?;
+        let year = parts.next()?.parse::<u32>().ok()?;
+        (parts.next().is_none() && (1..=12).contains(&month) && (1..=31).contains(&day))
+            .then_some(year * 10_000 + month * 100 + day)
     }
 
     pub fn get_driver_verifier(&self) -> Result<Value> {
@@ -1742,4 +1936,91 @@ impl NativeDiagnostics {
             .execute_command(program, args)
             .map_err(|e| anyhow::anyhow!("Security validation failed: {}", e))
     }
+}
+
+fn wide_null(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn xml_text(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}", tag);
+    let start = xml.find(&open)?;
+    let content_start = xml[start..].find('>')? + start + 1;
+    let close = format!("</{}>", tag);
+    let content_end = xml[content_start..].find(&close)? + content_start;
+    Some(xml_unescape(xml[content_start..content_end].trim()))
+}
+
+fn xml_attr(xml: &str, tag: &str, attr: &str) -> Option<String> {
+    let open = format!("<{}", tag);
+    let start = xml.find(&open)?;
+    let tag_end = xml[start..].find('>')? + start;
+    xml_attr_from_fragment(&xml[start..tag_end], attr)
+}
+
+fn xml_attr_from_fragment(fragment: &str, attr: &str) -> Option<String> {
+    let needle = format!("{}=\"", attr);
+    let start = fragment.find(&needle)? + needle.len();
+    let end = fragment[start..].find('"')? + start;
+    Some(xml_unescape(&fragment[start..end]))
+}
+
+fn xml_event_data(xml: &str) -> serde_json::Map<String, Value> {
+    let mut data = serde_json::Map::new();
+    let mut rest = xml;
+    let mut fallback_index = 1usize;
+
+    while let Some(data_pos) = rest.find("<Data") {
+        rest = &rest[data_pos..];
+        let Some(tag_end) = rest.find('>') else {
+            break;
+        };
+        let tag_fragment = &rest[..tag_end];
+        let name = xml_attr_from_fragment(tag_fragment, "Name").unwrap_or_else(|| {
+            let name = format!("Data{}", fallback_index);
+            fallback_index += 1;
+            name
+        });
+
+        if tag_fragment.ends_with('/') {
+            data.insert(name, json!(""));
+            rest = &rest[tag_end + 1..];
+            continue;
+        }
+
+        let value_start = tag_end + 1;
+        let Some(value_end) = rest[value_start..].find("</Data>") else {
+            break;
+        };
+        let value = xml_unescape(rest[value_start..value_start + value_end].trim());
+        data.insert(name, json!(value));
+        rest = &rest[value_start + value_end + "</Data>".len()..];
+    }
+
+    data
+}
+
+fn event_data_summary(data: &serde_json::Map<String, Value>) -> Option<String> {
+    let summary = data
+        .iter()
+        .filter_map(|(key, value)| {
+            let text = value.as_str()?.trim();
+            (!text.is_empty()).then(|| format!("{}={}", key, text))
+        })
+        .take(6)
+        .collect::<Vec<_>>()
+        .join("; ");
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary.chars().take(300).collect())
+    }
+}
+
+fn xml_unescape(text: &str) -> String {
+    text.replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }

@@ -11,9 +11,6 @@ on:
         description: 'Mark as pre-release'
         type: boolean
         default: false
-  push:
-    tags:
-      - 'v*'
 
 permissions:
   contents: write
@@ -51,10 +48,13 @@ jobs:
       shell: pwsh
       run: |
         Write-Host "🔍 Finding executables to sign..." -ForegroundColor Cyan
-        
-        $files = Get-ChildItem -Recurse -Include "*.exe", "*.msi", "*.msix" | Where-Object { 
-          $_.Name -notlike "*build*" -and 
-          $_.Directory.Name -ne "node_modules" 
+
+        $files = Get-ChildItem -Recurse -Include "*.exe", "*.msi", "*.msix" | Where-Object {
+          $_.Name -notlike "*build*" -and
+          $_.Directory.Name -ne "node_modules"
+        }
+        if (-not $files) {
+          throw "No signable artifacts found. Build artifacts first or use build-and-publish-store.yml for tag releases."
         }
         
         $signtool = @(
@@ -86,6 +86,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: windows-signed-binaries
+        if-no-files-found: error
         path: |
           **/*.exe
           **/*.msi
@@ -118,8 +119,14 @@ jobs:
     - name: Sign with Sigstore
       run: |
         echo "🔐 Adding Sigstore signatures to Windows-signed binaries..."
-        
-        find . \( -name "*.exe" -o -name "*.msi" -o -name "*.msix" \) -type f | while read -r file; do
+
+        files=$(find . \( -name "*.exe" -o -name "*.msi" -o -name "*.msix" \) -type f)
+        if [ -z "$files" ]; then
+          echo "No binaries found to sign."
+          exit 1
+        fi
+
+        printf '%s\n' "$files" | while read -r file; do
           if [ -f "$file" ]; then
             echo "🔐 Adding Sigstore signature: $file"
             cosign sign-blob --yes "$file" --output-signature "${file}.sig" --output-certificate "${file}.crt"
@@ -158,6 +165,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: dual-signed-release
+        if-no-files-found: error
         path: |
           **/*.exe
           **/*.msi
