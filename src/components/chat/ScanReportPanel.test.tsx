@@ -30,7 +30,7 @@ vi.mock('../../contexts/ToastContext', () => ({
 function makeContext(overrides: Record<string, unknown> = {}) {
   return {
     results: { os_info: { success: true, output: '{}', error: null, duration_ms: 1 } },
-    settings: { openAiApiKey: 'sk-test' },
+    settings: { openAiApiKey: 'sk-test', aiEnabled: true },
     pendingScanReport: false,
     setPendingScanReport: vi.fn(),
     ...overrides,
@@ -128,5 +128,20 @@ describe('ScanReportPanel', () => {
     render(<ScanReportPanel />)
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('ai_generate_report', expect.anything()))
     expect(setPendingScanReport).toHaveBeenCalledWith(false)
+  })
+
+  it('does not generate when AI insights are disabled', async () => {
+    const setPendingScanReport = vi.fn()
+    contextValue = makeContext({
+      settings: { openAiApiKey: 'sk-test', aiEnabled: false },
+      pendingScanReport: true,
+      setPendingScanReport,
+    })
+    render(<ScanReportPanel />)
+
+    expect(screen.getByText(/AI insights are disabled/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Explain this scan/ })).not.toBeInTheDocument()
+    await waitFor(() => expect(setPendingScanReport).toHaveBeenCalledWith(false))
+    expect(invokeMock).not.toHaveBeenCalledWith('ai_generate_report', expect.anything())
   })
 })

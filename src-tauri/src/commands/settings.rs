@@ -28,10 +28,10 @@ use std::path::PathBuf;
 use keyring::{Entry, Error as KeyringError};
 
 /// Application settings that persist across sessions
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub auto_save: bool,
     #[serde(default)]
     pub scan_on_startup: bool,
@@ -103,6 +103,40 @@ pub struct AppSettings {
     // Closing the main window hides to the system tray instead of exiting
     #[serde(default)]
     pub close_to_tray: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            auto_save: true,
+            scan_on_startup: false,
+            max_concurrent_tasks: default_max_concurrent(),
+            export_format: default_export_format(),
+            theme: default_theme(),
+            show_notifications: true,
+            custom_export_path: None,
+            retain_history: true,
+            history_limit: default_history_limit(),
+            ai_enabled: true,
+            preferred_ai_provider: default_ai_provider(),
+            open_ai_api_key: None,
+            anthropic_api_key: None,
+            gemini_api_key: None,
+            deepseek_api_key: None,
+            custom_api_key: None,
+            anthropic_model: None,
+            gemini_model: None,
+            deepseek_model: None,
+            custom_endpoint: None,
+            custom_model: None,
+            ollama_endpoint: None,
+            ollama_model: None,
+            quick_scan_tasks: None,
+            local_ai_endpoint: None,
+            phi_silica_laf_token: None,
+            close_to_tray: false,
+        }
+    }
 }
 
 fn default_max_concurrent() -> u32 {
@@ -345,6 +379,21 @@ mod tests {
             ollama_model: Some("llama3.2".into()),
             ..AppSettings::default()
         }
+    }
+
+    #[test]
+    fn app_settings_default_matches_frontend_defaults() {
+        let settings = AppSettings::default();
+        assert!(settings.auto_save);
+        assert!(!settings.scan_on_startup);
+        assert_eq!(settings.max_concurrent_tasks, 5);
+        assert_eq!(settings.export_format, "text");
+        assert_eq!(settings.theme, "dark");
+        assert!(settings.show_notifications);
+        assert!(settings.retain_history);
+        assert_eq!(settings.history_limit, 30);
+        assert!(settings.ai_enabled);
+        assert_eq!(settings.preferred_ai_provider, "auto");
     }
 
     #[test]

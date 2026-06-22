@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { ScanSummary } from './useScanHistory'
 import * as logger from '../utils/logger'
@@ -38,8 +38,12 @@ export function useComparison(): UseComparisonReturn {
   const [comparison, setComparison] = useState<ComparisonResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const requestSeq = useRef(0)
 
   const compareScans = async (currentId: string, previousId: string) => {
+    const requestId = ++requestSeq.current
+    const isLatestRequest = () => requestSeq.current === requestId
+
     try {
       setLoading(true)
       setError(null)
@@ -61,6 +65,11 @@ export function useComparison(): UseComparisonReturn {
         currentId,
         previousId
       })
+
+      if (!isLatestRequest()) {
+        logger.debug('useComparison', 'Ignoring stale comparison result', { currentId, previousId })
+        return
+      }
 
       logger.debug('useComparison', 'Comparison result received', { scanCount: result?.total_changes })
 
@@ -84,20 +93,29 @@ export function useComparison(): UseComparisonReturn {
 
       logger.info('useComparison', `Comparison complete: ${result.total_changes} total changes`)
       setComparison(result)
-      
+
     } catch (err) {
+      if (!isLatestRequest()) {
+        logger.debug('useComparison', 'Ignoring stale comparison failure', { currentId, previousId })
+        return
+      }
+
       const errorMessage = err instanceof Error ? err.message : String(err)
       logger.error('useComparison', 'Comparison failed', errorMessage)
       setError(`Failed to compare scans: ${errorMessage}`)
       setComparison(null)
     } finally {
-      setLoading(false)
+      if (isLatestRequest()) {
+        setLoading(false)
+      }
     }
   }
 
   const clearComparison = () => {
+    requestSeq.current += 1
     setComparison(null)
     setError(null)
+    setLoading(false)
   }
 
   const getFilteredChanges = (filter: ComparisonFilter): TaskChange[] => {

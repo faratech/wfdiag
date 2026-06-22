@@ -31,6 +31,7 @@ const safeRemediation: RemediationSummary = {
 
 let issues: Issue[]
 let isAdmin = true
+let appSettings: Record<string, unknown>
 
 vi.mock('../contexts/AppContext', async () => ({
   useAppContext: () => ({
@@ -42,7 +43,7 @@ vi.mock('../contexts/AppContext', async () => ({
     systemInfo: { computer_name: 'PC', os_version: 'Win11', is_admin: isAdmin },
     setPendingChatPrompt,
     setSelectedTab,
-    settings: { openAiApiKey: 'sk-test' },
+    settings: appSettings,
   }),
 }))
 vi.mock('../contexts/AIContext', () => ({
@@ -84,6 +85,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   issues = makeIssues()
   isAdmin = true
+  appSettings = { openAiApiKey: 'sk-test', aiEnabled: true }
   invokeMock.mockImplementation((cmd: string) => {
     switch (cmd) {
       case 'get_remediations':
@@ -163,6 +165,17 @@ describe('IssuesScreen remediation flow', () => {
     fireEvent.click(screen.getByRole('button', { name: /Prioritize/ }))
     await waitFor(() => expect(prioritizeIssues).toHaveBeenCalled())
     await waitFor(() => expect(screen.getByText(/Fix the disk first/)).toBeInTheDocument())
+  })
+
+  it('disables AI assistance actions when AI insights are disabled', () => {
+    appSettings = { openAiApiKey: 'sk-test', aiEnabled: false }
+    render(<IssuesScreen />)
+
+    expect(screen.getByRole('button', { name: /Prioritize/ })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Propose fix plan/ })).toBeDisabled()
+    expect(screen.getAllByRole('button', { name: /Ask AI/ })[0]).toBeDisabled()
+    expect(invokeMock).not.toHaveBeenCalledWith('ai_propose_fix_plan', expect.anything())
+    expect(setPendingChatPrompt).not.toHaveBeenCalled()
   })
 })
 

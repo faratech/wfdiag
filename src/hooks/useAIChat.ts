@@ -56,6 +56,7 @@ let persistentSessionId: string | null = null
 
 export function useAIChat() {
   const { settings } = useAppContext()
+  const aiEnabled = settings.aiEnabled ?? true
   const [messages, setMessages] = useState<ChatMessageVM[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(persistentSessionId)
@@ -250,7 +251,7 @@ export function useAIChat() {
 
   const send = useCallback(async (text: string) => {
     const trimmed = text.trim()
-    if (!trimmed || isStreaming) return
+    if (!trimmed || isStreaming || !aiEnabled) return
     setMessages(prev => [...prev, {
       id: `local_${Date.now()}_${prev.length}`,
       role: 'user',
@@ -289,7 +290,7 @@ export function useAIChat() {
         error: String(err),
       }])
     }
-  }, [isStreaming, adoptSession, buildAssistantMessage])
+  }, [aiEnabled, isStreaming, adoptSession, buildAssistantMessage])
 
   const stop = useCallback(async () => {
     const sid = sessionIdRef.current
@@ -316,5 +317,5 @@ export function useAIChat() {
     }
   }, [adoptSession])
 
-  return { messages, send, stop, newConversation, isStreaming, sessionId }
+  return { messages, send, stop, newConversation, isStreaming, sessionId, aiEnabled }
 }

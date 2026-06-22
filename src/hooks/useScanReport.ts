@@ -16,6 +16,7 @@ export interface ScanReportState {
   generating: boolean
   error: string | null
   hasResults: boolean
+  aiEnabled: boolean
   generate: () => Promise<void>
   copy: () => Promise<void>
 }
@@ -31,6 +32,7 @@ export function useScanReport(): ScanReportState {
   const [report, setReport] = useState('')
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const aiEnabled = settings.aiEnabled ?? true
   const reportIdRef = useRef<string | null>(null)
   const pendingReportEventsRef = useRef<Map<string, {
     text: string
@@ -120,6 +122,10 @@ export function useScanReport(): ScanReportState {
   }, [bufferReportDelta, bufferReportDone, bufferReportError])
 
   const generate = useCallback(async () => {
+    if (!aiEnabled) {
+      setGenerating(false)
+      return
+    }
     setError(null)
     setReport('')
     setGenerating(true)
@@ -142,7 +148,7 @@ export function useScanReport(): ScanReportState {
       setError(String(err))
       setGenerating(false)
     }
-  }, [applyBufferedReportEvents])
+  }, [aiEnabled, applyBufferedReportEvents])
 
   const copy = useCallback(async () => {
     try {
@@ -154,5 +160,5 @@ export function useScanReport(): ScanReportState {
     }
   }, [report, showSuccess, showError])
 
-  return { report, generating, error, hasResults, generate, copy }
+  return { report, generating, error, hasResults, aiEnabled, generate, copy }
 }

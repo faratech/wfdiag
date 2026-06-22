@@ -10,7 +10,7 @@ import { renderMarkdownLite } from '../../utils/markdownLite'
  */
 export const ScanReportPanel: React.FC = () => {
   const { pendingScanReport, setPendingScanReport } = useAppContext()
-  const { report, generating, error, hasResults, generate, copy } = useScanReport()
+  const { report, generating, error, hasResults, aiEnabled, generate, copy } = useScanReport()
 
   // "Explain this scan" deep-link: consume once (clear BEFORE generating so a
   // re-render can never double-fire). The effect only calls the context setter
@@ -18,10 +18,10 @@ export const ScanReportPanel: React.FC = () => {
   useEffect(() => {
     if (!pendingScanReport) return
     setPendingScanReport(false)
-    if (hasResults && !generating) {
+    if (hasResults && aiEnabled && !generating) {
       void generate()
     }
-  }, [pendingScanReport, setPendingScanReport, hasResults, generating, generate])
+  }, [pendingScanReport, setPendingScanReport, hasResults, aiEnabled, generating, generate])
 
   return (
     <div className="wf-block">
@@ -33,7 +33,7 @@ export const ScanReportPanel: React.FC = () => {
             <button className="btn ghost" title="Copy report" onClick={() => { void copy() }}>
               <i className="fa-solid fa-copy" aria-hidden="true" />
             </button>
-            <button className="btn ghost" title="Regenerate" onClick={() => { void generate() }}>
+            <button className="btn ghost" title="Regenerate" disabled={!aiEnabled} onClick={() => { void generate() }}>
               <i className="fa-solid fa-rotate-right" aria-hidden="true" />
             </button>
           </span>
@@ -45,11 +45,13 @@ export const ScanReportPanel: React.FC = () => {
             Run a scan, then generate an AI health report: top issues, what changed since the
             last scan, and what to fix first.
           </div>
+        ) : !aiEnabled && !report ? (
+          <div style={{ color: 'var(--wf-text-muted)' }}>AI insights are disabled in Settings.</div>
         ) : error ? (
           <div className="chat-error" role="alert">
             <i className="fa-solid fa-triangle-exclamation" aria-hidden="true" /> {error}
             <div style={{ marginTop: 8 }}>
-              <button className="btn" onClick={() => { void generate() }}>Try again</button>
+              <button className="btn" disabled={!aiEnabled} onClick={() => { void generate() }}>Try again</button>
             </div>
           </div>
         ) : report || generating ? (
@@ -59,7 +61,7 @@ export const ScanReportPanel: React.FC = () => {
               : <span style={{ color: 'var(--wf-text-muted)' }}><i className="fa-solid fa-circle-notch fa-spin" aria-hidden="true" /> Reading scan data…</span>}
           </div>
         ) : (
-          <button className="btn primary" onClick={() => { void generate() }}>
+          <button className="btn primary" disabled={!aiEnabled} onClick={() => { void generate() }}>
             <i className="fa-solid fa-wand-magic-sparkles" aria-hidden="true" /> Explain this scan
           </button>
         )}
