@@ -32,10 +32,48 @@ export function useScanReport(): ScanReportState {
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const reportIdRef = useRef<string | null>(null)
+  const pendingReportEventsRef = useRef<Map<string, {
+    text: string
+    done?: ReportDone
+    error?: string
+  }>>(new Map())
   const apiKeyRef = useRef<string | undefined>(settings.openAiApiKey)
   useEffect(() => { apiKeyRef.current = settings.openAiApiKey }, [settings.openAiApiKey])
 
   const hasResults = Object.keys(results).length > 0
+
+  const bufferReportDelta = useCallback((payload: ReportDelta) => {
+    const pending = pendingReportEventsRef.current.get(payload.reportId) ?? { text: '' }
+    pending.text += payload.text
+    pendingReportEventsRef.current.set(payload.reportId, pending)
+  }, [])
+
+  const bufferReportDone = useCallback((payload: ReportDone) => {
+    const pending = pendingReportEventsRef.current.get(payload.reportId) ?? { text: '' }
+    pending.done = payload
+    pendingReportEventsRef.current.set(payload.reportId, pending)
+  }, [])
+
+  const bufferReportError = useCallback((payload: ReportError) => {
+    const pending = pendingReportEventsRef.current.get(payload.reportId) ?? { text: '' }
+    pending.error = payload.message
+    pendingReportEventsRef.current.set(payload.reportId, pending)
+  }, [])
+
+  const applyBufferedReportEvents = useCallback((reportId: string) => {
+    const pending = pendingReportEventsRef.current.get(reportId)
+    if (!pending) return
+    pendingReportEventsRef.current.delete(reportId)
+    if (pending.text) {
+      setReport(prev => prev + pending.text)
+    }
+    if (pending.error) {
+      setError(pending.error)
+      setGenerating(false)
+    } else if (pending.done) {
+      setGenerating(false)
+    }
+  }, [])
 
   useEffect(() => {
     let disposed = false
@@ -43,14 +81,26 @@ export function useScanReport(): ScanReportState {
     const register = async () => {
       const resolved = await Promise.all([
         listen<ReportDelta>('ai-report://delta', event => {
+          if (!reportIdRef.current) {
+            bufferReportDelta(event.payload)
+            return
+          }
           if (event.payload.reportId !== reportIdRef.current) return
           setReport(prev => prev + event.payload.text)
         }),
         listen<ReportDone>('ai-report://done', event => {
+          if (!reportIdRef.current) {
+            bufferReportDone(event.payload)
+            return
+          }
           if (event.payload.reportId !== reportIdRef.current) return
           setGenerating(false)
         }),
         listen<ReportError>('ai-report://error', event => {
+          if (!reportIdRef.current) {
+            bufferReportError(event.payload)
+            return
+          }
           if (event.payload.reportId !== reportIdRef.current) return
           setError(event.payload.message)
           setGenerating(false)
@@ -67,12 +117,14 @@ export function useScanReport(): ScanReportState {
       disposed = true
       unlistens.forEach(u => u())
     }
-  }, [])
+  }, [bufferReportDelta, bufferReportDone, bufferReportError])
 
   const generate = useCallback(async () => {
     setError(null)
     setReport('')
     setGenerating(true)
+    reportIdRef.current = null
+    pendingReportEventsRef.current.clear()
     try {
       const ack = await invoke<ReportAck>('ai_generate_report', {
         previousScanId: null,
@@ -83,12 +135,14 @@ export function useScanReport(): ScanReportState {
         // Cache hit — full text, no events coming
         setReport(ack.report)
         setGenerating(false)
+      } else {
+        applyBufferedReportEvents(ack.reportId)
       }
     } catch (err) {
       setError(String(err))
       setGenerating(false)
     }
-  }, [])
+  }, [applyBufferedReportEvents])
 
   const copy = useCallback(async () => {
     try {

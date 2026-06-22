@@ -186,6 +186,8 @@ fn report_cache_hash(
         id.hash(&mut hasher);
         result.success.hash(&mut hasher);
         result.output.hash(&mut hasher);
+        result.error.hash(&mut hasher);
+        result.duration_ms.hash(&mut hasher);
     }
     previous_scan_id.unwrap_or("none").hash(&mut hasher);
     format!("{:x}", hasher.finish())
@@ -479,6 +481,26 @@ mod tests {
         let mut changed = results.clone();
         changed.insert("os_info".to_string(), result(true, "build 26200", None));
         assert_ne!(base, report_cache_hash(&changed, None));
+        // Different failure detail -> different hash
+        let mut failed = HashMap::new();
+        failed.insert(
+            "chkdsk".to_string(),
+            result(false, "", Some("access denied")),
+        );
+        let failed_base = report_cache_hash(&failed, None);
+        failed.insert(
+            "chkdsk".to_string(),
+            result(false, "", Some("volume locked")),
+        );
+        assert_ne!(failed_base, report_cache_hash(&failed, None));
+        // Different duration can affect report-relevant metadata and must invalidate too
+        let mut timed = HashMap::new();
+        timed.insert("os_info".to_string(), result(true, "build 26100", None));
+        let timed_base = report_cache_hash(&timed, None);
+        if let Some(task) = timed.get_mut("os_info") {
+            task.duration_ms = 99;
+        }
+        assert_ne!(timed_base, report_cache_hash(&timed, None));
         // Different baseline -> different hash
         assert_ne!(base, report_cache_hash(&results, Some("scan_1")));
     }

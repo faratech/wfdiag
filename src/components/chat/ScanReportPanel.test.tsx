@@ -37,6 +37,16 @@ function makeContext(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 beforeEach(() => {
   eventHandlers = new Map()
   invokeMock.mockReset()
@@ -70,6 +80,28 @@ describe('ScanReportPanel', () => {
     // Finished: copy + regenerate become available
     expect(screen.getByTitle('Copy report')).toBeInTheDocument()
     expect(screen.getByTitle('Regenerate')).toBeInTheDocument()
+  })
+
+  it('keeps report events that arrive before the generate ack resolves', async () => {
+    const ack = deferred<{ reportId: string; cached: boolean; provider: string }>()
+    invokeMock.mockReturnValue(ack.promise)
+    render(<ScanReportPanel />)
+    fireEvent.click(screen.getByRole('button', { name: /Explain this scan/ }))
+    await waitFor(() => expect(eventHandlers.size).toBe(3))
+
+    act(() => {
+      eventHandlers.get('ai-report://delta')?.({ payload: { reportId: 'r1', text: '## Health summary\nFast verdict.' } })
+      eventHandlers.get('ai-report://done')?.({ payload: { reportId: 'r1', finishReason: 'stop', provider: 'openai' } })
+    })
+
+    await act(async () => {
+      ack.resolve({ reportId: 'r1', cached: false, provider: 'openai' })
+      await ack.promise
+    })
+
+    expect(screen.getByText('Health summary')).toBeInTheDocument()
+    expect(screen.getByText('Fast verdict.')).toBeInTheDocument()
+    expect(screen.getByTitle('Copy report')).toBeInTheDocument()
   })
 
   it('renders a cached report immediately without events', async () => {
