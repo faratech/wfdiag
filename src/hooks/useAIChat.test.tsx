@@ -52,6 +52,16 @@ function mockBackend() {
   })
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 beforeEach(() => {
   eventHandlers = new Map()
   unlistenSpies = []
@@ -107,6 +117,57 @@ describe('useAIChat', () => {
     expect(result.current.isStreaming).toBe(false)
   })
 
+  it('keeps early delta, tool and done events that arrive before the send ack resolves', async () => {
+    const ack = deferred<{ sessionId: string; messageId: string; provider: string }>()
+    invokeMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'ai_chat_new_session':
+          return Promise.resolve('s1')
+        case 'ai_chat_send':
+          return ack.promise
+        case 'ai_chat_get_history':
+          return Promise.resolve([])
+        default:
+          return Promise.reject(new Error(`unexpected command ${cmd}`))
+      }
+    })
+
+    const useAIChat = await loadHook()
+    const { result } = renderHook(() => useAIChat())
+    await waitFor(() => expect(eventHandlers.size).toBe(4))
+
+    let sendPromise!: Promise<void>
+    act(() => {
+      sendPromise = result.current.send('hello')
+    })
+    await waitFor(() => expect(invokeMock.mock.calls.some(c => c[0] === 'ai_chat_send')).toBe(true))
+
+    act(() => {
+      fire('ai-chat://delta', { sessionId: 's1', messageId: 'm1', text: 'Fast answer.' })
+      fire('ai-chat://tool', {
+        sessionId: 's1', messageId: 'm1', callId: 'c1', tool: 'run_diagnostic',
+        argsSummary: 'task_id: os_info', status: 'completed', durationMs: 5,
+        resultPreview: 'Windows 11',
+      })
+      fire('ai-chat://done', { sessionId: 's1', messageId: 'm1', finishReason: 'stop', provider: 'openai', toolCallCount: 1 })
+    })
+
+    await act(async () => {
+      ack.resolve({ sessionId: 's1', messageId: 'm1', provider: 'openai' })
+      await sendPromise
+    })
+
+    expect(result.current.messages[1]).toMatchObject({
+      id: 'm1',
+      text: 'Fast answer.',
+      streaming: false,
+    })
+    expect(result.current.messages[1].tools).toEqual([
+      expect.objectContaining({ callId: 'c1', status: 'done', resultPreview: 'Windows 11' }),
+    ])
+    expect(result.current.isStreaming).toBe(false)
+  })
+
   it('tracks tool activity per call id from started to completed', async () => {
     const useAIChat = await loadHook()
     const { result } = renderHook(() => useAIChat())
@@ -155,7 +216,6 @@ describe('useAIChat', () => {
 
     act(() => {
       fire('ai-chat://error', { sessionId: 's1', messageId: 'm1', message: 'rate limited' })
-      fire('ai-chat://done', { sessionId: 's1', messageId: 'm1', finishReason: 'error', provider: 'openai', toolCallCount: 0 })
     })
     expect(result.current.messages[1].error).toBe('rate limited')
     expect(result.current.isStreaming).toBe(false)

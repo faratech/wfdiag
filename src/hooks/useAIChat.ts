@@ -63,6 +63,9 @@ export function useAIChat() {
   const sessionIdRef = useRef<string | null>(persistentSessionId)
   // Accumulated delta text per messageId, applied on a throttled flush.
   const pendingTextRef = useRef<Map<string, string>>(new Map())
+  const pendingDoneRef = useRef<Map<string, DonePayload>>(new Map())
+  const pendingErrorRef = useRef<Map<string, string>>(new Map())
+  const pendingToolsRef = useRef<Map<string, Map<string, ChatToolActivity>>>(new Map())
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const apiKeyRef = useRef<string | undefined>(settings.openAiApiKey)
   useEffect(() => { apiKeyRef.current = settings.openAiApiKey }, [settings.openAiApiKey])
@@ -98,6 +101,43 @@ export function useAIChat() {
     }
   }, [flushDeltas])
 
+  const applyTool = useCallback((tools: ChatToolActivity[], activity: ChatToolActivity) => {
+    const index = tools.findIndex(t => t.callId === activity.callId)
+    const next = [...tools]
+    if (index >= 0) next[index] = activity
+    else next.push(activity)
+    return next
+  }, [])
+
+  const bufferTool = useCallback((messageId: string, activity: ChatToolActivity) => {
+    const tools = pendingToolsRef.current.get(messageId) ?? new Map<string, ChatToolActivity>()
+    tools.set(activity.callId, activity)
+    pendingToolsRef.current.set(messageId, tools)
+  }, [])
+
+  const buildAssistantMessage = useCallback((messageId: string): ChatMessageVM => {
+    const text = pendingTextRef.current.get(messageId) ?? ''
+    pendingTextRef.current.delete(messageId)
+
+    const tools = Array.from(pendingToolsRef.current.get(messageId)?.values() ?? [])
+    pendingToolsRef.current.delete(messageId)
+
+    const error = pendingErrorRef.current.get(messageId)
+    pendingErrorRef.current.delete(messageId)
+
+    const done = pendingDoneRef.current.get(messageId)
+    pendingDoneRef.current.delete(messageId)
+
+    return {
+      id: messageId,
+      role: 'assistant',
+      text,
+      streaming: !done && !error,
+      tools,
+      error,
+    }
+  }, [])
+
   // Register the four event listeners once.
   useEffect(() => {
     let disposed = false
@@ -115,8 +155,7 @@ export function useAIChat() {
         listen<ToolPayload>('ai-chat://tool', event => {
           const p = event.payload
           if (p.sessionId !== sessionIdRef.current) return
-          setMessages(prev => prev.map(m => {
-            if (m.id !== p.messageId) return m
+          setMessages(prev => {
             const activity: ChatToolActivity = {
               callId: p.callId,
               tool: p.tool,
@@ -125,26 +164,46 @@ export function useAIChat() {
               durationMs: p.durationMs,
               resultPreview: p.resultPreview,
             }
-            const index = m.tools.findIndex(t => t.callId === p.callId)
-            const tools = [...m.tools]
-            if (index >= 0) tools[index] = activity
-            else tools.push(activity)
-            return { ...m, tools }
-          }))
+            let matched = false
+            const next = prev.map(m => {
+              if (m.id !== p.messageId) return m
+              matched = true
+              return { ...m, tools: applyTool(m.tools, activity) }
+            })
+            if (!matched) bufferTool(p.messageId, activity)
+            return next
+          })
         }),
         listen<DonePayload>('ai-chat://done', event => {
           const p = event.payload
           if (p.sessionId !== sessionIdRef.current) return
           flushDeltas()
-          setMessages(prev => prev.map(m => (m.id === p.messageId ? { ...m, streaming: false } : m)))
+          setMessages(prev => {
+            let matched = false
+            const next = prev.map(m => {
+              if (m.id !== p.messageId) return m
+              matched = true
+              return { ...m, streaming: false }
+            })
+            if (!matched) pendingDoneRef.current.set(p.messageId, p)
+            return next
+          })
           setIsStreaming(false)
         }),
         listen<ErrorPayload>('ai-chat://error', event => {
           const p = event.payload
           if (p.sessionId !== sessionIdRef.current) return
-          setMessages(prev => prev.map(m => (
-            m.id === p.messageId ? { ...m, error: p.message, streaming: false } : m
-          )))
+          setMessages(prev => {
+            let matched = false
+            const next = prev.map(m => {
+              if (m.id !== p.messageId) return m
+              matched = true
+              return { ...m, error: p.message, streaming: false }
+            })
+            if (!matched) pendingErrorRef.current.set(p.messageId, p.message)
+            return next
+          })
+          setIsStreaming(false)
         }),
       ]
       const resolved = await Promise.all(handlers)
@@ -164,7 +223,7 @@ export function useAIChat() {
         flushTimerRef.current = null
       }
     }
-  }, [scheduleFlush, flushDeltas])
+  }, [scheduleFlush, flushDeltas, applyTool, bufferTool])
 
   // Rehydrate an existing conversation after a screen remount.
   useEffect(() => {
@@ -214,13 +273,11 @@ export function useAIChat() {
         apiKey: apiKeyRef.current || null,
       })
       adoptSession(ack.sessionId)
-      setMessages(prev => [...prev, {
-        id: ack.messageId,
-        role: 'assistant',
-        text: '',
-        streaming: true,
-        tools: [],
-      }])
+      const assistant = buildAssistantMessage(ack.messageId)
+      setMessages(prev => [...prev, assistant])
+      if (!assistant.streaming) {
+        setIsStreaming(false)
+      }
     } catch (err) {
       setIsStreaming(false)
       setMessages(prev => [...prev, {
@@ -232,7 +289,7 @@ export function useAIChat() {
         error: String(err),
       }])
     }
-  }, [isStreaming, adoptSession])
+  }, [isStreaming, adoptSession, buildAssistantMessage])
 
   const stop = useCallback(async () => {
     const sid = sessionIdRef.current
@@ -249,6 +306,9 @@ export function useAIChat() {
       const sid = await invoke<string>('ai_chat_new_session')
       adoptSession(sid)
       pendingTextRef.current.clear()
+      pendingDoneRef.current.clear()
+      pendingErrorRef.current.clear()
+      pendingToolsRef.current.clear()
       setMessages([])
       setIsStreaming(false)
     } catch (err) {

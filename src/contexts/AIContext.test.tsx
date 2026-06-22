@@ -1,19 +1,20 @@
 import React from 'react'
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { AIProvider, useAIContext, diagnosticCacheKey, type AIResponse } from './AIContext'
 
 const invokeMock = vi.fn()
+let appContextValue: {
+  settings: Record<string, unknown>
+  settingsLoaded: boolean
+}
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }))
 
 vi.mock('./AppContext', () => ({
-  useAppContext: () => ({
-    settings: { openAiApiKey: 'sk-test', preferredAIProvider: 'auto' },
-    settingsLoaded: true,
-  }),
+  useAppContext: () => appContextValue,
 }))
 
 const okStatus = {
@@ -49,6 +50,15 @@ const wrapper: React.FC<{ children: React.ReactNode }> = ({ children }) => (
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.useRealTimers()
+  appContextValue = {
+    settings: { openAiApiKey: 'sk-test', preferredAIProvider: 'auto' },
+    settingsLoaded: true,
+  }
+})
+
+afterEach(() => {
+  vi.useRealTimers()
 })
 
 describe('AIContext analysis dedup and cache', () => {
@@ -185,5 +195,29 @@ describe('AIContext analysis dedup and cache', () => {
       retried = await result.current.analyzeDiagnostic('task1', 'Task One', 'output data')
     })
     expect(retried).toBe('recovered')
+  })
+
+  it('refreshes provider status when a non-OpenAI provider setting changes', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'ai_get_status') return okStatus
+      return undefined
+    })
+
+    const { rerender } = renderHook(() => useAIContext(), { wrapper })
+    await waitFor(() => expect(invokeMock.mock.calls.filter(c => c[0] === 'ai_get_status')).toHaveLength(2))
+
+    appContextValue = {
+      settings: {
+        openAiApiKey: 'sk-test',
+        preferredAIProvider: 'auto',
+        anthropicApiKey: 'sk-ant-new',
+      },
+      settingsLoaded: true,
+    }
+    rerender()
+
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(c => c[0] === 'ai_get_status').length).toBeGreaterThanOrEqual(3)
+    })
   })
 })

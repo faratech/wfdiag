@@ -121,6 +121,16 @@ export const useAppContext = () => {
   return context
 }
 
+function loadNavRailCollapsed(): boolean {
+  const saved = localStorage.getItem('navRailCollapsed')
+  if (!saved) return false
+  try {
+    return JSON.parse(saved) === true
+  } catch {
+    return false
+  }
+}
+
 interface AppProviderProps {
   children: ReactNode
 }
@@ -168,10 +178,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const [settingsLoaded, setSettingsLoaded] = useState(false)
 
   // NavRail state - initialize from localStorage
-  const [navRailCollapsed, setNavRailCollapsedInternal] = useState(() => {
-    const saved = localStorage.getItem('navRailCollapsed')
-    return saved ? JSON.parse(saved) : false
-  })
+  const [navRailCollapsed, setNavRailCollapsedInternal] = useState(loadNavRailCollapsed)
 
   const setNavRailCollapsed = (collapsed: boolean) => {
     setNavRailCollapsedInternal(collapsed)

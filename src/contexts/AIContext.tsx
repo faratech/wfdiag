@@ -132,7 +132,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   const [errors, setErrors] = useState<Record<string, string>>({})
 
   // Track previous settings to detect changes
-  const prevSettingsRef = useRef<{ apiKey?: string; provider?: string }>({})
+  const prevSettingsRef = useRef<{ availabilityKey?: string; provider?: string }>({})
 
   // Use settings from AppContext (with defaults)
   const aiEnabled = settings.aiEnabled ?? true
@@ -222,15 +222,27 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   useEffect(() => {
     if (!settingsLoaded) return
 
-    const currentApiKey = settings.openAiApiKey || ''
+    const availabilityKey = [
+      settings.openAiApiKey || '',
+      settings.anthropicApiKey || '',
+      settings.geminiApiKey || '',
+      settings.deepseekApiKey || '',
+      settings.customApiKey || '',
+      settings.customEndpoint || '',
+      settings.customModel || '',
+      settings.ollamaEndpoint || '',
+      settings.ollamaModel || '',
+      settings.localAiEndpoint || '',
+      settings.phiSilicaLafToken || '',
+    ].join('\u0001')
     const currentProvider = settings.preferredAIProvider || 'auto'
-    const prevApiKey = prevSettingsRef.current.apiKey || ''
+    const prevAvailabilityKey = prevSettingsRef.current.availabilityKey || ''
     const prevProvider = prevSettingsRef.current.provider || 'auto'
 
-    // Check if API key or provider changed
-    if (currentApiKey !== prevApiKey || currentProvider !== prevProvider) {
+    // Check if any setting that can affect provider availability or routing changed
+    if (availabilityKey !== prevAvailabilityKey || currentProvider !== prevProvider) {
       logger.debug('AIContext', 'AI settings changed, refreshing status')
-      prevSettingsRef.current = { apiKey: currentApiKey, provider: currentProvider }
+      prevSettingsRef.current = { availabilityKey, provider: currentProvider }
 
       // Update backend preference if it changed
       if (currentProvider !== prevProvider) {
@@ -252,7 +264,22 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
 
       return () => clearTimeout(timer)
     }
-  }, [settings.openAiApiKey, settings.preferredAIProvider, settingsLoaded, refreshStatus])
+  }, [
+    settings.openAiApiKey,
+    settings.anthropicApiKey,
+    settings.geminiApiKey,
+    settings.deepseekApiKey,
+    settings.customApiKey,
+    settings.customEndpoint,
+    settings.customModel,
+    settings.ollamaEndpoint,
+    settings.ollamaModel,
+    settings.localAiEndpoint,
+    settings.phiSilicaLafToken,
+    settings.preferredAIProvider,
+    settingsLoaded,
+    refreshStatus,
+  ])
 
   // Dummy setters for backwards compatibility (settings are managed via AppContext now)
   const setAiEnabled = useCallback((_enabled: boolean) => {
