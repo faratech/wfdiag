@@ -30,6 +30,7 @@ const ModalInner: React.FC<ModalProps> = ({ onClose, title, width = 520, childre
   const [closing, setClosing] = useState(false)
   const cardRef = useRef<HTMLDivElement>(null)
   const restoreRef = useRef<HTMLElement | null>(null)
+  const pointerDownOnOverlayRef = useRef(false)
 
   useEffect(() => {
     restoreRef.current = document.activeElement as HTMLElement | null
@@ -42,6 +43,17 @@ const ModalInner: React.FC<ModalProps> = ({ onClose, title, width = 520, childre
 
   const requestClose = useCallback(() => setClosing(true), [])
 
+  const handleOverlayPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    pointerDownOnOverlayRef.current = e.target === e.currentTarget
+  }
+
+  const handleOverlayClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget && pointerDownOnOverlayRef.current) {
+      requestClose()
+    }
+    pointerDownOnOverlayRef.current = false
+  }
+
   const handleAnimationEnd = (e: React.AnimationEvent) => {
     if (closing && e.animationName === 'overlay-out') {
       onClose()
@@ -50,10 +62,10 @@ const ModalInner: React.FC<ModalProps> = ({ onClose, title, width = 520, childre
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    e.stopPropagation()
     if (e.key === 'Escape') {
       // Modals own Escape while focus is trapped inside; the global shortcut
       // listener must not also act on it
-      e.stopPropagation()
       requestClose()
       return
     }
@@ -75,7 +87,8 @@ const ModalInner: React.FC<ModalProps> = ({ onClose, title, width = 520, childre
   return (
     <div
       className={`modal-overlay ${closing ? 'closing' : ''}`}
-      onClick={requestClose}
+      onPointerDown={handleOverlayPointerDown}
+      onClick={handleOverlayClick}
       onKeyDown={handleKeyDown}
       onAnimationEnd={handleAnimationEnd}
     >

@@ -27,6 +27,21 @@ const PROVIDER_OPTIONS: { id: AIProviderId; label: string }[] = [
   { id: 'deepseek', label: 'DeepSeek (cloud)' },
 ]
 
+function configuredProviderFromSettings(settings: SettingsData): AIProviderId {
+  if (settings.preferredAIProvider && settings.preferredAIProvider !== 'auto') {
+    return settings.preferredAIProvider
+  }
+  if (settings.phiSilicaLafToken) return 'phi_silica'
+  if (settings.localAiEndpoint) return 'foundry_local'
+  if (settings.ollamaEndpoint || settings.ollamaModel) return 'ollama'
+  if (settings.customEndpoint || settings.customModel || settings.customApiKey) return 'custom_openai'
+  if (settings.openAiApiKey) return 'openai'
+  if (settings.anthropicApiKey || settings.anthropicModel) return 'anthropic'
+  if (settings.geminiApiKey || settings.geminiModel) return 'gemini'
+  if (settings.deepseekApiKey || settings.deepseekModel) return 'deepseek'
+  return 'openai'
+}
+
 /** Model picker: curated options + "default" + whatever custom value is set */
 const ModelSelect: React.FC<{
   value: string | undefined
@@ -55,13 +70,13 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = (props) =>
 const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange, settings, onSave }) => {
   const [draft, setDraft] = useState<SettingsData>(settings)
   const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const [ollamaModels, setOllamaModels] = useState<string[]>([])
   // Which provider's fields are shown in "Provider setup" — presentation only,
-  // not persisted. Seeds from the active provider when it's concrete.
+  // not persisted. With Active AI = Auto, seed from configured provider data
+  // so saved non-OpenAI settings are visible when the dialog reopens.
   const [configProvider, setConfigProvider] = useState<AIProviderId>(() =>
-    settings.preferredAIProvider && settings.preferredAIProvider !== 'auto'
-      ? settings.preferredAIProvider
-      : 'openai'
+    configuredProviderFromSettings(settings)
   )
 
   // Populate the Ollama model dropdown on open; a missing or stopped Ollama
@@ -74,12 +89,21 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
     return () => { cancelled = true }
   }, [])
 
-  const set = <K extends keyof SettingsData>(k: K, v: SettingsData[K]) =>
+  const set = <K extends keyof SettingsData>(k: K, v: SettingsData[K]) => {
+    setSaveError(null)
     setDraft(d => ({ ...d, [k]: v }))
+  }
 
   const save = async () => {
     setSaving(true)
-    try { await onSave(draft) } finally { setSaving(false) }
+    setSaveError(null)
+    try {
+      await onSave(draft)
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -97,6 +121,15 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
         </>
       }
     >
+      {saveError && (
+        <div
+          role="alert"
+          className="tag error"
+          style={{ display: 'block', marginBottom: 12, whiteSpace: 'normal' }}
+        >
+          Settings were not saved: {saveError}
+        </div>
+      )}
       <SectionTitle>AI</SectionTitle>
       <div className="form-row">
         <div><strong>Enable AI insights</strong></div>

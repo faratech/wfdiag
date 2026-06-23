@@ -89,7 +89,7 @@ export const AIScreen: React.FC = () => {
           <span className="count" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span className="tag"><span className="status-dot success" style={{ boxShadow: 'none' }} /> {PROVIDER_TAGS[activeProvider]}</span>
             {messages.length > 0 && (
-              <button className="btn ghost" title="New conversation" disabled={!aiEnabled} onClick={() => { void newConversation() }}>
+              <button className="btn ghost" title="New conversation" disabled={!aiEnabled || isStreaming} onClick={() => { void newConversation() }}>
                 <i className="fa-solid fa-plus" aria-hidden="true" /> New
               </button>
             )}

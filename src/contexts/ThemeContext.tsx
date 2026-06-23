@@ -10,6 +10,7 @@ type ThemeMode = 'dark' | 'light' | 'auto'
 interface ThemeContextType {
   themeMode: ThemeMode
   setThemeMode: (mode: ThemeMode) => void
+  /** Effective theme after resolving Auto against the OS preference. */
   isDark: boolean
 }
 

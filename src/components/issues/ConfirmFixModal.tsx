@@ -35,8 +35,8 @@ export const ConfirmFixModal: React.FC<ConfirmFixModalProps> = ({
               Restart as Administrator
             </Button>
           ) : (
-            <Button variant="primary" icon="fa-screwdriver-wrench" onClick={() => onConfirm(remediation)}>
-              Run repair
+            <Button variant="primary" icon={remediation.tier === 'repair' ? 'fa-screwdriver-wrench' : 'fa-wand-magic-sparkles'} onClick={() => onConfirm(remediation)}>
+              {remediation.tier === 'repair' ? 'Run repair' : 'Run'}
             </Button>
           )}
         </>
@@ -45,7 +45,7 @@ export const ConfirmFixModal: React.FC<ConfirmFixModalProps> = ({
       <p style={{ marginTop: 0 }}>This will run: <strong>{remediation.description}</strong></p>
       {blocked && (
         <p className="chat-error" role="alert">
-          <i className="fa-solid fa-shield-halved" aria-hidden="true" /> This repair needs
+          <i className="fa-solid fa-shield-halved" aria-hidden="true" /> This action needs
           administrator rights. Restart the app as administrator first.
         </p>
       )}

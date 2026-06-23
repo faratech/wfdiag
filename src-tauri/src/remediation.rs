@@ -352,25 +352,14 @@ pub fn remediations() -> &'static [RemediationSpec] {
         RemediationSpec {
             id: "empty_recycle_bin",
             label: "Empty Recycle Bin",
-            description: "Runs PowerShell Clear-RecycleBin -Force.",
+            description: "Empties the Recycle Bin using the Windows Shell API.",
             tier: RemediationTier::AutoSafe,
             admin_required: false,
             requires_restart: false,
             long_running: false,
             maintenance: true,
-            run: RunKind::Steps {
-                steps: &[CmdStep {
-                    program: "powershell",
-                    args: &[
-                        "-NoProfile",
-                        "-Command",
-                        "Clear-RecycleBin -Force -ErrorAction SilentlyContinue",
-                    ],
-                    ignore_failure: false,
-                    action_label: "Emptied the Recycle Bin",
-                }],
-                timeout_secs: 120,
-                success_msg: "Recycle Bin emptied.",
+            run: RunKind::Custom {
+                f: empty_recycle_bin,
             },
         },
         RemediationSpec {
@@ -726,6 +715,34 @@ fn clear_prefetch() -> anyhow::Result<FixResult> {
     })
 }
 
+#[cfg(windows)]
+fn empty_recycle_bin() -> anyhow::Result<FixResult> {
+    use windows::Win32::UI::Shell::{
+        SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND, SHEmptyRecycleBinW,
+    };
+    use windows::core::PCWSTR;
+
+    unsafe {
+        SHEmptyRecycleBinW(
+            None,
+            PCWSTR(std::ptr::null()),
+            SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND,
+        )?;
+    }
+
+    Ok(FixResult {
+        success: true,
+        message: "Recycle Bin emptied.".to_string(),
+        actions_taken: vec!["Emptied the Recycle Bin via Windows Shell API".to_string()],
+        requires_restart: false,
+    })
+}
+
+#[cfg(not(windows))]
+fn empty_recycle_bin() -> anyhow::Result<FixResult> {
+    anyhow::bail!("Empty Recycle Bin is only supported on Windows")
+}
+
 fn clear_temp_files() -> anyhow::Result<FixResult> {
     let temp = std::env::temp_dir();
     let mut removed = 0u32;
@@ -756,20 +773,40 @@ fn clear_temp_files() -> anyhow::Result<FixResult> {
 }
 
 fn reset_windows_update() -> anyhow::Result<FixResult> {
-    // Stop -> clear download cache -> start. Sync commands are fine here: the
-    // service operations take seconds and this runs on a blocking-ok path.
+    // Stop -> clear download cache -> start. Bound service-control waits so a
+    // hung SCM call cannot stall the remediation indefinitely.
     let mut actions_taken = Vec::new();
 
     let run_quiet = |program: &str, args: &[&str]| -> anyhow::Result<bool> {
         let mut cmd = std::process::Command::new(crate::security::trusted_system_program(program)?);
         cmd.args(args);
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        Ok(cmd.output()?.status.success())
+        let mut child = cmd.spawn()?;
+        let timeout = Duration::from_secs(60);
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status.success());
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!(
+                    "'{} {}' timed out after {} second(s)",
+                    program,
+                    args.join(" "),
+                    timeout.as_secs()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     };
 
     if run_quiet("net", &["stop", "wuauserv"])? {
@@ -874,6 +911,28 @@ mod tests {
                     issue.id,
                     remediation_id
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn catalog_does_not_shell_out_to_powershell() {
+        for spec in remediations() {
+            if let RunKind::Steps { steps, .. } = &spec.run {
+                for step in *steps {
+                    assert_ne!(
+                        step.program.to_ascii_lowercase(),
+                        "powershell",
+                        "{}",
+                        spec.id
+                    );
+                    assert_ne!(
+                        step.program.to_ascii_lowercase(),
+                        "powershell.exe",
+                        "{}",
+                        spec.id
+                    );
+                }
             }
         }
     }

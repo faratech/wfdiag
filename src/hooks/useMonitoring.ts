@@ -54,16 +54,33 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
   // Refs for cleanup and preventing double-initialization
   const unlistenRef = useRef<UnlistenFn | null>(null)
   const leaseRef = useRef<number | null>(null)
+  const startInFlightRef = useRef<number | null>(null)
+  const startRequestRef = useRef(0)
   const hasAutoStarted = useRef(false)
   const isMountedRef = useRef(true)
 
+  const invalidatePendingStart = useCallback(() => {
+    startRequestRef.current += 1
+    startInFlightRef.current = null
+  }, [])
+
   // Start monitoring
   const start = useCallback(async () => {
-    if (isActive || leaseRef.current !== null) return
+    if (isActive || leaseRef.current !== null || startInFlightRef.current !== null) return
 
+    const requestId = ++startRequestRef.current
     try {
+      startInFlightRef.current = requestId
       setIsLoading(true)
       const leaseId = await invoke<number>('start_monitoring', { includeProcessAdapterStats })
+
+      if (!isMountedRef.current || requestId !== startRequestRef.current) {
+        await invoke('stop_monitoring', { leaseId }).catch(err =>
+          logger.error(componentName, 'Failed to stop stale monitoring lease', err)
+        )
+        return
+      }
+
       leaseRef.current = leaseId
 
       if (!isMountedRef.current) {
@@ -109,7 +126,11 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
       }
       logger.error(componentName, 'Failed to start monitoring', error)
     } finally {
-      if (isMountedRef.current) {
+      const isCurrentStart = startInFlightRef.current === requestId
+      if (isCurrentStart) {
+        startInFlightRef.current = null
+      }
+      if (isCurrentStart && isMountedRef.current) {
         setIsLoading(false)
       }
     }
@@ -117,6 +138,12 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
 
   // Stop monitoring
   const stop = useCallback(async () => {
+    if (startInFlightRef.current !== null && leaseRef.current === null) {
+      invalidatePendingStart()
+      if (isMountedRef.current) {
+        setIsLoading(false)
+      }
+    }
     if (!isActive && leaseRef.current === null) return
 
     // Clean up event listener
@@ -136,16 +163,17 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
     if (isMountedRef.current) {
       setIsActive(false)
     }
-  }, [isActive, componentName])
+  }, [isActive, componentName, invalidatePendingStart])
 
   // Toggle monitoring
   const toggle = useCallback(async () => {
+    if (isLoading) return
     if (isActive) {
       await stop()
     } else {
       await start()
     }
-  }, [isActive, start, stop])
+  }, [isActive, isLoading, start, stop])
 
   // Manually refresh stats
   const refresh = useCallback(async () => {
@@ -184,6 +212,7 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
       // Stop only the monitoring stream this hook started. A later hook mount
       // has a newer lease and the backend will ignore this stale cleanup.
       const leaseId = leaseRef.current
+      invalidatePendingStart()
       if (leaseId !== null) {
         leaseRef.current = null
         invoke('stop_monitoring', { leaseId }).catch(error =>
@@ -191,7 +220,7 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
         )
       }
     }
-  }, [componentName])
+  }, [componentName, invalidatePendingStart])
 
   // Extract processes from stats
   const processes = stats?.top_processes ?? []

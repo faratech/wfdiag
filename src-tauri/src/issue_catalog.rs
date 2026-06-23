@@ -18,6 +18,7 @@ pub struct Issue {
     pub id: String,
     pub category: String,
     pub severity: IssueSeverity,
+    pub status: IssueStatus,
     pub title: String,
     pub description: String,
     pub recommendation: String,
@@ -37,6 +38,14 @@ pub enum IssueSeverity {
     Warning,
     Info,
     Ok,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueStatus {
+    Detected,
+    Ok,
+    Skipped,
 }
 
 /// Everything a detector may consume. The clock and the temp-file count are
@@ -148,9 +157,9 @@ pub fn catalog() -> &'static [IssueSpec] {
             category: "Services",
             default_severity: IssueSeverity::Warning,
             title: "Stopped Services",
-            ok_title: "Windows Services",
-            ok_description: "All automatic services are running normally.",
-            recommendation: "Start stopped services or investigate why they failed.",
+            ok_title: "Core Windows Services",
+            ok_description: "Supported core automatic services are running normally.",
+            recommendation: "Start stopped core services or investigate why they failed.",
             source_tasks: &["services"],
             remediation_id: Some("start_critical_services"),
             detect: det::detect_stopped_services,
@@ -446,30 +455,63 @@ pub fn detect_all(ctx: &DetectCtx) -> Vec<Issue> {
                 id: spec.id.to_string(),
                 category: spec.category.to_string(),
                 severity: detection.severity.unwrap_or(spec.default_severity),
+                status: IssueStatus::Detected,
                 title: spec.title.to_string(),
                 description: detection.description,
                 recommendation: spec.recommendation.to_string(),
                 detected: true,
-                source_tasks: if spec.source_tasks.is_empty() {
-                    None
-                } else {
-                    Some(spec.source_tasks.iter().map(|s| s.to_string()).collect())
-                },
+                source_tasks: source_tasks_for_issue(spec),
                 remediation: spec.remediation_id.and_then(crate::remediation::summary),
             },
             None => Issue {
                 id: spec.id.to_string(),
                 category: spec.category.to_string(),
-                severity: IssueSeverity::Ok,
+                severity: if source_tasks_available(ctx, spec) {
+                    IssueSeverity::Ok
+                } else {
+                    IssueSeverity::Info
+                },
+                status: if source_tasks_available(ctx, spec) {
+                    IssueStatus::Ok
+                } else {
+                    IssueStatus::Skipped
+                },
                 title: spec.ok_title.to_string(),
-                description: spec.ok_description.to_string(),
-                recommendation: "No action needed.".to_string(),
+                description: if source_tasks_available(ctx, spec) {
+                    spec.ok_description.to_string()
+                } else {
+                    "Required diagnostic data was not available for this check.".to_string()
+                },
+                recommendation: if source_tasks_available(ctx, spec) {
+                    "No action needed.".to_string()
+                } else {
+                    "Run the required diagnostic tasks, or restart as administrator for admin-only checks.".to_string()
+                },
                 detected: false,
-                source_tasks: None,
+                source_tasks: source_tasks_for_issue(spec),
                 remediation: None,
             },
         })
         .collect()
+}
+
+fn source_tasks_for_issue(spec: &IssueSpec) -> Option<Vec<String>> {
+    if spec.source_tasks.is_empty() {
+        None
+    } else {
+        Some(spec.source_tasks.iter().map(|s| s.to_string()).collect())
+    }
+}
+
+fn source_tasks_available(ctx: &DetectCtx, spec: &IssueSpec) -> bool {
+    if spec.id == "temp_files" {
+        return ctx.temp_file_count.is_some();
+    }
+    spec.source_tasks.iter().all(|task_id| {
+        ctx.results
+            .get(*task_id)
+            .is_some_and(|result| result.success)
+    })
 }
 
 #[cfg(test)]
@@ -538,7 +580,30 @@ mod tests {
                 "issue '{}' detected on an empty result set",
                 issue.id
             );
-            assert_eq!(issue.severity, IssueSeverity::Ok);
+            assert_eq!(issue.status, IssueStatus::Skipped);
+            assert_eq!(issue.severity, IssueSeverity::Info);
         }
+    }
+
+    #[test]
+    fn successful_source_task_without_detection_is_ok() {
+        let mut results = HashMap::new();
+        results.insert(
+            "logical_disk".to_string(),
+            TaskResult {
+                success: true,
+                output: r#"[{"Name":"C:","FreeSpace":90000000000,"Size":100000000000}]"#.into(),
+                error: None,
+                duration_ms: 1,
+            },
+        );
+        let ctx = test_support::ctx(&results);
+        let issue = detect_all(&ctx)
+            .into_iter()
+            .find(|issue| issue.id == "low_disk_space")
+            .expect("issue exists");
+
+        assert_eq!(issue.status, IssueStatus::Ok);
+        assert_eq!(issue.severity, IssueSeverity::Ok);
     }
 }

@@ -9,6 +9,17 @@ import json
 import re
 import sys
 from pathlib import Path
+import xml.etree.ElementTree as ET
+
+
+APPX_TARGET_DEVICE_FAMILY_MIN_VERSIONS = {
+    "Windows.Universal": "10.0.26100.0",
+    "Windows.Desktop": "10.0.17763.0",
+}
+
+APPX_PACKAGE_DEPENDENCY_MIN_VERSIONS = {
+    "Microsoft.WindowsAppRuntime.1.8": "8000.675.1142.0",
+}
 
 
 def update_json_file(file_path: Path, new_version: str, dry_run: bool) -> bool:
@@ -153,6 +164,44 @@ def update_msix_conf(file_path: Path, new_version: str, dry_run: bool) -> bool:
         return False
 
 
+def validate_appx_manifest_version_invariants(content: str, file_path: Path) -> bool:
+    """Verify OS/framework MinVersion fields were not changed to app versions."""
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError as e:
+        print(f"  Error parsing {file_path}: {e}")
+        return False
+
+    ok = True
+    families = {
+        node.attrib.get("Name"): node.attrib.get("MinVersion")
+        for node in root.findall(".//{*}TargetDeviceFamily")
+    }
+    for name, expected in APPX_TARGET_DEVICE_FAMILY_MIN_VERSIONS.items():
+        actual = families.get(name)
+        if actual != expected:
+            print(
+                f"  Error: {file_path} TargetDeviceFamily {name} MinVersion "
+                f"is {actual!r}, expected {expected!r}"
+            )
+            ok = False
+
+    dependencies = {
+        node.attrib.get("Name"): node.attrib.get("MinVersion")
+        for node in root.findall(".//{*}PackageDependency")
+    }
+    for name, expected in APPX_PACKAGE_DEPENDENCY_MIN_VERSIONS.items():
+        actual = dependencies.get(name)
+        if actual != expected:
+            print(
+                f"  Error: {file_path} PackageDependency {name} MinVersion "
+                f"is {actual!r}, expected {expected!r}"
+            )
+            ok = False
+
+    return ok
+
+
 def update_appx_manifest(file_path: Path, new_version: str, dry_run: bool) -> bool:
     """Update the package Identity version in AppxManifest.xml (adds .0 suffix).
 
@@ -166,6 +215,8 @@ def update_appx_manifest(file_path: Path, new_version: str, dry_run: bool) -> bo
 
     try:
         content = file_path.read_text(encoding='utf-8')
+        if not validate_appx_manifest_version_invariants(content, file_path):
+            return False
 
         # AppxManifest uses X.Y.Z.0 format
         version_with_suffix = f"{new_version}.0"
@@ -178,16 +229,19 @@ def update_appx_manifest(file_path: Path, new_version: str, dry_run: bool) -> bo
 
         old_version = match.group(2)
 
+        new_content = re.sub(
+            pattern,
+            f'\\g<1>{version_with_suffix}\\g<3>',
+            content,
+            count=1,
+            flags=re.DOTALL,
+        )
+        if not validate_appx_manifest_version_invariants(new_content, file_path):
+            return False
+
         if dry_run:
             print(f"  [DRY RUN] Would update: {file_path} ({old_version} -> {version_with_suffix})")
         else:
-            new_content = re.sub(
-                pattern,
-                f'\\g<1>{version_with_suffix}\\g<3>',
-                content,
-                count=1,
-                flags=re.DOTALL,
-            )
             file_path.write_text(new_content, encoding='utf-8')
             print(f"  Updated: {file_path} ({old_version} -> {version_with_suffix})")
 

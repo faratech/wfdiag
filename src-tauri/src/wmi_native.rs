@@ -14,9 +14,12 @@ use windows::Win32::System::Variant::{
 };
 use windows::Win32::System::Wmi::{
     IWbemClassObject, IWbemLocator, IWbemServices, WBEM_FLAG_FORWARD_ONLY,
-    WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_INFINITE, WbemLocator,
+    WBEM_FLAG_RETURN_IMMEDIATELY, WbemLocator,
 };
 use windows::core::{BSTR, PCWSTR};
+
+const WMI_NEXT_TIMEOUT_MS: i32 = 30_000;
+const WBEM_S_TIMEDOUT: i32 = 0x0004_0004;
 
 // Thread-local COM initialization state
 thread_local! {
@@ -150,9 +153,15 @@ impl WmiConnection {
                 let mut objects: [Option<IWbemClassObject>; 1] = [None];
                 let mut returned: u32 = 0;
 
-                let hr = enumerator.Next(WBEM_INFINITE, &mut objects, &mut returned);
+                let hr = enumerator.Next(WMI_NEXT_TIMEOUT_MS, &mut objects, &mut returned);
 
-                if hr.is_err() || returned == 0 {
+                if hr.0 == WBEM_S_TIMEDOUT {
+                    return Err(anyhow!("WMI query timed out for '{}'", wql));
+                }
+                if hr.is_err() {
+                    return Err(anyhow!("WMI enumeration failed for '{}': {:?}", wql, hr));
+                }
+                if returned == 0 {
                     break;
                 }
 

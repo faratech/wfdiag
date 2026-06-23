@@ -462,8 +462,8 @@ fn run_command(cmd: &str, args: &[&str]) -> TaskResult {
     let executor = crate::security::SecureCommandExecutor::new();
     match executor.execute_command(cmd, args) {
         Ok(output) => {
-            let output_str = String::from_utf8_lossy(&output.stdout).to_string();
-            let error_str = String::from_utf8_lossy(&output.stderr).to_string();
+            let output_str = decode_command_output(&output.stdout);
+            let error_str = decode_command_output(&output.stderr);
 
             TaskResult {
                 success: output.status.success(),
@@ -483,6 +483,16 @@ fn run_command(cmd: &str, args: &[&str]) -> TaskResult {
             duration_ms: 0,
         },
     }
+}
+
+#[cfg(windows)]
+fn decode_command_output(bytes: &[u8]) -> String {
+    crate::security::decode_windows_output(bytes)
+}
+
+#[cfg(not(windows))]
+fn decode_command_output(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).to_string()
 }
 
 fn read_hosts_file() -> TaskResult {

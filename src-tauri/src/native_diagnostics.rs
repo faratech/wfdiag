@@ -1145,7 +1145,10 @@ impl NativeDiagnostics {
     }
 
     pub fn get_battery_report(&self) -> Result<Value> {
-        let temp_file = std::env::temp_dir().join("wfdiag_battery.html");
+        let temp_file = std::env::temp_dir().join(format!(
+            "wfdiag_battery_{}.html",
+            uuid::Uuid::new_v4().simple()
+        ));
         let temp_path = temp_file.to_string_lossy();
 
         let output =
@@ -1165,6 +1168,7 @@ impl NativeDiagnostics {
                 "parsed_data": true
             }))
         } else {
+            let _ = fs::remove_file(&temp_file);
             Err(anyhow::anyhow!("Failed to generate battery report"))
         }
     }

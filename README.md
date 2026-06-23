@@ -107,7 +107,12 @@ npm run tauri dev
 
 # Build for production
 npm run tauri build
+
+# Build the Microsoft Store/Phi Silica MSIX bundle
+python3 scripts/build-cross.py build-all --build-msix --sign
 ```
+
+The direct Tauri MSIX config (`src-tauri/tauri.msix.conf.json`) is a basic MSIX experiment and is not the Store/Phi Silica package. Store submissions and `systemAIModels` validation must use `scripts/build-cross.py`, which generates the full Store identity manifest and MSIX bundle.
 
 ## 🎯 Tauri Commands API
 

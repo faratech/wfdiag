@@ -415,6 +415,12 @@ html.is-dark .cb-btn:hover { background: rgba(255,255,255,0.06); }
 .cb-btn:disabled:hover { background: transparent; }
 .cb-btn .meta { color: var(--wf-text-muted); font-size: 11px; margin-left: 4px; opacity: 0.7; }
 .cb-btn i { width: 14px; text-align: center; }
+.cb-btn.icon-only {
+  width: 32px;
+  min-width: 32px;
+  padding-inline: 0;
+  justify-content: center;
+}
 
 /* ===== Page header ===== */
 .page-header {
@@ -1342,7 +1348,13 @@ html.accent-emerald { --wf-paletteColor1: #0f8a5a; --wf-paletteAccent1: #0a6c46;
   display: grid; place-items: center;
   animation: toast-in 160ms ease-out;
 }
-.modal-card { box-shadow: var(--elev-3); }
+.modal-card {
+  display: flex;
+  flex-direction: column;
+  max-height: min(90vh, calc(100vh - 32px));
+  overflow: hidden;
+  box-shadow: var(--elev-3);
+}
 
 /* ===== Toast stack v2 — flex column, close button, timeout bar ===== */
 .toast-stack {
@@ -1447,11 +1459,8 @@ html.is-dark .skeleton::after {
 /* ===== Tooltip ===== */
 .tooltip-wrap { position: relative; display: inline-flex; }
 .nav-list .tooltip-wrap { width: 100%; }
-.tooltip-wrap .tooltip {
-  position: absolute;
-  bottom: calc(100% + 7px);
-  left: 50%;
-  transform: translateX(-50%) translateY(2px);
+.tooltip-portal {
+  position: fixed;
   padding: 5px 9px;
   border-radius: 4px;
   background: var(--acrylic-strong);
@@ -1464,25 +1473,10 @@ html.is-dark .skeleton::after {
   font-weight: 500;
   white-space: nowrap;
   display: flex; align-items: center; gap: 7px;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 120ms ease, transform 120ms ease;
-  transition-delay: 0ms;
-  z-index: 400;
-}
-.tooltip-wrap:hover .tooltip,
-.tooltip-wrap:focus-within .tooltip {
   opacity: 1;
-  transform: translateX(-50%) translateY(0);
-  transition-delay: 350ms;
-}
-.tooltip-wrap.tip-right .tooltip {
-  bottom: auto; left: calc(100% + 7px); top: 50%;
-  transform: translateY(-50%) translateX(-2px);
-}
-.tooltip-wrap.tip-right:hover .tooltip,
-.tooltip-wrap.tip-right:focus-within .tooltip {
-  transform: translateY(-50%) translateX(0);
+  pointer-events: none;
+  z-index: 1000;
+  max-width: min(320px, calc(100vw - 16px));
 }
 
 /* ===== Empty state ===== */
@@ -1520,8 +1514,14 @@ html.is-dark .skeleton::after {
 .modal-overlay.closing { animation: overlay-out 140ms ease-in forwards; }
 .modal-card { animation: modal-in 160ms cubic-bezier(0.2, 0, 0, 1); }
 .modal-overlay.closing .modal-card { animation: modal-out 140ms ease-in forwards; }
-.modal-body { padding: 16px; max-height: 70vh; overflow: auto; }
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 16px;
+  overflow: auto;
+}
 .modal-footer {
+  flex: 0 0 auto;
   display: flex; justify-content: flex-end; gap: 8px;
   padding: 14px 16px;
   border-top: 1px solid var(--hairline);

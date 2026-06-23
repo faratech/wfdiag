@@ -28,6 +28,12 @@ const safeRemediation: RemediationSummary = {
   tier: 'auto_safe', admin_required: false, requires_restart: false,
   long_running: false, maintenance: true,
 }
+const adminSafeRemediation: RemediationSummary = {
+  id: 'clear_prefetch', label: 'Clear prefetch files',
+  description: 'Deletes .pf files from C:\\Windows\\Prefetch.',
+  tier: 'auto_safe', admin_required: true, requires_restart: false,
+  long_running: false, maintenance: true,
+}
 
 let issues: Issue[]
 let isAdmin = true
@@ -76,7 +82,12 @@ function makeIssues(): Issue[] {
     {
       id: 'firewall_disabled', title: 'Firewall Status',
       description: 'Firewall is enabled.', severity: 'Ok',
-      category: 'Security', detected: false,
+      category: 'Security', detected: false, status: 'ok',
+    },
+    {
+      id: 'disk_health', title: 'Disk Health',
+      description: 'Required diagnostic data was not available for this check.',
+      severity: 'Info', category: 'Storage', detected: false, status: 'skipped',
     },
   ]
 }
@@ -89,7 +100,7 @@ beforeEach(() => {
   invokeMock.mockImplementation((cmd: string) => {
     switch (cmd) {
       case 'get_remediations':
-        return Promise.resolve([repairRemediation, safeRemediation])
+        return Promise.resolve([repairRemediation, safeRemediation, adminSafeRemediation])
       case 'run_remediation':
         return Promise.resolve({ status: 'completed', result: { success: true, message: 'done' } })
       case 'ai_propose_fix_plan':
@@ -139,6 +150,29 @@ describe('IssuesScreen remediation flow', () => {
     )
   })
 
+  it('admin-required auto-safe fixes ask standard users to restart as administrator', async () => {
+    isAdmin = false
+    render(<IssuesScreen />)
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /^Run$/ }).length).toBeGreaterThan(0))
+
+    const runButtons = screen.getAllByRole('button', { name: /^Run$/ })
+    fireEvent.click(runButtons[runButtons.length - 1])
+
+    expect(screen.getByRole('button', { name: /Restart as Administrator/ })).toBeInTheDocument()
+    expect(invokeMock).not.toHaveBeenCalledWith('run_remediation', expect.anything())
+  })
+
+  it('suppresses stale AI fix plan entries after issues change', async () => {
+    const { rerender } = render(<IssuesScreen />)
+    fireEvent.click(screen.getByRole('button', { name: /Propose fix plan/ }))
+    await waitFor(() => expect(screen.getByText('Repairs the store.')).toBeInTheDocument())
+
+    issues = [makeIssues()[2]]
+    rerender(<IssuesScreen />)
+
+    await waitFor(() => expect(screen.queryByText('Repairs the store.')).not.toBeInTheDocument())
+  })
+
   it('Ask AI seeds the chat prompt with issue + diagnostic data and switches tabs', () => {
     render(<IssuesScreen />)
     fireEvent.click(screen.getAllByRole('button', { name: /Ask AI/ })[0])
@@ -162,6 +196,7 @@ describe('IssuesScreen remediation flow', () => {
   it('passed checks are collapsed and triage renders markdown', async () => {
     render(<IssuesScreen />)
     expect(screen.getByText('1 checks passed')).toBeInTheDocument()
+    expect(screen.getByText('1 checks skipped')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Prioritize/ }))
     await waitFor(() => expect(prioritizeIssues).toHaveBeenCalled())
     await waitFor(() => expect(screen.getByText(/Fix the disk first/)).toBeInTheDocument())

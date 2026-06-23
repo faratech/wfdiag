@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 
 // The module-level scan lock in useScanner is shared across hook instances,
@@ -41,6 +41,7 @@ function makeContext(overrides: Partial<MockContext> = {}): MockContext {
     setScanStartTime: vi.fn(),
     setScanEndTime: vi.fn(),
     setTaskStatuses: vi.fn(),
+    setIssues: vi.fn(),
     settings: { autoSave: false, maxConcurrentTasks: 2 },
     searchQuery: '',
     setFilteredResults: vi.fn(),
@@ -70,8 +71,13 @@ function startCalls() {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.useRealTimers()
   contextValue = makeContext()
   listenMock.mockResolvedValue(vi.fn())
+})
+
+afterEach(() => {
+  vi.useRealTimers()
 })
 
 describe('useScanner scan lock', () => {
@@ -149,6 +155,8 @@ describe('useScanner scan lock', () => {
 
   it('allows a new scan after stopScan (deadlock regression)', async () => {
     const parallel = deferred<Array<[string, unknown]>>()
+    const setIsRunning = vi.fn()
+    contextValue = makeContext({ setIsRunning })
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'start_diagnostics') return 'session-1'
       if (cmd === 'run_diagnostics_parallel') return parallel.promise
@@ -174,6 +182,8 @@ describe('useScanner scan lock', () => {
 
     // stopScan requests backend cancellation for the active session
     expect(invokeMock).toHaveBeenCalledWith('cancel_diagnostics', { sessionId: 'session-1' })
+    // UI should stay in the running/stopping state until the backend invoke drains
+    expect(setIsRunning).not.toHaveBeenCalledWith(false)
 
     // Backend resolves (quickly, since queued tasks are skipped); the scan's
     // finally must release the lock even though the session was abandoned
@@ -193,6 +203,59 @@ describe('useScanner scan lock', () => {
     })
 
     expect(startCalls()).toHaveLength(2)
+  })
+
+  it('normalizes maxConcurrentTasks 0 before invoking the backend', async () => {
+    contextValue = makeContext({ settings: { autoSave: false, maxConcurrentTasks: 0 } })
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'session-1'
+      if (cmd === 'run_diagnostics_parallel') return []
+      return undefined
+    })
+
+    const useScanner = await loadHook()
+    const { result } = renderHook(() => useScanner())
+
+    await act(async () => {
+      await result.current.runQuickScan()
+    })
+
+    expect(invokeMock).toHaveBeenCalledWith('run_diagnostics_parallel', expect.objectContaining({
+      maxConcurrent: 5,
+    }))
+  })
+
+  it('lets any hook instance cancel the active scan', async () => {
+    const parallel = deferred<Array<[string, unknown]>>()
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'session-1'
+      if (cmd === 'run_diagnostics_parallel') return parallel.promise
+      return undefined
+    })
+
+    const useScanner = await loadHook()
+    const starter = renderHook(() => useScanner())
+    const stopper = renderHook(() => useScanner())
+
+    let scan!: Promise<void>
+    act(() => {
+      scan = starter.result.current.runQuickScan()
+    })
+
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.some(c => c[0] === 'run_diagnostics_parallel')).toBe(true)
+    })
+
+    act(() => {
+      stopper.result.current.stopScan()
+    })
+
+    expect(invokeMock).toHaveBeenCalledWith('cancel_diagnostics', { sessionId: 'session-1' })
+
+    parallel.resolve([])
+    await act(async () => {
+      await scan
+    })
   })
 
   it('cancels a pending auto-save when stopped and still releases the lock', async () => {
@@ -243,6 +306,60 @@ describe('useScanner scan lock', () => {
     })
 
     expect(startCalls()).toHaveLength(2)
+  })
+
+  it('clears stale issues when a new scan starts and when results are cleared', async () => {
+    const setIssues = vi.fn()
+    contextValue = makeContext({ setIssues })
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'session-1'
+      if (cmd === 'run_diagnostics_parallel') return []
+      return undefined
+    })
+
+    const useScanner = await loadHook()
+    const { result } = renderHook(() => useScanner())
+
+    await act(async () => {
+      await result.current.runQuickScan()
+    })
+
+    expect(setIssues).toHaveBeenCalledWith([])
+
+    act(() => {
+      result.current.clearResults()
+    })
+
+    expect(setIssues).toHaveBeenCalledTimes(2)
+    expect(setIssues).toHaveBeenLastCalledWith([])
+  })
+
+  it('auto-saves a non-admin full scan with a Full Scan tag', async () => {
+    contextValue = makeContext({
+      systemInfo: { is_admin: false },
+      availableTasks: [
+        { id: 'os_info', name: 'OS Info', admin_required: false },
+        { id: 'dism_health', name: 'DISM', admin_required: true },
+      ],
+      settings: { autoSave: true, maxConcurrentTasks: 2 },
+    })
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'session-1'
+      if (cmd === 'run_diagnostics_parallel') return []
+      if (cmd === 'save_current_scan') return 'saved-id'
+      return undefined
+    })
+
+    const useScanner = await loadHook()
+    const { result } = renderHook(() => useScanner())
+
+    await act(async () => {
+      await result.current.runFullScan()
+    })
+
+    expect(invokeMock).toHaveBeenCalledWith('save_current_scan', expect.objectContaining({
+      tags: ['Full Scan'],
+    }))
   })
 })
 

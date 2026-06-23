@@ -17,7 +17,7 @@ export interface ScanReportState {
   error: string | null
   hasResults: boolean
   aiEnabled: boolean
-  generate: () => Promise<void>
+  generate: (forceRefresh?: boolean) => Promise<void>
   copy: () => Promise<void>
 }
 
@@ -127,7 +127,7 @@ export function useScanReport(): ScanReportState {
     }
   }, [bufferReportDelta, bufferReportDone, bufferReportError, setGeneratingState])
 
-  const generate = useCallback(async () => {
+  const generate = useCallback(async (forceRefresh = false) => {
     if (generatingRef.current) return
     if (!aiEnabled) {
       setGeneratingState(false)
@@ -142,6 +142,7 @@ export function useScanReport(): ScanReportState {
       const ack = await invoke<ReportAck>('ai_generate_report', {
         previousScanId: null,
         apiKey: apiKeyRef.current || null,
+        forceRefresh,
       })
       reportIdRef.current = ack.reportId
       if (ack.report) {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useAppContext, type Issue, type RemediationSummary } from '../contexts/AppContext'
 import { useAIContext } from '../contexts/AIContext'
@@ -39,10 +39,11 @@ export const IssuesScreen: React.FC = () => {
 
   const [maintenance, setMaintenance] = useState<RemediationSummary[]>([])
   const [confirming, setConfirming] = useState<RemediationSummary | null>(null)
-  const [triage, setTriage] = useState('')
+  const [triageState, setTriageState] = useState({ signature: '', text: '' })
   const [triageBusy, setTriageBusy] = useState(false)
-  const [plan, setPlan] = useState<FixPlan | null>(null)
+  const [planState, setPlanState] = useState<{ signature: string; plan: FixPlan | null }>({ signature: '', plan: null })
   const [planBusy, setPlanBusy] = useState(false)
+  const remediationInFlightRef = useRef(false)
 
   useEffect(() => {
     invoke<RemediationSummary[]>('get_remediations')
@@ -50,14 +51,22 @@ export const IssuesScreen: React.FC = () => {
       .catch(error => logger.error('IssuesScreen', 'Failed to load remediations', error))
   }, [])
 
-  const detected = issues.filter(i => i.detected)
-  const passed = issues.filter(i => !i.detected)
+  const detected = issues.filter(i => i.detected || i.status === 'detected')
+  const skipped = issues.filter(i => !i.detected && i.status === 'skipped')
+  const passed = issues.filter(i => !i.detected && i.status !== 'skipped')
   const critical = detected.filter(i => i.severity.toLowerCase() === 'critical').length
   const warnings = detected.filter(i => i.severity.toLowerCase() === 'warning').length
   const aiEnabled = settings.aiEnabled ?? true
+  const remediationBusy = fixingIssue !== null
+  const detectedIssueSignature = detected.map(i => i.id || i.title).sort().join('\n')
+  const detectedIssueIds = new Set(detected.map(i => i.id).filter((id): id is string => !!id))
+  const triage = triageState.signature === detectedIssueSignature ? triageState.text : ''
+  const plan = planState.signature === detectedIssueSignature ? planState.plan : null
 
   // ---- remediation execution (the backend enforces the Repair gate) ----
   const runRemediation = useCallback(async (remediation: RemediationSummary, confirmed: boolean) => {
+    if (remediationInFlightRef.current) return
+    remediationInFlightRef.current = true
     setFixingIssue(remediation.id)
     if (remediation.long_running) {
       showInfo('Repair started', `${remediation.label} can take 10+ minutes. Keep the app open.`)
@@ -86,11 +95,17 @@ export const IssuesScreen: React.FC = () => {
       logger.error('IssuesScreen', 'Failed to run remediation', e)
       showError('Fix failed', e instanceof Error ? e.message : String(e))
     } finally {
+      remediationInFlightRef.current = false
       setFixingIssue(null)
     }
   }, [setFixingIssue, showInfo, showWarning, showError, detectIssues])
 
   const handleFixClick = (remediation: RemediationSummary) => {
+    if (remediationInFlightRef.current || fixingIssue) return
+    if (remediation.admin_required && !systemInfo?.is_admin) {
+      setConfirming(remediation)
+      return
+    }
     if (remediation.tier === 'repair') {
       setConfirming(remediation)
     } else {
@@ -127,11 +142,12 @@ export const IssuesScreen: React.FC = () => {
     }
     setTriageBusy(true)
     try {
+      const signature = detectedIssueSignature
       const payload = JSON.stringify(detected.map(i => ({
         id: i.id, severity: i.severity, title: i.title, description: i.description,
       })))
       const text = await prioritizeIssues(payload, force)
-      setTriage(text)
+      setTriageState({ signature, text })
     } catch (e) {
       showError('AI triage failed', e instanceof Error ? e.message : String(e))
     } finally {
@@ -145,12 +161,13 @@ export const IssuesScreen: React.FC = () => {
       return
     }
     setPlanBusy(true)
-    setPlan(null)
+    const signature = detectedIssueSignature
+    setPlanState({ signature, plan: null })
     try {
       const result = await invoke<FixPlan>('ai_propose_fix_plan', {
         apiKey: settings.openAiApiKey || null,
       })
-      setPlan(result)
+      setPlanState({ signature, plan: result })
     } catch (e) {
       showError('AI fix plan failed', e instanceof Error ? e.message : String(e))
     } finally {
@@ -161,6 +178,7 @@ export const IssuesScreen: React.FC = () => {
   const remediationById = (id: string): RemediationSummary | undefined =>
     maintenance.find(r => r.id === id) ||
     issues.map(i => i.remediation).find(r => r?.id === id) || undefined
+  const visiblePlanEntries = plan?.entries.filter(entry => detectedIssueIds.has(entry.issue_id)) ?? []
 
   return (
     <>
@@ -182,7 +200,7 @@ export const IssuesScreen: React.FC = () => {
         </div>
         <div className="stat-card passed">
           <div className="label">Checks Run</div>
-          <div className="value">{issues.length}</div>
+          <div className="value">{issues.length - skipped.length}</div>
           <i className="fa-solid fa-list-check icon" />
         </div>
       </div>
@@ -223,8 +241,8 @@ export const IssuesScreen: React.FC = () => {
                 {triage && <div className="report-body">{renderMarkdownLite(triage)}</div>}
                 {plan && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: triage ? 10 : 0 }}>
-                    {plan.entries.length === 0 && <span style={{ color: 'var(--wf-text-muted)' }}>{plan.notes || 'No plan entries.'}</span>}
-                    {plan.entries.map(entry => {
+                    {visiblePlanEntries.length === 0 && <span style={{ color: 'var(--wf-text-muted)' }}>{plan.entries.length === 0 ? (plan.notes || 'No plan entries.') : 'This plan no longer matches the current issue set.'}</span>}
+                    {visiblePlanEntries.map(entry => {
                       const remediation = remediationById(entry.remediation_id)
                       const issue = issues.find(i => i.id === entry.issue_id)
                       return (
@@ -239,7 +257,7 @@ export const IssuesScreen: React.FC = () => {
                           </div>
                           <div className="actions">
                             {remediation && (
-                              <button className="btn primary" disabled={fixingIssue === remediation.id} onClick={() => handleFixClick(remediation)}>
+                              <button className="btn primary" disabled={remediationBusy} onClick={() => handleFixClick(remediation)}>
                                 {fixingIssue === remediation.id
                                   ? <><i className="fa-solid fa-spinner fa-spin" /> Running…</>
                                   : <><i className={`fa-solid ${TIER_ICON[remediation.tier]}`} /> {remediation.label}</>}
@@ -249,7 +267,7 @@ export const IssuesScreen: React.FC = () => {
                         </div>
                       )
                     })}
-                    {plan.notes && plan.entries.length > 0 && (
+                    {plan.notes && visiblePlanEntries.length > 0 && (
                       <p style={{ margin: 0, fontSize: 12, color: 'var(--wf-text-muted)' }}>{plan.notes}</p>
                     )}
                   </div>
@@ -307,7 +325,7 @@ export const IssuesScreen: React.FC = () => {
               </div>
               <div className="actions" style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'stretch' }}>
                 {remediation && (
-                  <button className="btn primary" disabled={fixingIssue === remediation.id} onClick={() => handleFixClick(remediation)}>
+                  <button className="btn primary" disabled={remediationBusy} onClick={() => handleFixClick(remediation)}>
                     {fixingIssue === remediation.id
                       ? <><i className="fa-solid fa-spinner fa-spin" /> Running…</>
                       : <><i className={`fa-solid ${TIER_ICON[remediation.tier]}`} /> {remediation.label}</>}
@@ -339,6 +357,23 @@ export const IssuesScreen: React.FC = () => {
           </details>
         )}
 
+        {skipped.length > 0 && (
+          <details className="wf-block" style={{ marginTop: 12, padding: '10px 14px' }}>
+            <summary style={{ cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+              {skipped.length} checks skipped
+            </summary>
+            <div style={{ paddingTop: 8 }}>
+              {skipped.map((issue, idx) => (
+                <div key={issue.id || idx} style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '4px 0', fontSize: 12.5, borderBottom: '1px solid var(--hairline)' }}>
+                  <i className="fa-solid fa-circle-minus" style={{ color: 'var(--wf-text-muted)', fontSize: 11 }} />
+                  <strong>{issue.title}</strong>
+                  <span style={{ color: 'var(--wf-text-muted)' }}>{issue.description}</span>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+
         {/* ---- Maintenance (always-available cleanups & repairs) ---- */}
         {maintenance.length > 0 && (
           <div className="wf-block" style={{ marginTop: 12 }}>
@@ -354,7 +389,7 @@ export const IssuesScreen: React.FC = () => {
                     </div>
                     <div style={{ fontSize: 11.5, color: 'var(--wf-text-muted)' }}>{remediation.description}</div>
                   </div>
-                  <button className="btn" disabled={fixingIssue === remediation.id} onClick={() => handleFixClick(remediation)}>
+                  <button className="btn" disabled={remediationBusy} onClick={() => handleFixClick(remediation)}>
                     {fixingIssue === remediation.id
                       ? <><i className="fa-solid fa-spinner fa-spin" /> Running…</>
                       : 'Run'}

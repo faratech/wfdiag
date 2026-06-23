@@ -21,4 +21,9 @@ describe('update check throttle', () => {
   it('treats corrupted storage as never-run', () => {
     expect(shouldCheck('not-a-number', now)).toBe(true)
   })
+
+  it('treats future timestamps as corrupt', () => {
+    expect(shouldCheck(String(now + 60_000), now)).toBe(false)
+    expect(shouldCheck(String(now + 10 * 60_000), now)).toBe(true)
+  })
 })

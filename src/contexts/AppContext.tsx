@@ -43,6 +43,8 @@ export interface Issue {
   category: string
   recommendation?: string
   detected: boolean
+  /** detected = active issue; ok = passed; skipped = source diagnostic was unavailable */
+  status?: 'detected' | 'ok' | 'skipped'
   /** Diagnostic tasks this issue was derived from (used by "Ask AI") */
   source_tasks?: string[]
   /** The vetted remediation for this issue, when one applies */

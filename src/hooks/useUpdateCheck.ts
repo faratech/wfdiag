@@ -11,6 +11,7 @@ export interface UpdateInfo {
 }
 
 export const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
+export const FUTURE_TIMESTAMP_GRACE_MS = 5 * 60 * 1000
 const LAST_CHECK_KEY = 'updateCheck.lastRun'
 const START_DELAY_MS = 5000
 
@@ -18,7 +19,7 @@ const START_DELAY_MS = 5000
 export function shouldCheck(lastRun: string | null, now: number, interval = CHECK_INTERVAL_MS): boolean {
   if (!lastRun) return true
   const last = Number(lastRun)
-  return !Number.isFinite(last) || now - last >= interval
+  return !Number.isFinite(last) || last > now + FUTURE_TIMESTAMP_GRACE_MS || now - last >= interval
 }
 
 /**

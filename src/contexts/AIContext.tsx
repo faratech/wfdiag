@@ -156,15 +156,16 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
 
   // Track previous settings to detect changes
   const prevSettingsRef = useRef<{ availabilityKey?: string; provider?: string }>({})
+  const analysisGenerationRef = useRef(0)
 
   // Use settings from AppContext (with defaults)
   const aiEnabled = settings.aiEnabled ?? true
   const preferredProvider: AIProviderPreference = (settings.preferredAIProvider as AIProviderPreference) ?? 'auto'
 
-  // Derived state - AI is available if backend reports provider OR if we have an API key
+  // Derived state used by the frontend mirror below. The OpenAI key in settings
+  // counts while status is refreshing because one-shot calls pass it to the backend.
   const backendAvailable = !!aiStatus && aiStatus.active_provider !== 'none'
   const hasSettingsApiKey = !!settings.openAiApiKey
-  const isAIAvailable = backendAvailable || hasSettingsApiKey
 
   // Determine the active provider — a frontend mirror of the backend's
   // route_provider(): explicit preference never falls back; Auto walks the
@@ -193,6 +194,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     }
     return backendAvailable ? aiStatus!.active_provider : 'none'
   })()
+  const isAIAvailable = activeProvider !== 'none'
 
   // Pure status fetch: returns a safe fallback on error and never calls
   // setState. Keeping the setState out of here lets the mount effect apply the
@@ -210,7 +212,8 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         openai_api_key_set: false,
         phi_silica_available: false,
         phi_silica_ready: false,
-        active_provider: 'none'
+        active_provider: 'none',
+        providers: [],
       }
     }
   }, [])
@@ -248,8 +251,11 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     const availabilityKey = [
       settings.openAiApiKey || '',
       settings.anthropicApiKey || '',
+      settings.anthropicModel || '',
       settings.geminiApiKey || '',
+      settings.geminiModel || '',
       settings.deepseekApiKey || '',
+      settings.deepseekModel || '',
       settings.customApiKey || '',
       settings.customEndpoint || '',
       settings.customModel || '',
@@ -266,6 +272,14 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     if (availabilityKey !== prevAvailabilityKey || currentProvider !== prevProvider) {
       logger.debug('AIContext', 'AI settings changed, refreshing status')
       prevSettingsRef.current = { availabilityKey, provider: currentProvider }
+      if (prevAvailabilityKey || currentProvider !== prevProvider) {
+        analysisGenerationRef.current++
+        setIsAnalyzing({})
+        setInterpretations({})
+        setAnalysisMeta({})
+        setErrors({})
+        inFlightRef.current.clear()
+      }
 
       // Update backend preference if it changed
       if (currentProvider !== prevProvider) {
@@ -290,8 +304,11 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   }, [
     settings.openAiApiKey,
     settings.anthropicApiKey,
+    settings.anthropicModel,
     settings.geminiApiKey,
+    settings.geminiModel,
     settings.deepseekApiKey,
+    settings.deepseekModel,
     settings.customApiKey,
     settings.customEndpoint,
     settings.customModel,
@@ -312,9 +329,6 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   const setPreferredProvider = useCallback(async (_provider: AIProviderPreference) => {
     logger.warn('AIContext', 'setPreferredProvider is deprecated - use Settings dialog to change AI settings')
   }, [])
-
-  // Check if we have an API key from settings
-  const hasApiKey = !!settings.openAiApiKey
 
   // In-flight analysis requests keyed by cacheKey. Concurrent calls for the
   // same content (e.g. a double-clicked Analyze button or two components
@@ -339,10 +353,14 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       return rest
     })
 
+    const generation = analysisGenerationRef.current
     const request = (async () => {
       try {
         const response = await doInvoke()
         const interpretation = response.interpretation
+        if (generation !== analysisGenerationRef.current) {
+          return ''
+        }
         setInterpretations(prev => ({ ...prev, [cacheKey]: interpretation }))
         setAnalysisMeta(prev => ({
           ...prev,
@@ -355,11 +373,15 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         return interpretation
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error)
-        setErrors(prev => ({ ...prev, [cacheKey]: errorMsg }))
+        if (generation === analysisGenerationRef.current) {
+          setErrors(prev => ({ ...prev, [cacheKey]: errorMsg }))
+        }
         throw error
       } finally {
         inFlightRef.current.delete(cacheKey)
-        setIsAnalyzing(prev => ({ ...prev, [cacheKey]: false }))
+        if (generation === analysisGenerationRef.current) {
+          setIsAnalyzing(prev => ({ ...prev, [cacheKey]: false }))
+        }
       }
     })()
 
@@ -375,7 +397,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     forceRefresh = false
   ): Promise<string> => {
     // Allow if AI is enabled and either backend says available OR we have an API key
-    if (!aiEnabled || (!isAIAvailable && !hasApiKey)) {
+    if (!aiEnabled || !isAIAvailable) {
       return ''
     }
 
@@ -396,13 +418,13 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         forceRefresh
       })
     )
-  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
+  }, [aiEnabled, isAIAvailable, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
 
   const analyzeSection = useCallback(async (
     sectionName: string,
     sectionData: string
   ): Promise<string> => {
-    if (!aiEnabled || (!isAIAvailable && !hasApiKey)) {
+    if (!aiEnabled || !isAIAvailable) {
       return ''
     }
 
@@ -420,10 +442,10 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         forceRefresh: false
       })
     )
-  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
+  }, [aiEnabled, isAIAvailable, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
 
   const explainHealth = useCallback(async (metricsData: string): Promise<string> => {
-    if (!aiEnabled || (!isAIAvailable && !hasApiKey)) {
+    if (!aiEnabled || !isAIAvailable) {
       return ''
     }
 
@@ -440,7 +462,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         forceRefresh: false
       })
     )
-  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
+  }, [aiEnabled, isAIAvailable, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
 
   // Generic analysis function for monitoring, processes, comparisons, etc.
   const analyzeGeneric = useCallback(async (
@@ -448,7 +470,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     prompt: string,
     forceRefresh = false
   ): Promise<string> => {
-    if (!aiEnabled || (!isAIAvailable && !hasApiKey)) {
+    if (!aiEnabled || !isAIAvailable) {
       return ''
     }
 
@@ -467,7 +489,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         forceRefresh
       })
     )
-  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
+  }, [aiEnabled, isAIAvailable, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
 
   // Rank detected issues with the backend's dedicated prioritization prompt.
   // Content-hashed cache key: a re-scan with different issues re-analyzes.
@@ -475,7 +497,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     issuesJson: string,
     forceRefresh = false
   ): Promise<string> => {
-    if (!aiEnabled || (!isAIAvailable && !hasApiKey)) {
+    if (!aiEnabled || !isAIAvailable) {
       return ''
     }
     const cacheKey = `issues:prioritize:${hashContent(issuesJson)}`
@@ -490,7 +512,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         forceRefresh
       })
     )
-  }, [aiEnabled, isAIAvailable, hasApiKey, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
+  }, [aiEnabled, isAIAvailable, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
 
   // Cache management
   const clearCache = useCallback(async (targetSessionId?: string) => {

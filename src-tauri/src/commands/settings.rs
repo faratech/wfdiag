@@ -329,6 +329,11 @@ fn sync_in_memory_state(settings: &AppSettings) {
     crate::tray::set_close_to_tray(settings.close_to_tray);
 }
 
+pub(crate) fn sync_in_memory_state_from_disk() {
+    let settings = read_settings_from_disk().unwrap_or_default();
+    sync_in_memory_state(&settings);
+}
+
 #[tauri::command]
 pub async fn load_settings() -> Result<AppSettings, String> {
     let path = get_settings_path()?;

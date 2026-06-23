@@ -105,17 +105,25 @@ pub fn detect_stopped_services(ctx: &DetectCtx) -> Option<Detection> {
     let stopped_count = services
         .iter()
         .filter(|s| {
-            s["StartMode"].as_str() == Some("Auto")
+            s["Name"].as_str().is_some_and(is_supported_core_service)
+                && s["StartMode"].as_str() == Some("Auto")
                 && s["State"].as_str().is_some_and(|state| state != "Running")
         })
         .count();
     if stopped_count > 0 {
         return Some(Detection::new(format!(
-            "{} automatic service(s) are not running.",
+            "{} supported core automatic service(s) are not running.",
             stopped_count
         )));
     }
     None
+}
+
+fn is_supported_core_service(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "wuauserv" | "bits" | "spooler" | "themes" | "audiosrv"
+    )
 }
 
 /// FIXED in the catalog refactor: the performance task emits
@@ -258,7 +266,9 @@ pub fn detect_smart_failure_predicted(ctx: &DetectCtx) -> Option<Detection> {
         let predictive = match &disk["OperationalStatus"] {
             Value::Array(states) => states.iter().any(|s| json_u64(s) == Some(5)),
             other => json_u64(other) == Some(5),
-        };
+        } || disk["OperationalStatusText"]
+            .as_str()
+            .is_some_and(|status| status.trim().eq_ignore_ascii_case("predictive failure"));
         if predictive {
             return Some(Detection::new(format!(
                 "Disk '{}' is predicting imminent failure (SMART). Back up your data NOW.",
@@ -327,6 +337,27 @@ pub fn detect_disk_unhealthy(ctx: &DetectCtx) -> Option<Detection> {
             ));
         }
         if operational_codes.iter().any(|code| matches!(*code, 3 | 4)) {
+            return Some(Detection::new(format!(
+                "Disk '{}' reports degraded operational status.",
+                disk["Model"].as_str().unwrap_or("Unknown")
+            )));
+        }
+
+        let operational_text = disk["OperationalStatusText"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if operational_text == "error" {
+            return Some(Detection::with_severity(
+                format!(
+                    "Disk '{}' reports an operational error. Back up your data immediately.",
+                    disk["Model"].as_str().unwrap_or("Unknown")
+                ),
+                IssueSeverity::Critical,
+            ));
+        }
+        if matches!(operational_text.as_str(), "degraded" | "stressed") {
             return Some(Detection::new(format!(
                 "Disk '{}' reports degraded operational status.",
                 disk["Model"].as_str().unwrap_or("Unknown")
@@ -787,6 +818,15 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_stopped_auto_service_not_mapped_to_core_service_fix() {
+        let results = results_with(
+            "services",
+            r#"[{"Name": "SomeVendorSvc", "State": "Stopped", "StartMode": "Auto"}]"#,
+        );
+        assert!(detect_stopped_services(&ctx(&results)).is_none());
+    }
+
+    #[test]
     fn high_memory_usage_uses_the_real_used_percent_field() {
         // Regression: the old detector read TotalVisibleMemorySize /
         // FreePhysicalMemory, which the performance task never emits — it was
@@ -968,6 +1008,26 @@ mod tests {
         );
         let d = detect_disk_unhealthy(&ctx(&results)).expect("operational error");
         assert_eq!(d.severity, Some(IssueSeverity::Critical));
+        // The native producer also emits OperationalStatusText; text-only
+        // payloads must not be treated as healthy.
+        let results = results_with(
+            "chkdsk",
+            r#"{"disks": [{"Model": "SSD G", "OperationalStatusText": "Degraded", "HealthStatus": 0}]}"#,
+        );
+        assert!(detect_disk_unhealthy(&ctx(&results)).is_some());
+        let results = results_with(
+            "chkdsk",
+            r#"{"disks": [{"Model": "SSD H", "OperationalStatusText": "Error", "HealthStatus": 0}]}"#,
+        );
+        let d = detect_disk_unhealthy(&ctx(&results)).expect("text operational error");
+        assert_eq!(d.severity, Some(IssueSeverity::Critical));
+        let results = results_with(
+            "chkdsk",
+            r#"{"disks": [{"Model": "SSD I", "OperationalStatusText": "Predictive Failure", "HealthStatus": 0}]}"#,
+        );
+        assert!(detect_smart_failure_predicted(&ctx(&results)).is_some());
+        let results = results_with("chkdsk", r#"{"disks": [], "errors_found": true}"#);
+        assert!(detect_disk_unhealthy(&ctx(&results)).is_some());
     }
 
     #[test]
