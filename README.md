@@ -1,7 +1,7 @@
-# WF Diagnostics v2.5.0 - WindowsForum Diagnostic Tool
+# WF Diagnostics v2.5.1 - WindowsForum Diagnostic Tool
 
 [![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC_BY--NC--ND_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
-[![Version](https://img.shields.io/badge/version-2.5.0-blue.svg)](https://github.com/faratech/wfdiag/releases)
+[![Version](https://img.shields.io/badge/version-2.5.1-blue.svg)](https://github.com/faratech/wfdiag/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightblue.svg)](https://github.com/faratech/wfdiag)
 [![Security](https://img.shields.io/badge/security-hardened-green.svg)](https://github.com/faratech/wfdiag)
 [![AI](https://img.shields.io/badge/AI-Hybrid-purple.svg)](https://github.com/faratech/wfdiag)
@@ -142,7 +142,7 @@ The tool employs a **Hybrid AI Strategy**:
 
 ## 🔄 Version History
 
-### **v2.5.0 (Current) - Performance & Accuracy Improvements**
+### **v2.5.1 (Current) - Performance & Accuracy Improvements**
 - ✅ **Non-blocking System Monitor**: Decoupled slow polling operations (Disk, NPU) for instant UI responsiveness.
 - ✅ **Network Rate Fix**: Corrected transfer rate calculation to eliminate spikes during startup.
 - ✅ ✅ **Accurate Swap Metrics**: Switched to native PDH counters for true paging file utilization.

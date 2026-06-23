@@ -134,7 +134,7 @@ const AppContent: React.FC = () => {
             <div className="rail-brand-mark"><img src="/wf-ds/icon-only.png" alt="" /></div>
             <div className="rail-brand-text">
               <div className="b1">WindowsForum</div>
-              <div className="b2">Diagnostics · 2.5.0</div>
+              <div className="b2">Diagnostics · 2.5.1</div>
             </div>
           </div>
 

@@ -449,6 +449,40 @@ jobs:
 
           ls -la
 
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          VERSION="${{ needs.build-x64.outputs.version }}"
+          TAG="v${VERSION}"
+          git fetch --force --tags
+
+          TAG_NOTES="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents:body)')"
+          if [ -z "${TAG_NOTES//[[:space:]]/}" ]; then
+            TAG_NOTES="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents:subject)')"
+          fi
+
+          {
+            echo "## WindowsForum Diagnostics v${VERSION}"
+            echo
+            if [ -n "${TAG_NOTES//[[:space:]]/}" ]; then
+              echo "### Changelog"
+              echo
+              printf '%s\n' "$TAG_NOTES"
+              echo
+            fi
+            echo "### Recommended Installation"
+            echo "**[Get from Microsoft Store](https://apps.microsoft.com/detail/9nj59rh053pv)** - Signed by Microsoft, automatic updates"
+            echo
+            echo "### Alternative Downloads"
+            echo "- **MSIX Bundle**: Unsigned, for sideloading (requires developer mode or self-signed cert)"
+            echo "- **Portable EXE**: Standalone executables for x64 and ARM64, no installation required"
+            echo
+            echo "### Manual MSIX Installation"
+            echo '```powershell'
+            echo "Add-AppxPackage -Path \"WindowsForum_Diagnostics_${VERSION}.msixbundle\""
+            echo '```'
+          } > release/RELEASE_NOTES.md
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -459,19 +493,6 @@ jobs:
           files: |
             release/*.msixbundle
             release/*.exe
-          body: |
-            ## WindowsForum Diagnostics v${{ needs.build-x64.outputs.version }}
-
-            ### Recommended Installation
-            **[Get from Microsoft Store](https://apps.microsoft.com/detail/9nj59rh053pv)** - Signed by Microsoft, automatic updates
-
-            ### Alternative Downloads
-            - **MSIX Bundle**: Unsigned, for sideloading (requires developer mode or self-signed cert)
-            - **Portable EXE**: Standalone executables for x64 and ARM64, no installation required
-
-            ### Manual MSIX Installation
-            ```powershell
-            Add-AppxPackage -Path "WindowsForum_Diagnostics_${{ needs.build-x64.outputs.version }}.msixbundle"
-            ```
+          body_path: release/RELEASE_NOTES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
