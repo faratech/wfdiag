@@ -566,10 +566,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link 0.2.1",
 ]
 
@@ -5315,13 +5313,11 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "wfdiag-tauri"
-version = "2.5.0"
+version = "2.5.1"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
  "async-openai",
- "base64 0.22.1",
- "chrono",
  "dirs",
  "encoding_rs",
  "eventsource-stream",
