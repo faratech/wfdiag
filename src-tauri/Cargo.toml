@@ -34,9 +34,6 @@ tauri-plugin-shell = "2.3"
 tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2.4.2"
 
-# Date/time utilities
-chrono = "0.4"
-
 # Async runtime
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
 futures = "0.3"
@@ -57,7 +54,6 @@ eventsource-stream = "0.2"
 # CancellationToken for stoppable AI chat turns
 tokio-util = "0.7"
 uuid = { version = "1.20.0", features = ["v4"] }
-base64 = "0.22"
 url = "2.5"
 dirs = "6.0"
 
