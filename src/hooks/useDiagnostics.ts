@@ -6,6 +6,33 @@ import { useAppContext, type SystemInfo, type DiagnosticTask, type Issue } from 
 import { useToast } from '../contexts/ToastContext'
 import * as logger from '../utils/logger'
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
+  if (error && typeof error === 'object' && 'message' in error) {
+    return String((error as { message: unknown }).message)
+  }
+  return error ? String(error) : 'Unknown error'
+}
+
+async function suggestedExportPath(filename: string): Promise<string> {
+  try {
+    return await invoke<string>('suggest_export_path', { filename })
+  } catch (error) {
+    logger.warn('useDiagnostics', 'Failed to get suggested export path', errorMessage(error))
+    return filename
+  }
+}
+
+async function validateExportPath(path: string): Promise<void> {
+  await invoke('validate_export_path', { path })
+}
+
+function exportLocationError(error: unknown): string {
+  const detail = errorMessage(error)
+  return `${detail}. Choose Documents, Desktop, Downloads, AppData, or an app-named report file in Temp.`
+}
+
 export const useDiagnostics = () => {
   const {
     systemInfo,
@@ -89,25 +116,12 @@ ${content}
 
     try {
       const exportFormat = settings.exportFormat || 'text'
-      const content = await invoke<string>('export_results', {
-        format: exportFormat,
-        includeRaw: true
-      })
-
-      const fileContent = exportFormat === 'text'
-        ? `=== WindowsForum Diagnostic Report ===
-Generated: ${new Date().toLocaleString()}
-Computer: ${systemInfo?.computer_name}
-OS: ${systemInfo?.os_version}
-Admin Mode: ${systemInfo?.is_admin ? 'Yes' : 'No'}
-${content}`
-        : content
-
       const extension = exportFormat === 'json' ? 'json' :
                        exportFormat === 'html' ? 'html' : 'txt'
+      const filename = `wf-diagnostics-${new Date().toISOString().split('T')[0]}.${extension}`
 
       const filePath = await save({
-        defaultPath: `wf-diagnostics-${new Date().toISOString().split('T')[0]}.${extension}`,
+        defaultPath: await suggestedExportPath(filename),
         filters: [{
           name: extension.toUpperCase(),
           extensions: [extension]
@@ -115,6 +129,27 @@ ${content}`
       })
 
       if (filePath) {
+        try {
+          await validateExportPath(filePath)
+        } catch (error) {
+          showError('Export Location Not Allowed', exportLocationError(error))
+          return
+        }
+
+        const content = await invoke<string>('export_results', {
+          format: exportFormat,
+          includeRaw: true
+        })
+
+        const fileContent = exportFormat === 'text'
+          ? `=== WindowsForum Diagnostic Report ===
+Generated: ${new Date().toLocaleString()}
+Computer: ${systemInfo?.computer_name}
+OS: ${systemInfo?.os_version}
+Admin Mode: ${systemInfo?.is_admin ? 'Yes' : 'No'}
+${content}`
+          : content
+
         // Use backend to write files (no fs:scope restrictions)
         await invoke('save_results_to_file', {
           path: filePath,
@@ -216,27 +251,11 @@ ${content}`
 
     try {
       logger.info('useDiagnostics', 'Starting support package generation...')
-
-      const jsonContent = await invoke<string>('export_results', {
-        format: 'json',
-        includeRaw: true
-      })
-
-      const textContent = await invoke<string>('export_results', {
-        format: 'text',
-        includeRaw: true
-      })
-
-      const htmlContent = await invoke<string>('export_results', {
-        format: 'html',
-        includeRaw: true
-      })
-
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
       const packageName = `support-package-${timestamp}`
 
       const jsonPath = await save({
-        defaultPath: `${packageName}.json`,
+        defaultPath: await suggestedExportPath(`${packageName}.json`),
         filters: [{ name: 'JSON', extensions: ['json'] }]
       })
 
@@ -250,6 +269,32 @@ ${content}`
         const textPath = `${basePath}.txt`
         const htmlPath = `${basePath}.html`
 
+        try {
+          await Promise.all([
+            validateExportPath(actualJsonPath),
+            validateExportPath(textPath),
+            validateExportPath(htmlPath),
+          ])
+        } catch (error) {
+          showError('Export Location Not Allowed', exportLocationError(error))
+          return
+        }
+
+        const jsonContent = await invoke<string>('export_results', {
+          format: 'json',
+          includeRaw: true
+        })
+
+        const textContent = await invoke<string>('export_results', {
+          format: 'text',
+          includeRaw: true
+        })
+
+        const htmlContent = await invoke<string>('export_results', {
+          format: 'html',
+          includeRaw: true
+        })
+
         // Use backend to write files (no fs:scope restrictions)
         await invoke('save_results_to_file', { path: actualJsonPath, content: jsonContent })
         await invoke('save_results_to_file', { path: textPath, content: textContent })
@@ -262,19 +307,9 @@ ${content}`
       }
     } catch (error: unknown) {
       logger.error('useDiagnostics', 'Failed to generate support package', error)
-      let errorMsg = 'Unknown error'
-      if (error instanceof Error) {
-        errorMsg = error.message
-      } else if (typeof error === 'string') {
-        errorMsg = error
-      } else if (error && typeof error === 'object' && 'message' in error) {
-        errorMsg = String((error as { message: unknown }).message)
-      } else if (error) {
-        errorMsg = String(error)
-      }
       showError(
         'Failed to Generate Support Package',
-        `Error: ${errorMsg}. Please try exporting individual files.`
+        `Error: ${errorMessage(error)}. Please try exporting individual files.`
       )
     }
   }, [sessionId, showSuccess, showError])
@@ -284,8 +319,9 @@ ${content}`
       await invoke('restart_as_admin')
     } catch (error) {
       logger.error('useDiagnostics', 'Failed to restart as admin', error)
+      showError('Restart failed', error instanceof Error ? error.message : String(error))
     }
-  }, [])
+  }, [showError])
 
   useEffect(() => {
     loadSystemInfo()

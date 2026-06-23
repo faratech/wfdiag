@@ -278,7 +278,9 @@ async fn run_diagnostic_task(
 
     // Store result
     let mut current = state.current_session.lock().await;
-    if let Some(ref mut session) = *current {
+    if let Some(ref mut session) = *current
+        && session_id.as_ref() == Some(&session.session_id)
+    {
         session.results.insert(task_id.clone(), result.clone());
     }
 
@@ -310,6 +312,15 @@ async fn run_diagnostics_parallel(
 
     let max_concurrent = max_concurrent.unwrap_or(5).clamp(1, 16); // Default to 5, bounded
     let tasks = std::sync::Arc::new(diagnostics::get_all_tasks());
+    {
+        let mut active_runners = state.active_scan_runners.lock().await;
+        if !active_runners.insert(session_id.clone()) {
+            return Err(format!(
+                "Diagnostics are already running for session {}",
+                session_id
+            ));
+        }
+    }
 
     // Create futures for each diagnostic task
     let futures: Vec<_> = task_ids
@@ -424,6 +435,7 @@ async fn run_diagnostics_parallel(
     }
 
     state.cancelled_sessions.lock().await.remove(&session_id);
+    state.active_scan_runners.lock().await.remove(&session_id);
 
     Ok(successful_results)
 }
@@ -509,6 +521,10 @@ async fn restart_as_admin() -> Result<(), String> {
         use windows::Win32::UI::Shell::ShellExecuteW;
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
         use windows::core::PCWSTR;
+
+        if update_check::is_store_install() {
+            return Err("Restart as administrator is not supported for the Microsoft Store version. The app will stay open; install the MSI/NSIS build for elevated relaunch, or run admin-only tools manually.".to_string());
+        }
 
         let exe_path = env::current_exe()
             .map_err(|e| DiagError::internal(format!("Failed to get exe path: {}", e)))?;
@@ -956,6 +972,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            commands::settings::sync_in_memory_state_from_disk();
             tray::setup_tray(app.handle())?;
             // Pre-initialize NPU detection in background to avoid delay on first monitoring start
             #[cfg(windows)]
@@ -991,6 +1008,8 @@ pub fn run() {
             get_session_results,
             commands::export::export_results,
             commands::export::save_results_to_file,
+            commands::export::suggest_export_path,
+            commands::export::validate_export_path,
             get_uptime,
             run_remediation,
             get_remediations,

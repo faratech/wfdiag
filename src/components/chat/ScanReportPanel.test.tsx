@@ -68,6 +68,7 @@ describe('ScanReportPanel', () => {
     expect(invokeMock).toHaveBeenCalledWith('ai_generate_report', {
       previousScanId: null,
       apiKey: 'sk-test',
+      forceRefresh: false,
     })
     await waitFor(() => expect(eventHandlers.size).toBe(3))
 
@@ -104,6 +105,23 @@ describe('ScanReportPanel', () => {
     expect(screen.getByTitle('Copy report')).toBeInTheDocument()
   })
 
+  it('prevents duplicate report generation before the first ack resolves', async () => {
+    const ack = deferred<{ reportId: string; cached: boolean; provider: string }>()
+    invokeMock.mockReturnValue(ack.promise)
+    render(<ScanReportPanel />)
+
+    const generate = screen.getByRole('button', { name: /Explain this scan/ })
+    fireEvent.click(generate)
+    fireEvent.click(generate)
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1))
+
+    await act(async () => {
+      ack.resolve({ reportId: 'r1', cached: false, provider: 'openai' })
+      await ack.promise
+    })
+  })
+
   it('renders a cached report immediately without events', async () => {
     invokeMock.mockResolvedValue({
       reportId: 'r1', cached: true, provider: 'openai', report: '## Health summary\nCached verdict.',
@@ -112,6 +130,30 @@ describe('ScanReportPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: /Explain this scan/ }))
     await waitFor(() => expect(screen.getByText('Cached verdict.')).toBeInTheDocument())
     expect(screen.getByText('Cached verdict.').closest('.scan-report-content')).toBeTruthy()
+  })
+
+  it('bypasses cache when regenerating a report', async () => {
+    invokeMock
+      .mockResolvedValueOnce({
+        reportId: 'r1', cached: true, provider: 'openai', report: '## Health summary\nCached verdict.',
+      })
+      .mockResolvedValueOnce({
+        reportId: 'r2', cached: false, provider: 'openai',
+      })
+
+    render(<ScanReportPanel />)
+    fireEvent.click(screen.getByRole('button', { name: /Explain this scan/ }))
+    await waitFor(() => expect(screen.getByTitle('Regenerate')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTitle('Regenerate'))
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenLastCalledWith('ai_generate_report', {
+        previousScanId: null,
+        apiKey: 'sk-test',
+        forceRefresh: true,
+      })
+    })
   })
 
   it('shows backend errors with a retry action', async () => {

@@ -101,4 +101,16 @@ describe('HistoryScreen compare flow', () => {
       expect(invokeMock).toHaveBeenCalledWith('update_scan_tags', { scanId: 'scan_1', tags: ['baseline'] })
     )
   })
+
+  it('requires confirmation before clearing scan history', async () => {
+    render(<HistoryScreen />)
+    await waitFor(() => expect(screen.getByText('after-update')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /Clear history/ }))
+    expect(invokeMock).not.toHaveBeenCalledWith('clear_scan_history')
+
+    const confirmButtons = screen.getAllByRole('button', { name: /^Clear history$/ })
+    fireEvent.click(confirmButtons[confirmButtons.length - 1])
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('clear_scan_history'))
+  })
 })

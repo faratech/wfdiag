@@ -4,7 +4,7 @@ import { useScanHistory } from '../hooks/useScanHistory'
 import { useComparison, TaskChange } from '../hooks/useComparison'
 import { useJsonDiff, JsonDifference } from '../hooks/useJsonDiff'
 import { useToast } from '../contexts/ToastContext'
-import { Skeleton, EmptyState } from '../components/ui'
+import { Skeleton, EmptyState, Modal, Button } from '../components/ui'
 
 interface TaskTrend {
   task_id: string
@@ -81,6 +81,8 @@ export const HistoryScreen: React.FC = () => {
   const [trends, setTrends] = useState<Map<string, TaskTrend>>(new Map())
   const [labelDraft, setLabelDraft] = useState('')
   const [editingLabel, setEditingLabel] = useState(false)
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false)
+  const [clearingHistory, setClearingHistory] = useState(false)
 
   const current = scans[0]
 
@@ -112,14 +114,18 @@ export const HistoryScreen: React.FC = () => {
   }
 
   const clearHistory = async () => {
+    setClearingHistory(true)
     try {
       await invoke('clear_scan_history')
       showSuccess('History cleared')
       await refreshScans()
       setSelected(null)
       clearComparison()
+      setConfirmClearOpen(false)
     } catch (e) {
       showError('Failed to clear history', String(e))
+    } finally {
+      setClearingHistory(false)
     }
   }
 
@@ -176,7 +182,7 @@ export const HistoryScreen: React.FC = () => {
         </div>
         <div className="row-gap-12">
           <button className="btn" onClick={() => refreshScans()}><i className="fa-solid fa-arrows-rotate" /> Refresh</button>
-          <button className="btn danger" onClick={clearHistory}><i className="fa-solid fa-trash" /> Clear history</button>
+          <button className="btn danger" onClick={() => setConfirmClearOpen(true)} disabled={scans.length === 0}><i className="fa-solid fa-trash" /> Clear history</button>
         </div>
       </div>
 
@@ -310,6 +316,26 @@ export const HistoryScreen: React.FC = () => {
           </div>
         </div>
       </div>
+
+      <Modal
+        open={confirmClearOpen}
+        onClose={() => setConfirmClearOpen(false)}
+        title="Clear Scan History"
+        width={420}
+        footer={
+          <>
+            <Button onClick={() => setConfirmClearOpen(false)} disabled={clearingHistory}>Cancel</Button>
+            <Button variant="danger" icon="fa-trash" onClick={() => { void clearHistory() }} disabled={clearingHistory}>
+              {clearingHistory ? 'Clearing...' : 'Clear history'}
+            </Button>
+          </>
+        }
+      >
+        <p style={{ marginTop: 0 }}>
+          This permanently deletes {scans.length} saved scan{scans.length === 1 ? '' : 's'} and
+          removes all comparison history.
+        </p>
+      </Modal>
     </>
   )
 }

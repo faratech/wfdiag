@@ -381,10 +381,7 @@ impl ScanStorage {
         match (val1, val2) {
             (Value::Null, Value::Null) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Number(a), Value::Number(b)) => {
-                // Compare numbers as floats to handle precision differences
-                a.as_f64() == b.as_f64()
-            }
+            (Value::Number(a), Value::Number(b)) => Self::json_numbers_equal(a, b),
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => {
                 if a.len() != b.len() {
@@ -416,6 +413,38 @@ impl ScanStorage {
                 true
             }
             _ => false, // Different types
+        }
+    }
+
+    fn json_numbers_equal(a: &serde_json::Number, b: &serde_json::Number) -> bool {
+        if a == b {
+            return true;
+        }
+
+        let a_is_integer = a.as_i64().is_some() || a.as_u64().is_some();
+        let b_is_integer = b.as_i64().is_some() || b.as_u64().is_some();
+
+        // Distinct JSON integers must stay distinct even when they are larger
+        // than f64 can represent exactly.
+        if a_is_integer && b_is_integer {
+            return false;
+        }
+
+        const MAX_SAFE_F64_INTEGER: u64 = 9_007_199_254_740_991;
+        let integer_is_safe = |n: &serde_json::Number| {
+            n.as_i64()
+                .map(|i| i.unsigned_abs() <= MAX_SAFE_F64_INTEGER)
+                .or_else(|| n.as_u64().map(|u| u <= MAX_SAFE_F64_INTEGER))
+                .unwrap_or(true)
+        };
+
+        if !integer_is_safe(a) || !integer_is_safe(b) {
+            return false;
+        }
+
+        match (a.as_f64(), b.as_f64()) {
+            (Some(left), Some(right)) => left == right,
+            _ => false,
         }
     }
 
@@ -641,6 +670,10 @@ mod tests {
         assert!(!ScanStorage::outputs_are_equivalent(
             r#"{"v": 1}"#,
             r#"{"v": 2}"#
+        ));
+        assert!(!ScanStorage::outputs_are_equivalent(
+            r#"{"bytes": 9007199254740992}"#,
+            r#"{"bytes": 9007199254740993}"#
         ));
         assert!(!ScanStorage::outputs_are_equivalent("abc", "abd"));
     }

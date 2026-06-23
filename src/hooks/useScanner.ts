@@ -67,6 +67,9 @@ async function notifyScanComplete(passed: number, failed: number) {
 // a finally around the whole runDiagnostics body — every exit path (success, stop,
 // session-changed early return, error) frees the lock.
 let scanLockOwner: string | null = null
+let activeScanSessionId: string | null = null
+let cancelledScanSessionId: string | null = null
+let activeAutoSaveCancel: (() => void) | null = null
 
 export const useScanner = () => {
   const {
@@ -86,6 +89,7 @@ export const useScanner = () => {
     searchQuery,
     setFilteredResults,
     setTaskStatuses,
+    setIssues,
   } = useAppContext()
 
   // Track the current running session to prevent race conditions
@@ -107,6 +111,9 @@ export const useScanner = () => {
     if (autoSaveCancelRef.current) {
       const cancel = autoSaveCancelRef.current
       autoSaveCancelRef.current = null
+      if (activeAutoSaveCancel === cancel) {
+        activeAutoSaveCancel = null
+      }
       cancel()
     }
   }, [])
@@ -114,16 +121,21 @@ export const useScanner = () => {
   // Cancellable delay; resolves true when cancelled early, false after the full delay
   const waitAutoSaveDelay = useCallback((ms: number) => {
     return new Promise<boolean>(resolve => {
-      autoSaveCancelRef.current = () => resolve(true)
+      const cancel = () => resolve(true)
+      autoSaveCancelRef.current = cancel
+      activeAutoSaveCancel = cancel
       autoSaveTimeoutRef.current = window.setTimeout(() => {
         autoSaveTimeoutRef.current = null
         autoSaveCancelRef.current = null
+        if (activeAutoSaveCancel === cancel) {
+          activeAutoSaveCancel = null
+        }
         resolve(false)
       }, ms)
     })
   }, [])
 
-  const runDiagnostics = useCallback(async (taskIds: string[]) => {
+  const runDiagnostics = useCallback(async (taskIds: string[], scanTag = 'Manual Diagnostic') => {
     if (taskIds.length === 0) return
 
     // Prevent concurrent scans - race condition guard (per-instance AND cross-instance)
@@ -139,9 +151,11 @@ export const useScanner = () => {
     scanLockOwner = lockId
     isRunningRef.current = true
     cancelledSessionRef.current = null
+    cancelledScanSessionId = null
     setIsRunning(true)
     setCurrentProgress(0)
     setResults({})
+    setIssues([])
     setTaskStatuses({})
     setTaskbarProgress(0)
     // Capture the start time in a local so the auto-save timeout below uses THIS scan's
@@ -158,6 +172,7 @@ export const useScanner = () => {
 
       // Store the session ID in ref to prevent race conditions
       currentSessionRef.current = newSessionId
+      activeScanSessionId = newSessionId
       setSessionId(newSessionId)
 
       let completedTasks = 0
@@ -171,12 +186,12 @@ export const useScanner = () => {
         success?: boolean
       }>('task-progress', event => {
         // Only process events for the current session
-        if (event.payload.session_id !== newSessionId || currentSessionRef.current !== newSessionId) {
+        if (event.payload.session_id !== newSessionId || activeScanSessionId !== newSessionId) {
           logger.debug('useScanner', 'Ignoring event from old session')
           return
         }
 
-        if (cancelledSessionRef.current === newSessionId) {
+        if (cancelledScanSessionId === newSessionId) {
           return
         }
 
@@ -199,12 +214,12 @@ export const useScanner = () => {
         })
 
         // Verify this is still the current session before updating results
-        if (currentSessionRef.current !== newSessionId) {
+        if (activeScanSessionId !== newSessionId) {
           logger.warn('useScanner', 'Scan session changed, discarding results from old session')
           return
         }
 
-        if (cancelledSessionRef.current !== newSessionId) {
+        if (cancelledScanSessionId !== newSessionId) {
           const resultsObj = scanResults.reduce((acc, [taskId, result]) => {
             acc[taskId] = result
             return acc
@@ -226,7 +241,7 @@ export const useScanner = () => {
         }
       }
 
-      const wasCancelled = cancelledSessionRef.current === newSessionId
+      const wasCancelled = cancelledScanSessionId === newSessionId
       setCurrentProgress(wasCancelled ? 0 : 100)
       setTaskbarProgress(null)
 
@@ -237,12 +252,12 @@ export const useScanner = () => {
         const cancelled = await waitAutoSaveDelay(500)
 
         // Check if we're still the current session (guard against race conditions)
-        if (!cancelled && currentSessionRef.current === newSessionId) {
+        if (!cancelled && activeScanSessionId === newSessionId) {
           const scanDuration = Date.now() - startedAt
           try {
             const savedScanId = await invoke<string>('save_current_scan', {
               durationMs: scanDuration,
-              tags: taskIds.length === availableTasks.length ? ['Full Scan'] : ['Quick Scan']
+              tags: [scanTag]
             })
             logger.info('useScanner', 'Scan auto-saved successfully', savedScanId)
           } catch (error) {
@@ -255,14 +270,16 @@ export const useScanner = () => {
 
       // Only update state if this is still the current session (stopScan
       // already reset the UI state when it nulled the session ref)
-      if (currentSessionRef.current === newSessionId) {
+      if (activeScanSessionId === newSessionId) {
         setScanEndTime(Date.now())
         setIsRunning(false)
         setCurrentTaskName('')
         currentSessionRef.current = null
+        activeScanSessionId = null
       }
-      if (cancelledSessionRef.current === newSessionId) {
+      if (cancelledScanSessionId === newSessionId) {
         cancelledSessionRef.current = null
+        cancelledScanSessionId = null
       }
     } catch (error) {
       logger.error('useScanner', 'Failed to start diagnostics', error)
@@ -279,7 +296,9 @@ export const useScanner = () => {
       setIsRunning(false)
       setTaskbarProgress(null)
       currentSessionRef.current = null
+      activeScanSessionId = null
       cancelledSessionRef.current = null
+      cancelledScanSessionId = null
     } finally {
       isRunningRef.current = false
       // Release the cross-instance lock only if this scan still owns it
@@ -288,10 +307,10 @@ export const useScanner = () => {
       }
     }
   }, [
-    availableTasks.length,
     setCurrentProgress,
     setCurrentTaskName,
     setIsRunning,
+    setIssues,
     setResults,
     setScanStartTime,
     setScanEndTime,
@@ -317,7 +336,7 @@ export const useScanner = () => {
       .filter(task => taskIdsToRun.includes(task.id))
       .map(t => t.id)
 
-    await runDiagnostics(quickTasks)
+    await runDiagnostics(quickTasks, 'Quick Scan')
   }, [availableTasks, settings.quickScanTasks, runDiagnostics])
 
   const runFullScan = useCallback(async () => {
@@ -325,18 +344,24 @@ export const useScanner = () => {
       .filter(task => !task.admin_required || systemInfo?.is_admin)
       .map(t => t.id)
 
-    await runDiagnostics(allTasks)
+    await runDiagnostics(allTasks, 'Full Scan')
   }, [availableTasks, systemInfo, runDiagnostics])
 
   const stopScan = useCallback(() => {
-    const sessionId = currentSessionRef.current
+    const sessionId = currentSessionRef.current ?? activeScanSessionId
     // Cancel any pending auto-save (resolves the awaited delay so the in-flight
     // runDiagnostics call can unwind and release the scan lock)
     clearAutoSaveTimeout()
+    if (activeAutoSaveCancel) {
+      const cancel = activeAutoSaveCancel
+      activeAutoSaveCancel = null
+      cancel()
+    }
     // Tell the backend to skip this session's queued tasks; in-flight tasks
     // finish and the pending run_diagnostics_parallel invoke resolves quickly.
     if (sessionId) {
       cancelledSessionRef.current = sessionId
+      cancelledScanSessionId = sessionId
       invoke('cancel_diagnostics', { sessionId }).catch(error =>
         logger.error('useScanner', 'Failed to cancel diagnostics session', error)
       )
@@ -348,12 +373,15 @@ export const useScanner = () => {
     // Cancel any pending auto-save
     clearAutoSaveTimeout()
     currentSessionRef.current = null
+    activeScanSessionId = null
     cancelledSessionRef.current = null
+    cancelledScanSessionId = null
     setResults({})
+    setIssues([])
     setSessionId(null)
     setCurrentProgress(0)
     setCurrentTaskName('')
-  }, [setResults, setSessionId, setCurrentProgress, setCurrentTaskName, clearAutoSaveTimeout])
+  }, [setResults, setIssues, setSessionId, setCurrentProgress, setCurrentTaskName, clearAutoSaveTimeout])
 
   // Search and filter functionality
   useEffect(() => {
@@ -389,7 +417,11 @@ export const useScanner = () => {
   useEffect(() => {
     return () => {
       isRunningRef.current = false
+      const localSessionId = currentSessionRef.current
       currentSessionRef.current = null
+      if (activeScanSessionId === localSessionId) {
+        activeScanSessionId = null
+      }
       cancelledSessionRef.current = null
       if (autoSaveTimeoutRef.current !== null) {
         clearTimeout(autoSaveTimeoutRef.current)
@@ -398,6 +430,9 @@ export const useScanner = () => {
       if (autoSaveCancelRef.current) {
         const cancel = autoSaveCancelRef.current
         autoSaveCancelRef.current = null
+        if (activeAutoSaveCancel === cancel) {
+          activeAutoSaveCancel = null
+        }
         cancel()
       }
     }

@@ -18,7 +18,7 @@ type SortKey =
 type SortDir = 'asc' | 'desc'
 
 export const ProcessesScreen: React.FC = () => {
-  const { processes, stats, isActive, toggle, refresh } = useMonitoring({
+  const { processes, stats, isActive, isLoading, toggle, refresh } = useMonitoring({
     autoStart: true,
     componentName: 'ProcessesScreen',
     includeProcessAdapterStats: true,
@@ -103,7 +103,7 @@ export const ProcessesScreen: React.FC = () => {
         </div>
         <div className="row-gap-12">
           <button className="btn" onClick={() => refresh()}><i className="fa-solid fa-arrows-rotate" /> Refresh</button>
-          <button className="btn" onClick={() => toggle()}><i className={`fa-solid ${isActive ? 'fa-pause' : 'fa-play'}`} /> {isActive ? 'Pause' : 'Resume'}</button>
+          <button className="btn" onClick={() => toggle()} disabled={isLoading}><i className={`fa-solid ${isActive ? 'fa-pause' : 'fa-play'}`} /> {isActive ? 'Pause' : 'Resume'}</button>
         </div>
       </div>
 

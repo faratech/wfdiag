@@ -69,6 +69,7 @@ export function useAIChat() {
   const pendingErrorRef = useRef<Map<string, string>>(new Map())
   const pendingToolsRef = useRef<Map<string, Map<string, ChatToolActivity>>>(new Map())
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const conversationEpochRef = useRef(0)
   const apiKeyRef = useRef<string | undefined>(settings.openAiApiKey)
   useEffect(() => { apiKeyRef.current = settings.openAiApiKey }, [settings.openAiApiKey])
 
@@ -258,6 +259,7 @@ export function useAIChat() {
   const send = useCallback(async (text: string) => {
     const trimmed = text.trim()
     if (!trimmed || streamingRef.current || !aiEnabled) return
+    const epoch = conversationEpochRef.current
     setMessages(prev => [...prev, {
       id: `local_${Date.now()}_${prev.length}`,
       role: 'user',
@@ -279,6 +281,7 @@ export function useAIChat() {
         message: trimmed,
         apiKey: apiKeyRef.current || null,
       })
+      if (epoch !== conversationEpochRef.current) return
       adoptSession(ack.sessionId)
       const assistant = buildAssistantMessage(ack.messageId)
       setMessages(prev => [...prev, assistant])
@@ -286,6 +289,7 @@ export function useAIChat() {
         setStreaming(false)
       }
     } catch (err) {
+      if (epoch !== conversationEpochRef.current) return
       setStreaming(false)
       setMessages(prev => [...prev, {
         id: `err_${Date.now()}`,
@@ -309,6 +313,13 @@ export function useAIChat() {
   }, [])
 
   const newConversation = useCallback(async () => {
+    const oldSessionId = sessionIdRef.current
+    conversationEpochRef.current++
+    if (oldSessionId && streamingRef.current) {
+      await invoke('ai_chat_cancel', { sessionId: oldSessionId }).catch(err =>
+        logger.error('useAIChat', 'Failed to cancel previous chat turn', String(err))
+      )
+    }
     try {
       const sid = await invoke<string>('ai_chat_new_session')
       adoptSession(sid)

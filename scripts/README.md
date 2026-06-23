@@ -56,6 +56,12 @@ All entry points delegate to `bump-version.py` and update:
 - `src-tauri/tauri.msix.conf.json` - Tauri MSIX version
 - `README.md` - Version references
 
+## MSIX Build Paths
+
+Use `python3 scripts/build-cross.py build-all --build-msix --sign` for the Microsoft Store/Phi Silica package. That path generates the Store identity manifest with `runFullTrust`, `systemAIModels`, Windows App Runtime dependency floors, and the architecture-specific MSIX bundle.
+
+`src-tauri/tauri.msix.conf.json` is kept in version sync only for basic Tauri MSIX experiments. Do not use it for Store submissions or Phi Silica validation; Tauri's MSIX config does not represent the Store package manifest used by the release workflow.
+
 ## Workflow
 
 1. **To bump version:**

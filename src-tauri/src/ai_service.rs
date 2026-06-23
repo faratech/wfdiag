@@ -536,6 +536,7 @@ fn generate_cache_key(
     request: &AIRequest,
     session_id: &str,
     provider: AIProvider,
+    config_fingerprint: &str,
     grounding: Option<&str>,
 ) -> String {
     use std::collections::hash_map::DefaultHasher;
@@ -547,13 +548,44 @@ fn generate_cache_key(
     let content_hash = hasher.finish();
 
     format!(
-        "{}:{}:{:?}:{}:{}:{:x}",
+        "{}:{}:{:?}:{}:{}:{}:{:x}",
         session_id,
         ANALYSIS_CACHE_VERSION,
         request.context_type,
         request.context_id,
         provider,
+        config_fingerprint,
         content_hash
+    )
+}
+
+pub(crate) fn provider_config_fingerprint(
+    provider: AIProvider,
+    cfg: &crate::ai_providers::ResolvedProviderConfig,
+) -> String {
+    fn key_fingerprint(key: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        "wfdiag-ai-key-v1".hash(&mut hasher);
+        key.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    let key = cfg
+        .api_key
+        .as_deref()
+        .filter(|key| !key.is_empty())
+        .map(key_fingerprint)
+        .unwrap_or_else(|| "none".to_string());
+
+    format!(
+        "provider={};endpoint={};model={};key={}",
+        provider,
+        cfg.endpoint.as_deref().unwrap_or_default(),
+        cfg.model.as_deref().unwrap_or_default(),
+        key
     )
 }
 
@@ -599,6 +631,8 @@ pub async fn analyze(
     let pref = get_user_preference();
     let frontend_key = api_key.as_deref().is_some_and(|k| !k.is_empty());
     let provider = determine_active_provider_with_key(pref, frontend_key).await;
+    let cfg = crate::ai_providers::resolve_config(provider, api_key).await?;
+    let config_fingerprint = provider_config_fingerprint(provider, &cfg);
     let data_budget = one_shot_data_budget(provider);
 
     let grounding = if provider == AIProvider::None {
@@ -620,7 +654,13 @@ pub async fn analyze(
         .and_then(|grounding| grounding.prompt_context.as_deref());
     let grounding_trace = grounding.as_ref().map(|grounding| grounding.trace.clone());
 
-    let cache_key = generate_cache_key(&request, session_id, provider, grounding_context);
+    let cache_key = generate_cache_key(
+        &request,
+        session_id,
+        provider,
+        &config_fingerprint,
+        grounding_context,
+    );
     if !force_refresh
         && let Ok(mut cache) = get_cache().lock()
         && let Some(cached) = cache.get(&cache_key)
@@ -657,11 +697,8 @@ pub async fn analyze(
     };
     let prompt = ai_prompts::attach_grounding(prompt, grounding_context);
 
-    // Resolve config (keys/endpoint/model) and call the provider client
-    let result = match crate::ai_providers::resolve_config(provider, api_key).await {
-        Ok(cfg) => crate::ai_providers::one_shot(provider, &cfg, SYSTEM_PROMPT, &prompt).await,
-        Err(e) => Err(e),
-    };
+    // Call the provider client with the config already used for the cache key.
+    let result = crate::ai_providers::one_shot(provider, &cfg, SYSTEM_PROMPT, &prompt).await;
 
     // Cache successful results
     if let Ok(ref interpretation) = result
@@ -1011,6 +1048,28 @@ mod tests {
             serde_json::from_str::<AIProvider>("\"open_a_i\"").unwrap(),
             AIProvider::OpenAI
         );
+    }
+
+    #[test]
+    fn provider_config_fingerprint_changes_on_key_rotation_without_leaking_key() {
+        let first = crate::ai_providers::ResolvedProviderConfig {
+            api_key: Some("sk-old-secret".to_string()),
+            endpoint: Some("https://api.openai.com".to_string()),
+            model: Some("gpt-test".to_string()),
+        };
+        let second = crate::ai_providers::ResolvedProviderConfig {
+            api_key: Some("sk-new-secret".to_string()),
+            ..first.clone()
+        };
+
+        let first_fp = provider_config_fingerprint(AIProvider::OpenAI, &first);
+        let second_fp = provider_config_fingerprint(AIProvider::OpenAI, &second);
+
+        assert_ne!(first_fp, second_fp);
+        assert!(!first_fp.contains("sk-old-secret"));
+        assert!(!second_fp.contains("sk-new-secret"));
+        assert!(first_fp.contains("endpoint=https://api.openai.com"));
+        assert!(first_fp.contains("model=gpt-test"));
     }
 
     #[test]

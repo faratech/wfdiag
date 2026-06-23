@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { AppProvider, useAppContext } from './contexts/AppContext'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
 import { AIProvider } from './contexts/AIContext'
@@ -45,9 +45,13 @@ const AppContent: React.FC = () => {
     scanStartTime, scanEndTime, issues, navRailCollapsed, setNavRailCollapsed,
     showSettings, setShowSettings, showAbout, setShowAbout, settings, saveSettings,
   } = useAppContext()
-  const { themeMode, setThemeMode } = useTheme()
+  const { setThemeMode, isDark } = useTheme()
   const { detectIssues, copyToClipboard, exportResults, shareToWindowsForum, emailReport, generateSupportPackage } = useDiagnostics()
   const { runQuickScan, runFullScan, stopScan } = useScanner()
+  const runQuickScanAndShow = useCallback(() => {
+    setSelectedTab('diagnostics')
+    void runQuickScan()
+  }, [runQuickScan, setSelectedTab])
 
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
@@ -60,6 +64,7 @@ const AppContent: React.FC = () => {
   useGlobalShortcuts({
     onTogglePalette: () => setPaletteOpen(o => !o),
     onShowHelp: () => setHelpOpen(true),
+    disabled: showSettings || showAbout || paletteOpen || helpOpen,
   })
 
   // Re-detect issues once per scan, when its results first arrive. Keying on
@@ -76,11 +81,11 @@ const AppContent: React.FC = () => {
   }, [resultCount, sessionId, detectIssues])
 
   // "Quick Scan" from the tray menu (backend shows the window, then emits)
-  const runQuickScanRef = useRef(runQuickScan)
+  const runQuickScanRef = useRef(runQuickScanAndShow)
   const startupScanStartedRef = useRef(false)
   useEffect(() => {
-    runQuickScanRef.current = runQuickScan
-  }, [runQuickScan])
+    runQuickScanRef.current = runQuickScanAndShow
+  }, [runQuickScanAndShow])
   useEffect(() => {
     if (
       startupScanStartedRef.current ||
@@ -109,7 +114,15 @@ const AppContent: React.FC = () => {
   const durationMs = scanEndTime > 0 ? scanEndTime - scanStartTime : 0
   const issueCount = issues.filter(i => i.detected).length
   const meta = PAGE_META[selectedTab]
-  const isDark = themeMode === 'dark'
+
+  const setAndSaveTheme = useCallback((mode: 'dark' | 'light' | 'auto') => {
+    setThemeMode(mode)
+    void saveSettings({ ...settings, theme: mode })
+  }, [setThemeMode, saveSettings, settings])
+
+  const toggleTheme = useCallback(() => {
+    setAndSaveTheme(isDark ? 'light' : 'dark')
+  }, [isDark, setAndSaveTheme])
 
   return (
     <div className="app-window">
@@ -149,7 +162,7 @@ const AppContent: React.FC = () => {
 
           <div className="rail-section-title">Tools</div>
           <div className="nav-list">
-            <button className="nav-item" onClick={() => runQuickScan()} disabled={isRunning}>
+            <button className="nav-item" onClick={runQuickScanAndShow} disabled={isRunning}>
               <i className="fa-solid fa-bolt item-icon" />
               <span className="item-label">Quick Scan</span>
             </button>
@@ -187,7 +200,7 @@ const AppContent: React.FC = () => {
           <div className="command-bar" role="toolbar" aria-label="Actions">
             <div className="cb-group" role="group" aria-label="Scan">
               <Tooltip content="Run the essential checks" shortcut="Ctrl+Shift+Q">
-                <button className="cb-btn primary" onClick={() => runQuickScan()} disabled={isRunning}>
+                <button className="cb-btn primary" onClick={runQuickScanAndShow} disabled={isRunning}>
                   <i className="fa-solid fa-bolt" aria-hidden="true" /> Quick Scan
                 </button>
               </Tooltip>
@@ -230,9 +243,8 @@ const AppContent: React.FC = () => {
                 </button>
               </Tooltip>
               <Tooltip content={`Switch to ${isDark ? 'light' : 'dark'} theme`}>
-                <button className="cb-btn" onClick={() => setThemeMode(isDark ? 'light' : 'dark')} aria-label={`Switch to ${isDark ? 'light' : 'dark'} theme`}>
+                <button className="cb-btn icon-only" onClick={toggleTheme} aria-label={`Switch to ${isDark ? 'light' : 'dark'} theme`}>
                   <i className={`fa-solid ${isDark ? 'fa-sun' : 'fa-moon'}`} aria-hidden="true" />
-                  {isDark ? 'Light' : 'Dark'}
                 </button>
               </Tooltip>
             </div>

@@ -262,6 +262,7 @@ jobs:
 
             # Create AppxManifest.xml
             $manifest = @"
+          <?xml version="1.0" encoding="utf-8"?>
           <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
                    xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
                    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
@@ -303,8 +304,13 @@ jobs:
             </Capabilities>
           </Package>
           "@
-            $manifest | Out-File -Encoding utf8 "$targetDir/AppxManifest.xml"
-            [xml](Get-Content -Raw "$targetDir/AppxManifest.xml") | Out-Null
+            $manifest = $manifest.TrimStart()
+            Set-Content -Path "$targetDir/AppxManifest.xml" -Value $manifest -Encoding utf8
+            $manifestText = Get-Content -Raw "$targetDir/AppxManifest.xml"
+            if (-not $manifestText.StartsWith('<?xml')) {
+              throw "Generated AppxManifest.xml must start with an XML declaration"
+            }
+            [xml]$manifestText | Out-Null
           }
 
           # Find Windows SDK

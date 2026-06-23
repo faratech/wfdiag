@@ -8,6 +8,7 @@ const TAB_ORDER: TabValue[] = ['diagnostics', 'monitoring', 'processes', 'ai', '
 interface GlobalShortcutOptions {
   onTogglePalette: () => void
   onShowHelp: () => void
+  disabled?: boolean
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -16,25 +17,30 @@ function isEditableTarget(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable
 }
 
+function hasBlockingOverlay(): boolean {
+  return !!document.querySelector('[aria-modal="true"], .palette-overlay')
+}
+
 /**
  * Single app-wide keydown listener (mounted once from AppContent). Modals and
  * the palette handle their own Escape inside their focus traps and stop
  * propagation, so there is no overlay registry to coordinate here.
  */
-export function useGlobalShortcuts({ onTogglePalette, onShowHelp }: GlobalShortcutOptions) {
+export function useGlobalShortcuts({ onTogglePalette, onShowHelp, disabled = false }: GlobalShortcutOptions) {
   const { setSelectedTab, isRunning } = useAppContext()
   const { runQuickScan, runFullScan } = useScanner()
 
   // Keep the handler stable; read latest values through a ref (synced after
   // each render so the listener never holds stale closures)
-  const stateRef = useRef({ setSelectedTab, isRunning, runQuickScan, runFullScan, onTogglePalette, onShowHelp })
+  const stateRef = useRef({ setSelectedTab, isRunning, runQuickScan, runFullScan, onTogglePalette, onShowHelp, disabled })
   useEffect(() => {
-    stateRef.current = { setSelectedTab, isRunning, runQuickScan, runFullScan, onTogglePalette, onShowHelp }
+    stateRef.current = { setSelectedTab, isRunning, runQuickScan, runFullScan, onTogglePalette, onShowHelp, disabled }
   })
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const s = stateRef.current
+      if (s.disabled || hasBlockingOverlay()) return
       const inEditable = isEditableTarget(e.target)
 
       // Ctrl+K works everywhere, including inputs

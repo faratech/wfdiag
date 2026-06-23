@@ -35,14 +35,13 @@ export function useCommands(): Command[] {
   const {
     setSelectedTab, availableTasks, results, isRunning, systemInfo,
     setShowSettings, setShowAbout, navRailCollapsed, setNavRailCollapsed,
-    setSelectedDiagnosticId,
+    setSelectedDiagnosticId, settings, saveSettings,
   } = useAppContext()
-  const { themeMode, setThemeMode } = useTheme()
+  const { setThemeMode, isDark } = useTheme()
   const { runDiagnostics, runQuickScan, runFullScan, stopScan } = useScanner()
   const { copyToClipboard, exportResults, shareToWindowsForum, emailReport, generateSupportPackage } = useDiagnostics()
 
   const hasResults = Object.keys(results).length > 0
-  const isDark = themeMode === 'dark'
 
   return useMemo(() => {
     const commands: Command[] = []
@@ -107,7 +106,11 @@ export function useCommands(): Command[] {
         section: 'App',
         icon: isDark ? 'fa-sun' : 'fa-moon',
         keywords: 'theme dark light appearance',
-        run: () => setThemeMode(isDark ? 'light' : 'dark'),
+        run: () => {
+          const nextTheme = isDark ? 'light' : 'dark'
+          setThemeMode(nextTheme)
+          void saveSettings({ ...settings, theme: nextTheme })
+        },
       },
       {
         id: 'app:settings',
@@ -165,7 +168,7 @@ export function useCommands(): Command[] {
   }, [
     availableTasks, results, isRunning, hasResults, isDark, navRailCollapsed, systemInfo,
     setSelectedTab, setShowSettings, setShowAbout, setNavRailCollapsed, setSelectedDiagnosticId,
-    setThemeMode, runDiagnostics, runQuickScan, runFullScan, stopScan,
+    settings, saveSettings, setThemeMode, runDiagnostics, runQuickScan, runFullScan, stopScan,
     copyToClipboard, exportResults, shareToWindowsForum, emailReport, generateSupportPackage,
   ])
 }

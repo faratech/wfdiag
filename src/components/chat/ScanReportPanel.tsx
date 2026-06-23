@@ -33,7 +33,7 @@ export const ScanReportPanel: React.FC = () => {
             <button className="btn ghost" title="Copy report" onClick={() => { void copy() }}>
               <i className="fa-solid fa-copy" aria-hidden="true" />
             </button>
-            <button className="btn ghost" title="Regenerate" disabled={!aiEnabled} onClick={() => { void generate() }}>
+            <button className="btn ghost" title="Regenerate" disabled={!aiEnabled} onClick={() => { void generate(true) }}>
               <i className="fa-solid fa-rotate-right" aria-hidden="true" />
             </button>
           </span>
@@ -51,7 +51,7 @@ export const ScanReportPanel: React.FC = () => {
           <div className="chat-error" role="alert">
             <i className="fa-solid fa-triangle-exclamation" aria-hidden="true" /> {error}
             <div style={{ marginTop: 8 }}>
-              <button className="btn" disabled={!aiEnabled} onClick={() => { void generate() }}>Try again</button>
+              <button className="btn" disabled={!aiEnabled} onClick={() => { void generate(true) }}>Try again</button>
             </div>
           </div>
         ) : report || generating ? (

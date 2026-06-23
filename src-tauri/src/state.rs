@@ -62,6 +62,8 @@ pub struct AppState {
     /// Session ids cancelled via `cancel_diagnostics`. Queued tasks of a
     /// cancelled session are skipped; in-flight tasks run to completion.
     pub cancelled_sessions: Arc<Mutex<HashSet<String>>>,
+    /// Session ids with an active `run_diagnostics_parallel` invocation.
+    pub active_scan_runners: Arc<Mutex<HashSet<String>>>,
     /// AI chat conversations, keyed by chat session id
     pub chat_sessions: Arc<Mutex<HashMap<String, ChatSession>>>,
     /// Cancellation tokens for in-flight chat turns, keyed by chat session id
@@ -78,6 +80,7 @@ impl AppState {
             scan_storage: Arc::new(Mutex::new(scan_storage)),
             scan_storage_error: Arc::new(Mutex::new(scan_storage_error)),
             cancelled_sessions: Arc::new(Mutex::new(HashSet::new())),
+            active_scan_runners: Arc::new(Mutex::new(HashSet::new())),
             chat_sessions: Arc::new(Mutex::new(HashMap::new())),
             chat_cancels: Arc::new(Mutex::new(HashMap::new())),
         }

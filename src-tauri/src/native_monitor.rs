@@ -52,6 +52,9 @@ static DISK_TYPES: OnceLock<HashMap<char, String>> = OnceLock::new();
 /// Uses Option to allow non-blocking check
 static NPU_INFO: OnceLock<(bool, Option<String>)> = OnceLock::new();
 
+/// Prevents duplicate slow DXCore/WMI NPU detection work.
+static NPU_DETECTION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
 /// Flag to track if background initialization is complete
 static INIT_COMPLETE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -623,15 +626,26 @@ impl SystemMonitor {
 /// Pre-warm NPU cache in background. Called from lib.rs setup hook.
 /// This prevents the 200-500ms delay on first monitoring start.
 pub fn prewarm_npu_cache() {
-    // Initialize NPU detection (can take 200-500ms for DXCore/WMI queries)
-    let npu_result = NPU_INFO.get_or_init(|| {
-        if let Some((name, _)) = detect_npu_dxcore() {
-            (true, Some(name))
-        } else {
-            let (available, name, _) = detect_npu_wmi_fallback();
-            (available, name)
+    if NPU_INFO.get().is_some() && NPU_LUID.get().is_some() {
+        return;
+    }
+
+    if NPU_DETECTION_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    struct DetectionGuard;
+    impl Drop for DetectionGuard {
+        fn drop(&mut self) {
+            NPU_DETECTION_IN_PROGRESS.store(false, Ordering::Release);
         }
-    });
+    }
+    let _guard = DetectionGuard;
+
+    // Initialize NPU detection (can take 200-500ms for DXCore/WMI queries)
+    let npu_result = NPU_INFO.get_or_init(detect_npu_info_uncached);
 
     // If NPU was detected, also discover LUID for utilization queries
     if npu_result.0 {
@@ -641,6 +655,25 @@ pub fn prewarm_npu_cache() {
     } else {
         NPU_LUID.get_or_init(|| None);
     }
+}
+
+fn detect_npu_info_uncached() -> (bool, Option<String>) {
+    if let Some((name, _)) = detect_npu_dxcore() {
+        (true, Some(name))
+    } else {
+        let (available, name, _) = detect_npu_wmi_fallback();
+        (available, name)
+    }
+}
+
+fn schedule_npu_cache_warmup() {
+    if NPU_INFO.get().is_some()
+        || NPU_DETECTION_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire)
+    {
+        return;
+    }
+
+    tokio::task::spawn_blocking(prewarm_npu_cache);
 }
 
 /// Pre-initialize all static caches. Call this at app startup for faster first display.
@@ -674,14 +707,7 @@ pub fn initialize_static_caches() {
     // These run in background and UI shows defaults until ready
     DISK_TYPES.get_or_init(detect_all_disk_types);
 
-    let npu_result = NPU_INFO.get_or_init(|| {
-        if let Some((name, _)) = detect_npu_dxcore() {
-            (true, Some(name))
-        } else {
-            let (available, name, _) = detect_npu_wmi_fallback();
-            (available, name)
-        }
-    });
+    let npu_result = NPU_INFO.get_or_init(detect_npu_info_uncached);
 
     // If NPU was detected, also discover LUID for utilization queries
     if npu_result.0 {
@@ -768,30 +794,11 @@ async fn collect_stats_optimized(
     } else if let Some(info) = NPU_INFO.get() {
         info.clone()
     } else {
-        // First time - run detection in spawn_blocking since DXCore/WMI need proper thread context
-        tokio::task::spawn_blocking(|| {
-            let result = NPU_INFO
-                .get_or_init(|| {
-                    if let Some((name, _)) = detect_npu_dxcore() {
-                        return (true, Some(name));
-                    }
-                    let (available, name, _) = detect_npu_wmi_fallback();
-                    (available, name)
-                })
-                .clone();
-
-            if result.0 {
-                if let Ok(wmi_con) = crate::wmi_native::WmiConnection::new() {
-                    NPU_LUID.get_or_init(|| discover_npu_luid_with_wmi(&wmi_con));
-                }
-            } else {
-                NPU_LUID.get_or_init(|| None);
-            }
-
-            result
-        })
-        .await
-        .unwrap_or((false, None))
+        // Keep DXCore/WMI detection off the stats hot path. The startup prewarm
+        // usually fills this before the first tick; if not, schedule it and emit
+        // a normal stats frame without legacy NPU fields until the cache is ready.
+        schedule_npu_cache_warmup();
+        (false, None)
     };
     let legacy_npu_utilization = if d3d_npu.is_none() && legacy_npu_available {
         get_npu_util_cached(cached_npu_util, npu_update_in_progress, tick).await
@@ -1557,12 +1564,17 @@ fn query_all_processes_optimized() -> Vec<NativeProcessInfo> {
     })
 }
 
+fn prune_process_cpu_times(prev: &mut ProcessCpuTimes, current_pids: &HashSet<u32>) {
+    prev.retain(|pid, _| current_pids.contains(pid));
+}
+
 async fn get_top_processes_optimized(
     total_memory: u64,
     previous_processes: &Arc<Mutex<ProcessCpuTimes>>,
     include_process_adapter_stats: bool,
 ) -> (Vec<ProcessInfo>, u64, u64) {
     let native_procs = query_all_processes_optimized();
+    let current_pids: HashSet<u32> = native_procs.iter().map(|process| process.pid).collect();
     let now = Instant::now();
     let adapter_processes: Vec<(u32, u64)> = if include_process_adapter_stats {
         native_procs
@@ -1576,6 +1588,7 @@ async fn get_top_processes_optimized(
         crate::adapter_monitor::process_stats(&adapter_processes, include_process_adapter_stats);
 
     let mut prev = previous_processes.lock().await;
+    prune_process_cpu_times(&mut prev, &current_pids);
     let mut processes = Vec::with_capacity(native_procs.len());
     let mut total_disk_read = 0u64;
     let mut total_disk_write = 0u64;
@@ -2163,4 +2176,26 @@ fn format_npu_description(name: &str, tops: Option<u32>) -> String {
         "{}\nEstimated Performance: {}\n{}",
         name, tops_str, copilot_status
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_cpu_history_prunes_exited_pids() {
+        let now = Instant::now();
+        let mut prev = ProcessCpuTimes::from([
+            (100, (10, 1, now)),
+            (200, (20, 1, now)),
+            (300, (30, 1, now)),
+        ]);
+        let current_pids = HashSet::from([100, 300]);
+
+        prune_process_cpu_times(&mut prev, &current_pids);
+
+        assert!(prev.contains_key(&100));
+        assert!(!prev.contains_key(&200));
+        assert!(prev.contains_key(&300));
+    }
 }

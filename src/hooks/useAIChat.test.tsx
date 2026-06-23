@@ -170,6 +170,43 @@ describe('useAIChat', () => {
     expect(result.current.isStreaming).toBe(false)
   })
 
+  it('prevents duplicate sends before the first request resolves', async () => {
+    const ack = deferred<{ sessionId: string; messageId: string; provider: string }>()
+    invokeMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'ai_chat_new_session':
+          return Promise.resolve('s1')
+        case 'ai_chat_send':
+          return ack.promise
+        case 'ai_chat_get_history':
+          return Promise.resolve([])
+        default:
+          return Promise.reject(new Error(`unexpected command ${cmd}`))
+      }
+    })
+
+    const useAIChat = await loadHook()
+    const { result } = renderHook(() => useAIChat())
+    await waitFor(() => expect(eventHandlers.size).toBe(4))
+
+    let first!: Promise<void>
+    let second!: Promise<void>
+    act(() => {
+      first = result.current.send('first')
+      second = result.current.send('second')
+    })
+
+    await waitFor(() => expect(invokeMock.mock.calls.some(c => c[0] === 'ai_chat_send')).toBe(true))
+    const sends = invokeMock.mock.calls.filter(c => c[0] === 'ai_chat_send')
+    expect(sends).toHaveLength(1)
+    expect(sends[0][1]).toMatchObject({ message: 'first' })
+
+    await act(async () => {
+      ack.resolve({ sessionId: 's1', messageId: 'm1', provider: 'openai' })
+      await Promise.all([first, second])
+    })
+  })
+
   it('tracks tool activity per call id from started to completed', async () => {
     const useAIChat = await loadHook()
     const { result } = renderHook(() => useAIChat())
@@ -237,6 +274,53 @@ describe('useAIChat', () => {
     await act(async () => { await result.current.newConversation() })
     expect(result.current.messages).toHaveLength(0)
     expect(result.current.sessionId).toBe('s2')
+    expect(result.current.isStreaming).toBe(false)
+  })
+
+  it('new conversation cancels and ignores an old in-flight send ack', async () => {
+    const ack = deferred<{ sessionId: string; messageId: string; provider: string }>()
+    let newSessionCalls = 0
+    invokeMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'ai_chat_new_session':
+          newSessionCalls += 1
+          return Promise.resolve(newSessionCalls === 1 ? 's1' : 's2')
+        case 'ai_chat_send':
+          return ack.promise
+        case 'ai_chat_get_history':
+          return Promise.resolve([])
+        case 'ai_chat_cancel':
+          return Promise.resolve()
+        default:
+          return Promise.reject(new Error(`unexpected command ${cmd}`))
+      }
+    })
+
+    const useAIChat = await loadHook()
+    const { result } = renderHook(() => useAIChat())
+    await waitFor(() => expect(eventHandlers.size).toBe(4))
+
+    let sendPromise!: Promise<void>
+    act(() => {
+      sendPromise = result.current.send('old prompt')
+    })
+    await waitFor(() => expect(invokeMock.mock.calls.some(c => c[0] === 'ai_chat_send')).toBe(true))
+
+    await act(async () => {
+      await result.current.newConversation()
+    })
+
+    expect(invokeMock).toHaveBeenCalledWith('ai_chat_cancel', { sessionId: 's1' })
+    expect(result.current.sessionId).toBe('s2')
+    expect(result.current.messages).toHaveLength(0)
+
+    await act(async () => {
+      ack.resolve({ sessionId: 's1', messageId: 'm1', provider: 'openai' })
+      await sendPromise
+    })
+
+    expect(result.current.sessionId).toBe('s2')
+    expect(result.current.messages).toHaveLength(0)
     expect(result.current.isStreaming).toBe(false)
   })
 

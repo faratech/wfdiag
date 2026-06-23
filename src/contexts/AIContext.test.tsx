@@ -62,6 +62,20 @@ afterEach(() => {
 })
 
 describe('AIContext analysis dedup and cache', () => {
+  it('returns an empty provider list when status fetch fails', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'ai_get_status') throw new Error('status unavailable')
+      return undefined
+    })
+
+    const { result } = renderHook(() => useAIContext(), { wrapper })
+
+    await waitFor(() => {
+      expect(result.current.aiStatus?.active_provider).toBe('none')
+      expect(result.current.aiStatus?.providers).toEqual([])
+    })
+  })
+
   it('deduplicates concurrent requests for the same content', async () => {
     const pending = deferred<AIResponse>()
     invokeMock.mockImplementation(async (cmd: string) => {
@@ -219,5 +233,62 @@ describe('AIContext analysis dedup and cache', () => {
     await waitFor(() => {
       expect(invokeMock.mock.calls.filter(c => c[0] === 'ai_get_status').length).toBeGreaterThanOrEqual(3)
     })
+  })
+
+  it('clears local interpretations when provider configuration changes', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'ai_get_status') return okStatus
+      if (cmd === 'ai_analyze_diagnostic') return aiResponse('old provider answer')
+      return undefined
+    })
+
+    const { result, rerender } = renderHook(() => useAIContext(), { wrapper })
+
+    await act(async () => {
+      await result.current.analyzeDiagnostic('task1', 'Task One', 'output data')
+    })
+
+    await waitFor(() => {
+      expect(Object.keys(result.current.interpretations)).toHaveLength(1)
+    })
+
+    appContextValue = {
+      settings: {
+        openAiApiKey: 'sk-test',
+        preferredAIProvider: 'auto',
+        anthropicModel: 'claude-opus-4-8',
+      },
+      settingsLoaded: true,
+    }
+    rerender()
+
+    await waitFor(() => {
+      expect(Object.keys(result.current.interpretations)).toHaveLength(0)
+    })
+  })
+
+  it('does not enable AI actions for an explicit unavailable provider just because OpenAI has a key', async () => {
+    appContextValue = {
+      settings: { openAiApiKey: 'sk-test', preferredAIProvider: 'anthropic' },
+      settingsLoaded: true,
+    }
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'ai_get_status') return okStatus
+      if (cmd === 'ai_analyze_diagnostic') return aiResponse('should not run')
+      return undefined
+    })
+
+    const { result } = renderHook(() => useAIContext(), { wrapper })
+
+    await waitFor(() => expect(result.current.activeProvider).toBe('none'))
+    expect(result.current.isAIAvailable).toBe(false)
+
+    let response = 'not empty'
+    await act(async () => {
+      response = await result.current.analyzeDiagnostic('task1', 'Task One', 'output data')
+    })
+
+    expect(response).toBe('')
+    expect(analyzeCalls()).toHaveLength(0)
   })
 })

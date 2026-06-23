@@ -174,6 +174,7 @@ pub(crate) fn build_report_context(
 fn report_cache_hash(
     results: &HashMap<String, TaskResult>,
     previous_scan_id: Option<&str>,
+    config_fingerprint: &str,
 ) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -190,7 +191,27 @@ fn report_cache_hash(
         result.duration_ms.hash(&mut hasher);
     }
     previous_scan_id.unwrap_or("none").hash(&mut hasher);
+    config_fingerprint.hash(&mut hasher);
     format!("{:x}", hasher.finish())
+}
+
+fn explicit_previous_scan_id(previous_scan_id: Option<&str>) -> Option<&str> {
+    previous_scan_id.map(str::trim).filter(|id| !id.is_empty())
+}
+
+fn resolve_loaded_report_baseline<T>(
+    explicit_previous_id: Option<&str>,
+    previous_id: String,
+    load_result: Result<T, String>,
+) -> Result<Option<(T, String)>, String> {
+    match load_result {
+        Ok(scan) => Ok(Some((scan, previous_id))),
+        Err(error) if explicit_previous_id.is_some() => Err(format!(
+            "Selected comparison scan '{}' could not be loaded: {}",
+            previous_id, error
+        )),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Maps the shared turn machinery's events onto `ai-report://*`.
@@ -242,6 +263,7 @@ pub async fn ai_generate_report(
     state: State<'_, AppState>,
     previous_scan_id: Option<String>,
     api_key: Option<String>,
+    force_refresh: Option<bool>,
 ) -> Result<ReportAck, String> {
     let pref = crate::ai_service::get_user_preference();
     let frontend_key = api_key.as_deref().is_some_and(|k| !k.is_empty());
@@ -254,6 +276,7 @@ pub async fn ai_generate_report(
         );
     }
     let cfg = crate::ai_providers::resolve_config(provider, api_key).await?;
+    let config_fingerprint = crate::ai_service::provider_config_fingerprint(provider, &cfg);
     let caps = crate::ai_providers::capabilities(provider);
 
     // Snapshot the current scan
@@ -273,40 +296,59 @@ pub async fn ai_generate_report(
 
     // Comparison baseline: explicit id, else the newest stored scan that is
     // not this session (auto-save may have stored the current scan already).
-    let comparison_info = {
+    let explicit_previous_id = explicit_previous_scan_id(previous_scan_id.as_deref());
+    let comparison_info: Result<Option<(ComparisonResult, String)>, String> = {
         let storage = state.scan_storage.lock().await;
-        storage.as_ref().and_then(|storage| {
-            let previous_id = match &previous_scan_id {
-                Some(id) => Some(id.clone()),
-                None => storage
-                    .list_scans()
-                    .ok()?
-                    .into_iter()
-                    .map(|s| s.id)
-                    .find(|id| *id != session_id),
-            }?;
-            let previous = storage.load_scan(&previous_id).ok()?;
-            let success_count = results.values().filter(|r| r.success).count();
-            let current = ScanRecord {
-                id: session_id.clone(),
-                timestamp: crate::timestamp::Timestamp::now(),
-                computer_name: String::new(),
-                os_version: String::new(),
-                is_admin: false,
-                task_count: results.len(),
-                success_count,
-                failure_count: results.len() - success_count,
-                duration_ms: 0,
-                tags: Vec::new(),
-                results: results.clone(),
-            };
-            Some((
-                ScanStorage::compute_comparison(current, previous),
-                previous_id,
-            ))
-        })
+        match storage.as_ref() {
+            Some(storage) => {
+                let previous_id = match explicit_previous_id {
+                    Some(id) => Some(id.to_string()),
+                    None => storage.list_scans().ok().and_then(|scans| {
+                        scans.into_iter().map(|s| s.id).find(|id| *id != session_id)
+                    }),
+                };
+                match previous_id {
+                    Some(previous_id) => {
+                        let load_result = storage.load_scan(&previous_id);
+                        match resolve_loaded_report_baseline(
+                            explicit_previous_id,
+                            previous_id,
+                            load_result,
+                        )? {
+                            Some((previous, previous_id)) => {
+                                let success_count = results.values().filter(|r| r.success).count();
+                                let current = ScanRecord {
+                                    id: session_id.clone(),
+                                    timestamp: crate::timestamp::Timestamp::now(),
+                                    computer_name: String::new(),
+                                    os_version: String::new(),
+                                    is_admin: false,
+                                    task_count: results.len(),
+                                    success_count,
+                                    failure_count: results.len() - success_count,
+                                    duration_ms: 0,
+                                    tags: Vec::new(),
+                                    results: results.clone(),
+                                };
+                                Ok(Some((
+                                    ScanStorage::compute_comparison(current, previous),
+                                    previous_id,
+                                )))
+                            }
+                            None => Ok(None),
+                        }
+                    }
+                    None => Ok(None),
+                }
+            }
+            None if explicit_previous_id.is_some() => Err(
+                "Selected comparison scan could not be loaded because scan history is unavailable."
+                    .to_string(),
+            ),
+            None => Ok(None),
+        }
     };
-    let (comparison, resolved_previous_scan_id) = match comparison_info {
+    let (comparison, resolved_previous_scan_id) = match comparison_info? {
         Some((comparison, previous_id)) => (Some(comparison), Some(previous_id)),
         None => (None, None),
     };
@@ -332,12 +374,18 @@ pub async fn ai_generate_report(
     };
     let prompt = format!("Scan data:\n\n{}", context);
 
-    let cache_hash = report_cache_hash(&results, resolved_previous_scan_id.as_deref());
-    let report_id = format!("report_{}", cache_hash);
+    let cache_hash = report_cache_hash(
+        &results,
+        resolved_previous_scan_id.as_deref(),
+        &config_fingerprint,
+    );
+    let report_id = format!("report_{}", uuid::Uuid::new_v4().simple());
     let cache_key = format!("report:{}:{}", provider, cache_hash);
-    if let Some(cached) = crate::ai_service::cached_value(&cache_key) {
+    if !force_refresh.unwrap_or(false)
+        && let Some(cached) = crate::ai_service::cached_value(&cache_key)
+    {
         return Ok(ReportAck {
-            report_id,
+            report_id: format!("report_{}", cache_hash),
             cached: true,
             provider: provider.to_string(),
             report: Some(cached),
@@ -393,7 +441,7 @@ pub async fn ai_generate_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::issue_catalog::IssueSeverity;
+    use crate::issue_catalog::{IssueSeverity, IssueStatus};
 
     fn result(success: bool, output: &str, error: Option<&str>) -> TaskResult {
         TaskResult {
@@ -409,6 +457,11 @@ mod tests {
             id: title.to_lowercase().replace(' ', "_"),
             category: "Storage".into(),
             severity,
+            status: if detected {
+                IssueStatus::Detected
+            } else {
+                IssueStatus::Ok
+            },
             title: title.into(),
             description: format!("{} description", title),
             recommendation: format!("{} fix", title),
@@ -416,6 +469,38 @@ mod tests {
             source_tasks: None,
             remediation: None,
         }
+    }
+
+    #[test]
+    fn explicit_previous_scan_id_trims_empty_values() {
+        assert_eq!(explicit_previous_scan_id(Some(" scan_1 ")), Some("scan_1"));
+        assert_eq!(explicit_previous_scan_id(Some("   ")), None);
+        assert_eq!(explicit_previous_scan_id(None), None);
+    }
+
+    #[test]
+    fn explicit_baseline_load_failure_returns_error() {
+        let error = resolve_loaded_report_baseline::<()>(
+            Some("scan_missing"),
+            "scan_missing".into(),
+            Err("not found".into()),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("scan_missing"));
+        assert!(error.contains("not found"));
+    }
+
+    #[test]
+    fn automatic_baseline_load_failure_falls_back_to_no_comparison() {
+        let resolved = resolve_loaded_report_baseline::<()>(
+            None,
+            "scan_corrupt".into(),
+            Err("bad data".into()),
+        )
+        .unwrap();
+
+        assert_eq!(resolved, None);
     }
 
     #[test]
@@ -481,34 +566,40 @@ mod tests {
     fn cache_hash_tracks_content_and_baseline() {
         let mut results = HashMap::new();
         results.insert("os_info".to_string(), result(true, "build 26100", None));
-        let base = report_cache_hash(&results, None);
+        let config = "provider=openai;model=gpt";
+        let base = report_cache_hash(&results, None, config);
         // Same content -> same hash (deterministic)
-        assert_eq!(base, report_cache_hash(&results, None));
+        assert_eq!(base, report_cache_hash(&results, None, config));
         // Different output -> different hash
         let mut changed = results.clone();
         changed.insert("os_info".to_string(), result(true, "build 26200", None));
-        assert_ne!(base, report_cache_hash(&changed, None));
+        assert_ne!(base, report_cache_hash(&changed, None, config));
         // Different failure detail -> different hash
         let mut failed = HashMap::new();
         failed.insert(
             "chkdsk".to_string(),
             result(false, "", Some("access denied")),
         );
-        let failed_base = report_cache_hash(&failed, None);
+        let failed_base = report_cache_hash(&failed, None, config);
         failed.insert(
             "chkdsk".to_string(),
             result(false, "", Some("volume locked")),
         );
-        assert_ne!(failed_base, report_cache_hash(&failed, None));
+        assert_ne!(failed_base, report_cache_hash(&failed, None, config));
         // Different duration can affect report-relevant metadata and must invalidate too
         let mut timed = HashMap::new();
         timed.insert("os_info".to_string(), result(true, "build 26100", None));
-        let timed_base = report_cache_hash(&timed, None);
+        let timed_base = report_cache_hash(&timed, None, config);
         if let Some(task) = timed.get_mut("os_info") {
             task.duration_ms = 99;
         }
-        assert_ne!(timed_base, report_cache_hash(&timed, None));
+        assert_ne!(timed_base, report_cache_hash(&timed, None, config));
         // Different baseline -> different hash
-        assert_ne!(base, report_cache_hash(&results, Some("scan_1")));
+        assert_ne!(base, report_cache_hash(&results, Some("scan_1"), config));
+        // Different provider configuration -> different hash
+        assert_ne!(
+            base,
+            report_cache_hash(&results, None, "provider=openai;model=new")
+        );
     }
 }

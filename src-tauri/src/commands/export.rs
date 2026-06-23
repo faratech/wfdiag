@@ -7,7 +7,7 @@ use crate::diagnostics::{self, DiagnosticTask};
 use crate::error::DiagError;
 use crate::state::AppState;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::State;
 
 /// Format JSON values into readable text with indentation
@@ -121,6 +121,43 @@ fn temp_filename_allowed(filename: &str) -> bool {
         || (lower.starts_with("support-package-") && has_report_extension)
 }
 
+fn safe_report_filename(filename: &str) -> Result<&str, String> {
+    let path = Path::new(filename);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            DiagError::path_validation(filename.to_string(), "filename is required").to_string()
+        })?;
+
+    if name != filename || name.contains(['/', '\\']) {
+        return Err(DiagError::path_validation(
+            filename.to_string(),
+            "filename must not contain a path",
+        )
+        .into());
+    }
+
+    let lower = name.to_ascii_lowercase();
+    if !(lower.ends_with(".txt") || lower.ends_with(".html") || lower.ends_with(".json")) {
+        return Err(DiagError::path_validation(
+            filename.to_string(),
+            "filename must end in .txt, .html, or .json",
+        )
+        .into());
+    }
+
+    Ok(name)
+}
+
+fn default_export_dir() -> Result<PathBuf, String> {
+    dirs::download_dir()
+        .or_else(dirs::document_dir)
+        .or_else(dirs::desktop_dir)
+        .or_else(|| dirs::config_dir().map(|dir| dir.join("com.windowsforum.diagnostics")))
+        .ok_or_else(|| DiagError::internal("Could not find an export directory").into())
+}
+
 /// Validate that the save path is within allowed scopes (security)
 fn validate_save_path(path: &str) -> Result<(), String> {
     let path = Path::new(path);
@@ -189,6 +226,20 @@ fn validate_save_path(path: &str) -> Result<(), String> {
         "Path not in allowed scope. Allowed: Documents, Desktop, Downloads, AppData, or Temp (app report filenames only)",
     )
     .into())
+}
+
+#[tauri::command]
+pub async fn validate_export_path(path: String) -> Result<(), String> {
+    validate_save_path(&path)
+}
+
+#[tauri::command]
+pub async fn suggest_export_path(filename: String) -> Result<String, String> {
+    let filename = safe_report_filename(&filename)?;
+    Ok(default_export_dir()?
+        .join(filename)
+        .to_string_lossy()
+        .into_owned())
 }
 
 fn redacted_json_results(
@@ -467,5 +518,16 @@ mod tests {
         ] {
             assert!(!temp_filename_allowed(filename), "{filename}");
         }
+    }
+
+    #[test]
+    fn safe_report_filename_rejects_paths_and_non_report_extensions() {
+        assert_eq!(
+            safe_report_filename("wf-diagnostics-2026-06-22.txt").unwrap(),
+            "wf-diagnostics-2026-06-22.txt"
+        );
+        assert!(safe_report_filename("../report.txt").is_err());
+        assert!(safe_report_filename("nested/report.txt").is_err());
+        assert!(safe_report_filename("report.exe").is_err());
     }
 }

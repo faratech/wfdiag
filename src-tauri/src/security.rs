@@ -56,22 +56,6 @@ impl SecureCommandExecutor {
     pub fn new() -> Self {
         let mut allowed_commands = HashMap::new();
 
-        // PowerShell - most restricted, only safe parameters allowed
-        allowed_commands.insert(
-            "powershell".to_string(),
-            CommandConfig {
-                executable: "powershell.exe".to_string(),
-                allowed_args: vec![
-                    "-NoProfile".to_string(),
-                    "-NonInteractive".to_string(),
-                    "-WindowStyle".to_string(),
-                    "Hidden".to_string(),
-                    "-Command".to_string(),
-                ],
-                max_args: 5,
-            },
-        );
-
         // System diagnostic commands - read-only operations only
         allowed_commands.insert(
             "dxdiag".to_string(),
@@ -129,19 +113,6 @@ impl SecureCommandExecutor {
                 executable: "dsregcmd.exe".to_string(),
                 allowed_args: vec!["/status".to_string()],
                 max_args: 1,
-            },
-        );
-
-        allowed_commands.insert(
-            "wmic".to_string(),
-            CommandConfig {
-                executable: "wmic.exe".to_string(),
-                allowed_args: vec![
-                    "path".to_string(),
-                    "get".to_string(),
-                    "/format:list".to_string(),
-                ],
-                max_args: 4, // path <class> get [properties] /format:list
             },
         );
 
@@ -218,36 +189,8 @@ impl SecureCommandExecutor {
         self.output_with_timeout(command, DEFAULT_COMMAND_TIMEOUT, cmd)
     }
 
-    /// Validate PowerShell scripts against known safe patterns
-    #[allow(dead_code)] // Used by fallback diagnostics
-    pub fn execute_powershell_script(&self, script: &str) -> Result<std::process::Output> {
-        // Validate PowerShell script for safety
-        self.validate_powershell_script(script)?;
-
-        let config = self
-            .allowed_commands
-            .get("powershell")
-            .ok_or_else(|| anyhow::anyhow!("PowerShell not configured"))?;
-
-        let mut command = self.create_secure_command(&config.executable)?;
-        command.args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            script,
-        ]);
-
-        self.output_with_timeout(command, DEFAULT_COMMAND_TIMEOUT, "powershell")
-    }
-
     fn validate_arguments(&self, cmd: &str, args: &[&str], config: &CommandConfig) -> Result<()> {
         match cmd {
-            "powershell" => {
-                // PowerShell script validation is handled separately
-                Ok(())
-            }
             "dxdiag" => {
                 // Only allow /t <temp_path> /whql:off
                 if args.len() == 3 && args[0] == "/t" && args[2] == "/whql:off" {
@@ -265,11 +208,6 @@ impl SecureCommandExecutor {
                 } else {
                     Err(anyhow::anyhow!("Invalid powercfg arguments"))
                 }
-            }
-            "wmic" => {
-                // Validate WMI class names against whitelist
-                self.validate_wmi_query(args)?;
-                Ok(())
             }
             "wevtutil" => {
                 // Only allow querying System or Application logs
@@ -319,122 +257,6 @@ impl SecureCommandExecutor {
                 Ok(())
             }
         }
-    }
-
-    #[allow(dead_code)] // Used by execute_powershell_script
-    fn validate_powershell_script(&self, script: &str) -> Result<()> {
-        // Whitelist of allowed PowerShell commands for diagnostics
-        let allowed_cmdlets = [
-            "Get-AppxPackage",
-            "Get-Counter",
-            "Get-ScheduledTask",
-            "Get-HotFix",
-            "Select-Object",
-            "Where-Object",
-            "ConvertTo-Json",
-            "Repair-Volume", // Read-only scan only
-        ];
-
-        // Blocked dangerous cmdlets and operations
-        let blocked_patterns = [
-            "Invoke-Expression",
-            "iex",
-            "Invoke-Command",
-            "icm",
-            "Start-Process",
-            "New-Object",
-            "Add-Type",
-            "Invoke-RestMethod",
-            "Invoke-WebRequest",
-            "Download",
-            "Remove-",
-            "Delete",
-            "Set-",
-            "New-",
-            "Install-",
-            "Uninstall-",
-            "Stop-",
-            "Start-Service",
-            "&",
-            ";",
-            "$env:",
-            "Get-Credential",
-            "ConvertTo-SecureString",
-            // Note: "|" removed because it's commonly used for piping in safe diagnostic scripts
-        ];
-
-        // Check for blocked patterns
-        let script_lower = script.to_lowercase();
-        for pattern in &blocked_patterns {
-            if script_lower.contains(&pattern.to_lowercase()) {
-                return Err(anyhow::anyhow!(
-                    "PowerShell script contains blocked pattern: {}",
-                    pattern
-                ));
-            }
-        }
-
-        // Check if script uses allowed cmdlets (more permissive check)
-        let has_allowed_cmdlet = allowed_cmdlets
-            .iter()
-            .any(|cmdlet| script_lower.contains(&cmdlet.to_lowercase()));
-
-        if !has_allowed_cmdlet {
-            // Allow some basic cmdlets and operations that are commonly used in diagnostic scripts
-            let basic_allowed = [
-                "select", "where", "sort", "format", "out-", "write-", "echo",
-            ];
-
-            let has_basic_cmdlet = basic_allowed
-                .iter()
-                .any(|cmdlet| script_lower.contains(&cmdlet.to_lowercase()));
-
-            if !has_basic_cmdlet {
-                return Err(anyhow::anyhow!(
-                    "PowerShell script must use allowed diagnostic cmdlets"
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
-    fn validate_wmi_query(&self, args: &[&str]) -> Result<()> {
-        // WMI class whitelist for system diagnostics
-        let allowed_wmi_classes = [
-            "Win32_ComputerSystem",
-            "Win32_OperatingSystem",
-            "Win32_BIOS",
-            "Win32_BaseBoard",
-            "Win32_Processor",
-            "Win32_PhysicalMemory",
-            "Win32_DeviceMemoryAddress",
-            "Win32_DMAChannel",
-            "Win32_IRQResource",
-            "Win32_DiskDrive",
-            "Win32_DiskPartition",
-            "Win32_LogicalDisk",
-            "Win32_SystemDevices",
-            "Win32_NetworkAdapter",
-            "Win32_Printer",
-            "Win32_Environment",
-            "Win32_StartupCommand",
-            "Win32_SystemDriver",
-            "Win32_Process",
-            "Win32_NTLogEvent",
-        ];
-
-        if args.len() >= 2 && args[0] == "path" {
-            let wmi_class = args[1];
-            if !allowed_wmi_classes.contains(&wmi_class) {
-                return Err(anyhow::anyhow!(
-                    "WMI class '{}' not in whitelist",
-                    wmi_class
-                ));
-            }
-        }
-
-        Ok(())
     }
 
     fn validate_temp_path(&self, path: &str) -> Result<()> {
@@ -510,16 +332,18 @@ impl SecureCommandExecutor {
         timeout: Duration,
         label: &str,
     ) -> Result<std::process::Output> {
-        let stdout_path = unique_output_path(label, "stdout")?;
-        let stderr_path = unique_output_path(label, "stderr")?;
+        let temp_files = TempOutputFiles {
+            stdout_path: unique_output_path(label, "stdout")?,
+            stderr_path: unique_output_path(label, "stderr")?,
+        };
         let stdout_file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&stdout_path)?;
+            .open(&temp_files.stdout_path)?;
         let stderr_file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&stderr_path)?;
+            .open(&temp_files.stderr_path)?;
 
         command.stdout(Stdio::from(stdout_file));
         command.stderr(Stdio::from(stderr_file));
@@ -534,10 +358,8 @@ impl SecureCommandExecutor {
                 .try_wait()
                 .map_err(|e| anyhow::anyhow!("Failed while waiting for '{}': {}", label, e))?
             {
-                let stdout = fs::read(&stdout_path).unwrap_or_default();
-                let stderr = fs::read(&stderr_path).unwrap_or_default();
-                let _ = fs::remove_file(&stdout_path);
-                let _ = fs::remove_file(&stderr_path);
+                let stdout = fs::read(&temp_files.stdout_path).unwrap_or_default();
+                let stderr = fs::read(&temp_files.stderr_path).unwrap_or_default();
                 return Ok(std::process::Output {
                     status,
                     stdout,
@@ -548,8 +370,6 @@ impl SecureCommandExecutor {
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = fs::remove_file(&stdout_path);
-                let _ = fs::remove_file(&stderr_path);
                 return Err(anyhow::anyhow!(
                     "Command '{}' timed out after {} second(s)",
                     label,
@@ -559,6 +379,18 @@ impl SecureCommandExecutor {
 
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+}
+
+struct TempOutputFiles {
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+}
+
+impl Drop for TempOutputFiles {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.stdout_path);
+        let _ = fs::remove_file(&self.stderr_path);
     }
 }
 
@@ -614,12 +446,6 @@ pub(crate) fn trusted_system_program(program: &str) -> Result<PathBuf> {
         let root = windows_root();
         let lower = program.to_ascii_lowercase();
         let path = match lower.as_str() {
-            "powershell" | "powershell.exe" => root
-                .join("System32")
-                .join("WindowsPowerShell")
-                .join("v1.0")
-                .join("powershell.exe"),
-            "wmic" | "wmic.exe" => root.join("System32").join("wbem").join("wmic.exe"),
             "explorer" | "explorer.exe" => root.join("explorer.exe"),
             _ => root.join("System32").join(with_exe_extension(program)),
         };
@@ -659,35 +485,29 @@ mod tests {
         let executor = SecureCommandExecutor::new();
 
         // Should allow whitelisted commands
-        assert!(executor.allowed_commands.contains_key("powershell"));
         assert!(executor.allowed_commands.contains_key("dxdiag"));
 
         // Should reject non-whitelisted commands
         assert!(!executor.allowed_commands.contains_key("cmd"));
         assert!(!executor.allowed_commands.contains_key("notepad"));
+        assert!(!executor.allowed_commands.contains_key("powershell"));
+        assert!(!executor.allowed_commands.contains_key("wmic"));
     }
 
     #[test]
-    fn test_powershell_validation() {
-        let executor = SecureCommandExecutor::new();
+    fn temp_output_files_remove_existing_paths_on_drop() {
+        let paths = TempOutputFiles {
+            stdout_path: unique_output_path("cleanup_test", "stdout").unwrap(),
+            stderr_path: unique_output_path("cleanup_test", "stderr").unwrap(),
+        };
+        std::fs::write(&paths.stdout_path, b"stdout").unwrap();
+        std::fs::write(&paths.stderr_path, b"stderr").unwrap();
+        let stdout_path = paths.stdout_path.clone();
+        let stderr_path = paths.stderr_path.clone();
 
-        // Safe script should pass
-        assert!(
-            executor
-                .validate_powershell_script("Get-AppxPackage | Select-Object Name")
-                .is_ok()
-        );
+        drop(paths);
 
-        // Dangerous script should fail
-        assert!(
-            executor
-                .validate_powershell_script("Invoke-Expression 'calc'")
-                .is_err()
-        );
-        assert!(
-            executor
-                .validate_powershell_script("Start-Process notepad")
-                .is_err()
-        );
+        assert!(!stdout_path.exists());
+        assert!(!stderr_path.exists());
     }
 }

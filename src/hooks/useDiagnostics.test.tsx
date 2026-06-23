@@ -60,6 +60,8 @@ beforeEach(() => {
   invokeMock.mockImplementation((cmd: string) => {
     if (cmd === 'get_system_info') return Promise.resolve(contextValue.systemInfo)
     if (cmd === 'get_available_tasks') return Promise.resolve([])
+    if (cmd === 'suggest_export_path') return Promise.resolve('/tmp/wf-diagnostics.txt')
+    if (cmd === 'validate_export_path') return Promise.resolve()
     if (cmd === 'export_results') return Promise.resolve('backend export payload')
     if (cmd === 'save_results_to_file') return Promise.resolve()
     return Promise.reject(new Error(`unexpected command ${cmd}`))
@@ -88,6 +90,8 @@ describe('useDiagnostics exportResults', () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'get_system_info') return Promise.resolve(contextValue.systemInfo)
       if (cmd === 'get_available_tasks') return Promise.resolve([])
+      if (cmd === 'suggest_export_path') return Promise.resolve('/tmp/wf-diagnostics.json')
+      if (cmd === 'validate_export_path') return Promise.resolve()
       if (cmd === 'export_results') return Promise.resolve('{"ok":true}')
       if (cmd === 'save_results_to_file') return Promise.resolve()
       return Promise.reject(new Error(`unexpected command ${cmd}`))
@@ -112,6 +116,8 @@ describe('useDiagnostics exportResults', () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'get_system_info') return Promise.resolve(contextValue.systemInfo)
       if (cmd === 'get_available_tasks') return Promise.resolve([])
+      if (cmd === 'suggest_export_path') return Promise.resolve('/tmp/wf-diagnostics.html')
+      if (cmd === 'validate_export_path') return Promise.resolve()
       if (cmd === 'export_results') return Promise.resolve('<!DOCTYPE html><html></html>')
       if (cmd === 'save_results_to_file') return Promise.resolve()
       return Promise.reject(new Error(`unexpected command ${cmd}`))
@@ -128,5 +134,34 @@ describe('useDiagnostics exportResults', () => {
       includeRaw: true,
     })
     expect(savedContent()).toBe('<!DOCTYPE html><html></html>')
+  })
+
+  it('preflights selected export paths before generating content', async () => {
+    saveMock.mockResolvedValue('/blocked/case-folder/report.txt')
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_system_info') return Promise.resolve(contextValue.systemInfo)
+      if (cmd === 'get_available_tasks') return Promise.resolve([])
+      if (cmd === 'suggest_export_path') return Promise.resolve('/tmp/wf-diagnostics.txt')
+      if (cmd === 'validate_export_path') return Promise.reject('Path not in allowed scope')
+      if (cmd === 'export_results') return Promise.resolve('should not generate')
+      if (cmd === 'save_results_to_file') return Promise.resolve()
+      return Promise.reject(new Error(`unexpected command ${cmd}`))
+    })
+
+    const { result } = renderHook(() => useDiagnostics())
+
+    await act(async () => {
+      await result.current.exportResults()
+    })
+
+    expect(invokeMock).toHaveBeenCalledWith('validate_export_path', {
+      path: '/blocked/case-folder/report.txt',
+    })
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'export_results')).toBe(false)
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'save_results_to_file')).toBe(false)
+    expect(showErrorMock).toHaveBeenCalledWith(
+      'Export Location Not Allowed',
+      expect.stringContaining('Documents, Desktop, Downloads')
+    )
   })
 })

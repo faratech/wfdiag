@@ -222,7 +222,7 @@ pub async fn ai_propose_fix_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::issue_catalog::IssueSeverity;
+    use crate::issue_catalog::{IssueSeverity, IssueStatus};
     use crate::remediation::remediations;
 
     fn detected_issue(id: &str) -> Issue {
@@ -230,6 +230,7 @@ mod tests {
             id: id.to_string(),
             category: "Test".into(),
             severity: IssueSeverity::Warning,
+            status: IssueStatus::Detected,
             title: id.to_string(),
             description: format!("{} description", id),
             recommendation: "fix it".into(),

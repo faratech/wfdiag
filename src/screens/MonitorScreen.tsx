@@ -31,7 +31,7 @@ export const MonitorScreen: React.FC = () => {
     }))
   }, [])
 
-  const { isActive, stats, toggle, refresh } = useMonitoring({ autoStart: true, onStats, componentName: 'MonitorScreen' })
+  const { isActive, isLoading, stats, toggle, refresh } = useMonitoring({ autoStart: true, onStats, componentName: 'MonitorScreen' })
 
   const last = stats || lastStats
   const netMax = Math.max(2, ...series.net) * 1.2 || 2
@@ -53,7 +53,7 @@ export const MonitorScreen: React.FC = () => {
           )}
         </div>
         <div className="row-gap-12">
-          <button className="btn" onClick={() => toggle()}>
+          <button className="btn" onClick={() => toggle()} disabled={isLoading}>
             <i className={`fa-solid ${isActive ? 'fa-pause' : 'fa-play'}`} /> {isActive ? 'Pause' : 'Resume'}
           </button>
           <button className="btn" onClick={() => refresh()}><i className="fa-solid fa-arrows-rotate" /> Refresh</button>
