@@ -231,6 +231,9 @@ impl NativeDiagnostics {
                 break;
             }
 
+            // Always visit every handle EvtNext returned so each one gets
+            // EvtClose'd — breaking early here would leak the handles still
+            // sitting in the rest of this batch's buffer.
             for raw_handle in handles.iter().take(returned as usize) {
                 let event_handle = EVT_HANDLE(*raw_handle);
                 let record = Self::render_event_record(event_handle);
@@ -238,12 +241,10 @@ impl NativeDiagnostics {
 
                 if let Some(record) = record {
                     records.push(record);
-                    if records.len() >= row_cap {
-                        break;
-                    }
                 }
             }
         }
+        records.truncate(row_cap);
 
         Ok(records)
     }

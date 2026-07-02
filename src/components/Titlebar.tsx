@@ -16,11 +16,24 @@ export const Titlebar: React.FC = () => {
     if (!inTauri()) return
     const win = getCurrentWindow()
     let unlisten: (() => void) | undefined
+    let cancelled = false
     win.isMaximized().then(setMaximized).catch(() => {})
     win.onResized(() => {
       win.isMaximized().then(setMaximized).catch(() => {})
-    }).then(fn => { unlisten = fn }).catch(() => {})
-    return () => unlisten?.()
+    }).then(fn => {
+      // Cleanup may already have run while onResized() was still in flight
+      // (e.g. React StrictMode's dev double-invoke) — tear the just-created
+      // listener down immediately instead of leaking a duplicate handler.
+      if (cancelled) {
+        fn()
+      } else {
+        unlisten = fn
+      }
+    }).catch(() => {})
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
   }, [])
 
   if (!inTauri()) return null

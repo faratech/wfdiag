@@ -700,8 +700,11 @@ pub async fn analyze(
     // Call the provider client with the config already used for the cache key.
     let result = crate::ai_providers::one_shot(provider, &cfg, SYSTEM_PROMPT, &prompt).await;
 
-    // Cache successful results
+    // Cache successful, non-empty results. Some providers return Ok("") on a
+    // refusal or empty completion instead of an error — caching that would
+    // serve a blank analysis for the cache's full TTL.
     if let Ok(ref interpretation) = result
+        && !interpretation.is_empty()
         && let Ok(mut cache) = get_cache().lock()
     {
         cache.insert(cache_key, interpretation.clone());

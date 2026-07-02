@@ -319,9 +319,19 @@ fn dll_search_dirs() -> Vec<std::path::PathBuf> {
 static AI_TEXT_DLL_LOADED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// HMODULE wraps a raw pointer, so it's `!Send`/`!Sync` by default even
+/// though the loaded-module handle itself is just an opaque, immutable
+/// value once stored — safe to read from any thread after `OnceLock::set`.
+#[cfg(windows)]
+struct AiTextDllHandle(windows::Win32::Foundation::HMODULE);
+#[cfg(windows)]
+unsafe impl Send for AiTextDllHandle {}
+#[cfg(windows)]
+unsafe impl Sync for AiTextDllHandle {}
+
 /// Store the loaded DLL module handle
 #[cfg(windows)]
-static mut AI_TEXT_DLL_MODULE: Option<windows::Win32::Foundation::HMODULE> = None;
+static AI_TEXT_DLL_MODULE: std::sync::OnceLock<AiTextDllHandle> = std::sync::OnceLock::new();
 
 /// Load a DLL by bare name first (resolves from the framework package via the
 /// package graph when the process has identity), then from each candidate
@@ -402,7 +412,9 @@ fn try_direct_dll_activation() -> Result<(), String> {
 
     match load_ai_dll("Microsoft.Windows.AI.Text.dll", &search_dirs) {
         Some(module) => {
-            unsafe { AI_TEXT_DLL_MODULE = Some(module) };
+            // If another thread already raced us here, keep its handle — both
+            // are valid loaded-module handles for the same DLL.
+            let _ = AI_TEXT_DLL_MODULE.set(AiTextDllHandle(module));
             AI_TEXT_DLL_LOADED.store(true, Ordering::SeqCst);
             log_phi_silica("AI Text DLL loaded");
             Ok(())
@@ -482,7 +494,9 @@ fn create_language_model_direct() -> Result<crate::windows_ai_bindings::Language
     // Ensure DLLs are loaded
     try_direct_dll_activation()?;
 
-    let module = unsafe { AI_TEXT_DLL_MODULE }
+    let module = AI_TEXT_DLL_MODULE
+        .get()
+        .map(|handle| handle.0)
         .ok_or_else(|| DiagError::ai_unavailable("phi_silica", "AI Text DLL not loaded"))?;
 
     // DllGetActivationFactory signature:
@@ -1100,7 +1114,12 @@ pub async fn generate_response(_prompt: &str) -> Result<String, String> {
 /// Tauri command to check Phi Silica availability
 #[tauri::command]
 pub async fn check_phi_silica_available() -> Result<PhiSilicaStatus, String> {
-    Ok(is_phi_silica_available())
+    // is_phi_silica_available() can fall back to creating the LanguageModel
+    // directly (a blocking WinRT/COM call with its own busy-wait), so it must
+    // not run inline on an async runtime worker thread.
+    tokio::task::spawn_blocking(is_phi_silica_available)
+        .await
+        .map_err(|e| format!("Phi Silica availability check task panicked: {}", e))
 }
 
 /// Tauri command to ensure Phi Silica is ready (downloads model if needed)
@@ -1230,7 +1249,11 @@ fn truncate_output(text: &str, max_chars: usize) -> String {
     if text.len() <= max_chars {
         text.to_string()
     } else {
-        format!("{}... [truncated]", &text[..max_chars])
+        let mut end = max_chars;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}... [truncated]", &text[..end])
     }
 }
 
@@ -1654,8 +1677,11 @@ fn suggest_diagnostics_for_question(question: &str) -> Vec<&'static str> {
 /// Tauri command to analyze system with Phi Silica using tool calling
 #[tauri::command]
 pub async fn analyze_with_phi_silica(prompt: String) -> Result<PhiSilicaAnalysisResponse, String> {
-    // Check availability first
-    let status = is_phi_silica_available();
+    // Check availability first. This can fall back to a blocking WinRT/COM
+    // LanguageModel creation, so keep it off the async runtime worker thread.
+    let status = tokio::task::spawn_blocking(is_phi_silica_available)
+        .await
+        .map_err(|e| format!("Phi Silica availability check task panicked: {}", e))?;
     if !status.available {
         return Err(status.message);
     }

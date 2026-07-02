@@ -413,15 +413,18 @@ export const useScanner = () => {
   }, [searchQuery, results, setFilteredResults])
 
   // Cleanup on unmount - ensure refs are reset and pending delays are resolved
-  // (an unresolved awaited delay would keep the module-level scan lock held)
+  // (an unresolved awaited delay would keep the module-level scan lock held).
+  // Deliberately does NOT touch the module-global activeScanSessionId: a scan
+  // started from this instance can legitimately keep running in the backend
+  // after the owning component unmounts (e.g. the user switches tabs), and
+  // its results/isRunning live in AppContext, not this component. Clearing
+  // that global here used to make the in-flight runDiagnostics call discard
+  // its results and skip setIsRunning(false), leaving isRunning stuck true
+  // app-wide until restart.
   useEffect(() => {
     return () => {
       isRunningRef.current = false
-      const localSessionId = currentSessionRef.current
       currentSessionRef.current = null
-      if (activeScanSessionId === localSessionId) {
-        activeScanSessionId = null
-      }
       cancelledSessionRef.current = null
       if (autoSaveTimeoutRef.current !== null) {
         clearTimeout(autoSaveTimeoutRef.current)

@@ -47,16 +47,35 @@ pub(crate) fn build_generate_body(
                 contents.push(json!({"role": "model", "parts": parts}));
             }
             ChatRole::Tool => {
-                contents.push(json!({
-                    "role": "user",
-                    "parts": [{
-                        "functionResponse": {
-                            "name": message.tool_name.clone().unwrap_or_default(),
-                            // Must be an object, not a bare string
-                            "response": {"result": message.content},
-                        }
-                    }],
-                }));
+                let response_part = json!({
+                    "functionResponse": {
+                        "name": message.tool_name.clone().unwrap_or_default(),
+                        // Must be an object, not a bare string
+                        "response": {"result": message.content},
+                    }
+                });
+                // Gemini requires every function response from one round of
+                // parallel tool calls to be a part of a SINGLE content entry
+                // — sending each as its own "user" turn causes a 400. Append
+                // to the previous entry when it's already a tool-result
+                // batch instead of starting a new turn per result.
+                let appended = contents.last_mut().is_some_and(|last| {
+                    let is_tool_batch = last.get("role").and_then(Value::as_str) == Some("user")
+                        && last["parts"].as_array().is_some_and(|parts| {
+                            !parts.is_empty()
+                                && parts.iter().all(|p| p.get("functionResponse").is_some())
+                        });
+                    if is_tool_batch {
+                        last["parts"]
+                            .as_array_mut()
+                            .expect("checked above")
+                            .push(response_part.clone());
+                    }
+                    is_tool_batch
+                });
+                if !appended {
+                    contents.push(json!({"role": "user", "parts": [response_part]}));
+                }
             }
         }
     }
@@ -88,7 +107,13 @@ pub(crate) fn build_generate_body(
 fn map_finish_reason(reason: Option<&str>, has_tool_calls: bool) -> FinishReason {
     match reason {
         Some("MAX_TOKENS") => FinishReason::MaxTokens,
-        Some("SAFETY") | Some("PROHIBITED_CONTENT") | Some("BLOCKLIST") => FinishReason::Refusal,
+        // All of these mean the model did NOT produce a normal completion —
+        // treating them as Stop would make a blocked/malformed generation
+        // look like a successful (if empty) answer.
+        Some("SAFETY") | Some("PROHIBITED_CONTENT") | Some("BLOCKLIST") | Some("RECITATION")
+        | Some("SPII") | Some("OTHER") | Some("MALFORMED_FUNCTION_CALL") => {
+            FinishReason::Refusal
+        }
         _ if has_tool_calls => FinishReason::ToolUse,
         _ => FinishReason::Stop,
     }
@@ -351,6 +376,39 @@ mod tests {
     }
 
     #[test]
+    fn parallel_tool_results_batch_into_one_turn() {
+        // Gemini requires all function responses from one round of parallel
+        // tool calls to live in a single content entry, not one turn each.
+        let messages = vec![
+            ChatMessage::assistant_with_tools(
+                "",
+                vec![
+                    ToolCall {
+                        id: "get_scan_summary#0".into(),
+                        name: "get_scan_summary".into(),
+                        arguments: json!({}),
+                    },
+                    ToolCall {
+                        id: "get_detected_issues#1".into(),
+                        name: "get_detected_issues".into(),
+                        arguments: json!({}),
+                    },
+                ],
+            ),
+            ChatMessage::tool_result("get_scan_summary#0", "get_scan_summary", "3 passed"),
+            ChatMessage::tool_result("get_detected_issues#1", "get_detected_issues", "none"),
+        ];
+        let body = build_generate_body(None, &messages, &[], None);
+        // Exactly two contents: the model's tool-call turn, then ONE user
+        // turn carrying both function responses as separate parts.
+        assert_eq!(body["contents"].as_array().unwrap().len(), 2);
+        let parts = body["contents"][1]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["functionResponse"]["name"], "get_scan_summary");
+        assert_eq!(parts[1]["functionResponse"]["name"], "get_detected_issues");
+    }
+
+    #[test]
     fn parses_text_and_synthesizes_tool_call_ids() {
         let v = json!({
             "candidates": [{
@@ -367,6 +425,26 @@ mod tests {
         assert_eq!(turn.tool_calls[0].arguments["task_id"], "os_info");
         // Tool calls present → ToolUse even though Gemini said STOP
         assert_eq!(turn.finished, FinishReason::ToolUse);
+    }
+
+    #[test]
+    fn blocked_and_malformed_finish_reasons_are_not_reported_as_stop() {
+        for reason in [
+            "SAFETY",
+            "PROHIBITED_CONTENT",
+            "BLOCKLIST",
+            "RECITATION",
+            "SPII",
+            "OTHER",
+            "MALFORMED_FUNCTION_CALL",
+        ] {
+            assert_eq!(
+                map_finish_reason(Some(reason), false),
+                FinishReason::Refusal,
+                "{reason} should not map to Stop"
+            );
+        }
+        assert_eq!(map_finish_reason(Some("STOP"), false), FinishReason::Stop);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { useMonitoring } from './useMonitoring'
 
@@ -131,5 +131,52 @@ describe('useMonitoring lease ownership', () => {
     })
     expect(invokeMock).not.toHaveBeenCalledWith('stop_monitoring', { leaseId: 2 })
     expect(second.result.current.isActive).toBe(true)
+  })
+})
+
+describe('useMonitoring visibility handling', () => {
+  afterEach(() => {
+    Object.defineProperty(document, 'hidden', { value: false, configurable: true })
+  })
+
+  it('stops monitoring when the window/app is hidden', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_monitoring') return Promise.resolve(1)
+      if (cmd === 'stop_monitoring') return Promise.resolve()
+      return Promise.resolve(null)
+    })
+
+    const { result } = renderHook(() => useMonitoring({ componentName: 'test' }))
+
+    await act(async () => {
+      await result.current.start()
+    })
+    expect(result.current.isActive).toBe(true)
+
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true })
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('stop_monitoring', { leaseId: 1 })
+    })
+    expect(result.current.isActive).toBe(false)
+  })
+
+  it('does nothing on hide when monitoring was never started', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'stop_monitoring') return Promise.resolve()
+      return Promise.resolve(null)
+    })
+
+    renderHook(() => useMonitoring({ componentName: 'test' }))
+
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true })
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+
+    expect(invokeMock.mock.calls.some(c => c[0] === 'stop_monitoring')).toBe(false)
   })
 })

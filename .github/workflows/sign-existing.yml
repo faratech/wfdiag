@@ -23,10 +23,21 @@ jobs:
       with:
         cosign-release: 'v2.2.4'
 
+    - name: Verify build artifacts exist
+      run: |
+        count=$(find . \( -name "*.exe" -o -name "*.msi" -o -name "*.msix" \) -type f | wc -l)
+        if [ "$count" -eq 0 ]; then
+          echo "❌ No .exe/.msi/.msix artifacts found. This workflow signs artifacts that already" >&2
+          echo "   exist in the checkout (e.g. downloaded from another job) — it does not build" >&2
+          echo "   them itself, and a bare checkout on its own never has any." >&2
+          exit 1
+        fi
+        echo "Found $count artifact(s) to sign."
+
     - name: Find and sign executables
       run: |
         echo "🔍 Finding binaries to sign..."
-        
+
         # Find all exe files
         find . -name "*.exe" -type f | while read -r file; do
           if [ -f "$file" ]; then

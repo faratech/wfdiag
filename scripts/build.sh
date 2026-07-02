@@ -4,7 +4,7 @@
 set -e
 
 TARGET="${1:-all}"
-FORCE="${2}"
+SKIP_UPDATE="${2}"
 
 echo "WindowsForum Diagnostic Tool - Build with Dependency Updates"
 echo "============================================================"
@@ -60,10 +60,10 @@ build_application() {
 }
 
 # Main execution
-if [ "$FORCE" != "--force" ]; then
+if [ "$SKIP_UPDATE" != "--skip-update" ]; then
     update_dependencies
 else
-    echo "Skipping dependency updates (--force specified)"
+    echo "Skipping dependency updates (--skip-update specified)"
 fi
 
 build_application "$TARGET"

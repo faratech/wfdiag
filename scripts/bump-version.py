@@ -7,6 +7,7 @@ Updates version numbers across all project files.
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -124,6 +125,29 @@ def update_cargo_toml(file_path: Path, new_version: str, dry_run: bool) -> bool:
     except Exception as e:
         print(f"  Error updating {file_path}: {e}")
         return False
+
+
+def refresh_cargo_lock(cargo_dir: Path, dry_run: bool) -> None:
+    """Re-sync Cargo.lock's own-package version entry after Cargo.toml's
+    [package].version changes — otherwise the next build leaves the tree
+    dirty (or fails outright under --locked)."""
+    if dry_run:
+        print("  [DRY RUN] Would refresh src-tauri/Cargo.lock to match the new version")
+        return
+    try:
+        subprocess.run(
+            ["cargo", "update", "--offline", "-p", "wfdiag-tauri"],
+            cwd=cargo_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        print("  Refreshed: src-tauri/Cargo.lock")
+    except FileNotFoundError:
+        print("  Warning: cargo not found on PATH — Cargo.lock was not refreshed; run "
+              "'cargo update -p wfdiag-tauri' manually before committing")
+    except subprocess.CalledProcessError as e:
+        print(f"  Warning: failed to refresh Cargo.lock: {e.stderr.strip() if e.stderr else e}")
 
 
 def update_msix_conf(file_path: Path, new_version: str, dry_run: bool) -> bool:
@@ -324,6 +348,7 @@ def main():
     total_count += 1
     if update_cargo_toml(script_dir / 'src-tauri' / 'Cargo.toml', new_version, dry_run):
         success_count += 1
+        refresh_cargo_lock(script_dir / 'src-tauri', dry_run)
 
     # 5. src-tauri/tauri.conf.json
     total_count += 1
