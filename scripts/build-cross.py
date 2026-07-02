@@ -101,9 +101,10 @@ def get_env_for_target(target_name: str) -> dict:
     return env
 
 
-def run_command(cmd: list, env: dict = None, cwd: Path = None) -> bool:
+def run_command(cmd: list, env: dict = None, cwd: Path = None, redact: str = None) -> bool:
     """Run a command and return success status."""
-    print(f"\n>>> Running: {' '.join(cmd)}")
+    shown = ' '.join(cmd) if redact is None else ' '.join(cmd).replace(redact, "***")
+    print(f"\n>>> Running: {shown}")
     try:
         result = subprocess.run(
             cmd,
@@ -114,6 +115,9 @@ def run_command(cmd: list, env: dict = None, cwd: Path = None) -> bool:
         return True
     except subprocess.CalledProcessError as e:
         print(f"Error: Command failed with exit code {e.returncode}")
+        return False
+    except FileNotFoundError as e:
+        print(f"Error: Command not found: {e}")
         return False
 
 
@@ -586,7 +590,7 @@ def build_sparse(version: str, sign: bool = False) -> bool:
                 "/f", wslpath(CERT_PATH), "/p", CERT_PASSWORD,
                 wslpath(msix_path),
             ]
-            if not run_command(cmd):
+            if not run_command(cmd, redact=CERT_PASSWORD):
                 print(f"Failed to sign {msix_path.name}")
                 return False
 
@@ -642,7 +646,7 @@ Write-Host "and the systemAIModels capability (Phi Silica via Windows AI APIs)."
     return True
 
 
-def build_msix(version: str) -> bool:
+def build_msix(version: str, release: bool = True) -> bool:
     """Build MSIX packages and bundle for both architectures."""
     print(f"\n{'='*60}")
     print("Building MSIX Packages")
@@ -675,14 +679,14 @@ def build_msix(version: str) -> bool:
     icons_dir = SRC_TAURI / "icons"
 
     for target_name in ["x64", "arm64"]:
-        target = TARGETS[target_name]
-        triple = target["triple"]
         target_dir = x64_dir if target_name == "x64" else arm64_dir
 
         print(f"\nPreparing {target_name} package...")
 
-        # Copy executable
-        exe_src = TARGET_DIR / triple / "release" / "wfdiag-tauri.exe"
+        # Copy executable (matches the profile actually built — packaging the
+        # release exe while --debug was requested would silently bundle a
+        # stale or wrong-profile binary)
+        exe_src = get_build_output_path(target_name, release)
         exe_dst = target_dir / f"{PROJECT_NAME}.exe"
         if not exe_src.exists():
             print(f"Error: Built executable not found at {exe_src}")
@@ -808,7 +812,7 @@ try {{
 '''
 
     cmd = ["powershell.exe", "-Command", ps_script]
-    if not run_command(cmd):
+    if not run_command(cmd, redact=CERT_PASSWORD):
         print("Failed to create certificate")
         print("\nTo create manually, run in Windows PowerShell as Admin:")
         print(f'  powershell.exe -File C:\\code\\sign-msix.ps1')
@@ -851,7 +855,7 @@ def sign_msix(version: str) -> bool:
         wslpath(bundle_path)
     ]
 
-    if not run_command(cmd):
+    if not run_command(cmd, redact=CERT_PASSWORD):
         print("Failed to sign bundle")
         print("\nIf you see 'Access denied', ensure certificate is installed to Trusted Root.")
         print("Run in Windows PowerShell as Admin:")
@@ -1044,7 +1048,7 @@ def main():
         # Build MSIX if requested
         if args.build_msix:
             version = get_version()
-            if not build_msix(version):
+            if not build_msix(version, release):
                 print("MSIX build failed!")
                 sys.exit(1)
 
@@ -1068,7 +1072,7 @@ def main():
         version = get_version()
         print(f"\nBuilding MSIX bundle v{version}...")
 
-        if not build_msix(version):
+        if not build_msix(version, release):
             print("MSIX build failed!")
             sys.exit(1)
 

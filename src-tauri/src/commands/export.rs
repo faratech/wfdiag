@@ -121,6 +121,18 @@ fn temp_filename_allowed(filename: &str) -> bool {
         || (lower.starts_with("support-package-") && has_report_extension)
 }
 
+/// Every allowed save directory — not just Temp — is restricted to the
+/// app's own report extensions. Without this, Documents/Desktop/Downloads/
+/// AppData would accept any filename and extension a caller supplied.
+fn has_report_extension(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|f| f.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|lower| {
+            lower.ends_with(".txt") || lower.ends_with(".html") || lower.ends_with(".json")
+        })
+}
+
 fn safe_report_filename(filename: &str) -> Result<&str, String> {
     let path = Path::new(filename);
     let name = path
@@ -158,8 +170,10 @@ fn default_export_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| DiagError::internal("Could not find an export directory").into())
 }
 
-/// Validate that the save path is within allowed scopes (security)
-fn validate_save_path(path: &str) -> Result<(), String> {
+/// Validate that the save path is within allowed scopes (security). Returns
+/// the canonicalized path that was actually checked, so callers can write to
+/// exactly what was validated instead of re-resolving the original string.
+fn validate_save_path(path: &str) -> Result<PathBuf, String> {
     let path = Path::new(path);
 
     // Get the path to validate (canonicalize parent for new files)
@@ -182,6 +196,14 @@ fn validate_save_path(path: &str) -> Result<(), String> {
             .map_err(|e| DiagError::path_validation(parent.display().to_string(), e.to_string()))?;
         canonical_parent.join(path.file_name().unwrap_or_default())
     };
+
+    if !has_report_extension(&path_to_check) {
+        return Err(DiagError::path_validation(
+            path_to_check.display().to_string(),
+            "filename must end in .txt, .html, or .json",
+        )
+        .into());
+    }
 
     let allowed_paths = get_allowed_save_paths();
 
@@ -217,7 +239,7 @@ fn validate_save_path(path: &str) -> Result<(), String> {
                     }
                 }
             }
-            return Ok(());
+            return Ok(path_to_check);
         }
     }
 
@@ -230,7 +252,7 @@ fn validate_save_path(path: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn validate_export_path(path: String) -> Result<(), String> {
-    validate_save_path(&path)
+    validate_save_path(&path).map(|_| ())
 }
 
 #[tauri::command]
@@ -443,10 +465,14 @@ pub async fn export_results(
 pub async fn save_results_to_file(path: String, content: String) -> Result<(), String> {
     use std::fs;
 
-    // Validate path is within allowed scopes (security fix)
-    validate_save_path(&path)?;
+    // Validate path is within allowed scopes (security fix), then write to
+    // the exact canonicalized path that was validated rather than
+    // re-resolving the original string — shrinks the window in which a
+    // swapped path component between validation and write could matter.
+    let validated_path = validate_save_path(&path)?;
 
-    fs::write(&path, &content).map_err(|e| DiagError::file(path.clone(), e.to_string()))?;
+    fs::write(&validated_path, &content)
+        .map_err(|e| DiagError::file(path.clone(), e.to_string()))?;
     Ok(())
 }
 
@@ -518,6 +544,16 @@ mod tests {
         ] {
             assert!(!temp_filename_allowed(filename), "{filename}");
         }
+    }
+
+    #[test]
+    fn has_report_extension_applies_outside_temp_too() {
+        assert!(has_report_extension(Path::new(r"C:\Users\me\Documents\wf-diagnostics.txt")));
+        assert!(has_report_extension(Path::new(r"C:\Users\me\Desktop\report.html")));
+        assert!(has_report_extension(Path::new(r"C:\Users\me\Downloads\report.JSON")));
+        assert!(!has_report_extension(Path::new(r"C:\Users\me\Desktop\run.bat")));
+        assert!(!has_report_extension(Path::new(r"C:\Users\me\Documents\startup.vbs")));
+        assert!(!has_report_extension(Path::new(r"C:\Users\me\Documents\noext")));
     }
 
     #[test]

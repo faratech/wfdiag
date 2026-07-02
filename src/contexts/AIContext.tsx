@@ -354,6 +354,12 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     })
 
     const generation = analysisGenerationRef.current
+    // Boxed so the closure below can identify "am I still the current
+    // in-flight entry" without TypeScript flagging a self-referential
+    // `const request` as used-before-assigned — `self.current` is set
+    // synchronously right after the IIFE call, always before the first
+    // `await` inside it actually suspends.
+    const self: { current?: Promise<string> } = {}
     const request = (async () => {
       try {
         const response = await doInvoke()
@@ -378,12 +384,20 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         }
         throw error
       } finally {
-        inFlightRef.current.delete(cacheKey)
+        // Only remove OUR OWN entry: if a settings change cleared the map
+        // and a newer request already registered under the same cacheKey
+        // by the time this (now-stale) request settles, deleting
+        // unconditionally would evict that newer request's in-flight entry
+        // and let a third caller bypass dedup.
+        if (inFlightRef.current.get(cacheKey) === self.current) {
+          inFlightRef.current.delete(cacheKey)
+        }
         if (generation === analysisGenerationRef.current) {
           setIsAnalyzing(prev => ({ ...prev, [cacheKey]: false }))
         }
       }
     })()
+    self.current = request
 
     inFlightRef.current.set(cacheKey, request)
     return request

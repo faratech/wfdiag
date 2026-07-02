@@ -68,6 +68,16 @@ jobs:
             $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
           }
 
+          # The publish-to-store job depends on create-release succeeding —
+          # requesting a store publish without a release silently no-ops
+          # both downstream jobs (create-release is skipped, which is not
+          # "success", so publish-to-store's condition never passes either)
+          # while the rest of the run still shows green. Fail loudly instead.
+          if ($publishToStore -eq "true" -and $createRelease -ne "true") {
+            Write-Host "::error::publish_to_store=true requires create_release=true (Store publish runs only after the GitHub Release is created)."
+            exit 1
+          }
+
           echo "version=$version" >> $env:GITHUB_OUTPUT
           echo "publish_to_store=$publishToStore" >> $env:GITHUB_OUTPUT
           echo "create_release=$createRelease" >> $env:GITHUB_OUTPUT
@@ -102,6 +112,10 @@ jobs:
       - name: Build x64 executable
         working-directory: src-tauri
         run: cargo build --release --target x86_64-pc-windows-msvc
+        env:
+          # Match the ARM64 job: statically link the VC++ runtime so the
+          # portable exe doesn't need the redistributable on a clean machine.
+          RUSTFLAGS: -C target-feature=+crt-static
 
       - name: Upload x64 executable
         uses: actions/upload-artifact@v4

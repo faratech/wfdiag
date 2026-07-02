@@ -10,6 +10,18 @@ export interface DiagItem extends DiagnosticTask {
   result: TaskResult
 }
 
+// Grounding sources come from an external search/grounding API response, not
+// our own code — same convention as the backend's open_url command (only
+// http/https/mailto are allowed) before a URL is used as a clickable link.
+function isSafeHttpUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
   const [tab, setTab] = useState<'output' | 'raw'>('output')
   const [aiOpen, setAiOpen] = useState(true)
@@ -224,7 +236,7 @@ const AITrace: React.FC<{ meta: AIAnalysisMeta }> = ({ meta }) => {
             <ul>
               {grounding.sources.map((source, index) => (
                 <li key={`${source.url ?? source.title}-${index}`}>
-                  {source.url ? (
+                  {source.url && isSafeHttpUrl(source.url) ? (
                     <a href={source.url} target="_blank" rel="noreferrer">{source.title}</a>
                   ) : (
                     <span>{source.title}</span>

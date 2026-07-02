@@ -609,6 +609,16 @@ async fn stop_monitoring(lease_id: Option<u64>, state: State<'_, AppState>) -> R
 
     let monitor_opt = state.system_monitor.lock().await;
 
+    // Re-check after acquiring the lock: a concurrent start_monitoring may
+    // have bumped the lease (and started a newer loop) while this call was
+    // waiting for the lock. Without this, a stale stop could kill a session
+    // it was never meant to touch.
+    if let Some(lease_id) = lease_id
+        && state.monitoring_lease.load(Ordering::SeqCst) != lease_id
+    {
+        return Ok(());
+    }
+
     if let Some(monitor) = monitor_opt.as_ref() {
         monitor.stop_monitoring().await;
         Ok(())

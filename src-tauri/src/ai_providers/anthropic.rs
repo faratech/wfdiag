@@ -273,6 +273,7 @@ pub async fn chat_stream(
     let mut open_tools: std::collections::BTreeMap<u64, (String, String, String)> =
         std::collections::BTreeMap::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
+    let mut saw_message_stop = false;
 
     sse::for_each_event(response, |event, data| {
         match event {
@@ -333,7 +334,10 @@ pub async fn chat_stream(
                     stop_reason = Some(reason.to_string());
                 }
             }
-            "message_stop" => return Ok(false),
+            "message_stop" => {
+                saw_message_stop = true;
+                return Ok(false);
+            }
             "error" => {
                 let v: Value = serde_json::from_str(data).unwrap_or_default();
                 let message = v
@@ -348,6 +352,17 @@ pub async fn chat_stream(
         Ok(true)
     })
     .await?;
+
+    // A stream that ends without ever sending message_stop was cut short by
+    // something other than a normal completion (e.g. a proxy or timeout
+    // closing the connection mid-turn) — surface that instead of returning a
+    // truncated answer as if it finished normally.
+    if !saw_message_stop {
+        return Err(
+            "Anthropic stream ended unexpectedly before completion (no message_stop received)"
+                .to_string(),
+        );
+    }
 
     let finished = map_stop_reason(stop_reason.as_deref(), !tool_calls.is_empty());
     Ok(ChatTurn {

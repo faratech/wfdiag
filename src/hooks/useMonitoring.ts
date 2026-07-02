@@ -196,6 +196,21 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
     }
   }, [autoStart, start])
 
+  // Stop monitoring when the window/app is hidden (minimized, closed to
+  // tray, or the OS switches away) — tab switches within the app already
+  // stop monitoring via the unmount cleanup below, but that only covers
+  // navigating away from the Monitor/Processes screen, not the window
+  // itself losing visibility while that screen stays mounted.
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        stop()
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }, [stop])
+
   // Cleanup on unmount
   useEffect(() => {
     isMountedRef.current = true

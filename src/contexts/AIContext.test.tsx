@@ -267,6 +267,71 @@ describe('AIContext analysis dedup and cache', () => {
     })
   })
 
+  it('does not let a stale pre-settings-change request evict a newer request from the in-flight map', async () => {
+    const firstResponse = deferred<AIResponse>()
+    const secondResponse = deferred<AIResponse>()
+    const pending = [firstResponse, secondResponse]
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'ai_get_status') return okStatus
+      if (cmd === 'ai_analyze_diagnostic') return pending.shift()!.promise
+      return undefined
+    })
+
+    const { result, rerender } = renderHook(() => useAIContext(), { wrapper })
+
+    let p1!: Promise<string>
+    act(() => {
+      p1 = result.current.analyzeDiagnostic('task1', 'Task One', 'output data')
+    })
+    await waitFor(() => expect(analyzeCalls()).toHaveLength(1))
+
+    // A settings change bumps the generation and clears the in-flight map
+    // while the first request is still pending.
+    appContextValue = {
+      settings: {
+        openAiApiKey: 'sk-test',
+        preferredAIProvider: 'auto',
+        anthropicModel: 'claude-opus-4-8',
+      },
+      settingsLoaded: true,
+    }
+    rerender()
+
+    let p2!: Promise<string>
+    act(() => {
+      p2 = result.current.analyzeDiagnostic('task1', 'Task One', 'output data')
+    })
+    await waitFor(() => expect(analyzeCalls()).toHaveLength(2))
+
+    // The stale first request now resolves (its own generation is outdated,
+    // so it contributes no interpretation) — its cleanup must not touch the
+    // second request's still-pending in-flight entry.
+    await act(async () => {
+      firstResponse.resolve(aiResponse('stale answer'))
+      await p1
+    })
+
+    // A third call for the same content must dedupe against the still-live
+    // second request rather than firing a new backend call — which is only
+    // true if the stale request's cleanup left the second entry alone.
+    let p3!: Promise<string>
+    act(() => {
+      p3 = result.current.analyzeDiagnostic('task1', 'Task One', 'output data')
+    })
+    expect(analyzeCalls()).toHaveLength(2)
+
+    let r2 = ''
+    let r3 = ''
+    await act(async () => {
+      secondResponse.resolve(aiResponse('fresh answer'))
+      ;[r2, r3] = await Promise.all([p2, p3])
+    })
+
+    expect(analyzeCalls()).toHaveLength(2)
+    expect(r2).toBe('fresh answer')
+    expect(r3).toBe('fresh answer')
+  })
+
   it('does not enable AI actions for an explicit unavailable provider just because OpenAI has a key', async () => {
     appContextValue = {
       settings: { openAiApiKey: 'sk-test', preferredAIProvider: 'anthropic' },

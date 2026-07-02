@@ -392,6 +392,20 @@ pub async fn ai_generate_report(
         });
     }
 
+    // Reject a second concurrent generation for the same scan+comparison+
+    // provider instead of firing a duplicate paid-provider request — a fast
+    // double-click on "Generate" arrives before the first call's ack updates
+    // the UI's own busy state.
+    {
+        let mut in_flight = state.report_in_flight.lock().await;
+        if !in_flight.insert(cache_key.clone()) {
+            return Err(
+                "A report is already being generated for this scan. Wait for it to finish."
+                    .to_string(),
+            );
+        }
+    }
+
     let ack = ReportAck {
         report_id: report_id.clone(),
         cached: false,
@@ -399,6 +413,7 @@ pub async fn ai_generate_report(
         report: None,
     };
 
+    let report_in_flight = state.report_in_flight.clone();
     tauri::async_runtime::spawn(async move {
         let chat = RealChatProvider { provider, cfg };
         let emitter = ReportEmitter(app);
@@ -431,8 +446,9 @@ pub async fn ai_generate_report(
             && matches!(last.role, crate::ai_providers::ChatRole::Assistant)
             && !last.content.is_empty()
         {
-            crate::ai_service::cache_value(cache_key, last.content.clone());
+            crate::ai_service::cache_value(cache_key.clone(), last.content.clone());
         }
+        report_in_flight.lock().await.remove(&cache_key);
     });
 
     Ok(ack)

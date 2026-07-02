@@ -205,6 +205,48 @@ describe('useScanner scan lock', () => {
     expect(startCalls()).toHaveLength(2)
   })
 
+  it('still commits results and clears isRunning after the owning instance unmounts mid-scan', async () => {
+    const parallel = deferred<Array<[string, unknown]>>()
+    const setIsRunning = vi.fn()
+    const setResults = vi.fn()
+    contextValue = makeContext({ setIsRunning, setResults })
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'session-1'
+      if (cmd === 'run_diagnostics_parallel') return parallel.promise
+      return undefined
+    })
+
+    const useScanner = await loadHook()
+    const { result, unmount } = renderHook(() => useScanner())
+
+    let scan!: Promise<void>
+    act(() => {
+      scan = result.current.runQuickScan()
+    })
+
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.some(c => c[0] === 'run_diagnostics_parallel')).toBe(true)
+    })
+
+    // Simulate a tab switch: the component that started the scan unmounts,
+    // but the scan itself (a plain promise chain, not tied to React) keeps
+    // running in the background exactly like the real backend call does.
+    unmount()
+
+    parallel.resolve([['os_info', { success: true, output: '{}', error: null, duration_ms: 1 }]])
+    await act(async () => {
+      await scan
+    })
+
+    // Results must still land in AppContext, and isRunning must still be
+    // cleared — neither should be silently dropped just because the
+    // initiating component is gone.
+    expect(setResults).toHaveBeenCalledWith({
+      os_info: { success: true, output: '{}', error: null, duration_ms: 1 },
+    })
+    expect(setIsRunning).toHaveBeenCalledWith(false)
+  })
+
   it('normalizes maxConcurrentTasks 0 before invoking the backend', async () => {
     contextValue = makeContext({ settings: { autoSave: false, maxConcurrentTasks: 0 } })
     invokeMock.mockImplementation(async (cmd: string) => {

@@ -100,11 +100,25 @@ const AppContent: React.FC = () => {
   }, [settings.scanOnStartup, availableTasks.length, isRunning])
   useEffect(() => {
     let unlisten: (() => void) | undefined
+    let cancelled = false
     import('@tauri-apps/api/event')
       .then(({ listen }) => listen('tray://quick-scan', () => runQuickScanRef.current()))
-      .then(fn => { unlisten = fn })
+      .then(fn => {
+        // Effect may have cleaned up while listen() was still in flight (e.g.
+        // React StrictMode's dev double-invoke) — tear the listener down
+        // immediately instead of leaking it via an unlisten ref that's
+        // already too late to be returned from cleanup.
+        if (cancelled) {
+          fn()
+        } else {
+          unlisten = fn
+        }
+      })
       .catch(() => {}) // not running under Tauri (plain vite dev)
-    return () => unlisten?.()
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
   }, [])
 
   const resultValues = Object.values(results)

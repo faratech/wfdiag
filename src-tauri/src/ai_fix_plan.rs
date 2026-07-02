@@ -40,13 +40,21 @@ pub(crate) fn build_fix_plan_prompt(
     catalog: &[RemediationSpec],
     max_data_chars: usize,
 ) -> String {
+    // Each issue has exactly ONE pre-vetted remediation (never a free choice
+    // among the whole catalog) — state that mapping explicitly per issue, or
+    // the model will plausibly pair an issue with any catalog id that looks
+    // relevant, and parse_fix_plan silently drops the mismatched entry.
     let issue_lines: Vec<String> = issues
         .iter()
         .filter(|i| i.detected)
         .map(|i| {
+            let remediation_note = match i.remediation.as_ref() {
+                Some(r) => format!("allowed remediation id: {}", r.id),
+                None => "no vetted remediation available for this issue".to_string(),
+            };
             format!(
-                "- {} [{:?}] {}: {}",
-                i.id, i.severity, i.title, i.description
+                "- {} [{:?}] {}: {} ({})",
+                i.id, i.severity, i.title, i.description, remediation_note
             )
         })
         .collect();
@@ -70,7 +78,8 @@ pub(crate) fn build_fix_plan_prompt(
 
     let data = crate::ai_prompts::truncate_output(
         &format!(
-            "DETECTED ISSUES:\n{}\n\nAVAILABLE REMEDIATIONS (the ONLY allowed ids):\n{}",
+            "DETECTED ISSUES (each lists the one remediation id allowed for it):\n{}\n\n\
+             REMEDIATION CATALOG (for context/descriptions only — not a free menu):\n{}",
             issue_lines.join("\n"),
             remediation_lines.join("\n")
         ),
@@ -83,9 +92,9 @@ pub(crate) fn build_fix_plan_prompt(
          Respond with ONLY this JSON (no prose, no code fences):\n\
          {{\"entries\": [{{\"issue_id\": \"...\", \"remediation_id\": \"...\", \"rationale\": \"one sentence\"}}], \"notes\": \"one short paragraph\"}}\n\n\
          Rules:\n\
-         - Use only the listed remediation ids and only for the listed detected issues.\n\
-         - Prefer the lowest tier that can address the issue; order entries most-important-first.\n\
-         - If no remediation applies to an issue, leave it out and mention it in notes.\n\
+         - For each issue, use ONLY the exact remediation id listed as its \"allowed remediation id\" above — never a different catalog id, even one that looks relevant.\n\
+         - If an issue has no vetted remediation available, leave it out and mention it in notes.\n\
+         - Order entries most-important-first.\n\
          - At most {} entries.",
         data, MAX_PLAN_ENTRIES
     )
