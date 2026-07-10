@@ -439,6 +439,9 @@ pub async fn ai_generate_report(
             &NoToolExecutor,
             &emitter,
             CancellationToken::new(),
+            // The report is bound to one resolved provider; no chat-style
+            // fallback (it manages its own provider selection).
+            false,
         )
         .await;
 

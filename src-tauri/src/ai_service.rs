@@ -430,6 +430,54 @@ pub async fn determine_active_provider_with_key(
     route_provider(pref, avail)
 }
 
+/// The next Auto-order provider not already in `tried`, probed lazily and
+/// short-circuited on the first available one. Returns `None` for explicit
+/// preferences (they never fall back — the documented rule) and when no
+/// untried provider is available. Used to recover in chat when the chosen
+/// provider fails before producing any output, so a flaky subscription
+/// bridge can't dead-end a request another provider could serve.
+pub async fn next_auto_provider(
+    pref: AIProviderPreference,
+    tried: &[AIProvider],
+    frontend_openai_key: bool,
+) -> Option<AIProvider> {
+    if pref != AIProviderPreference::Auto {
+        return None;
+    }
+    let untried = |p: AIProvider| !tried.contains(&p);
+    if untried(AIProvider::PhiSilica) && check_phi_silica_available().1 {
+        return Some(AIProvider::PhiSilica);
+    }
+    if untried(AIProvider::FoundryLocal) && check_foundry_local_available().await.is_some() {
+        return Some(AIProvider::FoundryLocal);
+    }
+    if untried(AIProvider::Ollama) && check_ollama_available().await.is_some() {
+        return Some(AIProvider::Ollama);
+    }
+    if untried(AIProvider::CustomOpenAI) && check_custom_available().await.is_some() {
+        return Some(AIProvider::CustomOpenAI);
+    }
+    if untried(AIProvider::CodexCli) && check_codex_available().await {
+        return Some(AIProvider::CodexCli);
+    }
+    if untried(AIProvider::ClaudeCode) && check_claude_code_available().await {
+        return Some(AIProvider::ClaudeCode);
+    }
+    if untried(AIProvider::OpenAI) && (frontend_openai_key || check_openai_available().await) {
+        return Some(AIProvider::OpenAI);
+    }
+    if untried(AIProvider::Anthropic) && check_anthropic_available().await {
+        return Some(AIProvider::Anthropic);
+    }
+    if untried(AIProvider::Gemini) && check_gemini_available().await {
+        return Some(AIProvider::Gemini);
+    }
+    if untried(AIProvider::DeepSeek) && check_deepseek_available().await {
+        return Some(AIProvider::DeepSeek);
+    }
+    None
+}
+
 fn provider_info(
     id: AIProvider,
     available: bool,

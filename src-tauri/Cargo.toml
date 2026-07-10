@@ -1,6 +1,6 @@
 [package]
 name = "wfdiag-tauri"
-version = "2.5.2"
+version = "2.5.3"
 description = "WindowsForum Diagnostic Tool"
 authors = ["WindowsForum"]
 edition = "2024"

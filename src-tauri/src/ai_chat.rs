@@ -446,8 +446,15 @@ async fn pre_ground_chat(
 
 enum StreamOutcome {
     Completed(ChatTurn),
-    Cancelled { partial: String },
-    Error(String),
+    Cancelled {
+        partial: String,
+    },
+    /// `streamed_any` is true if any text reached the UI before the error —
+    /// used to decide whether a provider fallback would duplicate output.
+    Error {
+        message: String,
+        streamed_any: bool,
+    },
 }
 
 /// Drive one provider stream, forwarding coalesced text deltas to the UI.
@@ -496,7 +503,10 @@ async fn stream_one_turn(
                 flush!();
                 return match result {
                     Ok(turn) => StreamOutcome::Completed(turn),
-                    Err(e) => StreamOutcome::Error(e),
+                    Err(e) => StreamOutcome::Error {
+                        message: e,
+                        streamed_any: !streamed.is_empty(),
+                    },
                 };
             }
             maybe = rx.recv(), if rx_open => {
@@ -601,6 +611,12 @@ async fn run_tools(
 /// prompt is supplied by the caller — chat and the scan report share this
 /// loop with different instructions.
 #[allow(clippy::too_many_arguments)]
+/// Drive one provider's chat turn (with its tool loop). Returns `Ok(())` when
+/// the turn is fully handled — a completed answer, a cancellation, or a
+/// terminal error already emitted to the UI. Returns `Err(message)` ONLY when
+/// `allow_fallback` is set and the very first request failed before anything
+/// reached the UI: no terminal event is emitted, so the caller can retry the
+/// same message on the next provider without the user seeing a false error.
 pub async fn run_chat_turn(
     provider_label: &str,
     caps: ProviderCaps,
@@ -613,6 +629,7 @@ pub async fn run_chat_turn(
     executor: &dyn ToolExecutor,
     emitter: &dyn ChatEmitter,
     cancel: CancellationToken,
+    allow_fallback: bool,
 ) -> Result<(), String> {
     let plan = plan_context(caps.context_budget_chars);
     let use_tools = caps.supports_tools && !tools.is_empty();
@@ -650,7 +667,16 @@ pub async fn run_chat_turn(
                     emitter.done(&done("cancelled", tool_call_count));
                     return Ok(());
                 }
-                StreamOutcome::Error(message) => {
+                StreamOutcome::Error {
+                    message,
+                    streamed_any,
+                } => {
+                    // Fall back only on a clean first-attempt failure — round 0,
+                    // no tools run, nothing streamed — so retrying on the next
+                    // provider can't double-emit or duplicate partial text.
+                    if allow_fallback && round == 0 && tool_call_count == 0 && !streamed_any {
+                        return Err(message);
+                    }
                     emitter.error(&ErrorPayload {
                         session_id: session_id.to_string(),
                         message_id: message_id.to_string(),
@@ -825,6 +851,9 @@ pub async fn ai_chat_send(
                 .to_string(),
         );
     }
+    // Keep the frontend OpenAI key for a possible fallback resolve (it counts
+    // as OpenAI availability; resolve_config ignores it for other providers).
+    let api_key_for_fallback = api_key.clone();
     let cfg = crate::ai_providers::resolve_config(provider, api_key).await?;
     let caps = crate::ai_providers::capabilities(provider);
 
@@ -896,10 +925,8 @@ pub async fn ai_chat_send(
 
     tauri::async_runtime::spawn(async move {
         let mut messages = messages_snapshot;
-        let chat = RealChatProvider { provider, cfg };
         let tools = crate::ai_tools::tool_registry();
         let emitter = TauriEmitter(app);
-        let provider_label = provider.to_string();
         let mut system = system;
         if let Some(query) = latest_user_query.as_deref() {
             let should_pre_ground =
@@ -922,20 +949,79 @@ pub async fn ai_chat_send(
             }
         }
 
-        let _ = run_chat_turn(
-            &provider_label,
-            caps,
-            &chat,
-            &session_id,
-            &message_id,
-            &mut messages,
-            &system,
-            &tools,
-            &executor,
-            &emitter,
-            cancel,
-        )
-        .await;
+        // Provider loop with Auto fallback: if the chosen provider fails
+        // before any text reaches the UI, retry the same message on the next
+        // available Auto provider. `caps`/`system`/`executor` stay those of
+        // the first provider — safe because the Auto order has non-decreasing
+        // context budgets, so a later provider never overflows an earlier
+        // one's plan. Explicit (non-Auto) preferences never fall back.
+        let mut cur_provider = provider;
+        let mut cur_cfg = cfg;
+        let mut tried = vec![provider];
+        loop {
+            let next = crate::ai_service::next_auto_provider(pref, &tried, frontend_key).await;
+            let allow_fallback = next.is_some();
+            let chat = RealChatProvider {
+                provider: cur_provider,
+                cfg: cur_cfg.clone(),
+            };
+            let outcome = run_chat_turn(
+                &cur_provider.to_string(),
+                caps,
+                &chat,
+                &session_id,
+                &message_id,
+                &mut messages,
+                &system,
+                &tools,
+                &executor,
+                &emitter,
+                cancel.clone(),
+                allow_fallback,
+            )
+            .await;
+
+            let Err(failed_msg) = outcome else {
+                break; // handled: answered, cancelled, or terminal error emitted
+            };
+
+            // Advance to the next provider we can actually resolve.
+            let mut candidate = next;
+            let mut resolved = None;
+            while let Some(np) = candidate {
+                tried.push(np);
+                if let Ok(c) =
+                    crate::ai_providers::resolve_config(np, api_key_for_fallback.clone()).await
+                {
+                    resolved = Some((np, c));
+                    break;
+                }
+                candidate = crate::ai_service::next_auto_provider(pref, &tried, frontend_key).await;
+            }
+            match resolved {
+                Some((np, c)) => {
+                    cur_provider = np;
+                    cur_cfg = c;
+                }
+                None => {
+                    // Nothing usable left — surface the failure run_chat_turn
+                    // suppressed for the fallback attempt.
+                    emitter.error(&ErrorPayload {
+                        session_id: session_id.clone(),
+                        message_id: message_id.clone(),
+                        message: failed_msg,
+                    });
+                    emitter.done(&DonePayload {
+                        session_id: session_id.clone(),
+                        message_id: message_id.clone(),
+                        finish_reason: "error".to_string(),
+                        provider: cur_provider.to_string(),
+                        tool_call_count: 0,
+                    });
+                    break;
+                }
+            }
+        }
 
         // Write the updated history back and release the session
         {
@@ -1288,6 +1374,7 @@ mod tests {
             &EchoExecutor,
             &emitter,
             CancellationToken::new(),
+            false,
         )
         .await
         .unwrap();
@@ -1347,6 +1434,7 @@ mod tests {
             &EchoExecutor,
             &emitter,
             CancellationToken::new(),
+            false,
         )
         .await
         .unwrap();
@@ -1373,6 +1461,7 @@ mod tests {
             &EchoExecutor,
             &emitter,
             cancel,
+            false,
         )
         .await
         .unwrap();
@@ -1381,18 +1470,19 @@ mod tests {
         assert_eq!(messages.len(), 1);
     }
 
-    #[tokio::test]
-    async fn provider_error_surfaces_as_error_then_done() {
-        struct FailingProvider;
-        impl ChatProvider for FailingProvider {
-            fn stream<'a>(
-                &'a self,
-                _request: &'a ChatRequest,
-                _tx: mpsc::Sender<String>,
-            ) -> Pin<Box<dyn Future<Output = Result<ChatTurn, String>> + Send + 'a>> {
-                Box::pin(async move { Err("rate limited".to_string()) })
-            }
+    struct FailingProvider;
+    impl ChatProvider for FailingProvider {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a ChatRequest,
+            _tx: mpsc::Sender<String>,
+        ) -> Pin<Box<dyn Future<Output = Result<ChatTurn, String>> + Send + 'a>> {
+            Box::pin(async move { Err("rate limited".to_string()) })
         }
+    }
+
+    #[tokio::test]
+    async fn provider_error_surfaces_as_error_then_done_when_no_fallback() {
         let emitter = RecordingEmitter::default();
         let mut messages = vec![ChatMessage::user("hello")];
         run_chat_turn(
@@ -1407,10 +1497,41 @@ mod tests {
             &EchoExecutor,
             &emitter,
             CancellationToken::new(),
+            false,
         )
         .await
         .unwrap();
         assert_eq!(emitter.log(), vec!["error:rate limited", "done:error"]);
+    }
+
+    #[tokio::test]
+    async fn first_attempt_error_defers_to_fallback_without_emitting() {
+        // With fallback allowed, a clean pre-output failure returns Err and
+        // emits NOTHING — so the caller can retry on the next provider and the
+        // user never sees a false error. History stays clean for the retry.
+        let emitter = RecordingEmitter::default();
+        let mut messages = vec![ChatMessage::user("hello")];
+        let outcome = run_chat_turn(
+            "codex_cli",
+            tool_caps(),
+            &FailingProvider,
+            "s1",
+            "m1",
+            &mut messages,
+            "test system prompt",
+            &specs(),
+            &EchoExecutor,
+            &emitter,
+            CancellationToken::new(),
+            true,
+        )
+        .await;
+        assert_eq!(outcome.unwrap_err(), "rate limited");
+        assert!(
+            emitter.log().is_empty(),
+            "no terminal event should be emitted"
+        );
+        assert_eq!(messages.len(), 1, "history unchanged for the retry");
     }
 
     #[test]

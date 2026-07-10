@@ -16,7 +16,7 @@
         "displayName": "WindowsForum Diagnostics",
         "publisherDisplayName": "Mike Fara",
         "identityName": "32827MikeFara.WindowsForumDiagnostics",
-        "msixVersion": "2.5.2.0",
+        "msixVersion": "2.5.3.0",
         "languages": ["en-US"],
         "capabilities": [
           "internetClient",
