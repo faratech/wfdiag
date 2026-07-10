@@ -1,0 +1,130 @@
+name: Update Store Screenshots
+
+# Replaces the "Screenshot"-type listing images on the live Store submission
+# with the PNGs committed under store-assets/screenshots/. Does NOT touch
+# other image types on the listing (Icon, StoreLogo*, PromotionalArt*, etc.)
+# — those are untouched, only Screenshot entries are replaced.
+#
+# Mechanics (per the Microsoft Store submission API docs): get the current
+# submission (Partner Center auto-clones the last published one into a new
+# draft if none is pending), patch its images array, PUT a zip of the new
+# image files to the submission's fileUploadUrl (an Azure Blob SAS URL —
+# no separate auth needed for that PUT), then commit and poll. Unlike the
+# package upload, unchanged resources (the app package itself) are left as
+# fileStatus "Uploaded" and are NOT re-included in the zip — only the new
+# PendingUpload images need to be in it.
+#
+# NOTE: run this only when there is no OTHER pending/in-flight submission
+# for the app — concurrent submissions on the same app will conflict.
+on:
+  workflow_dispatch:
+    inputs:
+      listing_language:
+        description: 'Listing language key to update'
+        required: false
+        default: 'en-us'
+
+permissions:
+  contents: read
+
+env:
+  STORE_APP_ID: 9NJ59RH053PV
+
+jobs:
+  update-images:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Microsoft Store CLI
+        uses: microsoft/setup-msstore-cli@v1
+
+      - name: Configure Store credentials
+        shell: pwsh
+        run: |
+          msstore reconfigure `
+            --tenantId ${{ secrets.AZURE_TENANT_ID }} `
+            --sellerId ${{ secrets.STORE_SELLER_ID }} `
+            --clientId ${{ secrets.AZURE_CLIENT_ID }} `
+            --clientSecret ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: Replace screenshot images on the submission
+        shell: pwsh
+        env:
+          LISTING_LANG: ${{ github.event.inputs.listing_language }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lang = if ($env:LISTING_LANG) { $env:LISTING_LANG } else { 'en-us' }
+
+          $screenshotDir = Join-Path $env:GITHUB_WORKSPACE 'store-assets\screenshots'
+          $files = Get-ChildItem -Path $screenshotDir -Filter '*.png' | Sort-Object Name
+          if ($files.Count -eq 0) { throw "No PNG files found in $screenshotDir" }
+          Write-Host "Found $($files.Count) screenshot(s) to upload:"
+          $files | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
+
+          # ---- Get the current submission (same get pattern as the notes updater) ----
+          $raw = (msstore submission get $env:STORE_APP_ID | Out-String)
+          $start = $raw.IndexOf('{')
+          $end = $raw.LastIndexOf('}')
+          if ($start -lt 0 -or $end -le $start) { throw "No JSON in 'submission get' output. Raw output:`n$raw" }
+          $submission = $raw.Substring($start, $end - $start + 1) | ConvertFrom-Json
+
+          if (-not $submission.listings.$lang) {
+            throw "Listing language '$lang' not found on the submission. Available: $($submission.listings.PSObject.Properties.Name -join ', ')"
+          }
+          if ([string]::IsNullOrWhiteSpace($submission.fileUploadUrl)) {
+            throw "Submission has no fileUploadUrl — it may not be in an editable state. Check Partner Center."
+          }
+
+          $existingImages = @($submission.listings.$lang.baseListing.images)
+          Write-Host "Existing images on '$lang' listing before this run:"
+          $existingImages | ForEach-Object { Write-Host "  [$($_.imageType)] $($_.fileName) (status=$($_.fileStatus))" }
+
+          # Keep every non-Screenshot asset (logo, icons, promotional art, …)
+          # untouched; only Screenshot-type entries are replaced.
+          $keepImages = @($existingImages | Where-Object { $_.imageType -ne 'Screenshot' })
+          $newImages = @($files | ForEach-Object {
+            [PSCustomObject]@{
+              fileName   = $_.Name
+              fileStatus = 'PendingUpload'
+              imageType  = 'Screenshot'
+            }
+          })
+          $submission.listings.$lang.baseListing.images = @($keepImages + $newImages)
+
+          Write-Host "New images array ($($submission.listings.$lang.baseListing.images.Count) entries):"
+          $submission.listings.$lang.baseListing.images | ForEach-Object { Write-Host "  [$($_.imageType)] $($_.fileName) (status=$($_.fileStatus))" }
+
+          # ---- Patch the submission metadata (adds the PendingUpload placeholders) ----
+          $json = $submission | ConvertTo-Json -Depth 64 -Compress
+          $updateOut = msstore submission update $env:STORE_APP_ID $json --skipInitialPolling 2>&1 | Out-String
+          Write-Host $updateOut
+          if ($LASTEXITCODE -ne 0 -or $updateOut -match 'Error!|Could not') {
+            throw "msstore submission update failed"
+          }
+
+          # ---- Build a zip with ONLY the new files (unchanged package stays 'Uploaded', no re-upload needed) ----
+          $stagingDir = Join-Path $env:RUNNER_TEMP 'store-images-upload'
+          New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
+          $files | ForEach-Object { Copy-Item $_.FullName -Destination (Join-Path $stagingDir $_.Name) }
+          $zipPath = Join-Path $env:RUNNER_TEMP 'images.zip'
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive -Path (Join-Path $stagingDir '*') -DestinationPath $zipPath
+          Write-Host "Built $zipPath ($((Get-Item $zipPath).Length) bytes)"
+
+          # ---- Upload the zip to the blob SAS URL (self-contained auth, no bearer token needed) ----
+          Invoke-WebRequest -Method Put -Uri $submission.fileUploadUrl `
+            -InFile $zipPath `
+            -Headers @{ 'x-ms-blob-type' = 'BlockBlob' } `
+            -ContentType 'application/octet-stream' `
+            -UseBasicParsing | Out-Null
+          Write-Host "Zip uploaded to blob storage."
+
+          # ---- Commit and poll ----
+          $publishOut = msstore submission publish $env:STORE_APP_ID 2>&1 | Out-String
+          Write-Host $publishOut
+          if ($LASTEXITCODE -ne 0 -or $publishOut -match 'Error!|Could not commit') {
+            throw "msstore submission publish failed"
+          }
+          msstore submission poll $env:STORE_APP_ID
