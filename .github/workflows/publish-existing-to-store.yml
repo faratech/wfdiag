@@ -1,0 +1,167 @@
+name: Publish Existing Release to Microsoft Store
+
+# Manual trigger only - publishes an existing GitHub release to the Store
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., 2.1.9) - must have existing GitHub release'
+        required: true
+      release_notes:
+        description: 'Store "What''s new" text (optional — defaults to the GitHub release body, plain-texted and truncated to the Store limit)'
+        required: false
+        default: ''
+
+env:
+  PROJECT_NAME: WindowsForum_Diagnostics
+
+permissions:
+  contents: read
+
+jobs:
+  publish-to-store:
+    runs-on: windows-latest
+    steps:
+      # Don't checkout - we don't want the source code confusing msstore CLI
+      - name: Download release asset from GitHub
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          $bundleName = "${{ env.PROJECT_NAME }}_${version}.msixbundle"
+
+          Write-Host "Downloading $bundleName from GitHub release v$version..."
+
+          # Download using gh CLI (use repo flag since we didn't checkout)
+          gh release download "v$version" --repo ${{ github.repository }} --pattern "*.msixbundle"
+
+          # Verify download
+          $downloaded = Get-ChildItem -Filter "*.msixbundle"
+          if ($downloaded) {
+            Write-Host "Downloaded: $($downloaded.FullName) ($($downloaded.Length) bytes)"
+          } else {
+            throw "Failed to download msixbundle from release v$version"
+          }
+
+      - name: Setup Microsoft Store CLI
+        uses: microsoft/setup-msstore-cli@v1
+
+      - name: Configure Store credentials
+        shell: pwsh
+        run: |
+          msstore reconfigure `
+            --tenantId ${{ secrets.AZURE_TENANT_ID }} `
+            --sellerId ${{ secrets.STORE_SELLER_ID }} `
+            --clientId ${{ secrets.AZURE_CLIENT_ID }} `
+            --clientSecret ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: List working directory contents
+        shell: pwsh
+        run: |
+          Write-Host "Contents of working directory:"
+          Get-ChildItem -Recurse | ForEach-Object { Write-Host "  $($_.FullName) - $($_.Length) bytes" }
+
+      - name: Prepare Store release notes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES_INPUT: ${{ github.event.inputs.release_notes }}
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          $notes = $env:NOTES_INPUT
+
+          if (-not $notes) {
+            # Default: the GitHub release body, converted to Store-friendly
+            # plain text (no markdown headings/links/emphasis)
+            #
+            # PowerShell captures a multi-line external command's stdout as
+            # an ARRAY of lines, not one string — -join forces a real single
+            # string (a no-op if gh already returned one) so IndexOf/Substring
+            # below are unambiguous String operations, not IList.IndexOf
+            # (which matches whole array ELEMENTS, not a text offset).
+            $bodyRaw = gh release view "v$version" --repo ${{ github.repository }} --json body -q .body
+            $body = $bodyRaw -join "`n"
+            if ($body) {
+              # Drop the install/download boilerplate the release template
+              # appends — Store "What's new" should be just the changelog.
+              # Ordinal comparison is required: the default culture-aware
+              # IndexOf can return an index that disagrees with Substring's
+              # UTF-16 code-unit counting once the text has em-dashes,
+              # curly quotes or bullets, throwing "Index and length must
+              # refer to a location within the string."
+              foreach ($marker in @('### Recommended Installation', '### Alternative Downloads', '### Manual MSIX')) {
+                $idx = $body.IndexOf($marker, [StringComparison]::Ordinal)
+                if ($idx -ge 0) { $body = $body.Substring(0, $idx) }
+              }
+              $notes = $body -replace '\[([^\]]+)\]\([^)]+\)', '$1'   # links -> text
+              $notes = ($notes -split "`n" | Where-Object {
+                $_ -notmatch '^\s*#' -and $_ -notmatch '^\s*---\s*$'
+              }) -join "`n"
+              $notes = $notes -replace '\*\*', '' -replace '`', ''
+              $notes = ($notes -replace "(\r?\n){3,}", "`n`n").Trim()
+            }
+          }
+          if (-not $notes) { $notes = "Bug fixes and improvements." }
+
+          # Partner Center caps release notes at 1500 characters
+          if ($notes.Length -gt 1490) { $notes = $notes.Substring(0, 1490) + "…" }
+
+          $notes | Out-File -Encoding utf8 store-release-notes.txt
+          Write-Host "Store release notes ($($notes.Length) chars):"
+          Write-Host $notes
+
+      - name: Upload package to draft submission
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          $bundleFile = Get-ChildItem -Filter "*.msixbundle" | Select-Object -First 1
+
+          if (-not $bundleFile) {
+            throw "No msixbundle file found!"
+          }
+
+          Write-Host "Bundle file: $($bundleFile.FullName)"
+
+          # Use the bundle file as the positional argument (pathOrUrl); the
+          # --appId flag bypasses project detection. --noCommit keeps the
+          # submission in draft so the next step can set the release notes.
+          msstore publish "$($bundleFile.FullName)" --appId 9NJ59RH053PV --noCommit --verbose
+          if ($LASTEXITCODE -ne 0) { throw "msstore publish --noCommit failed" }
+
+      - name: Set release notes on draft submission
+        shell: pwsh
+        run: |
+          # Best-effort: release notes are cosmetic — a failure here must not
+          # block the release, the commit step below still ships the package.
+          try {
+            $raw = (msstore submission get 9NJ59RH053PV | Out-String)
+            $start = $raw.IndexOf('{')
+            $end = $raw.LastIndexOf('}')
+            if ($start -lt 0 -or $end -le $start) { throw "No JSON in 'submission get' output" }
+            $submission = $raw.Substring($start, $end - $start + 1) | ConvertFrom-Json
+
+            $notes = (Get-Content -Raw store-release-notes.txt).Trim()
+            $langs = @($submission.listings.PSObject.Properties.Name)
+            if ($langs.Count -eq 0) { throw "Submission has no listings" }
+            foreach ($lang in $langs) {
+              $submission.listings.$lang.baseListing.releaseNotes = $notes
+            }
+
+            # The packaged-app update API REPLACES the submission body, so the
+            # full get -> patch -> update round-trip is required (per msstore
+            # CLI docs) — never send a partial JSON here.
+            $json = $submission | ConvertTo-Json -Depth 64 -Compress
+            msstore submission update 9NJ59RH053PV $json --skipInitialPolling
+            if ($LASTEXITCODE -ne 0) { throw "msstore submission update failed" }
+            Write-Host "Release notes applied to $($langs.Count) listing(s): $($langs -join ', ')"
+          } catch {
+            Write-Warning "Could not set Store release notes (continuing with release): $_"
+          }
+
+      - name: Commit submission to the Store
+        shell: pwsh
+        run: |
+          msstore submission publish 9NJ59RH053PV
+          if ($LASTEXITCODE -ne 0) { throw "msstore submission publish failed" }
+          msstore submission poll 9NJ59RH053PV

@@ -1,0 +1,206 @@
+# =============================================================================
+# Dependencies
+# =============================================================================
+node_modules/
+.pnpm-store/
+
+# =============================================================================
+# Build Outputs
+# =============================================================================
+build/
+dist/
+out/
+msix-build/
+release/
+releases/
+msix_layout/
+
+# Tauri build outputs
+src-tauri/target/
+src-tauri/gen/
+src-tauri/bundle/
+.tauri/
+
+# Binary outputs (use GitHub Releases)
+*.msi
+*.msix
+*.msixbundle
+*.exe
+*.appx
+*.nsis
+*.dmg
+*.deb
+*.rpm
+*.zip
+*.tar.gz
+WFDiagnostics_*.msix
+
+# =============================================================================
+# Security Sensitive Files - NEVER COMMIT
+# =============================================================================
+# Certificates and keys
+*.pfx
+*.p12
+*.key
+*.crt
+*.cer
+*.pem
+*.keystore
+*.jks
+*.rsa
+*.dsa
+*_key
+*_key.*
+certs/*.pem
+certs/*.key
+certs/*.pfx
+certs/*.p12
+certs/*.crt
+certs/*.cer
+wfdiag-signing-cert.pfx
+certificates/
+
+# Encrypted/secret files
+*.enc
+*.dat
+*.token
+*.secret
+*.priv
+
+# API keys and credentials
+.env
+.env.local
+.env.*.local
+apikey.txt
+token.txt
+oauth_tokens.json
+credentials.json
+auth_tokens.json
+
+# Sigstore signatures (local development only)
+signatures/
+*.sig
+*.bundle
+*.rekor
+*-signature.json
+
+# =============================================================================
+# Local Build Scripts (auto-generated, not tracked)
+# =============================================================================
+build-msix-bundle.sh
+rebuild-msix-signed.ps1
+sign-*.ps1
+build-*.ps1
+create-*cert.ps1
+
+# =============================================================================
+# IDE and Editor Files
+# =============================================================================
+.idea/
+.vscode/
+*.code-workspace
+.history/
+*.swp
+*.swo
+*~
+
+# =============================================================================
+# OS Generated Files
+# =============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.Trash-*
+.fuse_hidden*
+.nfs*
+ehthumbs.db
+Thumbs.db
+*.stackdump
+*.lnk
+
+# =============================================================================
+# Logs and Debug Files
+# =============================================================================
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# =============================================================================
+# Testing and Coverage
+# =============================================================================
+coverage/
+.nyc_output/
+*.cpuprofile
+*.heapprofile
+*.heapsnapshot
+*.perf
+
+# =============================================================================
+# TypeScript and Rust Build Artifacts
+# =============================================================================
+*.tsbuildinfo
+*.tgz
+**/*.rs.bk
+*.orig
+Cargo.lock.orig
+src-tauri/.cargo/
+
+# =============================================================================
+# Temporary and Cache Files
+# =============================================================================
+.cache/
+.tmp/
+tmp/
+temp/
+*.tmp
+*.temp
+*.backup
+*.bak
+~$*
+
+# =============================================================================
+# Local Configuration (user-specific)
+# =============================================================================
+config.json
+user_config.json
+settings.json
+local_settings.json
+diagnostic_data/
+scan_results/
+*.sqlite
+*.db
+*.database
+
+# =============================================================================
+# Development Tools
+# =============================================================================
+.claude/
+.devcontainer/
+.dockerignore
+docker-compose.override.yml
+.turbo/
+.next/
+.nuxt/
+.output/
+.vercel/
+.netlify/
+.clinic/
+profile/
+
+# Playwright MCP session artifacts (console logs + page snapshots)
+.playwright-mcp/
+
+# =============================================================================
+# Package Manager Alternatives (we use npm)
+# =============================================================================
+pnpm-lock.yaml
+yarn.lock
+.yarn/
+.pnp.*
+nul
+__pycache__/

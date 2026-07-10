@@ -1,0 +1,136 @@
+name: Sign Existing Binaries
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  id-token: write   # Required for OIDC authentication with Sigstore
+  contents: read    # Required to read repository contents
+
+jobs:
+  sign-binaries:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Cosign
+      uses: sigstore/cosign-installer@v3
+      with:
+        cosign-release: 'v2.2.4'
+
+    - name: Verify build artifacts exist
+      run: |
+        count=$(find . \( -name "*.exe" -o -name "*.msi" -o -name "*.msix" \) -type f | wc -l)
+        if [ "$count" -eq 0 ]; then
+          echo "❌ No .exe/.msi/.msix artifacts found. This workflow signs artifacts that already" >&2
+          echo "   exist in the checkout (e.g. downloaded from another job) — it does not build" >&2
+          echo "   them itself, and a bare checkout on its own never has any." >&2
+          exit 1
+        fi
+        echo "Found $count artifact(s) to sign."
+
+    - name: Find and sign executables
+      run: |
+        echo "🔍 Finding binaries to sign..."
+
+        # Find all exe files
+        find . -name "*.exe" -type f | while read -r file; do
+          if [ -f "$file" ]; then
+            echo "🔐 Signing executable: $file"
+            cosign sign-blob --yes "$file" --output-signature "${file}.sig" --output-certificate "${file}.crt"
+            echo "✅ Signed: $file"
+          fi
+        done
+        
+        # Find all MSI files
+        find . -name "*.msi" -type f | while read -r file; do
+          if [ -f "$file" ]; then
+            echo "🔐 Signing MSI installer: $file"
+            cosign sign-blob --yes "$file" --output-signature "${file}.sig" --output-certificate "${file}.crt"
+            echo "✅ Signed: $file"
+          fi
+        done
+        
+        # Find all MSIX files
+        find . -name "*.msix" -type f | while read -r file; do
+          if [ -f "$file" ]; then
+            echo "🔐 Signing MSIX package: $file"
+            cosign sign-blob --yes "$file" --output-signature "${file}.sig" --output-certificate "${file}.crt"
+            echo "✅ Signed: $file"
+          fi
+        done
+
+    - name: Create build metadata
+      run: |
+        echo "📋 Creating build metadata..."
+        
+        # Create a metadata file for all signed files
+        echo "# Sigstore Signing Metadata" > SIGNING_METADATA.md
+        echo "Generated on: $(date -u)" >> SIGNING_METADATA.md
+        echo "Commit SHA: ${{ github.sha }}" >> SIGNING_METADATA.md
+        echo "Repository: ${{ github.repository }}" >> SIGNING_METADATA.md
+        echo "" >> SIGNING_METADATA.md
+        echo "## Signed Files" >> SIGNING_METADATA.md
+        
+        find . \( -name "*.exe" -o -name "*.msi" -o -name "*.msix" \) -type f | while read -r file; do
+          if [ -f "$file" ]; then
+            echo "- **$file**" >> SIGNING_METADATA.md
+            echo "  - SHA256: $(sha256sum "$file" | cut -d' ' -f1)" >> SIGNING_METADATA.md
+            echo "  - Size: $(stat -c%s "$file") bytes" >> SIGNING_METADATA.md
+            echo "  - Signature: ${file}.sig" >> SIGNING_METADATA.md
+            echo "  - Certificate: ${file}.crt" >> SIGNING_METADATA.md
+            echo "" >> SIGNING_METADATA.md
+          fi
+        done
+
+    - name: Verify signatures
+      run: |
+        echo "🔍 Verifying all signatures..."
+        
+        # Verify all signatures
+        find . -name "*.sig" -type f | while read -r sigfile; do
+          original="${sigfile%.sig}"
+          cert="${original}.crt"
+          
+          if [ -f "$original" ] && [ -f "$cert" ]; then
+            echo "🔍 Verifying: $original"
+            if cosign verify-blob --signature "$sigfile" --certificate "$cert" --certificate-identity-regexp "https://github.com/faratech/wfdiag" --certificate-oidc-issuer "https://token.actions.githubusercontent.com" "$original"; then
+              echo "✅ Verification successful: $original"
+            else
+              echo "❌ Verification failed: $original"
+              exit 1
+            fi
+          fi
+        done
+
+    - name: Upload signature artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: sigstore-signatures
+        path: |
+          **/*.sig
+          **/*.crt
+          SIGNING_METADATA.md
+        retention-days: 90
+
+    - name: Summary
+      run: |
+        echo "## 🔐 Sigstore Signing Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Signed Files:" >> $GITHUB_STEP_SUMMARY
+        find . \( -name "*.exe" -o -name "*.msi" -o -name "*.msix" \) -type f | while read -r file; do
+          size=$(stat -c%s "$file" 2>/dev/null || echo "unknown")
+          echo "- \`$file\` (${size} bytes)" >> $GITHUB_STEP_SUMMARY
+        done
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Generated Artifacts:" >> $GITHUB_STEP_SUMMARY
+        find . \( -name "*.sig" -o -name "*.crt" \) -type f | while read -r file; do
+          echo "- \`$file\`" >> $GITHUB_STEP_SUMMARY
+        done
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "🎯 All binaries have been signed with Sigstore keyless signatures!"

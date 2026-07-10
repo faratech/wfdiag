@@ -1,0 +1,54 @@
+name: Test Store Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run ID to download artifacts from (leave empty for latest)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  test-publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download bundle from previous run
+        uses: actions/download-artifact@v4
+        with:
+          name: msixbundle-unsigned
+          path: bundle
+          run-id: ${{ github.event.inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Find bundle file
+        id: find-bundle
+        shell: pwsh
+        run: |
+          $bundle = Get-ChildItem "bundle/*.msixbundle" | Select-Object -First 1
+          if (-not $bundle) {
+            Write-Host "::error::No .msixbundle found in artifacts"
+            exit 1
+          }
+          Write-Host "Found bundle: $($bundle.FullName)"
+          echo "bundle_file=$($bundle.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Setup Microsoft Store CLI
+        uses: microsoft/setup-msstore-cli@v1
+
+      - name: Configure Store credentials
+        shell: pwsh
+        run: |
+          msstore reconfigure `
+            --tenantId ${{ secrets.AZURE_TENANT_ID }} `
+            --sellerId ${{ secrets.STORE_SELLER_ID }} `
+            --clientId ${{ secrets.AZURE_CLIENT_ID }} `
+            --clientSecret ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: Publish to Microsoft Store
+        shell: pwsh
+        run: |
+          msstore publish -i bundle -id 9NJ59RH053PV -v
