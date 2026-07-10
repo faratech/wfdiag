@@ -85,6 +85,10 @@ export const useAI = () => {
         return 'OpenAI'
       case 'phi_silica':
         return 'Phi Silica (Local)'
+      case 'codex_cli':
+        return 'ChatGPT (Codex CLI)'
+      case 'claude_code':
+        return 'Claude (Claude Code)'
       default:
         return 'None'
     }

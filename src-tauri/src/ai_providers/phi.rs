@@ -34,9 +34,10 @@ pub async fn one_shot(prompt: &str) -> Result<String, String> {
 }
 
 /// Render a chat request as a single plain-text prompt (Phi Silica has no
-/// message API). The chat layer is responsible for trimming the history to
-/// the provider budget first; this only applies the hard safety clamp.
-fn flatten_request(req: &ChatRequest) -> String {
+/// message API; the Codex CLI bridge reuses this for the same reason). The
+/// chat layer is responsible for trimming the history to the provider budget
+/// first; Phi additionally applies its hard safety clamp.
+pub(super) fn flatten_request(req: &ChatRequest) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(system) = req.system.as_deref().filter(|s| !s.is_empty()) {
         parts.push(system.to_string());

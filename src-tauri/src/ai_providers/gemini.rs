@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 
 /// Default model when the `geminiModel` setting is empty.
 pub const GEMINI_DEFAULT_MODEL: &str = "gemini-2.5-flash";
-const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
+pub(crate) const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 /// Build a generateContent request body. Pure and network-free for testability.
 pub(crate) fn build_generate_body(
@@ -110,10 +110,13 @@ fn map_finish_reason(reason: Option<&str>, has_tool_calls: bool) -> FinishReason
         // All of these mean the model did NOT produce a normal completion —
         // treating them as Stop would make a blocked/malformed generation
         // look like a successful (if empty) answer.
-        Some("SAFETY") | Some("PROHIBITED_CONTENT") | Some("BLOCKLIST") | Some("RECITATION")
-        | Some("SPII") | Some("OTHER") | Some("MALFORMED_FUNCTION_CALL") => {
-            FinishReason::Refusal
-        }
+        Some("SAFETY")
+        | Some("PROHIBITED_CONTENT")
+        | Some("BLOCKLIST")
+        | Some("RECITATION")
+        | Some("SPII")
+        | Some("OTHER")
+        | Some("MALFORMED_FUNCTION_CALL") => FinishReason::Refusal,
         _ if has_tool_calls => FinishReason::ToolUse,
         _ => FinishReason::Stop,
     }

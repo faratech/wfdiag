@@ -548,12 +548,24 @@ mod tests {
 
     #[test]
     fn has_report_extension_applies_outside_temp_too() {
-        assert!(has_report_extension(Path::new(r"C:\Users\me\Documents\wf-diagnostics.txt")));
-        assert!(has_report_extension(Path::new(r"C:\Users\me\Desktop\report.html")));
-        assert!(has_report_extension(Path::new(r"C:\Users\me\Downloads\report.JSON")));
-        assert!(!has_report_extension(Path::new(r"C:\Users\me\Desktop\run.bat")));
-        assert!(!has_report_extension(Path::new(r"C:\Users\me\Documents\startup.vbs")));
-        assert!(!has_report_extension(Path::new(r"C:\Users\me\Documents\noext")));
+        assert!(has_report_extension(Path::new(
+            r"C:\Users\me\Documents\wf-diagnostics.txt"
+        )));
+        assert!(has_report_extension(Path::new(
+            r"C:\Users\me\Desktop\report.html"
+        )));
+        assert!(has_report_extension(Path::new(
+            r"C:\Users\me\Downloads\report.JSON"
+        )));
+        assert!(!has_report_extension(Path::new(
+            r"C:\Users\me\Desktop\run.bat"
+        )));
+        assert!(!has_report_extension(Path::new(
+            r"C:\Users\me\Documents\startup.vbs"
+        )));
+        assert!(!has_report_extension(Path::new(
+            r"C:\Users\me\Documents\noext"
+        )));
     }
 
     #[test]

@@ -63,6 +63,9 @@ pub struct AppSettings {
     // NEVER written to the settings file (see settings_for_disk)
     #[serde(default)]
     pub open_ai_api_key: Option<String>,
+    // OpenAI model override; empty falls back to openai::OPENAI_MODEL
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_ai_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +94,19 @@ pub struct AppSettings {
     pub ollama_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ollama_model: Option<String>,
+    // Codex CLI bridge (ChatGPT subscription — no API key, the CLI owns
+    // auth): empty path auto-detects the CLI on PATH, empty model uses the
+    // CLI's default
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_cli_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_model: Option<String>,
+    // Claude Code CLI bridge (Claude subscription — same trust model as the
+    // Codex bridge: the CLI owns auth, no key or token stored here)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_cli_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_model: Option<String>,
     // User-customized Quick Scan task IDs. camelCase rename => "quickScanTasks" to match
     // the TS SettingsData field; #[serde(default)] keeps old settings files loadable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,6 +116,9 @@ pub struct AppSettings {
     // its port is dynamic by design and must not be hardcoded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_ai_endpoint: Option<String>,
+    // Foundry Local model override; empty falls back to FOUNDRY_LOCAL_MODEL
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_ai_model: Option<String>,
     // Microsoft-issued Limited Access Feature token for Phi Silica
     // (systemAIModels). When set, the supported WinRT activation path works
     // without the bundled-DLL bypass. Empty uses the built-in fallback token.
@@ -125,6 +144,7 @@ impl Default for AppSettings {
             ai_enabled: true,
             preferred_ai_provider: default_ai_provider(),
             open_ai_api_key: None,
+            open_ai_model: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             deepseek_api_key: None,
@@ -136,8 +156,13 @@ impl Default for AppSettings {
             custom_model: None,
             ollama_endpoint: None,
             ollama_model: None,
+            codex_cli_path: None,
+            codex_model: None,
+            claude_cli_path: None,
+            claude_model: None,
             quick_scan_tasks: None,
             local_ai_endpoint: None,
+            local_ai_model: None,
             phi_silica_laf_token: None,
             close_to_tray: false,
         }
@@ -320,6 +345,10 @@ fn sync_in_memory_state(settings: &AppSettings) {
         "foundry_local" | "foundrylocal" => crate::ai_service::AIProviderPreference::FoundryLocal,
         "ollama" => crate::ai_service::AIProviderPreference::Ollama,
         "custom_openai" | "custom" => crate::ai_service::AIProviderPreference::CustomOpenAI,
+        "codex_cli" | "codexcli" | "codex" => crate::ai_service::AIProviderPreference::CodexCli,
+        "claude_code" | "claudecode" | "claude" => {
+            crate::ai_service::AIProviderPreference::ClaudeCode
+        }
         "anthropic" => crate::ai_service::AIProviderPreference::Anthropic,
         "gemini" => crate::ai_service::AIProviderPreference::Gemini,
         "deepseek" => crate::ai_service::AIProviderPreference::DeepSeek,
@@ -425,6 +454,12 @@ mod tests {
             custom_model: Some("meta-llama/llama-4".into()),
             ollama_endpoint: Some("http://127.0.0.1:11434".into()),
             ollama_model: Some("llama3.2".into()),
+            codex_cli_path: Some(r"C:\Tools\codex.exe".into()),
+            codex_model: Some("gpt-5-codex".into()),
+            claude_cli_path: Some(r"C:\Tools\claude.exe".into()),
+            claude_model: Some("claude-sonnet-4-6".into()),
+            open_ai_model: Some("gpt-5-nano".into()),
+            local_ai_model: Some("phi-4-mini".into()),
             ..AppSettings::default()
         }
     }
@@ -462,6 +497,11 @@ mod tests {
             Some("https://openrouter.ai/api")
         );
         assert_eq!(on_disk.ollama_model.as_deref(), Some("llama3.2"));
+        assert_eq!(
+            on_disk.codex_cli_path.as_deref(),
+            Some(r"C:\Tools\codex.exe")
+        );
+        assert_eq!(on_disk.codex_model.as_deref(), Some("gpt-5-codex"));
     }
 
     #[test]
@@ -489,6 +529,12 @@ mod tests {
             "\"customModel\"",
             "\"ollamaEndpoint\"",
             "\"ollamaModel\"",
+            "\"codexCliPath\"",
+            "\"codexModel\"",
+            "\"claudeCliPath\"",
+            "\"claudeModel\"",
+            "\"openAiModel\"",
+            "\"localAiModel\"",
             "\"preferredAIProvider\"",
         ] {
             // geminiModel is None in the fixture and skipped — check it on a

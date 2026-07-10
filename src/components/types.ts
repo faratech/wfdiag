@@ -9,12 +9,16 @@ export type AIProviderId =
   | 'foundry_local'
   | 'ollama'
   | 'custom_openai'
+  | 'codex_cli'
+  | 'claude_code'
   | 'anthropic'
   | 'gemini'
   | 'deepseek'
 
 export interface SettingsData {
   openAiApiKey?: string
+  /** OpenAI model override; empty uses the app default (gpt-5-nano) */
+  openAiModel?: string
   /** Anthropic (Claude) API key — stored in the OS secret store, never the settings file */
   anthropicApiKey?: string
   /** Anthropic model override; empty uses the app default (claude-sonnet-4-6) */
@@ -37,6 +41,20 @@ export interface SettingsData {
   ollamaEndpoint?: string
   /** Ollama model; empty uses the first locally pulled model */
   ollamaModel?: string
+  /**
+   * Path to the OpenAI Codex CLI executable (ChatGPT subscription bridge —
+   * the CLI owns sign-in, no API key). Empty auto-detects it on PATH.
+   */
+  codexCliPath?: string
+  /** Codex model override; empty uses the CLI's default */
+  codexModel?: string
+  /**
+   * Path to the Claude Code CLI executable (Claude subscription bridge —
+   * the CLI owns sign-in, no API key). Empty auto-detects it on PATH.
+   */
+  claudeCliPath?: string
+  /** Claude Code model override; empty uses the CLI's default */
+  claudeModel?: string
   autoSave?: boolean
   scanOnStartup?: boolean
   maxConcurrentTasks?: number
@@ -57,6 +75,8 @@ export interface SettingsData {
    * Leave empty to auto-discover via the foundry CLI (its port is dynamic).
    */
   localAiEndpoint?: string
+  /** Foundry Local model override; empty uses the app default (phi-4-mini) */
+  localAiModel?: string
   /**
    * Microsoft-issued Limited Access Feature token for Phi Silica. With an
    * approved token the supported WinRT path works without the DLL bypass.

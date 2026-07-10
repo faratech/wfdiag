@@ -36,6 +36,14 @@ pub enum AIProvider {
     /// User-configured OpenAI-compatible endpoint (OpenRouter, Groq, …)
     #[serde(rename = "custom_openai")]
     CustomOpenAI,
+    /// ChatGPT subscription via the user's installed Codex CLI (the CLI owns
+    /// sign-in; no API key — see `ai_providers/cli_bridge.rs`)
+    #[serde(rename = "codex_cli")]
+    CodexCli,
+    /// Claude subscription via the user's installed Claude Code CLI (same
+    /// bridge trust model as Codex — the CLI owns sign-in)
+    #[serde(rename = "claude_code")]
+    ClaudeCode,
     /// Anthropic Claude via the native Messages API
     #[serde(rename = "anthropic")]
     Anthropic,
@@ -56,6 +64,8 @@ impl std::fmt::Display for AIProvider {
             AIProvider::FoundryLocal => write!(f, "foundry_local"),
             AIProvider::Ollama => write!(f, "ollama"),
             AIProvider::CustomOpenAI => write!(f, "custom_openai"),
+            AIProvider::CodexCli => write!(f, "codex_cli"),
+            AIProvider::ClaudeCode => write!(f, "claude_code"),
             AIProvider::Anthropic => write!(f, "anthropic"),
             AIProvider::Gemini => write!(f, "gemini"),
             AIProvider::DeepSeek => write!(f, "deepseek"),
@@ -79,6 +89,10 @@ pub enum AIProviderPreference {
     Ollama,
     #[serde(rename = "custom_openai")]
     CustomOpenAI,
+    #[serde(rename = "codex_cli")]
+    CodexCli,
+    #[serde(rename = "claude_code")]
+    ClaudeCode,
     #[serde(rename = "anthropic")]
     Anthropic,
     #[serde(rename = "gemini")]
@@ -254,6 +268,22 @@ pub async fn check_custom_available() -> Option<String> {
     }
 }
 
+/// Check if the Codex CLI bridge is usable: installed AND signed in with a
+/// ChatGPT account (probe result is cached briefly in `cli_bridge`).
+pub async fn check_codex_available() -> bool {
+    crate::ai_providers::cli_bridge::probe(AIProvider::CodexCli)
+        .await
+        .usable()
+}
+
+/// Check if the Claude Code CLI bridge is usable: installed AND signed in
+/// with a Claude account (probe result is cached briefly in `cli_bridge`).
+pub async fn check_claude_code_available() -> bool {
+    crate::ai_providers::cli_bridge::probe(AIProvider::ClaudeCode)
+        .await
+        .usable()
+}
+
 /// Check if Anthropic is available (API key stored)
 pub async fn check_anthropic_available() -> bool {
     crate::commands::settings::load_provider_key_internal(crate::dpapi::ProviderKeyId::Anthropic)
@@ -283,6 +313,10 @@ pub struct ProviderAvailability {
     pub ollama: bool,
     /// Custom endpoint configured (endpoint + model) AND reachable
     pub custom: bool,
+    /// Codex CLI installed AND signed in (ChatGPT subscription bridge)
+    pub codex: bool,
+    /// Claude Code CLI installed AND signed in (Claude subscription bridge)
+    pub claude: bool,
     pub openai: bool,
     pub anthropic: bool,
     pub gemini: bool,
@@ -295,10 +329,11 @@ pub struct ProviderAvailability {
 /// Auto is local-first: on-device Phi Silica (NPU, no server), then Foundry
 /// Local (Microsoft's local server — before Ollama so pre-2.5 setups see no
 /// behavior change), then Ollama, then a configured custom endpoint
-/// (configuring one is a deliberate act), then cloud keys in the order
-/// OpenAI → Anthropic → Gemini (OpenAI first strictly for backward
-/// compatibility; the cloud tiebreak is pinned by test and moot in practice —
-/// multiple-key users set an explicit preference).
+/// (configuring one is a deliberate act), then a signed-in Codex CLI (a
+/// ChatGPT subscription has no marginal cost, so it beats metered API keys),
+/// then cloud keys in the order OpenAI → Anthropic → Gemini (OpenAI first
+/// strictly for backward compatibility; the cloud tiebreak is pinned by test
+/// and moot in practice — multiple-key users set an explicit preference).
 ///
 /// An explicit preference never falls back to a different provider.
 pub fn route_provider(pref: AIProviderPreference, avail: ProviderAvailability) -> AIProvider {
@@ -312,6 +347,10 @@ pub fn route_provider(pref: AIProviderPreference, avail: ProviderAvailability) -
                 AIProvider::Ollama
             } else if avail.custom {
                 AIProvider::CustomOpenAI
+            } else if avail.codex {
+                AIProvider::CodexCli
+            } else if avail.claude {
+                AIProvider::ClaudeCode
             } else if avail.openai {
                 AIProvider::OpenAI
             } else if avail.anthropic {
@@ -329,6 +368,8 @@ pub fn route_provider(pref: AIProviderPreference, avail: ProviderAvailability) -
         AIProviderPreference::FoundryLocal if avail.foundry => AIProvider::FoundryLocal,
         AIProviderPreference::Ollama if avail.ollama => AIProvider::Ollama,
         AIProviderPreference::CustomOpenAI if avail.custom => AIProvider::CustomOpenAI,
+        AIProviderPreference::CodexCli if avail.codex => AIProvider::CodexCli,
+        AIProviderPreference::ClaudeCode if avail.claude => AIProvider::ClaudeCode,
         AIProviderPreference::Anthropic if avail.anthropic => AIProvider::Anthropic,
         AIProviderPreference::Gemini if avail.gemini => AIProvider::Gemini,
         AIProviderPreference::DeepSeek if avail.deepseek => AIProvider::DeepSeek,
@@ -358,6 +399,10 @@ pub async fn determine_active_provider_with_key(
         AIProviderPreference::CustomOpenAI => {
             avail.custom = check_custom_available().await.is_some();
         }
+        AIProviderPreference::CodexCli => avail.codex = check_codex_available().await,
+        AIProviderPreference::ClaudeCode => {
+            avail.claude = check_claude_code_available().await;
+        }
         AIProviderPreference::Anthropic => avail.anthropic = check_anthropic_available().await,
         AIProviderPreference::Gemini => avail.gemini = check_gemini_available().await,
         AIProviderPreference::DeepSeek => avail.deepseek = check_deepseek_available().await,
@@ -369,6 +414,10 @@ pub async fn determine_active_provider_with_key(
             let won = local_won || avail.ollama;
             avail.custom = !won && check_custom_available().await.is_some();
             let won = won || avail.custom;
+            avail.codex = !won && check_codex_available().await;
+            let won = won || avail.codex;
+            avail.claude = !won && check_claude_code_available().await;
+            let won = won || avail.claude;
             avail.openai = !won && (frontend_openai_key || check_openai_available().await);
             let won = won || avail.openai;
             avail.anthropic = !won && check_anthropic_available().await;
@@ -409,6 +458,8 @@ pub async fn get_ai_status() -> AIProviderStatus {
     let foundry_endpoint = check_foundry_local_available().await;
     let ollama_endpoint = check_ollama_available().await;
     let custom_endpoint = check_custom_available().await;
+    let codex_probe = crate::ai_providers::cli_bridge::probe(AIProvider::CodexCli).await;
+    let claude_probe = crate::ai_providers::cli_bridge::probe(AIProvider::ClaudeCode).await;
     let anthropic_available = check_anthropic_available().await;
     let gemini_available = check_gemini_available().await;
     let deepseek_available = check_deepseek_available().await;
@@ -420,6 +471,8 @@ pub async fn get_ai_status() -> AIProviderStatus {
         foundry: foundry_endpoint.is_some(),
         ollama: ollama_endpoint.is_some(),
         custom: custom_endpoint.is_some(),
+        codex: codex_probe.usable(),
+        claude: claude_probe.usable(),
         openai: openai_available,
         anthropic: anthropic_available,
         gemini: gemini_available,
@@ -443,7 +496,15 @@ pub async fn get_ai_status() -> AIProviderStatus {
             AIProvider::FoundryLocal,
             foundry_endpoint.is_some(),
             foundry_endpoint.is_some(),
-            Some(crate::ai_providers::foundry::FOUNDRY_LOCAL_MODEL.to_string()),
+            Some(
+                settings
+                    .local_ai_model
+                    .clone()
+                    .filter(|m| !m.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        crate::ai_providers::foundry::FOUNDRY_LOCAL_MODEL.to_string()
+                    }),
+            ),
             foundry_endpoint.clone(),
         ),
         provider_info(
@@ -462,10 +523,32 @@ pub async fn get_ai_status() -> AIProviderStatus {
             custom_endpoint.or_else(|| settings.custom_endpoint.clone()),
         ),
         provider_info(
+            AIProvider::CodexCli,
+            // Usable = signed in; configured = installed, so the UI can show
+            // a Sign in action for the installed-but-signed-out state
+            codex_probe.usable(),
+            codex_probe.path.is_some(),
+            settings.codex_model.clone(),
+            codex_probe.path.map(|p| p.display().to_string()),
+        ),
+        provider_info(
+            AIProvider::ClaudeCode,
+            claude_probe.usable(),
+            claude_probe.path.is_some(),
+            settings.claude_model.clone(),
+            claude_probe.path.map(|p| p.display().to_string()),
+        ),
+        provider_info(
             AIProvider::OpenAI,
             openai_available,
             openai_available,
-            Some(crate::ai_providers::openai::OPENAI_MODEL.to_string()),
+            Some(
+                settings
+                    .open_ai_model
+                    .clone()
+                    .filter(|m| !m.trim().is_empty())
+                    .unwrap_or_else(|| crate::ai_providers::openai::OPENAI_MODEL.to_string()),
+            ),
             None,
         ),
         provider_info(
@@ -839,6 +922,8 @@ pub async fn ai_set_preference(preference: String) -> Result<(), String> {
         "foundry_local" | "foundrylocal" => AIProviderPreference::FoundryLocal,
         "ollama" => AIProviderPreference::Ollama,
         "custom_openai" | "custom" => AIProviderPreference::CustomOpenAI,
+        "codex_cli" | "codexcli" | "codex" => AIProviderPreference::CodexCli,
+        "claude_code" | "claudecode" | "claude" => AIProviderPreference::ClaudeCode,
         "anthropic" => AIProviderPreference::Anthropic,
         "gemini" => AIProviderPreference::Gemini,
         "deepseek" => AIProviderPreference::DeepSeek,
@@ -909,6 +994,8 @@ mod tests {
             foundry: true,
             ollama: true,
             custom: true,
+            codex: true,
+            claude: true,
             openai: true,
             anthropic: true,
             gemini: true,
@@ -918,14 +1005,17 @@ mod tests {
 
     #[test]
     fn auto_walks_the_priority_chain_link_by_link() {
-        // Local-first chain: phi → foundry → ollama → custom → openai →
-        // anthropic → gemini → none. Each step turns off the previous winner.
+        // Local-first chain: phi → foundry → ollama → custom → codex →
+        // claude → openai → anthropic → gemini → none. Each step turns off
+        // the previous winner.
         let mut avail = all();
         let chain = [
             AIProvider::PhiSilica,
             AIProvider::FoundryLocal,
             AIProvider::Ollama,
             AIProvider::CustomOpenAI,
+            AIProvider::CodexCli,
+            AIProvider::ClaudeCode,
             AIProvider::OpenAI,
             AIProvider::Anthropic,
             AIProvider::Gemini,
@@ -943,6 +1033,8 @@ mod tests {
                 AIProvider::FoundryLocal => avail.foundry = false,
                 AIProvider::Ollama => avail.ollama = false,
                 AIProvider::CustomOpenAI => avail.custom = false,
+                AIProvider::CodexCli => avail.codex = false,
+                AIProvider::ClaudeCode => avail.claude = false,
                 AIProvider::OpenAI => avail.openai = false,
                 AIProvider::Anthropic => avail.anthropic = false,
                 AIProvider::Gemini => avail.gemini = false,
@@ -979,6 +1071,8 @@ mod tests {
             (AIProviderPreference::FoundryLocal, AIProvider::FoundryLocal),
             (AIProviderPreference::Ollama, AIProvider::Ollama),
             (AIProviderPreference::CustomOpenAI, AIProvider::CustomOpenAI),
+            (AIProviderPreference::CodexCli, AIProvider::CodexCli),
+            (AIProviderPreference::ClaudeCode, AIProvider::ClaudeCode),
             (AIProviderPreference::Anthropic, AIProvider::Anthropic),
             (AIProviderPreference::Gemini, AIProvider::Gemini),
             (AIProviderPreference::DeepSeek, AIProvider::DeepSeek),
@@ -999,6 +1093,8 @@ mod tests {
                 AIProviderPreference::FoundryLocal => avail.foundry = false,
                 AIProviderPreference::Ollama => avail.ollama = false,
                 AIProviderPreference::CustomOpenAI => avail.custom = false,
+                AIProviderPreference::CodexCli => avail.codex = false,
+                AIProviderPreference::ClaudeCode => avail.claude = false,
                 AIProviderPreference::OpenAI => avail.openai = false,
                 AIProviderPreference::Anthropic => avail.anthropic = false,
                 AIProviderPreference::Gemini => avail.gemini = false,
@@ -1013,6 +1109,8 @@ mod tests {
             AIProviderPreference::FoundryLocal,
             AIProviderPreference::Ollama,
             AIProviderPreference::CustomOpenAI,
+            AIProviderPreference::CodexCli,
+            AIProviderPreference::ClaudeCode,
             AIProviderPreference::Anthropic,
             AIProviderPreference::Gemini,
             AIProviderPreference::DeepSeek,
@@ -1037,6 +1135,8 @@ mod tests {
             (AIProvider::FoundryLocal, "\"foundry_local\""),
             (AIProvider::Ollama, "\"ollama\""),
             (AIProvider::CustomOpenAI, "\"custom_openai\""),
+            (AIProvider::CodexCli, "\"codex_cli\""),
+            (AIProvider::ClaudeCode, "\"claude_code\""),
             (AIProvider::Anthropic, "\"anthropic\""),
             (AIProvider::Gemini, "\"gemini\""),
             (AIProvider::DeepSeek, "\"deepseek\""),
@@ -1084,6 +1184,8 @@ mod tests {
             (AIProviderPreference::FoundryLocal, "\"foundry_local\""),
             (AIProviderPreference::Ollama, "\"ollama\""),
             (AIProviderPreference::CustomOpenAI, "\"custom_openai\""),
+            (AIProviderPreference::CodexCli, "\"codex_cli\""),
+            (AIProviderPreference::ClaudeCode, "\"claude_code\""),
             (AIProviderPreference::Anthropic, "\"anthropic\""),
             (AIProviderPreference::Gemini, "\"gemini\""),
             (AIProviderPreference::DeepSeek, "\"deepseek\""),

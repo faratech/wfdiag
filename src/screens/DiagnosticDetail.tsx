@@ -201,6 +201,8 @@ function providerLabelFor(provider: string): string {
   if (provider === 'foundry_local') return 'local (Foundry)'
   if (provider === 'ollama') return 'local (Ollama)'
   if (provider === 'custom_openai') return 'custom API'
+  if (provider === 'codex_cli') return 'subscription (Codex CLI)'
+  if (provider === 'claude_code') return 'subscription (Claude Code)'
   if (provider === 'none') return 'not configured'
   return 'cloud'
 }
