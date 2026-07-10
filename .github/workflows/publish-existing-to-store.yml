@@ -78,8 +78,13 @@ jobs:
             if ($body) {
               # Drop the install/download boilerplate the release template
               # appends — Store "What's new" should be just the changelog.
+              # Ordinal comparison is required: the default culture-aware
+              # IndexOf can return an index that disagrees with Substring's
+              # UTF-16 code-unit counting once the text has em-dashes,
+              # curly quotes or bullets, throwing "Index and length must
+              # refer to a location within the string."
               foreach ($marker in @('### Recommended Installation', '### Alternative Downloads', '### Manual MSIX')) {
-                $idx = $body.IndexOf($marker)
+                $idx = $body.IndexOf($marker, [StringComparison]::Ordinal)
                 if ($idx -ge 0) { $body = $body.Substring(0, $idx) }
               }
               $notes = $body -replace '\[([^\]]+)\]\([^)]+\)', '$1'   # links -> text
