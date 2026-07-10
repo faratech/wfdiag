@@ -1,0 +1,72 @@
+name: Update Store Release Notes
+
+# Metadata-only Store update: patches the "What's new in this version" text
+# on the listing without touching packages. Creates a new submission (cloned
+# from the live one by Partner Center), sets releaseNotes on every listing
+# language, commits, and polls. Metadata-only submissions still pass through
+# certification, but typically clear quickly.
+#
+# NOTE: fails cleanly if a submission is already in certification — wait for
+# the in-flight release to publish first.
+on:
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: 'The "What''s new" text to publish (plain text, max ~1490 chars)'
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  STORE_APP_ID: 9NJ59RH053PV
+
+jobs:
+  update-release-notes:
+    runs-on: windows-latest
+    steps:
+      - name: Setup Microsoft Store CLI
+        uses: microsoft/setup-msstore-cli@v1
+
+      - name: Configure Store credentials
+        shell: pwsh
+        run: |
+          msstore reconfigure `
+            --tenantId ${{ secrets.AZURE_TENANT_ID }} `
+            --sellerId ${{ secrets.STORE_SELLER_ID }} `
+            --clientId ${{ secrets.AZURE_CLIENT_ID }} `
+            --clientSecret ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: Patch release notes and commit submission
+        shell: pwsh
+        env:
+          NOTES_INPUT: ${{ github.event.inputs.release_notes }}
+        run: |
+          $notes = $env:NOTES_INPUT.Trim()
+          if (-not $notes) { throw "release_notes input is empty" }
+          if ($notes.Length -gt 1490) { $notes = $notes.Substring(0, 1490) + "…" }
+          Write-Host "Applying release notes ($($notes.Length) chars):"
+          Write-Host $notes
+
+          # Documented msstore flow for metadata edits: get -> patch -> update.
+          # The packaged-app update API REPLACES the submission body, so the
+          # full round-trip is required — never send partial JSON.
+          $raw = (msstore submission get ${{ env.STORE_APP_ID }} | Out-String)
+          $start = $raw.IndexOf('{')
+          $end = $raw.LastIndexOf('}')
+          if ($start -lt 0 -or $end -le $start) { throw "No JSON in 'submission get' output" }
+          $submission = $raw.Substring($start, $end - $start + 1) | ConvertFrom-Json
+
+          $langs = @($submission.listings.PSObject.Properties.Name)
+          if ($langs.Count -eq 0) { throw "Submission has no listings" }
+          foreach ($lang in $langs) {
+            $submission.listings.$lang.baseListing.releaseNotes = $notes
+          }
+
+          $json = $submission | ConvertTo-Json -Depth 64 -Compress
+          msstore submission update ${{ env.STORE_APP_ID }} $json --skipInitialPolling
+          if ($LASTEXITCODE -ne 0) { throw "msstore submission update failed" }
+
+          msstore submission publish ${{ env.STORE_APP_ID }}
+          if ($LASTEXITCODE -ne 0) { throw "msstore submission publish failed" }
+          msstore submission poll ${{ env.STORE_APP_ID }}
