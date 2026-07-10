@@ -67,23 +67,56 @@ async fn exec(cfg: &ResolvedProviderConfig, payload: String) -> Result<String, S
     cmd.current_dir(&workdir);
 
     let output = cli_bridge::run_headless(cmd, Some(&payload), EXEC_TIMEOUT, "Codex CLI").await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
+        // codex writes its real failure to stdout as a JSONL `error` event;
+        // stderr is often empty. Check stdout first, then stderr, then a
+        // generic hint — never swallow the actual reason (see issue #99).
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = cli_bridge::tail(stderr.trim(), 400);
+        let detail = extract_error(&stdout)
+            .or_else(|| {
+                let tail = cli_bridge::tail(stderr.trim(), 400);
+                (!tail.is_empty()).then_some(tail)
+            })
+            .or_else(|| {
+                let tail = cli_bridge::tail(stdout.trim(), 400);
+                (!tail.is_empty()).then_some(tail)
+            })
+            .unwrap_or_else(|| {
+                "no error output. If you recently signed out, sign in again in Settings."
+                    .to_string()
+            });
         return Err(format!(
             "Codex CLI failed (exit {}): {}",
             output
                 .status
                 .code()
                 .map_or_else(|| "?".to_string(), |c| c.to_string()),
-            if detail.is_empty() {
-                "no error output. If you recently signed out, sign in again in Settings."
-            } else {
-                &detail
-            }
+            detail
         ));
     }
-    parse_exec_jsonl(&String::from_utf8_lossy(&output.stdout))
+    parse_exec_jsonl(&stdout)
+}
+
+/// The message from the last `error` event in `codex exec --json` output, if
+/// any. Used to surface the real reason behind a non-zero exit.
+fn extract_error(stdout: &str) -> Option<String> {
+    let mut message = None;
+    for line in stdout.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        if let Ok(event) = serde_json::from_str::<serde_json::Value>(line)
+            && event.get("type").and_then(|t| t.as_str()) == Some("error")
+        {
+            message = event
+                .get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string);
+        }
+    }
+    message
 }
 
 /// Extract the answer from `codex exec --json` output: JSONL thread events,
@@ -166,6 +199,23 @@ mod tests {
             r#"{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}"#,
         );
         assert_eq!(parse_exec_jsonl(recovered).unwrap(), "ok");
+    }
+
+    #[test]
+    fn extract_error_finds_the_last_error_event() {
+        let out = concat!(
+            r#"{"type":"error","message":"stream disconnected, retrying"}"#,
+            "\n",
+            r#"{"type":"error","message":"401 Unauthorized: please run codex login"}"#,
+            "\n",
+        );
+        assert_eq!(
+            extract_error(out).unwrap(),
+            "401 Unauthorized: please run codex login"
+        );
+        // No error event -> None (so the caller can fall back to stderr/stdout)
+        assert_eq!(extract_error(r#"{"type":"turn.completed"}"#), None);
+        assert_eq!(extract_error("plain text"), None);
     }
 
     #[test]
