@@ -76,6 +76,12 @@ jobs:
             # plain text (no markdown headings/links/emphasis)
             $body = gh release view "v$version" --repo ${{ github.repository }} --json body -q .body
             if ($body) {
+              # Drop the install/download boilerplate the release template
+              # appends — Store "What's new" should be just the changelog.
+              foreach ($marker in @('### Recommended Installation', '### Alternative Downloads', '### Manual MSIX')) {
+                $idx = $body.IndexOf($marker)
+                if ($idx -ge 0) { $body = $body.Substring(0, $idx) }
+              }
               $notes = $body -replace '\[([^\]]+)\]\([^)]+\)', '$1'   # links -> text
               $notes = ($notes -split "`n" | Where-Object {
                 $_ -notmatch '^\s*#' -and $_ -notmatch '^\s*---\s*$'

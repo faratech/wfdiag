@@ -370,7 +370,13 @@ Auto routing is local-first: Phi → Foundry → Ollama → custom → Codex CLI
 Claude Code → OpenAI → Anthropic → Gemini; the pure decision lives in `route_provider()`
 (unit-tested, takes a `ProviderAvailability` struct); probing stays lazy in
 `determine_active_provider_with_key()`. An explicit (non-Auto) preference
-never falls back to another provider. Wire strings are pinned per-variant
+never falls back to another provider. In **Auto** chat, if the chosen
+provider fails before any text streams (round 0, nothing emitted — e.g. a
+flaky CLI bridge), `ai_chat_send` retries the same message on the next
+available Auto provider via `next_auto_provider()`; `run_chat_turn`'s
+`allow_fallback` returns `Err` without emitting a terminal event so the
+retry is invisible. Fallback reuses the first provider's caps/system, which
+is safe because Auto budgets are non-decreasing down the chain. Wire strings are pinned per-variant
 with explicit `#[serde(rename)]` — `rename_all = "snake_case"` would emit
 `"open_a_i"` for OpenAI (a real bug fixed in 2.5.0; do not reintroduce).
 
