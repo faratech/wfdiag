@@ -5,14 +5,20 @@ name: Update Store Screenshots
 # other image types on the listing (Icon, StoreLogo*, PromotionalArt*, etc.)
 # — those are untouched, only Screenshot entries are replaced.
 #
-# Mechanics (per the Microsoft Store submission API docs): get the current
-# submission (Partner Center auto-clones the last published one into a new
-# draft if none is pending), patch its images array, PUT a zip of the new
-# image files to the submission's fileUploadUrl (an Azure Blob SAS URL —
-# no separate auth needed for that PUT), then commit and poll. Unlike the
-# package upload, unchanged resources (the app package itself) are left as
-# fileStatus "Uploaded" and are NOT re-included in the zip — only the new
-# PendingUpload images need to be in it.
+# Mechanics (per the Microsoft Store submission API docs, and the msstore
+# CLI's own PackagedUpdateCommandAsync source): `submission get` on an app
+# with no pending draft returns the LAST PUBLISHED submission as read-only —
+# it does NOT auto-create a new draft, and that response has no
+# fileUploadUrl (expected, not an error). Only `submission update` creates a
+# new pending submission (cloned server-side from the last published one)
+# when none exists. So the flow is: get the last-published/pending
+# submission to read its current images array, patch that array and PUSH it
+# via `submission update` (creating the draft if needed), THEN get again to
+# read the now-pending draft's fresh fileUploadUrl, PUT a zip of the new
+# image files to that Azure Blob SAS URL (no separate auth needed for that
+# PUT), then commit and poll. Unlike the package upload, unchanged resources
+# (the app package itself) are left as fileStatus "Uploaded" and are NOT
+# re-included in the zip — only the new PendingUpload images need to be in it.
 #
 # NOTE: run this only when there is no OTHER pending/in-flight submission
 # for the app — concurrent submissions on the same app will conflict.
@@ -63,18 +69,22 @@ jobs:
           Write-Host "Found $($files.Count) screenshot(s) to upload:"
           $files | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
 
-          # ---- Get the current submission (same get pattern as the notes updater) ----
-          $raw = (msstore submission get $env:STORE_APP_ID | Out-String)
-          $start = $raw.IndexOf('{')
-          $end = $raw.LastIndexOf('}')
-          if ($start -lt 0 -or $end -le $start) { throw "No JSON in 'submission get' output. Raw output:`n$raw" }
-          $submission = $raw.Substring($start, $end - $start + 1) | ConvertFrom-Json
+          function Get-Submission {
+            # $submission.fileUploadUrl is expected to be empty here when
+            # there's no pending draft yet (the response is the read-only
+            # last-published submission) — that is normal, not an error.
+            $raw = (msstore submission get $env:STORE_APP_ID | Out-String)
+            $start = $raw.IndexOf('{')
+            $end = $raw.LastIndexOf('}')
+            if ($start -lt 0 -or $end -le $start) { throw "No JSON in 'submission get' output. Raw output:`n$raw" }
+            return $raw.Substring($start, $end - $start + 1) | ConvertFrom-Json
+          }
+
+          # ---- Get the current (pending-or-last-published) submission to read its images array ----
+          $submission = Get-Submission
 
           if (-not $submission.listings.$lang) {
             throw "Listing language '$lang' not found on the submission. Available: $($submission.listings.PSObject.Properties.Name -join ', ')"
-          }
-          if ([string]::IsNullOrWhiteSpace($submission.fileUploadUrl)) {
-            throw "Submission has no fileUploadUrl — it may not be in an editable state. Check Partner Center."
           }
 
           $existingImages = @($submission.listings.$lang.baseListing.images)
@@ -103,6 +113,14 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $updateOut -match 'Error!|Could not') {
             throw "msstore submission update failed"
           }
+
+          # ---- Re-fetch: `update` creates the pending draft server-side if none
+          # existed, so only NOW does the submission have a live fileUploadUrl ----
+          $submission = Get-Submission
+          if ([string]::IsNullOrWhiteSpace($submission.fileUploadUrl)) {
+            throw "Submission still has no fileUploadUrl after 'submission update'. Raw: $($submission | ConvertTo-Json -Depth 5 -Compress)"
+          }
+          Write-Host "Got fileUploadUrl for the pending draft (submission id: $($submission.id))."
 
           # ---- Build a zip with ONLY the new files (unchanged package stays 'Uploaded', no re-upload needed) ----
           $stagingDir = Join-Path $env:RUNNER_TEMP 'store-images-upload'
