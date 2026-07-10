@@ -63,10 +63,18 @@ jobs:
             $submission.listings.$lang.baseListing.releaseNotes = $notes
           }
 
+          # msstore can exit 0 even when a sub-operation fails (it prints the
+          # error instead), so gate on the output text as well as $LASTEXITCODE
           $json = $submission | ConvertTo-Json -Depth 64 -Compress
-          msstore submission update ${{ env.STORE_APP_ID }} $json --skipInitialPolling
-          if ($LASTEXITCODE -ne 0) { throw "msstore submission update failed" }
+          $updateOut = msstore submission update ${{ env.STORE_APP_ID }} $json --skipInitialPolling 2>&1 | Out-String
+          Write-Host $updateOut
+          if ($LASTEXITCODE -ne 0 -or $updateOut -match 'Error!|Could not') {
+            throw "msstore submission update failed (is a submission still in certification?)"
+          }
 
-          msstore submission publish ${{ env.STORE_APP_ID }}
-          if ($LASTEXITCODE -ne 0) { throw "msstore submission publish failed" }
+          $publishOut = msstore submission publish ${{ env.STORE_APP_ID }} 2>&1 | Out-String
+          Write-Host $publishOut
+          if ($LASTEXITCODE -ne 0 -or $publishOut -match 'Error!|Could not commit') {
+            throw "msstore submission publish failed"
+          }
           msstore submission poll ${{ env.STORE_APP_ID }}
