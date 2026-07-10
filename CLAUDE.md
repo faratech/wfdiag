@@ -350,7 +350,7 @@ Gotchas encoded in the manifests: concrete per-arch `ProcessorArchitecture`
 There is no in-app self-registration: shipped loose exes do not attempt to
 gain identity (Store-only decision).
 
-### AI Providers (2.5.0+: seven providers)
+### AI Providers
 
 | Provider (wire id) | Runs | Auth | Tools | Streaming | Budget (chars) |
 |---|---|---|---|---|---|
@@ -358,14 +358,16 @@ gain identity (Store-only decision).
 | `foundry_local` | local server | none | no (unverified) | yes | 12,000 |
 | `ollama` | local server | none | yes | yes | 12,000 |
 | `custom_openai` | any /v1/chat/completions server | optional key | yes | yes | 24,000 |
+| `codex_cli` | cloud via installed Codex CLI | ChatGPT sign-in (CLI-owned) | no | no | 24,000 |
+| `claude_code` | cloud via installed Claude Code CLI | Claude sign-in (CLI-owned) | no | no | 24,000 |
 | `openai` | cloud | API key | yes | yes | 48,000 |
 | `anthropic` | cloud (native Messages API) | API key | yes | yes | 48,000 |
 | `gemini` | cloud (native generateContent) | API key | yes | yes | 48,000 |
 | `deepseek` | cloud (OpenAI-compatible) | API key | yes | yes | 48,000 |
 
 `ai_providers::capabilities()` is the single source of truth for this table.
-Auto routing is local-first: Phi → Foundry → Ollama → custom → OpenAI →
-Anthropic → Gemini; the pure decision lives in `route_provider()`
+Auto routing is local-first: Phi → Foundry → Ollama → custom → Codex CLI →
+Claude Code → OpenAI → Anthropic → Gemini; the pure decision lives in `route_provider()`
 (unit-tested, takes a `ProviderAvailability` struct); probing stays lazy in
 `determine_active_provider_with_key()`. An explicit (non-Auto) preference
 never falls back to another provider. Wire strings are pinned per-variant
@@ -388,6 +390,27 @@ Provider gotchas encoded in the clients (don't relearn these):
   it (resolution lives in `ai_providers/foundry.rs`).
 - Ollama has no default model: the `ollamaModel` setting, else the first
   entry from `/api/tags`, else an error telling the user to pull a model.
+- Subscription CLI bridges (`ai_providers/cli_bridge.rs` + `codex.rs` +
+  `claude_cli.rs` + `acp_bridge.rs`): we implement NO OAuth and store NO
+  tokens; the installed CLI owns sign-in (driven by the generic
+  `ai_bridge_*` commands) and usage bills to the user's plan. OpenAI
+  endorses this for Codex. The Claude transport mirrors Microsoft's
+  Intelligent Terminal EXACTLY: spawn `npx -y
+  @agentclientprotocol/claude-agent-acp` and speak ACP over stdio using the
+  same `agent-client-protocol` crate (initialize → session/new →
+  session/prompt; agent_message_chunk streams as deltas; permission
+  requests are rejected — Q&A only; scrub `CLAUDECODE` or the adapter
+  refuses to start). `claude -p --output-format json --max-turns 2` is only
+  the no-Node fallback. What Anthropic's Feb 2026 terms ban is extracting
+  subscription OAuth tokens for direct API use — never do that. Prompts go
+  via stdin (never argv — npm `.cmd` shims + quoting), exes are resolved
+  through `where.exe` because bare `Command::new("codex")` cannot spawn npm
+  shims, codex runs use `codex exec --json --ephemeral --sandbox read-only`
+  in an empty workdir, probes are TTL-cached 30 s, and every bridge child
+  gets `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`OPENAI_API_KEY` scrubbed
+  (headless CLIs prefer env keys over the stored login — a stale key breaks
+  runs AND flips billing to the API; status probes also treat "not logged
+  in" text as signed-out because exit codes lie).
 
 API keys: one DPAPI file / keyring entry per provider via the closed
 `ProviderKeyId` set (`dpapi.rs`); OpenAI keeps the legacy `credentials.bin`

@@ -1,6 +1,6 @@
 //! AI provider layer: capabilities and per-provider clients.
 //!
-//! wfdiag supports seven AI providers behind one enum (`ai_service::AIProvider`):
+//! wfdiag supports the AI providers behind one enum (`ai_service::AIProvider`):
 //!
 //! | Provider       | Where it runs        | Auth            | Module        |
 //! |----------------|----------------------|-----------------|---------------|
@@ -8,6 +8,8 @@
 //! | Foundry Local  | local server         | none            | (this layer)  |
 //! | Ollama         | local server         | none            | `ollama`      |
 //! | Custom         | any OpenAI-compatible| optional key    | (this layer)  |
+//! | Codex CLI      | cloud via local CLI  | ChatGPT sign-in | `codex`       |
+//! | Claude Code    | cloud via local CLI  | Claude sign-in  | `claude_cli`  |
 //! | OpenAI         | cloud                | API key         | (this layer)  |
 //! | Anthropic      | cloud                | API key         | (this layer)  |
 //! | Gemini         | cloud                | API key         | (this layer)  |
@@ -17,11 +19,16 @@
 //! `capabilities()` is the single source of truth for what each provider can
 //! do and how much context it gets.
 
+pub mod acp_bridge;
 pub mod anthropic;
+pub mod claude_cli;
+pub mod cli_bridge;
+pub mod codex;
 pub mod deepseek;
 pub mod discovery;
 pub mod foundry;
 pub mod gemini;
+pub mod model_catalog;
 pub mod ollama;
 pub mod openai;
 pub mod openai_compat;
@@ -197,9 +204,9 @@ pub async fn resolve_config(
         AIProvider::None => Err(DiagError::ai_unavailable(
             "none",
             "No AI provider available. Configure an API key (OpenAI, Anthropic or Gemini) in \
-             Settings, install Foundry Local (winget install Microsoft.FoundryLocal) or Ollama \
-             for local AI, or use the Microsoft Store version on a Copilot+ PC for on-device \
-             Phi Silica.",
+             Settings, sign in with a ChatGPT or Claude subscription (Codex / Claude Code CLI), \
+             install Foundry Local (winget install Microsoft.FoundryLocal) or Ollama for local \
+             AI, or use the Microsoft Store version on a Copilot+ PC for on-device Phi Silica.",
         )
         .into()),
         AIProvider::PhiSilica => Ok(ResolvedProviderConfig::default()),
@@ -215,10 +222,15 @@ pub async fn resolve_config(
                         ))
                     })?,
             };
+            let model = settings
+                .open_ai_model
+                .clone()
+                .filter(|m| !m.trim().is_empty())
+                .unwrap_or_else(|| openai::OPENAI_MODEL.to_string());
             Ok(ResolvedProviderConfig {
                 api_key: Some(api_key),
                 endpoint: None,
-                model: Some(openai::OPENAI_MODEL.to_string()),
+                model: Some(model),
             })
         }
         AIProvider::FoundryLocal => {
@@ -231,10 +243,15 @@ pub async fn resolve_config(
                          service start', or configure an endpoint in Settings.",
                     ))
                 })?;
+            let model = settings
+                .local_ai_model
+                .clone()
+                .filter(|m| !m.trim().is_empty())
+                .unwrap_or_else(|| foundry::FOUNDRY_LOCAL_MODEL.to_string());
             Ok(ResolvedProviderConfig {
                 api_key: None,
                 endpoint: Some(endpoint),
-                model: Some(foundry::FOUNDRY_LOCAL_MODEL.to_string()),
+                model: Some(model),
             })
         }
         AIProvider::Ollama => {
@@ -279,6 +296,74 @@ pub async fn resolve_config(
                 api_key: load_provider_key_internal(ProviderKeyId::Custom).await,
                 endpoint: Some(endpoint),
                 model: Some(model),
+            })
+        }
+        AIProvider::CodexCli => {
+            let probe = cli_bridge::probe(AIProvider::CodexCli).await;
+            let path = probe.path.as_ref().ok_or_else(|| {
+                String::from(DiagError::ai_unavailable(
+                    "codex_cli",
+                    "Codex CLI not found. Install it with 'npm install -g @openai/codex' or \
+                     set its path in Settings.",
+                ))
+            })?;
+            if !probe.authed {
+                return Err(DiagError::ai_unavailable(
+                    "codex_cli",
+                    "Codex CLI is installed but not signed in. Open Settings → ChatGPT (Codex \
+                     CLI) and click Sign in — your browser opens OpenAI's own login (uses your \
+                     ChatGPT plan).",
+                )
+                .into());
+            }
+            let model = match settings
+                .codex_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+            {
+                Some(m) => Some(cli_bridge::sanitize_model(m)?),
+                None => None,
+            };
+            Ok(ResolvedProviderConfig {
+                api_key: None,
+                // For the bridge, "endpoint" is the resolved CLI executable
+                endpoint: Some(path.display().to_string()),
+                model,
+            })
+        }
+        AIProvider::ClaudeCode => {
+            let probe = cli_bridge::probe(AIProvider::ClaudeCode).await;
+            let path = probe.path.as_ref().ok_or_else(|| {
+                String::from(DiagError::ai_unavailable(
+                    "claude_code",
+                    "Claude Code CLI not found. Install it with 'npm install -g \
+                     @anthropic-ai/claude-code' or set its path in Settings.",
+                ))
+            })?;
+            if !probe.authed {
+                return Err(DiagError::ai_unavailable(
+                    "claude_code",
+                    "Claude Code is installed but not signed in. Open Settings → Claude (Claude \
+                     Code CLI) and click Sign in — Anthropic's own login opens in your browser \
+                     (uses your Claude plan).",
+                )
+                .into());
+            }
+            let model = match settings
+                .claude_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+            {
+                Some(m) => Some(cli_bridge::sanitize_model(m)?),
+                None => None,
+            };
+            Ok(ResolvedProviderConfig {
+                api_key: None,
+                // For the bridge, "endpoint" is the resolved CLI executable
+                endpoint: Some(path.display().to_string()),
+                model,
             })
         }
         AIProvider::Anthropic => {
@@ -362,6 +447,8 @@ pub async fn one_shot(
         AIProvider::Ollama | AIProvider::CustomOpenAI | AIProvider::DeepSeek => {
             openai_compat::one_shot(provider, cfg, system, prompt).await
         }
+        AIProvider::CodexCli => codex::one_shot(cfg, system, prompt).await,
+        AIProvider::ClaudeCode => claude_cli::one_shot(cfg, system, prompt).await,
         AIProvider::Anthropic => anthropic::one_shot(cfg, system, prompt).await,
         AIProvider::Gemini => gemini::one_shot(cfg, system, prompt).await,
     }
@@ -385,6 +472,8 @@ pub async fn chat_stream(
         | AIProvider::Ollama
         | AIProvider::CustomOpenAI
         | AIProvider::DeepSeek => openai_compat::chat_stream(provider, cfg, req, tx).await,
+        AIProvider::CodexCli => codex::chat_single_shot(cfg, req, tx).await,
+        AIProvider::ClaudeCode => claude_cli::chat_single_shot(cfg, req, tx).await,
         AIProvider::Anthropic => anthropic::chat_stream(cfg, req, tx).await,
         AIProvider::Gemini => gemini::chat_stream(cfg, req, tx).await,
     }
@@ -435,6 +524,21 @@ pub fn capabilities(provider: AIProvider) -> ProviderCaps {
             supports_streaming: true,
             context_budget_chars: 24_000,
         },
+        // The bridged CLIs run their own agent loop (not ours — no tool
+        // API). Codex `--json` emits whole items, so its chat is
+        // single-shot like Phi.
+        AIProvider::CodexCli => ProviderCaps {
+            supports_tools: false,
+            supports_streaming: false,
+            context_budget_chars: 24_000,
+        },
+        // Claude Code streams message chunks over ACP (the -p fallback
+        // degrades to a single delta)
+        AIProvider::ClaudeCode => ProviderCaps {
+            supports_tools: false,
+            supports_streaming: true,
+            context_budget_chars: 24_000,
+        },
         AIProvider::OpenAI | AIProvider::Anthropic | AIProvider::Gemini | AIProvider::DeepSeek => {
             ProviderCaps {
                 supports_tools: true,
@@ -469,6 +573,16 @@ mod tests {
             capabilities(AIProvider::FoundryLocal).context_budget_chars,
             local
         );
+        // Subscription is flat-rate but latency grows with prompt size, so
+        // the CLI bridges sit at the custom tier, not the cloud tier
+        assert_eq!(
+            capabilities(AIProvider::CodexCli).context_budget_chars,
+            custom
+        );
+        assert_eq!(
+            capabilities(AIProvider::ClaudeCode).context_budget_chars,
+            custom
+        );
         assert_eq!(
             capabilities(AIProvider::Anthropic).context_budget_chars,
             cloud
@@ -491,10 +605,13 @@ mod tests {
     #[test]
     fn tool_capable_set_is_exactly_the_chat_capable_providers() {
         // Phi Silica has no tool API; Foundry stays conservative until its
-        // chat-completions path is verified on a real install.
+        // chat-completions path is verified on a real install; the Codex CLI
+        // runs its own agent loop, never ours.
         for (provider, tools) in [
             (AIProvider::PhiSilica, false),
             (AIProvider::FoundryLocal, false),
+            (AIProvider::CodexCli, false),
+            (AIProvider::ClaudeCode, false),
             (AIProvider::Ollama, true),
             (AIProvider::CustomOpenAI, true),
             (AIProvider::OpenAI, true),

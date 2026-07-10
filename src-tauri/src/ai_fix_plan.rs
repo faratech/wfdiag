@@ -176,8 +176,8 @@ pub async fn ai_propose_fix_plan(
     let provider = crate::ai_service::determine_active_provider_with_key(pref, frontend_key).await;
     if provider == AIProvider::None {
         return Err(
-            "No AI provider available. Add an API key in Settings, or install Foundry Local \
-             or Ollama for local AI."
+            "No AI provider available. Add an API key in Settings, sign in with a ChatGPT or \
+             Claude subscription, or install Foundry Local or Ollama for local AI."
                 .to_string(),
         );
     }

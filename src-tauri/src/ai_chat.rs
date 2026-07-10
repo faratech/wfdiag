@@ -820,7 +820,8 @@ pub async fn ai_chat_send(
     if provider == AIProvider::None {
         return Err(
             "No AI provider available. Add an API key (OpenAI, Anthropic or Gemini) in \
-             Settings, or install Foundry Local or Ollama for local AI."
+             Settings, sign in with a ChatGPT or Claude subscription, or install Foundry Local \
+             or Ollama for local AI."
                 .to_string(),
         );
     }

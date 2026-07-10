@@ -1036,6 +1036,12 @@ pub fn run() {
             update_scan_tags,
             get_task_trends,
             ai_providers::ollama::ai_list_ollama_models,
+            ai_providers::model_catalog::ai_list_models,
+            // Subscription CLI bridge (Codex): the CLI owns sign-in
+            ai_providers::cli_bridge::ai_bridge_status,
+            ai_providers::cli_bridge::ai_bridge_sign_in,
+            ai_providers::cli_bridge::ai_bridge_sign_in_cancel,
+            ai_providers::cli_bridge::ai_bridge_sign_out,
             phi_silica::check_phi_silica_available,
             phi_silica::ensure_phi_silica,
             phi_silica::analyze_with_phi_silica,

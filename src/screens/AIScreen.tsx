@@ -10,6 +10,8 @@ export const PROVIDER_LABELS: Record<Exclude<AIProvider, 'none'>, string> = {
   foundry_local: 'Foundry Local (local server)',
   ollama: 'Ollama (local server)',
   custom_openai: 'Custom endpoint',
+  codex_cli: 'ChatGPT via Codex CLI (subscription)',
+  claude_code: 'Claude via Claude Code CLI (subscription)',
   openai: 'OpenAI (cloud)',
   anthropic: 'Anthropic Claude (cloud)',
   gemini: 'Google Gemini (cloud)',
@@ -22,6 +24,8 @@ const PROVIDER_TAGS: Record<AIProvider, string> = {
   foundry_local: 'local · Foundry Local',
   ollama: 'local · Ollama',
   custom_openai: 'custom endpoint',
+  codex_cli: 'subscription · Codex',
+  claude_code: 'subscription · Claude Code',
   openai: 'cloud · OpenAI',
   anthropic: 'cloud · Claude',
   gemini: 'cloud · Gemini',
@@ -45,6 +49,14 @@ function providerDetail(p: ProviderInfo, phiMessage?: string): string {
       return 'Not detected — install from ollama.com'
     case 'custom_openai':
       return p.configured ? 'Configured but unreachable' : 'Set endpoint and model in Settings'
+    case 'codex_cli':
+      return p.configured
+        ? 'Installed — sign in with ChatGPT in Settings'
+        : 'Not detected — install with: npm install -g @openai/codex'
+    case 'claude_code':
+      return p.configured
+        ? 'Installed — sign in with Claude in Settings'
+        : 'Not detected — install with: npm install -g @anthropic-ai/claude-code'
     default:
       return 'No API key — add one in Settings'
   }

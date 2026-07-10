@@ -31,6 +31,8 @@ export type AIProvider =
   | 'foundry_local'
   | 'ollama'
   | 'custom_openai'
+  | 'codex_cli'
+  | 'claude_code'
   | 'anthropic'
   | 'gemini'
   | 'deepseek'
@@ -187,7 +189,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       return available(preferredProvider) ? preferredProvider : 'none'
     }
     const autoOrder: Exclude<AIProvider, 'none'>[] = [
-      'phi_silica', 'foundry_local', 'ollama', 'custom_openai', 'openai', 'anthropic', 'gemini', 'deepseek',
+      'phi_silica', 'foundry_local', 'ollama', 'custom_openai', 'codex_cli', 'claude_code', 'openai', 'anthropic', 'gemini', 'deepseek',
     ]
     for (const id of autoOrder) {
       if (available(id)) return id
@@ -250,6 +252,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
 
     const availabilityKey = [
       settings.openAiApiKey || '',
+      settings.openAiModel || '',
       settings.anthropicApiKey || '',
       settings.anthropicModel || '',
       settings.geminiApiKey || '',
@@ -261,7 +264,12 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       settings.customModel || '',
       settings.ollamaEndpoint || '',
       settings.ollamaModel || '',
+      settings.codexCliPath || '',
+      settings.codexModel || '',
+      settings.claudeCliPath || '',
+      settings.claudeModel || '',
       settings.localAiEndpoint || '',
+      settings.localAiModel || '',
       settings.phiSilicaLafToken || '',
     ].join('\u0001')
     const currentProvider = settings.preferredAIProvider || 'auto'
@@ -303,6 +311,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     }
   }, [
     settings.openAiApiKey,
+    settings.openAiModel,
     settings.anthropicApiKey,
     settings.anthropicModel,
     settings.geminiApiKey,
@@ -314,7 +323,12 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     settings.customModel,
     settings.ollamaEndpoint,
     settings.ollamaModel,
+    settings.codexCliPath,
+    settings.codexModel,
+    settings.claudeCliPath,
+    settings.claudeModel,
     settings.localAiEndpoint,
+    settings.localAiModel,
     settings.phiSilicaLafToken,
     settings.preferredAIProvider,
     settingsLoaded,

@@ -332,6 +332,32 @@ describe('AIContext analysis dedup and cache', () => {
     expect(r3).toBe('fresh answer')
   })
 
+  it('routes Auto to a signed-in Codex CLI ahead of cloud API keys', async () => {
+    appContextValue = {
+      settings: { preferredAIProvider: 'auto' },
+      settingsLoaded: true,
+    }
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'ai_get_status') {
+        return {
+          ...okStatus,
+          openai_available: true,
+          active_provider: 'codex_cli',
+          providers: [
+            { id: 'codex_cli', available: true, configured: true, supports_tools: false, supports_streaming: false },
+            { id: 'openai', available: true, configured: true, supports_tools: true, supports_streaming: true },
+          ],
+        }
+      }
+      return undefined
+    })
+
+    const { result } = renderHook(() => useAIContext(), { wrapper })
+
+    await waitFor(() => expect(result.current.activeProvider).toBe('codex_cli'))
+    expect(result.current.isAIAvailable).toBe(true)
+  })
+
   it('does not enable AI actions for an explicit unavailable provider just because OpenAI has a key', async () => {
     appContextValue = {
       settings: { openAiApiKey: 'sk-test', preferredAIProvider: 'anthropic' },

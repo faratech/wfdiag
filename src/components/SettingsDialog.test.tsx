@@ -55,6 +55,100 @@ describe('SettingsDialog provider setup seeding', () => {
     expect(screen.getByText('Endpoint URL')).toBeInTheDocument()
   })
 
+  it('fills the OpenAI model dropdown from the live model list', async () => {
+    invokeMock.mockImplementation(async (cmd: unknown) => {
+      if (cmd === 'ai_list_models') return ['gpt-5.2', 'gpt-5-nano']
+      return []
+    })
+    render(
+      <SettingsDialog
+        open
+        onOpenChange={vi.fn()}
+        onSave={vi.fn()}
+        settings={{ preferredAIProvider: 'openai', openAiApiKey: 'sk-test' }}
+      />
+    )
+
+    const select = screen.getByLabelText('OpenAI model') as HTMLSelectElement
+    await waitFor(() => {
+      expect(Array.from(select.options).map(o => o.value)).toContain('gpt-5.2')
+    })
+    expect(invokeMock).toHaveBeenCalledWith('ai_list_models', {
+      provider: 'openai',
+      apiKey: 'sk-test',
+      endpoint: undefined,
+    })
+  })
+
+  it('opens the Codex CLI pane when a codex path is configured and Active AI is Auto', async () => {
+    invokeMock.mockImplementation(async (cmd: unknown) => {
+      if (cmd === 'ai_bridge_status') return { installed: true, signedIn: true, path: 'C:\\Tools\\codex.exe' }
+      return []
+    })
+    render(
+      <SettingsDialog
+        open
+        onOpenChange={vi.fn()}
+        onSave={vi.fn()}
+        settings={{ preferredAIProvider: 'auto', codexCliPath: 'C:\\Tools\\codex.exe' }}
+      />
+    )
+
+    expect((screen.getByLabelText('Provider to configure') as HTMLSelectElement).value).toBe('codex_cli')
+    expect(screen.getByText('ChatGPT account')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('Signed in')).toBeInTheDocument())
+  })
+
+  it('opens the Claude Code pane and drives sign-in through the bridge commands', async () => {
+    invokeMock.mockImplementation(async (cmd: unknown, args?: unknown) => {
+      const provider = (args as { provider?: string } | undefined)?.provider
+      if (cmd === 'ai_bridge_status' && provider === 'claude_code') return { installed: true, signedIn: false }
+      if (cmd === 'ai_bridge_sign_in' && provider === 'claude_code') return { installed: true, signedIn: true }
+      return []
+    })
+    render(
+      <SettingsDialog
+        open
+        onOpenChange={vi.fn()}
+        onSave={vi.fn()}
+        settings={{ preferredAIProvider: 'claude_code' }}
+      />
+    )
+
+    expect(screen.getByText('Claude account')).toBeInTheDocument()
+    const signIn = await screen.findByRole('button', { name: /sign in with claude/i })
+    fireEvent.click(signIn)
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('ai_bridge_sign_in', { provider: 'claude_code' })
+      expect(screen.getByText('Signed in')).toBeInTheDocument()
+    })
+  })
+
+  it('drives the Codex CLI sign-in through the bridge commands', async () => {
+    invokeMock.mockImplementation(async (cmd: unknown) => {
+      if (cmd === 'ai_bridge_status') return { installed: true, signedIn: false }
+      if (cmd === 'ai_bridge_sign_in') return { installed: true, signedIn: true }
+      return []
+    })
+    render(
+      <SettingsDialog
+        open
+        onOpenChange={vi.fn()}
+        onSave={vi.fn()}
+        settings={{ preferredAIProvider: 'codex_cli' }}
+      />
+    )
+
+    const signIn = await screen.findByRole('button', { name: /sign in with chatgpt/i })
+    fireEvent.click(signIn)
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('ai_bridge_sign_in', { provider: 'codex_cli' })
+      expect(screen.getByText('Signed in')).toBeInTheDocument()
+    })
+  })
+
   it('shows an inline error when settings fail to save', async () => {
     render(
       <SettingsDialog
