@@ -74,7 +74,14 @@ jobs:
           if (-not $notes) {
             # Default: the GitHub release body, converted to Store-friendly
             # plain text (no markdown headings/links/emphasis)
-            $body = gh release view "v$version" --repo ${{ github.repository }} --json body -q .body
+            #
+            # PowerShell captures a multi-line external command's stdout as
+            # an ARRAY of lines, not one string — -join forces a real single
+            # string (a no-op if gh already returned one) so IndexOf/Substring
+            # below are unambiguous String operations, not IList.IndexOf
+            # (which matches whole array ELEMENTS, not a text offset).
+            $bodyRaw = gh release view "v$version" --repo ${{ github.repository }} --json body -q .body
+            $body = $bodyRaw -join "`n"
             if ($body) {
               # Drop the install/download boilerplate the release template
               # appends — Store "What's new" should be just the changelog.
