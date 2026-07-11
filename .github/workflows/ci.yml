@@ -45,7 +45,7 @@ jobs:
       # tauri-build embeds ../dist via the default custom-protocol feature and
       # dist/ is untracked, so the frontend must be built first
       - run: npm run build
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
