@@ -5,49 +5,40 @@ interface ChartCardProps {
   value: string
   sub: string
   series: number[]
-  color: string
   max: number
   hint: string
 }
 
-// SVG sparkline card — ported verbatim from the theme-demo ChartCard.
-export const ChartCard: React.FC<ChartCardProps> = ({ title, value, sub, series, color, max, hint }) => {
-  const w = 320
-  const h = 80
-  const pts = series.length
-    ? series.map((v, i) => [
-        (i / Math.max(1, series.length - 1)) * w,
-        h - Math.min(v, max) / max * (h - 4) - 2,
-      ])
-    : [[0, h - 2], [w, h - 2]]
-  const path = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')
-  const area = `${path} L${w},${h} L0,${h} Z`
-  const cur = pts[pts.length - 1]
+/**
+ * Monochrome SVG sparkline card. All monitor charts render in the brand accent
+ * (--app-chart) — the per-metric rainbow is dropped per the design system's
+ * "no non-brand hues" rule. The path is drawn in a fixed 300×72 viewBox and
+ * stretched with preserveAspectRatio="none"; a non-scaling stroke keeps the
+ * line crisp at any card width.
+ */
+export const ChartCard: React.FC<ChartCardProps> = ({ title, value, sub, series, max, hint }) => {
+  const w = 300
+  const h = 72
+  const n = series.length
+  const pts = n > 1
+    ? series.map((v, i) => `${(i * (w / (n - 1))).toFixed(1)},${(h - 4 - Math.min(1, v / max) * (h - 12)).toFixed(1)}`)
+    : ['0,68', '300,68']
+  const line = 'M' + pts.join(' L')
+  const area = `${line} L300,72 L0,72 Z`
   return (
     <div className="chart-card">
       <div className="ch-head">
         <div>
           <div className="ch-title">{title}</div>
-          <div style={{ fontSize: 11, color: 'var(--wf-text-muted)' }}>{hint}</div>
+          <div className="ch-hint">{hint}</div>
         </div>
-        <div style={{ textAlign: 'right' }}>
-          <span className="ch-val" style={{ color }}>{value}</span>
-          <span className="ch-sub">{sub}</span>
-        </div>
+        <div className="ch-val">{value}<span className="ch-sub">{sub}</span></div>
       </div>
-      <svg className="chart-svg" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
-        <defs>
-          <linearGradient id={`g-${title}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity="0.32" />
-            <stop offset="100%" stopColor={color} stopOpacity="0.02" />
-          </linearGradient>
-        </defs>
-        <path d={area} fill={`url(#g-${title})`} />
-        <path d={path} fill="none" stroke={color} strokeWidth="1.6" />
-        <circle cx={cur[0]} cy={cur[1]} r="3" fill={color} />
-        <circle cx={cur[0]} cy={cur[1]} r="6" fill={color} opacity="0.2" />
+      <svg className="chart-svg" viewBox="0 0 300 72" preserveAspectRatio="none">
+        <path className="area" d={area} />
+        <path className="line" d={line} vectorEffect="non-scaling-stroke" />
       </svg>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--wf-text-muted)', marginTop: 4, fontFamily: 'var(--wf-font-mono)' }}>
+      <div className="chart-axis">
         <span>-60s</span><span>-45</span><span>-30</span><span>-15</span><span>now</span>
       </div>
     </div>

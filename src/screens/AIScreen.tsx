@@ -32,7 +32,20 @@ const PROVIDER_TAGS: Record<AIProvider, string> = {
   deepseek: 'cloud · DeepSeek',
 }
 
-/** Status line for one provider row in the Models panel */
+/** Icon for one provider row in the Providers panel. */
+function providerIcon(id: AIProvider): string {
+  switch (id) {
+    case 'phi_silica': return 'fa-microchip'
+    case 'foundry_local':
+    case 'ollama': return 'fa-server'
+    case 'custom_openai': return 'fa-plug'
+    case 'codex_cli':
+    case 'claude_code': return 'fa-terminal'
+    default: return 'fa-cloud'
+  }
+}
+
+/** Status line for one provider row in the Providers panel */
 function providerDetail(p: ProviderInfo, phiMessage?: string): string {
   if (p.available) {
     const parts: string[] = []
@@ -143,24 +156,26 @@ export const AIScreen: React.FC = () => {
 
       <div className="ai-side-col">
         <div className="wf-block">
-          <header className="wf-block-header"><span className="accent-bar" /><span>Models</span></header>
-          <div style={{ padding: 12, fontSize: 13 }}>
-            {(aiStatus?.providers ?? []).map((p, i, arr) => (
-              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: i < arr.length - 1 ? '1px solid var(--hairline)' : 'none' }}>
-                <span className="status-dot" style={{ background: p.available ? 'var(--wf-success-feature)' : 'var(--wf-text-muted)', boxShadow: 'none' }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600 }}>{PROVIDER_LABELS[p.id]}</div>
-                  <div style={{ fontSize: 11, color: 'var(--wf-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {providerDetail(p, aiStatus?.phi_silica_message)}
-                  </div>
+          <header className="wf-block-header"><span className="accent-bar" /><span>Providers</span></header>
+          <div>
+            {(aiStatus?.providers ?? []).map(p => (
+              <div key={p.id} className="provider-row">
+                <div className={`provider-tile ${p.available ? 'on' : ''}`}><i className={`fa-solid ${providerIcon(p.id)}`} /></div>
+                <div className="pr-body">
+                  <div className="pr-name">{PROVIDER_LABELS[p.id]}</div>
+                  <div className="pr-detail">{providerDetail(p, aiStatus?.phi_silica_message)}</div>
                 </div>
-                {activeProvider === p.id && <span className="tag">Active</span>}
+                {p.available
+                  ? <span className="pr-status"><span className="status-dot" />{activeProvider === p.id ? 'Active' : 'Ready'}</span>
+                  : <span className="pr-status off">Not configured</span>}
               </div>
             ))}
             {!aiStatus?.providers?.length && (
-              <div style={{ color: 'var(--wf-text-muted)', fontSize: 12, padding: '4px 0' }}>Checking providers…</div>
+              <div className="provider-row"><span className="pr-detail">Checking providers…</span></div>
             )}
-            <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setShowSettings(true)}><i className="fa-solid fa-gear" /> AI settings</button>
+            <div style={{ padding: '2px 18px 14px' }}>
+              <button className="btn ghost" onClick={() => setShowSettings(true)}><i className="fa-solid fa-gear" /> AI settings</button>
+            </div>
           </div>
         </div>
 

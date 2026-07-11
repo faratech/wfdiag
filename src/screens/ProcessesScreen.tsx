@@ -17,6 +17,25 @@ type SortKey =
   | 'user'
 type SortDir = 'asc' | 'desc'
 
+/** Muted per-process glyph, keyed off the executable name. */
+function procIcon(name: string): string {
+  const n = name.toLowerCase()
+  if (n.includes('edge') || n.includes('chrome') || n.includes('firefox') || n.includes('browser') || n.includes('opera')) return 'fa-globe'
+  if (n.includes('code') || n.includes('devenv') || n.includes('studio')) return 'fa-code'
+  if (n.includes('explorer')) return 'fa-folder-open'
+  if (n.includes('svchost') || n.includes('services') || n.startsWith('svc')) return 'fa-gears'
+  if (n.includes('teams') || n.includes('slack') || n.includes('discord') || n.includes('zoom')) return 'fa-users'
+  if (n.includes('defender') || n.includes('msmpeng') || n.includes('security') || n.includes('antimal')) return 'fa-shield-halved'
+  if (n.includes('dwm') || n.includes('desktop')) return 'fa-layer-group'
+  if (n.includes('audio')) return 'fa-volume-high'
+  if (n.includes('onedrive') || n.includes('dropbox') || n.includes('cloud')) return 'fa-cloud'
+  if (n.includes('search') || n.includes('index')) return 'fa-magnifying-glass'
+  if (n === 'system' || n.includes('kernel') || n.includes('ntoskrnl') || n.includes('registry')) return 'fa-microchip'
+  if (n.includes('python') || n.includes('node') || n.includes('java') || n.includes('powershell') || n.includes('cmd')) return 'fa-terminal'
+  if (n.includes('wfdiag') || n.includes('diagnostic')) return 'fa-stethoscope'
+  return 'fa-window-maximize'
+}
+
 export const ProcessesScreen: React.FC = () => {
   const { processes, stats, isActive, isLoading, toggle, refresh } = useMonitoring({
     autoStart: true,
@@ -133,10 +152,10 @@ export const ProcessesScreen: React.FC = () => {
                 <tr key={p.pid}>
                   <td>
                     <div className="pname">
-                      <span className="pico">{(p.name[0] || '?').toUpperCase()}</span>
+                      <i className={`fa-solid ${procIcon(p.name)} pico`} aria-hidden="true" />
                       <div>
-                        <div style={{ fontWeight: 600 }}>{p.name}</div>
-                        <div style={{ fontSize: 11, color: 'var(--wf-text-muted)' }}>{p.command || p.exe_path || p.status}</div>
+                        <div>{p.name}</div>
+                        <div style={{ fontSize: 11, color: 'var(--wf-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.command || p.exe_path || p.status}</div>
                       </div>
                     </div>
                   </td>

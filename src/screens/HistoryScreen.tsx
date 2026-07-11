@@ -194,7 +194,7 @@ export const HistoryScreen: React.FC = () => {
             <span className="count">{loading ? 'Loading…' : 'Click to compare vs latest'}</span>
           </header>
           <div>
-            <div className="history-row" style={{ background: 'rgba(0,0,0,0.03)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--wf-text-muted)', fontWeight: 700 }}>
+            <div className="history-row head">
               <span></span><span>Timestamp</span><span>Label</span>
               <span style={{ textAlign: 'right' }}>Pass</span>
               <span style={{ textAlign: 'right' }}>Fail</span>
@@ -206,7 +206,7 @@ export const HistoryScreen: React.FC = () => {
               </div>
             )}
             {filteredScans.map(h => (
-              <div key={h.id} className="history-row" style={{ background: selected === h.id ? 'rgba(15,108,189,0.12)' : 'transparent' }} onClick={() => select(h.id)}>
+              <div key={h.id} className={`history-row ${selected === h.id ? 'selected' : ''}`} onClick={() => select(h.id)}>
                 <span className={`status-dot ${h.failure_count > 0 ? 'warning' : 'success'}`} />
                 <span className="ts">{new Date(h.timestamp).toLocaleString()}</span>
                 <span className="name">
@@ -276,13 +276,19 @@ export const HistoryScreen: React.FC = () => {
                 <div style={{ fontSize: 13, color: 'var(--wf-text-muted)', marginBottom: 12 }}>
                   Comparing <strong style={{ color: 'var(--wf-text)' }}>{new Date(comparison.previous_scan.timestamp).toLocaleString()}</strong> against the latest scan — <strong style={{ color: 'var(--wf-text)' }}>{comparison.total_changes}</strong> changes.
                 </div>
-                <div className="kv-grid" style={{ gridTemplateColumns: '1fr 90px' }}>
-                  <div className="k" style={{ fontFamily: 'inherit' }}>New failures</div>
-                  <div className="v" style={{ textAlign: 'right', color: 'var(--err-fg)' }}>{comparison.new_failures.length}</div>
-                  <div className="k" style={{ fontFamily: 'inherit' }}>New successes</div>
-                  <div className="v" style={{ textAlign: 'right', color: 'var(--ok-fg)' }}>{comparison.new_successes.length}</div>
-                  <div className="k" style={{ fontFamily: 'inherit' }}>Output changed</div>
-                  <div className="v" style={{ textAlign: 'right' }}>{comparison.status_unchanged.filter(c => c.output_changed).length}</div>
+                <div className="kv-grid">
+                  <div className="kv-row" style={{ gridTemplateColumns: '1fr 90px' }}>
+                    <span className="k">New failures</span>
+                    <span className="v" style={{ textAlign: 'right', color: 'var(--err-fg)' }}>{comparison.new_failures.length}</span>
+                  </div>
+                  <div className="kv-row" style={{ gridTemplateColumns: '1fr 90px' }}>
+                    <span className="k">New successes</span>
+                    <span className="v" style={{ textAlign: 'right', color: 'var(--ok-fg)' }}>{comparison.new_successes.length}</span>
+                  </div>
+                  <div className="kv-row" style={{ gridTemplateColumns: '1fr 90px' }}>
+                    <span className="k">Output changed</span>
+                    <span className="v" style={{ textAlign: 'right' }}>{comparison.status_unchanged.filter(c => c.output_changed).length}</span>
+                  </div>
                 </div>
 
                 {comparison.total_changes === 0 && (

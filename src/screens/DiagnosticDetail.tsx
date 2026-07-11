@@ -66,30 +66,20 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
   return (
     <div className="diag-detail">
       <div className="diag-detail-head">
-        <div className="title-row">
-          <i className={`fa-solid ${taskIcon(item.id, item.category)}`} style={{ fontSize: 18, color: 'var(--wf-paletteColor1)' }} />
+        <div className="head-tile"><i className={`fa-solid ${taskIcon(item.id, item.category)}`} /></div>
+        <div className="head-text">
           <h2>{item.name}</h2>
-          <span style={{ marginLeft: 'auto' }}>
-            <span className={`tag ${success ? 'success' : 'error'}`}>
-              <i className={`fa-solid ${success ? 'fa-circle-check' : 'fa-circle-xmark'}`} />
-              {success ? 'Passed' : 'Failed'}
-            </span>
-            {item.admin_required && <span className="tag warning" style={{ marginLeft: 6 }}><i className="fa-solid fa-shield" /> Admin</span>}
-          </span>
+          <div className="diag-meta">{item.category}{item.result.duration_ms > 0 ? ` · completed in ${formatDuration(item.result.duration_ms)}` : ''}</div>
         </div>
-        <div className="diag-meta">
-          <span><i className="fa-solid fa-folder" /> {item.category}</span>
-          {item.result.duration_ms > 0 && <span><i className="fa-solid fa-stopwatch" /> {formatDuration(item.result.duration_ms)}</span>}
+        <div className="seg-control">
+          <button className={tab === 'output' ? 'active' : ''} onClick={() => setTab('output')}>Output</button>
+          <button className={tab === 'raw' ? 'active' : ''} onClick={() => setTab('raw')}>Raw</button>
         </div>
-      </div>
-
-      <div className="diag-detail-tabs">
-        {(['output', 'raw'] as const).map(t => (
-          <button key={t} className={`diag-tab ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>
-            <i className={`fa-solid ${t === 'output' ? 'fa-table-list' : 'fa-code'}`} />
-            <span style={{ marginLeft: 4, textTransform: 'capitalize' }}>{t}</span>
-          </button>
-        ))}
+        <span className={`tag ${success ? 'success' : 'error'}`}>
+          <i className={`fa-solid ${success ? 'fa-circle-check' : 'fa-circle-xmark'}`} />
+          {success ? 'Passed' : 'Failed'}
+        </span>
+        {item.admin_required && <span className="tag warning"><i className="fa-solid fa-shield" /> Admin</span>}
       </div>
 
       <div className="diag-detail-body">
@@ -109,10 +99,10 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
           kv.length > 0 ? (
             <div className="kv-grid">
               {kv.map(([k, v]) => (
-                <React.Fragment key={k}>
-                  <div className="k">{k}</div>
-                  <div className="v">{v}</div>
-                </React.Fragment>
+                <div className="kv-row" key={k}>
+                  <span className="k">{k}</span>
+                  <span className="v">{v}</span>
+                </div>
               ))}
             </div>
           ) : (

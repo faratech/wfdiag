@@ -1,12 +1,11 @@
 import React, { useMemo, useState } from 'react'
 import { useAppContext } from '../contexts/AppContext'
 import { useScanner } from '../hooks/useScanner'
-import { taskIcon } from '../ui/diagnostic-icons'
 import { formatDuration } from './util'
 import { DiagnosticDetail, type DiagItem } from './DiagnosticDetail'
 
 export const DiagnosticsScreen: React.FC = () => {
-  const { availableTasks, results, isRunning, currentProgress, currentTaskName, scanStartTime, scanEndTime, taskStatuses, selectedDiagnosticId, setSelectedDiagnosticId, setPendingScanReport, setSelectedTab } = useAppContext()
+  const { availableTasks, results, isRunning, currentProgress, currentTaskName, scanStartTime, scanEndTime, taskStatuses, selectedDiagnosticId, setSelectedDiagnosticId, setPendingScanReport, setSelectedTab, systemInfo } = useAppContext()
   const { runQuickScan, runFullScan, stopScan } = useScanner()
 
   const [searchTerm, setSearchTerm] = useState('')
@@ -51,27 +50,31 @@ export const DiagnosticsScreen: React.FC = () => {
   const failed = completed.filter(t => !t.result.success).length
   const durationMs = scanEndTime > 0 ? scanEndTime - scanStartTime : 0
   const selected = completed.find(t => t.id === selectedDiagnosticId) || completed[0]
+  const machine = systemInfo?.computer_name || 'this PC'
 
   if (isRunning) {
+    // r=53 → circumference ≈ 333; the progress arc's dash length scales with %.
+    const dash = (currentProgress * 3.33).toFixed(1)
     return (
       <div className="scan-hero scanning">
-        <div className="ring" style={{ '--p': currentProgress } as React.CSSProperties}>
-          <span className="pct">{Math.round(currentProgress)}%</span>
+        <div className="scan-ring">
+          <svg width="124" height="124" viewBox="0 0 124 124">
+            <circle className="ring-track" cx="62" cy="62" r="53" fill="none" strokeWidth="6" />
+            <circle className="ring-prog" cx="62" cy="62" r="53" fill="none" strokeWidth="6" strokeLinecap="round" strokeDasharray={`${dash} 333`} transform="rotate(-90 62 62)" />
+          </svg>
+          <div className="pct">{Math.round(currentProgress)}%</div>
         </div>
-        <h1>Running diagnostic sweep…</h1>
-        <p className="sub">Collecting hardware inventory, driver telemetry, storage health, network state, security posture and event logs.</p>
+        <h2 className="scan-title">Scanning {machine}…</h2>
+        <div className="task-line">{currentTaskName || 'Starting…'}</div>
         <div className="progress-mini"><span style={{ width: `${currentProgress}%` }} /></div>
         {categoryProgress.length > 0 && (
           <div className="scan-cats">
             {categoryProgress.map(([cat, p]) => (
-              <span key={cat} className={`tag ${p.done === p.total ? 'done' : 'neutral'}`}>
-                {cat} {p.done}/{p.total}
-              </span>
+              <span key={cat} className={`cat-pill ${p.done === p.total ? 'done' : ''}`}>{cat} {p.done}/{p.total}</span>
             ))}
           </div>
         )}
-        <div className="task-line">{currentTaskName || 'Starting…'}</div>
-        <button className="btn" onClick={stopScan}><i className="fa-solid fa-stop" /> Stop scan</button>
+        <button className="btn" style={{ marginTop: 24, height: 33 }} onClick={stopScan}><i className="fa-solid fa-stop" /> Stop scan</button>
       </div>
     )
   }
@@ -79,12 +82,10 @@ export const DiagnosticsScreen: React.FC = () => {
   if (completed.length === 0) {
     return (
       <div className="scan-hero">
-        <div style={{ width: 72, height: 72, borderRadius: 16, background: 'rgba(15,108,189,0.12)', display: 'grid', placeItems: 'center', marginBottom: 18 }}>
-          <i className="fa-solid fa-stethoscope" style={{ fontSize: 32, color: 'var(--wf-paletteColor1)' }} />
-        </div>
+        <div className="hero-tile"><i className="fa-solid fa-stethoscope" /></div>
         <h1>Ready to diagnose</h1>
-        <p className="sub">Run a Quick Scan to inventory your system. Most reads complete in seconds and never leave this machine.</p>
-        <div className="row-gap-12">
+        <p className="sub">Run a Quick Scan to inventory this PC. Checks are read-only, finish in seconds, and never leave this machine.</p>
+        <div className="hero-actions">
           <button className="btn primary" onClick={() => runQuickScan()}><i className="fa-solid fa-bolt" /> Quick Scan</button>
           <button className="btn" onClick={() => runFullScan()}><i className="fa-solid fa-list-check" /> Full Scan</button>
         </div>
@@ -93,31 +94,23 @@ export const DiagnosticsScreen: React.FC = () => {
   }
 
   return (
-    <>
-      <div className="stat-strip screen-strip">
-        <div className="stat-card passed">
+    <div className="results-wrap">
+      <div className="stat-row">
+        <div className="st">
           <div className="label">Passed</div>
-          <div className="value">{passed}<span className="ch-sub"> / {completed.length}</span></div>
-          <i className="fa-solid fa-circle-check icon" />
+          <div className="value"><span className="accent-n">{passed}</span><span className="unit"> / {completed.length}</span></div>
         </div>
-        <div className="stat-card failed">
+        <div className={`st ${failed > 0 ? 'failed' : ''}`}>
           <div className="label">Failed</div>
           <div className="value">{failed}</div>
-          <i className="fa-solid fa-circle-xmark icon" />
         </div>
-        <div className="stat-card brand">
-          <div className="label">Checks</div>
-          <div className="value">{completed.length}</div>
-          <i className="fa-solid fa-list-check icon" />
-        </div>
-        <div className="stat-card brand">
+        <div className="st">
           <div className="label">Duration</div>
-          <div className="value">{durationMs > 0 ? (durationMs / 1000).toFixed(1) : '—'}<span className="ch-sub">{durationMs > 0 ? 's' : ''}</span></div>
-          <i className="fa-solid fa-stopwatch icon" />
+          <div className="value">{durationMs > 0 ? (durationMs / 1000).toFixed(1) : '—'}{durationMs > 0 && <span className="unit">s</span>}</div>
         </div>
+        <div className="spacer" />
         <button
           className="btn"
-          style={{ alignSelf: 'center', whiteSpace: 'nowrap' }}
           title="Generate an AI health report for this scan"
           onClick={() => { setPendingScanReport(true); setSelectedTab('ai') }}
         >
@@ -132,7 +125,7 @@ export const DiagnosticsScreen: React.FC = () => {
             {failed > 0 && <span className="failed-count">{failed} failed</span>}
           </div>
           <div className="diag-list-search">
-            <input type="text" placeholder="Filter…" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
+            <input type="text" placeholder="Filter diagnostics…" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
           </div>
           <div className="diag-list-scroll">
             {Object.entries(grouped).map(([cat, items]) => (
@@ -145,7 +138,6 @@ export const DiagnosticsScreen: React.FC = () => {
                     onClick={() => setSelectedDiagnosticId(item.id)}
                   >
                     <span className={`status-dot ${item.result.success ? 'success' : 'error'}`} />
-                    <i className={`fa-solid ${taskIcon(item.id, item.category)}`} style={{ width: 13, color: 'var(--wf-text-muted)', fontSize: 12 }} />
                     <span className="name">{item.name}</span>
                     {item.result.duration_ms > 0 && <span className="duration">{formatDuration(item.result.duration_ms)}</span>}
                   </div>
@@ -156,6 +148,6 @@ export const DiagnosticsScreen: React.FC = () => {
         </div>
         {selected && <DiagnosticDetail key={selected.id} item={selected} />}
       </div>
-    </>
+    </div>
   )
 }

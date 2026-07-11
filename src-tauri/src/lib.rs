@@ -512,61 +512,117 @@ fn get_remediations() -> Result<Vec<remediation::RemediationSummary>, String> {
         .collect())
 }
 
-#[tauri::command]
-async fn restart_as_admin() -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        use std::env;
-        use std::ptr;
-        use windows::Win32::UI::Shell::ShellExecuteW;
-        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-        use windows::core::PCWSTR;
+/// Relaunch THIS process elevated by ShellExecute-ing its own absolute image
+/// path (`current_exe()`) with the `runas` verb. Blocking: ShellExecuteEx shows
+/// the UAC consent prompt and doesn't return until the user answers, and it can
+/// delegate to COM shell extensions — so this runs on a dedicated blocking
+/// thread with its own STA apartment, never the async worker.
+///
+/// The same code path serves the loose exe and the packaged Store build: both
+/// relaunch whatever absolute path the process is actually running from
+/// (`current_exe()` resolves the real image path in either case). The MSIX is a
+/// `runFullTrust` package, so elevating its exe is permitted; if the elevated
+/// session comes up without package identity, the AI layer just routes away
+/// from Phi Silica — the admin-only diagnostics that motivate the restart don't
+/// need identity. If Windows refuses the launch outright we surface that instead
+/// of silently pretending the Store build can never elevate (the old behavior).
+/// Returns `Ok(true)` when the elevated instance was launched, `Ok(false)` when
+/// the user dismissed the UAC prompt (not a failure — the caller should leave
+/// the app running untouched), and `Err` only on a genuine failure to launch.
+#[cfg(windows)]
+fn relaunch_self_elevated() -> Result<bool, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_CANCELLED};
+    use windows::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+    };
+    use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{HRESULT, PCWSTR};
 
-        if update_check::is_store_install() {
-            return Err("Restart as administrator is not supported for the Microsoft Store version. The app will stay open; install the MSI/NSIS build for elevated relaunch, or run admin-only tools manually.".to_string());
-        }
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("Could not resolve the running program path: {}", e))?;
+    // Run the elevated copy from its own directory rather than inheriting this
+    // process's working directory, so it can't pick up a hijacked DLL/exe from
+    // an attacker-controlled CWD (same reasoning as security::trusted_system_program).
+    let dir = exe.parent().map(|p| p.to_path_buf());
 
-        let exe_path = env::current_exe()
-            .map_err(|e| DiagError::internal(format!("Failed to get exe path: {}", e)))?;
+    let to_wide =
+        |s: &std::ffi::OsStr| -> Vec<u16> { s.encode_wide().chain(std::iter::once(0)).collect() };
+    let exe_w = to_wide(exe.as_os_str());
+    let dir_w = dir.as_deref().map(|d| to_wide(d.as_os_str()));
+    let verb_w: Vec<u16> = "runas\0".encode_utf16().collect();
 
-        // Convert path to wide string for Windows API
-        let exe_path_str = exe_path.to_string_lossy().to_string();
-        let exe_wide: Vec<u16> = exe_path_str
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-        let runas_wide: Vec<u16> = "runas".encode_utf16().chain(std::iter::once(0)).collect();
+    // ShellExecuteEx may route through COM (shell extensions); this blocking
+    // thread has no apartment of its own. RPC_E_CHANGED_MODE means COM was
+    // already initialized in another mode — leave it as-is and don't uninit.
+    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let should_uninit = hr.is_ok();
 
-        unsafe {
-            // Use ShellExecuteW with "runas" verb to trigger UAC elevation
-            let result = ShellExecuteW(
-                None,
-                PCWSTR(runas_wide.as_ptr()),
-                PCWSTR(exe_wide.as_ptr()),
-                PCWSTR(ptr::null()),
-                PCWSTR(ptr::null()),
-                SW_SHOWNORMAL,
-            );
+    // Zeroed base is the canonical way to build SHELLEXECUTEINFOW (all fields
+    // are null/0-valid, including the hIcon/hMonitor union).
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    // NOASYNC: complete the launch before returning — we exit immediately after,
+    // and an async in-process handler would be torn down mid-flight.
+    info.fMask = SEE_MASK_NOASYNC;
+    info.lpVerb = PCWSTR(verb_w.as_ptr());
+    info.lpFile = PCWSTR(exe_w.as_ptr());
+    info.lpDirectory = dir_w
+        .as_ref()
+        .map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr()));
+    info.nShow = SW_SHOWNORMAL.0;
 
-            // ShellExecuteW returns a value > 32 on success
-            if result.0 as i32 <= 32 {
-                return Err(DiagError::internal(format!(
-                    "Failed to restart with elevation. Error code: {}",
-                    result.0 as i32
+    let result = unsafe { ShellExecuteExW(&mut info) };
+
+    if should_uninit {
+        unsafe { CoUninitialize() };
+    }
+
+    match result {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            let code = e.code();
+            if code == HRESULT::from_win32(ERROR_CANCELLED.0) {
+                // User clicked "No" on the UAC prompt — deliberate, not an error.
+                Ok(false)
+            } else if code == HRESULT::from_win32(ERROR_ACCESS_DENIED.0) {
+                Err("Windows denied elevation. Try launching the app as administrator manually."
+                    .to_string())
+            } else {
+                Err(format!(
+                    "Could not relaunch with administrator rights ({:?}).",
+                    code
                 ))
-                .into());
             }
         }
+    }
+}
 
-        // Give the elevated process time to start before exiting
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        // Exit current process
-        std::process::exit(0);
+#[tauri::command]
+async fn restart_as_admin(app_handle: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        // UAC prompt blocks the calling thread; keep it off the async runtime.
+        match tokio::task::spawn_blocking(relaunch_self_elevated).await {
+            Ok(Ok(true)) => {
+                // Elevated instance is up. Fully quit this one (bypassing
+                // close-to-tray, like the tray "Exit") so only one copy runs.
+                app_handle.exit(0);
+                Ok(())
+            }
+            // User dismissed the UAC prompt — leave this instance running, no error.
+            Ok(Ok(false)) => Ok(()),
+            Ok(Err(message)) => Err(message),
+            Err(join_err) => {
+                Err(DiagError::internal(format!("Elevation task failed: {}", join_err)).into())
+            }
+        }
     }
 
     #[cfg(not(windows))]
     {
+        let _ = app_handle;
         Err(DiagError::PlatformNotSupported {
             operation: "Administrator restart".to_string(),
         }

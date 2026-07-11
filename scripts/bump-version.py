@@ -370,12 +370,15 @@ def main():
     ):
         success_count += 1
 
-    # 8. src/App.tsx - "Diagnostics · X.Y.Z" in the nav rail brand
+    # 8. src/App.tsx - APP_VERSION constant (rendered in the nav rail and status bar)
     total_count += 1
     if update_tsx_file(
         script_dir / 'src' / 'App.tsx',
         new_version,
-        [(r'Diagnostics · [\d.]+', 'Diagnostics · VERSION')],
+        # Capture groups keep the identifier out of the replacement text —
+        # a literal "APP_VERSION = '...'" template would have its own
+        # VERSION substring rewritten by the placeholder substitution.
+        [(r"(APP_VERSION = ')[\d.]+(')", r"\g<1>VERSION\g<2>")],
         dry_run
     ):
         success_count += 1
