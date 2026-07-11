@@ -3,17 +3,25 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 
 const inTauri = () => '__TAURI_INTERNALS__' in window
 
+interface TitlebarProps {
+  isDark: boolean
+  onToggleTheme: () => void
+}
+
 /**
- * Custom titlebar for the frameless window (decorations: false). Dragging and
- * double-click-maximize come from the data-tauri-drag-region attribute, which
- * Tauri applies only to the element itself — child buttons stay clickable.
- * Renders nothing in a plain-browser dev session.
+ * Custom titlebar for the frameless window (decorations: false). Sits directly
+ * on the wallpaper. Left: brand mark + name. Right: theme toggle, then the
+ * window controls. Dragging + double-click-maximize come from
+ * data-tauri-drag-region (applied only to the bar itself; child buttons stay
+ * clickable). Outside Tauri it still renders the bar + theme toggle so the
+ * chrome and theme switch are usable in a plain browser dev session.
  */
-export const Titlebar: React.FC = () => {
+export const Titlebar: React.FC<TitlebarProps> = ({ isDark, onToggleTheme }) => {
   const [maximized, setMaximized] = useState(false)
+  const tauri = inTauri()
 
   useEffect(() => {
-    if (!inTauri()) return
+    if (!tauri) return
     const win = getCurrentWindow()
     let unlisten: (() => void) | undefined
     let cancelled = false
@@ -34,28 +42,34 @@ export const Titlebar: React.FC = () => {
       cancelled = true
       unlisten?.()
     }
-  }, [])
-
-  if (!inTauri()) return null
+  }, [tauri])
 
   const win = () => getCurrentWindow()
 
   return (
     <div className="titlebar" data-tauri-drag-region>
       <div className="tb-left" data-tauri-drag-region>
-        <span className="tb-mark" aria-hidden="true">WF</span>
-        <span className="tb-title">WindowsForum Diagnostic Tool</span>
+        <span className="tb-mark" aria-hidden="true"><img src="/wf-ds/icon-only.png" alt="" /></span>
+        <span className="tb-title">WindowsForum Diagnostics</span>
       </div>
+      <div className="tb-spacer" data-tauri-drag-region />
       <div className="tb-controls">
-        <button onClick={() => win().minimize()} aria-label="Minimize">
-          <i className="fa-solid fa-window-minimize" aria-hidden="true" />
+        <button title="Switch theme" aria-label="Switch theme" onClick={onToggleTheme}>
+          <i className={`fa-solid ${isDark ? 'fa-sun' : 'fa-moon'}`} aria-hidden="true" />
         </button>
-        <button onClick={() => win().toggleMaximize()} aria-label={maximized ? 'Restore' : 'Maximize'}>
-          <i className={`fa-regular ${maximized ? 'fa-window-restore' : 'fa-window-maximize'}`} aria-hidden="true" />
-        </button>
-        <button className="close" onClick={() => win().close()} aria-label="Close">
-          <i className="fa-solid fa-xmark" aria-hidden="true" />
-        </button>
+        {tauri && (
+          <>
+            <button onClick={() => win().minimize()} aria-label="Minimize" style={{ fontSize: 11 }}>
+              <i className="fa-solid fa-minus" aria-hidden="true" />
+            </button>
+            <button onClick={() => win().toggleMaximize()} aria-label={maximized ? 'Restore' : 'Maximize'} style={{ fontSize: 10 }}>
+              <i className={`fa-regular ${maximized ? 'fa-window-restore' : 'fa-square'}`} aria-hidden="true" />
+            </button>
+            <button className="close" onClick={() => win().close()} aria-label="Close" style={{ fontSize: 13 }}>
+              <i className="fa-solid fa-xmark" aria-hidden="true" />
+            </button>
+          </>
+        )}
       </div>
     </div>
   )

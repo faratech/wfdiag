@@ -1,6 +1,6 @@
 [package]
 name = "wfdiag-tauri"
-version = "2.5.3"
+version = "2.5.4"
 description = "WindowsForum Diagnostic Tool"
 authors = ["WindowsForum"]
 edition = "2024"
@@ -101,6 +101,7 @@ windows = { version = "0.62", features = [
     "Win32_System_WinRT",
     "Win32_System_LibraryLoader",
     "Win32_System_Com",
+    "Win32_System_Registry",
     "Win32_System_Ole",
     "Win32_System_Variant",
     "Win32_System_Wmi",

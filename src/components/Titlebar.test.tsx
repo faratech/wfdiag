@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, act } from '@testing-library/react'
+import { render, act, fireEvent } from '@testing-library/react'
 import { Titlebar } from './Titlebar'
 
 const isMaximizedMock = vi.fn()
@@ -36,7 +36,7 @@ describe('Titlebar onResized listener cleanup', () => {
     const unlisten = vi.fn()
     onResizedMock.mockReturnValue(resizePending.promise)
 
-    const { unmount } = render(<Titlebar />)
+    const { unmount } = render(<Titlebar isDark={false} onToggleTheme={() => {}} />)
     // Unmount before onResized() has a chance to resolve, simulating React
     // StrictMode's dev double-invoke (or a real fast mount/unmount cycle).
     unmount()
@@ -53,7 +53,7 @@ describe('Titlebar onResized listener cleanup', () => {
     const unlisten = vi.fn()
     onResizedMock.mockResolvedValue(unlisten)
 
-    const { unmount } = render(<Titlebar />)
+    const { unmount } = render(<Titlebar isDark={false} onToggleTheme={() => {}} />)
 
     await act(async () => {
       await Promise.resolve()
@@ -61,5 +61,20 @@ describe('Titlebar onResized listener cleanup', () => {
 
     unmount()
     expect(unlisten).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('Titlebar theme toggle', () => {
+  it('renders an icon-only theme toggle that calls onToggleTheme', () => {
+    const onToggleTheme = vi.fn()
+    const { getByRole } = render(<Titlebar isDark onToggleTheme={onToggleTheme} />)
+
+    const themeButton = getByRole('button', { name: 'Switch theme' })
+    // Icon-only: an <i> glyph and no visible label text
+    expect(themeButton.querySelector('i')).not.toBeNull()
+    expect(themeButton).not.toHaveTextContent(/Light|Dark/)
+
+    fireEvent.click(themeButton)
+    expect(onToggleTheme).toHaveBeenCalledTimes(1)
   })
 })

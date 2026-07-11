@@ -21,6 +21,9 @@ interface FixPlan { entries: FixPlanEntry[]; notes: string }
 const sevClass = (s: string) =>
   ({ critical: 'critical', warning: 'warning', info: 'info', ok: 'ok' } as Record<string, string>)[s.toLowerCase()] || 'info'
 
+const sevIcon = (s: string) =>
+  ({ critical: 'fa-circle-xmark', warning: 'fa-triangle-exclamation', info: 'fa-circle-info', ok: 'fa-circle-check' } as Record<string, string>)[s.toLowerCase()] || 'fa-circle-info'
+
 const TIER_ICON: Record<RemediationSummary['tier'], string> = {
   open_tool: 'fa-arrow-up-right-from-square',
   auto_safe: 'fa-wand-magic-sparkles',
@@ -182,38 +185,20 @@ export const IssuesScreen: React.FC = () => {
 
   return (
     <>
-      <div className="stat-strip screen-toolbar">
-        <div className="stat-card brand">
-          <div className="label">Active Issues</div>
-          <div className="value">{detected.length}</div>
-          <i className="fa-solid fa-triangle-exclamation icon" />
-        </div>
-        <div className="stat-card failed">
-          <div className="label">Critical</div>
-          <div className="value">{critical}</div>
-          <i className="fa-solid fa-circle-xmark icon" />
-        </div>
-        <div className="stat-card warning">
-          <div className="label">Warnings</div>
-          <div className="value">{warnings}</div>
-          <i className="fa-solid fa-triangle-exclamation icon" />
-        </div>
-        <div className="stat-card passed">
-          <div className="label">Checks Run</div>
-          <div className="value">{issues.length - skipped.length}</div>
-          <i className="fa-solid fa-list-check icon" />
-        </div>
-      </div>
-
       <div className="scrollable screen-pad">
         {issues.length === 0 && (
-          <div className="wf-block">
-            <EmptyState
-              icon="fa-shield-halved"
-              title="No issues detected"
-              sub="Issues are derived from the most recent scan. Run a scan to refresh the analysis."
-              actions={<Button variant="primary" icon="fa-bolt" onClick={() => runQuickScan()} disabled={isRunning}>Quick Scan</Button>}
-            />
+          <EmptyState
+            icon="fa-shield-halved"
+            title="No scan data yet"
+            sub="Run a Quick Scan and any detected problems will appear here with one-click fixes."
+            actions={<Button variant="primary" icon="fa-bolt" onClick={() => runQuickScan()} disabled={isRunning}>Quick Scan</Button>}
+          />
+        )}
+        {issues.length > 0 && (
+          <div className="issues-summary">
+            {detected.length === 0
+              ? `All clear — no issues detected · ${issues.length - skipped.length} checks passed`
+              : `${detected.length} issue${detected.length === 1 ? '' : 's'} need${detected.length === 1 ? 's' : ''} attention · detected by the latest scan${critical > 0 ? ` · ${critical} critical` : ''}${warnings > 0 ? ` · ${warnings} warning${warnings === 1 ? '' : 's'}` : ''}`}
           </div>
         )}
 
@@ -246,11 +231,11 @@ export const IssuesScreen: React.FC = () => {
                       const remediation = remediationById(entry.remediation_id)
                       const issue = issues.find(i => i.id === entry.issue_id)
                       return (
-                        <div key={`${entry.issue_id}:${entry.remediation_id}`} className={`issue-card ${sevClass(issue?.severity || 'info')}`} style={{ margin: 0 }}>
-                          <div className="swatch" />
+                        <div key={`${entry.issue_id}:${entry.remediation_id}`} className={`issue-card ${sevClass(issue?.severity || 'info')}`} style={{ marginBottom: 0 }}>
+                          <div className="isev"><i className={`fa-solid ${sevIcon(issue?.severity || 'info')}`} /></div>
                           <div className="body">
                             <div className="title-row">
-                              <h3 style={{ fontSize: 13 }}>{issue?.title || entry.issue_id}</h3>
+                              <h3>{issue?.title || entry.issue_id}</h3>
                               <span className="badge">{entry.tier.replace('_', ' ')}</span>
                             </div>
                             <p className="desc">{entry.rationale}</p>
@@ -279,20 +264,17 @@ export const IssuesScreen: React.FC = () => {
 
         {/* ---- Admin-gated checks notice ---- */}
         {issues.length > 0 && !systemInfo?.is_admin && (
-          <div className="issue-card info" style={{ alignItems: 'center' }}>
-            <div className="swatch" />
+          <div className="issue-card info">
+            <div className="isev"><i className="fa-solid fa-user-shield" /></div>
             <div className="body">
-              <div className="title-row">
-                <i className="fa-solid fa-user-shield" style={{ color: 'var(--wf-paletteColor1)' }} />
-                <h3>Some checks need administrator access</h3>
-              </div>
+              <div className="title-row"><h3>Some checks need administrator access</h3></div>
               <p className="desc">
                 Crash dumps (BSOD), SMART &amp; disk health, system-file (DISM) and battery
                 checks only run when the app is elevated, so they were skipped. Restart as
                 administrator to include them.
               </p>
             </div>
-            <div className="actions" style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'stretch' }}>
+            <div className="actions">
               <button className="btn primary" onClick={() => { void restartAsAdmin() }}>
                 <i className="fa-solid fa-user-shield" /> Restart as administrator
               </button>
@@ -307,23 +289,19 @@ export const IssuesScreen: React.FC = () => {
           const remediation = issue.remediation
           return (
             <div key={id} className={`issue-card ${sevClass(sev)}`}>
-              <div className="swatch" />
+              <div className="isev"><i className={`fa-solid ${sevIcon(sev)}`} /></div>
               <div className="body">
-                <div className="title-row">
-                  <i
-                    className={`fa-solid ${sev.toLowerCase() === 'critical' ? 'fa-circle-xmark' : sev.toLowerCase() === 'warning' ? 'fa-triangle-exclamation' : 'fa-circle-info'}`}
-                    style={{ color: sev.toLowerCase() === 'critical' ? 'var(--err-fg)' : sev.toLowerCase() === 'warning' ? 'var(--warn-fg)' : 'var(--wf-paletteColor1)' }}
-                  />
-                  <h3>{issue.title}</h3>
-                  <span className="badge">{sev}</span>
-                  <span className="badge">{issue.category}</span>
-                </div>
+                <div className="title-row"><h3>{issue.title}</h3></div>
                 <p className="desc">{issue.description}</p>
                 {issue.recommendation && (
                   <div className="reco"><strong>Recommended:</strong> {issue.recommendation}</div>
                 )}
+                <div className="chips">
+                  <span className="chip"><i className="fa-solid fa-stethoscope" />{issue.category}</span>
+                  <span className="chip sev">{sev}</span>
+                </div>
               </div>
-              <div className="actions" style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'stretch' }}>
+              <div className="actions">
                 {remediation && (
                   <button className="btn primary" disabled={remediationBusy} onClick={() => handleFixClick(remediation)}>
                     {fixingIssue === remediation.id

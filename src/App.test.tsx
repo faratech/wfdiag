@@ -121,16 +121,4 @@ describe('App command bar', () => {
     expect(mocks.runQuickScan).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps the command-bar theme toggle icon-only', () => {
-    mocks.appContextValue = {
-      ...mocks.appContextValue,
-      settings: { scanOnStartup: false, theme: 'dark' },
-    }
-
-    render(<App />)
-
-    const themeButton = screen.getByRole('button', { name: 'Switch to dark theme' })
-    expect(themeButton).toHaveClass('icon-only')
-    expect(themeButton).not.toHaveTextContent(/Light|Dark/)
-  })
 })

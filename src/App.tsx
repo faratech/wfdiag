@@ -9,7 +9,7 @@ import { useGlobalShortcuts } from './hooks/useGlobalShortcuts'
 import { useMediaQuery } from './hooks/useMediaQuery'
 import { useUpdateCheck } from './hooks/useUpdateCheck'
 import type { TabValue } from './components'
-import { SettingsDialog, AboutDialog, Tooltip, Kbd } from './components'
+import { SettingsDialog, AboutDialog, Tooltip } from './components'
 import { CommandPalette } from './components/CommandPalette'
 import { ShortcutHelp } from './components/ShortcutHelp'
 import { Titlebar } from './components/Titlebar'
@@ -31,13 +31,15 @@ const TABS: { id: TabValue; label: string }[] = [
 ]
 
 const PAGE_META: Record<TabValue, { title: string; sub: string }> = {
-  diagnostics: { title: 'System Analysis', sub: 'Comprehensive diagnostic engine across hardware, drivers, storage, network and logs' },
+  diagnostics: { title: 'System Analysis', sub: 'Read-only diagnostics across hardware, storage, network and logs' },
   monitoring: { title: 'Live Monitor', sub: 'Real-time CPU, memory, disk, network and NPU telemetry' },
-  processes: { title: 'Running Processes', sub: 'Live process explorer with per-process resource tracking' },
-  ai: { title: 'AI Analysis', sub: 'Interpret diagnostics on-device or with a configured cloud model' },
-  issues: { title: 'Detected Issues', sub: 'Problems found in the most recent scan with remediation guidance' },
-  history: { title: 'Scan History', sub: 'Compare past scans to spot drift and regressions' },
+  processes: { title: 'Processes', sub: 'Running processes with live resource usage' },
+  ai: { title: 'AI Analysis', sub: 'On-device intelligence powered by Phi Silica' },
+  issues: { title: 'Issues', sub: 'Problems detected in the latest scan, with one-click fixes' },
+  history: { title: 'History', sub: 'Past scans — spot drift and regressions over time' },
 }
+
+const APP_VERSION = '2.5.4'
 
 const AppContent: React.FC = () => {
   const {
@@ -46,8 +48,8 @@ const AppContent: React.FC = () => {
     showSettings, setShowSettings, showAbout, setShowAbout, settings, saveSettings,
   } = useAppContext()
   const { setThemeMode, isDark } = useTheme()
-  const { detectIssues, copyToClipboard, exportResults, shareToWindowsForum, emailReport, generateSupportPackage } = useDiagnostics()
-  const { runQuickScan, runFullScan, stopScan } = useScanner()
+  const { detectIssues, exportResults, shareToWindowsForum } = useDiagnostics()
+  const { runQuickScan } = useScanner()
   const runQuickScanAndShow = useCallback(() => {
     setSelectedTab('diagnostics')
     void runQuickScan()
@@ -140,19 +142,24 @@ const AppContent: React.FC = () => {
 
   return (
     <div className="app-window">
-      <Titlebar />
+      {/* Wallpaper backdrop — two blurred layers cross-faded on theme change */}
+      <div className="wp-layer wp-layer-light" aria-hidden="true" />
+      <div className="wp-layer wp-layer-dark" aria-hidden="true" />
+      <div className="wp-dim" aria-hidden="true" />
+
+      <Titlebar isDark={isDark} onToggleTheme={toggleTheme} />
+
       <div className={`app-body ${railCollapsed ? 'rail-collapsed' : ''}`}>
-        {/* Nav rail */}
+        {/* Nav rail — transparent, on the wallpaper */}
         <nav className="nav-rail" aria-label="Primary">
           <div className="rail-brand">
-            <div className="rail-brand-mark"><img src="/wf-ds/icon-only.png" alt="" /></div>
+            <div className="rail-brand-mark"><img src="/wf-ds/icon-only.png" alt="WindowsForum" /></div>
             <div className="rail-brand-text">
               <div className="b1">WindowsForum</div>
-              <div className="b2">Diagnostics · 2.5.3</div>
+              <div className="b2">Diagnostics · {APP_VERSION}</div>
             </div>
           </div>
 
-          <div className="rail-section-title">Workspace</div>
           <div className="nav-list">
             {TABS.map((t, i) => {
               const btn = (
@@ -176,94 +183,41 @@ const AppContent: React.FC = () => {
 
           <div className="rail-section-title">Tools</div>
           <div className="nav-list">
-            <button className="nav-item" onClick={runQuickScanAndShow} disabled={isRunning}>
+            <button className="nav-item tool" onClick={runQuickScanAndShow} disabled={isRunning}>
               <i className="fa-solid fa-bolt item-icon" />
               <span className="item-label">Quick Scan</span>
             </button>
-            <button className="nav-item" onClick={() => generateSupportPackage()} disabled={!hasResults}>
-              <i className="fa-solid fa-box-archive item-icon" />
-              <span className="item-label">Support Package</span>
+            <button className="nav-item tool" onClick={() => exportResults()} disabled={!hasResults}>
+              <i className="fa-solid fa-file-export item-icon" />
+              <span className="item-label">Export Report</span>
             </button>
-            <button className="nav-item" onClick={() => shareToWindowsForum()} disabled={!hasResults}>
+            <button className="nav-item tool" onClick={() => shareToWindowsForum()} disabled={!hasResults}>
               <i className="fa-solid fa-share-nodes item-icon" />
               <span className="item-label">Share to Forum</span>
             </button>
           </div>
 
           <div className="rail-footer">
-            <div className="sysinfo">
-              <div className="si-row"><i className="fa-solid fa-desktop" /><strong>{systemInfo?.computer_name || '—'}</strong></div>
-              <div className="si-row"><i className="fa-brands fa-windows" />{systemInfo?.os_version || 'Windows'}</div>
-              <div className="si-row"><i className="fa-solid fa-user-shield" />{systemInfo?.is_admin ? 'Administrator' : 'Standard user'}</div>
-            </div>
-            <button className="nav-item" onClick={() => setShowSettings(true)}><i className="fa-solid fa-gear item-icon" /><span className="item-label">Settings</span></button>
-            <button className="nav-item" onClick={() => setShowAbout(true)}><i className="fa-solid fa-circle-info item-icon" /><span className="item-label">About</span></button>
+            <button className="nav-item tool" onClick={() => setShowSettings(true)}><i className="fa-solid fa-gear item-icon" /><span className="item-label">Settings</span></button>
+            <button className="nav-item tool" onClick={() => setShowAbout(true)}><i className="fa-solid fa-circle-info item-icon" /><span className="item-label">About</span></button>
             {/* Hidden while the narrow window forces a collapse — toggling a
                 preference with no visible effect would just confuse */}
             {!forceCollapsed && (
-              <button className="nav-item" onClick={() => setNavRailCollapsed(!navRailCollapsed)}>
+              <button className="nav-item tool" onClick={() => setNavRailCollapsed(!navRailCollapsed)}>
                 <i className={`fa-solid ${navRailCollapsed ? 'fa-angles-right' : 'fa-angles-left'} item-icon`} />
                 <span className="item-label">Collapse</span>
               </button>
             )}
+            <div className="sysinfo">
+              <div className="si-row"><i className="fa-solid fa-desktop" /><strong>{systemInfo?.computer_name || '—'}</strong></div>
+              <div className="si-row"><i className="fa-brands fa-windows" /><span>{systemInfo?.os_version || 'Windows'}</span></div>
+              <div className="si-row"><i className="fa-solid fa-user-shield" /><span>{systemInfo?.is_admin ? 'Administrator' : 'Standard user'}</span></div>
+            </div>
           </div>
         </nav>
 
-        {/* Content */}
+        {/* Content panel — the single acrylic surface */}
         <main className="content-area">
-          <div className="command-bar" role="toolbar" aria-label="Actions">
-            <div className="cb-group" role="group" aria-label="Scan">
-              <Tooltip content="Run the essential checks" shortcut="Ctrl+Shift+Q">
-                <button className="cb-btn primary" onClick={runQuickScanAndShow} disabled={isRunning}>
-                  <i className="fa-solid fa-bolt" aria-hidden="true" /> Quick Scan
-                </button>
-              </Tooltip>
-              <Tooltip content="Run every available diagnostic" shortcut="Ctrl+Shift+F">
-                <button className="cb-btn" onClick={() => runFullScan()} disabled={isRunning}>
-                  <i className="fa-solid fa-list-check" aria-hidden="true" /> Full Scan
-                </button>
-              </Tooltip>
-              {isRunning && (
-                <button className="cb-btn danger" onClick={() => stopScan()}><i className="fa-solid fa-stop" aria-hidden="true" /> Stop</button>
-              )}
-            </div>
-            <div className="cb-divider" role="presentation" />
-            <div className="cb-group" role="group" aria-label="Report">
-              {([
-                ['Copy report to clipboard', 'fa-copy', 'Copy', copyToClipboard],
-                ['Export report to a file', 'fa-file-export', 'Export', exportResults],
-                ['Share results to WindowsForum', 'fa-share-nodes', 'Share', shareToWindowsForum],
-                ['Email the report', 'fa-envelope', 'Email', emailReport],
-              ] as const).map(([tip, icon, label, action]) => (
-                <Tooltip key={label} content={hasResults ? tip : 'Run a scan first'}>
-                  <button className="cb-btn" onClick={() => action()} disabled={!hasResults}>
-                    <i className={`fa-solid ${icon}`} aria-hidden="true" /> {label}
-                  </button>
-                </Tooltip>
-              ))}
-            </div>
-            <div className="cb-divider" role="presentation" />
-            <div className="cb-group">
-              <Tooltip content="Compare scans over time">
-                <button className="cb-btn" onClick={() => setSelectedTab('history')}><i className="fa-solid fa-code-compare" aria-hidden="true" /> Compare</button>
-              </Tooltip>
-            </div>
-            <div className="cb-spacer" />
-            <div className="cb-group">
-              <Tooltip content="Search commands and diagnostics" shortcut="Ctrl+K">
-                <button className="cb-btn" onClick={() => setPaletteOpen(true)} aria-label="Open command palette">
-                  <i className="fa-solid fa-magnifying-glass" aria-hidden="true" /> Search
-                  <span className="meta"><Kbd keys="Ctrl+K" /></span>
-                </button>
-              </Tooltip>
-              <Tooltip content={`Switch to ${isDark ? 'light' : 'dark'} theme`}>
-                <button className="cb-btn icon-only" onClick={toggleTheme} aria-label={`Switch to ${isDark ? 'light' : 'dark'} theme`}>
-                  <i className={`fa-solid ${isDark ? 'fa-sun' : 'fa-moon'}`} aria-hidden="true" />
-                </button>
-              </Tooltip>
-            </div>
-          </div>
-
           <div className="page-header">
             <div>
               <h1>{meta.title}</h1>
@@ -287,25 +241,25 @@ const AppContent: React.FC = () => {
           {selectedTab === 'issues' && <IssuesScreen />}
           {selectedTab === 'history' && <HistoryScreen />}
           </div>
-        </main>
 
-        {/* Status bar */}
-        <div className={`status-bar ${isRunning ? 'scanning' : ''}`} role="status">
-          <div className="sb-segments">
-            {isRunning ? (
-              <div className="sb-seg"><i className="fa-solid fa-circle-notch fa-spin" aria-hidden="true" /> Running: {currentTaskName || '…'}</div>
-            ) : (
-              <>
-                <div className="sb-seg ok"><i className="fa-solid fa-circle-check" /> <strong>{passed}</strong> passed</div>
-                {failed > 0 && <div className="sb-seg fail"><i className="fa-solid fa-circle-xmark" /> <strong>{failed}</strong> failed</div>}
-              </>
-            )}
+          {/* Status bar — inside the panel */}
+          <div className="status-bar" role="status">
+            <div className="sb-left">
+              {isRunning ? (
+                <><i className="fa-solid fa-circle-notch fa-spin ico-accent" aria-hidden="true" /><span>Running: {currentTaskName || '…'}</span></>
+              ) : hasResults ? (
+                <><i className="fa-solid fa-circle-check ico-ok" aria-hidden="true" /><span>{passed} passed · {failed} failed</span></>
+              ) : (
+                <><i className="fa-solid fa-circle-info" aria-hidden="true" /><span>Ready — no scan data</span></>
+              )}
+            </div>
+            <div className="sb-spacer" />
+            <div className="sb-right">
+              <span>{durationMs > 0 ? `${(durationMs / 1000).toFixed(1)}s · ` : ''}{systemInfo?.is_admin ? 'Administrator' : 'Standard user'}</span>
+              <span className="sb-brand">wfdiag {APP_VERSION} · WindowsForum.com</span>
+            </div>
           </div>
-          <div className="sb-segments sb-right">
-            {durationMs > 0 && <div className="sb-seg"><i className="fa-solid fa-stopwatch" /> <strong>{(durationMs / 1000).toFixed(1)}s</strong></div>}
-            <div className="sb-seg"><i className="fa-solid fa-user" /> {systemInfo?.is_admin ? 'Administrator' : 'Standard user'}</div>
-          </div>
-        </div>
+        </main>
       </div>
 
       <SettingsDialog

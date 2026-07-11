@@ -38,47 +38,44 @@ export const MonitorScreen: React.FC = () => {
 
   return (
     <>
-      <div className="row-gap-12 screen-toolbar" style={{ justifyContent: 'space-between' }}>
-        <div className="row-gap-12">
-          <span className={`tag ${isActive ? 'success' : 'neutral'}`}>
-            <span className="status-dot" style={{ background: isActive ? 'var(--ok-fg)' : 'var(--wf-text-muted)', animation: isActive ? 'pulse 1.4s ease-in-out infinite' : 'none' }} />
-            {isActive ? 'Live · sampling' : 'Paused'}
+      <div className="monitor-head screen-toolbar">
+        <span className={`tag ${isActive ? 'success' : 'neutral'}`}>
+          <span className={`mon-dot ${isActive ? 'live' : ''}`} />
+          {isActive ? 'Live · sampling' : 'Paused'}
+        </span>
+        {last && (
+          <span className="hw-line">
+            {last.per_cpu_utilization?.length || 0} threads · {last.memory_total_gb.toFixed(1)} GB RAM
+            {last.gpu_available ? ` · GPU: ${last.gpu_name ?? 'present'}` : ''}
+            {last.npu_available ? ` · NPU: ${last.npu_name ?? 'present'}` : ''}
           </span>
-          {last && (
-            <span style={{ fontSize: 12, color: 'var(--wf-text-muted)' }}>
-              {last.per_cpu_utilization?.length || 0} threads · {last.memory_total_gb.toFixed(1)} GB RAM
-              {last.gpu_available ? ` · GPU: ${last.gpu_name ?? 'present'}` : ''}
-              {last.npu_available ? ` · NPU: ${last.npu_name ?? 'present'}` : ''}
-            </span>
-          )}
-        </div>
-        <div className="row-gap-12">
-          <button className="btn" onClick={() => toggle()} disabled={isLoading}>
-            <i className={`fa-solid ${isActive ? 'fa-pause' : 'fa-play'}`} /> {isActive ? 'Pause' : 'Resume'}
-          </button>
-          <button className="btn" onClick={() => refresh()}><i className="fa-solid fa-arrows-rotate" /> Refresh</button>
-        </div>
+        )}
+        <div className="spacer" />
+        <button className="btn" onClick={() => toggle()} disabled={isLoading}>
+          <i className={`fa-solid ${isActive ? 'fa-pause' : 'fa-play'}`} /> {isActive ? 'Pause' : 'Resume'}
+        </button>
+        <button className="btn" onClick={() => refresh()}><i className="fa-solid fa-arrows-rotate" /> Refresh</button>
       </div>
 
       <div className="scrollable screen-pad">
         {!last && (
           <div className="charts-grid" aria-hidden="true">
-            {Array.from({ length: 5 }, (_, i) => (
-              <Skeleton key={i} variant="block" height={150} />
+            {Array.from({ length: 6 }, (_, i) => (
+              <Skeleton key={i} variant="block" height={140} />
             ))}
           </div>
         )}
         {last && (
         <div className="charts-grid">
-          <ChartCard title="CPU" value={(last?.cpu_utilization ?? 0).toFixed(1)} sub="%" color="var(--wf-paletteColor1)" series={series.cpu} max={100} hint={last?.cpu_frequency ? `${(last.cpu_frequency / 1000).toFixed(2)} GHz` : 'Processor utilization'} />
-          <ChartCard title="Memory" value={(last?.memory_utilization ?? 0).toFixed(1)} sub="%" color="#0e8fb8" series={series.mem} max={100} hint={last ? `${last.memory_used_gb.toFixed(1)} / ${last.memory_total_gb.toFixed(1)} GB used` : ''} />
-          <ChartCard title="Disk" value={(last?.disk_utilization ?? 0).toFixed(1)} sub="%" color="#7a4cc9" series={series.disk} max={100} hint="Active disk time" />
-          <ChartCard title="Network" value={(((last?.network_upload_kb ?? 0) + (last?.network_download_kb ?? 0)) / 1024).toFixed(2)} sub="MB/s" color="#0f8a5a" series={series.net} max={netMax} hint="Up + down throughput" />
+          <ChartCard title="CPU" value={(last?.cpu_utilization ?? 0).toFixed(1)} sub="%" series={series.cpu} max={100} hint={last?.cpu_frequency ? `${(last.cpu_frequency / 1000).toFixed(2)} GHz` : 'Processor utilization'} />
+          <ChartCard title="Memory" value={(last?.memory_utilization ?? 0).toFixed(1)} sub="%" series={series.mem} max={100} hint={last ? `${last.memory_used_gb.toFixed(1)} / ${last.memory_total_gb.toFixed(1)} GB used` : ''} />
+          <ChartCard title="Disk" value={(last?.disk_utilization ?? 0).toFixed(1)} sub="%" series={series.disk} max={100} hint="Active disk time" />
+          <ChartCard title="Network" value={(((last?.network_upload_kb ?? 0) + (last?.network_download_kb ?? 0)) / 1024).toFixed(2)} sub="MB/s" series={series.net} max={netMax} hint="Up + down throughput" />
           {last?.gpu_available && (
-            <ChartCard title="GPU" value={(last?.gpu_utilization ?? 0).toFixed(1)} sub="%" color="#b04a7a" series={series.gpu} max={100} hint={last.gpu_memory_total_mb > 0 ? `${formatBytesMb(last.gpu_memory_used_mb)} / ${formatBytesMb(last.gpu_memory_total_mb)}` : (last.gpu_name ?? 'Graphics adapter')} />
+            <ChartCard title="GPU" value={(last?.gpu_utilization ?? 0).toFixed(1)} sub="%" series={series.gpu} max={100} hint={last.gpu_memory_total_mb > 0 ? `${formatBytesMb(last.gpu_memory_used_mb)} / ${formatBytesMb(last.gpu_memory_total_mb)}` : (last.gpu_name ?? 'Graphics adapter')} />
           )}
           {last?.npu_available && (
-            <ChartCard title="NPU" value={(last?.npu_utilization ?? 0).toFixed(1)} sub="%" color="#c98a00" series={series.npu} max={100} hint={last.npu_memory_total_mb > 0 ? `${formatBytesMb(last.npu_memory_used_mb)} / ${formatBytesMb(last.npu_memory_total_mb)}` : (last?.npu_name ?? 'Neural processing unit')} />
+            <ChartCard title="NPU" value={(last?.npu_utilization ?? 0).toFixed(1)} sub="%" series={series.npu} max={100} hint={last.npu_memory_total_mb > 0 ? `${formatBytesMb(last.npu_memory_used_mb)} / ${formatBytesMb(last.npu_memory_total_mb)}` : (last?.npu_name ?? 'Neural processing unit')} />
           )}
         </div>
         )}
