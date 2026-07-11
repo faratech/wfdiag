@@ -207,10 +207,11 @@ def generate_windows_ai_bindings() -> bool:
     cargo_toml.write_text('''[package]
 name = "bindgen_runner"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.97"
 
 [dependencies]
-windows-bindgen = "0.65"
+windows-bindgen = "0.66"
 ''')
 
     # Build the list of input winmd files - include all AI-related winmd files

@@ -1777,10 +1777,7 @@ pub fn get_npu_utilization() -> Option<f32> {
             // LUID not yet initialized - try to discover it
             let wmi_con = WmiConnection::new().ok()?;
             let luid = NPU_LUID.get_or_init(|| discover_npu_luid_with_wmi(&wmi_con));
-            match luid {
-                Some(l) => l.clone(),
-                None => return None,
-            }
+            luid.clone()?
         }
     };
 

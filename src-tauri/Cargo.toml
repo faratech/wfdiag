@@ -4,6 +4,7 @@ version = "2.5.3"
 description = "WindowsForum Diagnostic Tool"
 authors = ["WindowsForum"]
 edition = "2024"
+rust-version = "1.97"
 
 [lib]
 name = "wfdiag_tauri"
