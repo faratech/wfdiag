@@ -126,8 +126,31 @@ jobs:
           # Use the bundle file as the positional argument (pathOrUrl); the
           # --appId flag bypasses project detection. --noCommit keeps the
           # submission in draft so the next step can set the release notes.
-          msstore publish "$($bundleFile.FullName)" --appId 9NJ59RH053PV --noCommit --verbose
-          if ($LASTEXITCODE -ne 0) { throw "msstore publish --noCommit failed" }
+          #
+          # When a pending submission already exists, msstore CLI deletes it
+          # server-side before creating a fresh one. That delete call has been
+          # observed to 504 after 80s and return an HTML error page, which
+          # crashes the CLI with an unhandled JSON parse exception instead of
+          # a clean non-zero exit. Retry a few times with backoff — this is a
+          # transient Partner Center gateway issue, not something the CLI or
+          # this workflow can fix directly. If it keeps failing, the pending
+          # submission is likely stuck and needs to be cancelled manually in
+          # the Partner Center portal before any retry here can succeed.
+          $maxAttempts = 3
+          $succeeded = $false
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            Write-Host "msstore publish attempt $attempt of $maxAttempts..."
+            msstore publish "$($bundleFile.FullName)" --appId 9NJ59RH053PV --noCommit --verbose
+            if ($LASTEXITCODE -eq 0) { $succeeded = $true; break }
+            Write-Warning "msstore publish failed (exit $LASTEXITCODE)."
+            if ($attempt -lt $maxAttempts) {
+              Write-Host "Retrying in 60s..."
+              Start-Sleep -Seconds 60
+            }
+          }
+          if (-not $succeeded) {
+            throw "msstore publish --noCommit failed after $maxAttempts attempts. If this keeps happening, a pending submission on Partner Center is likely stuck (undeletable via API) and needs to be cancelled manually from the Store portal before retrying."
+          }
 
       - name: Set release notes on draft submission
         shell: pwsh
