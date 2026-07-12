@@ -436,7 +436,7 @@ def create_appx_manifest(target_name: str, version: str) -> str:
             ProcessorArchitecture="{arch}" />
   <Properties>
     <DisplayName>WindowsForum Diagnostics</DisplayName>
-    <PublisherDisplayName>Mike Fara</PublisherDisplayName>
+    <PublisherDisplayName>WindowsForum.com</PublisherDisplayName>
     <Logo>Logo.png</Logo>
   </Properties>
   <Dependencies>
@@ -497,7 +497,7 @@ def create_sparse_manifest(target_name: str, version: str) -> str:
             ProcessorArchitecture="{arch}" />
   <Properties>
     <DisplayName>WindowsForum Diagnostics (Loose)</DisplayName>
-    <PublisherDisplayName>Mike Fara</PublisherDisplayName>
+    <PublisherDisplayName>WindowsForum.com</PublisherDisplayName>
     <Logo>Logo.png</Logo>
     <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
   </Properties>
