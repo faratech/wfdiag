@@ -13,8 +13,16 @@ fn main() {
     // Add-AppxPackage -ExternalLocation (build-cross.py build-sparse). The
     // custom application manifest below embeds the <msix> element that ties a
     // directly-launched loose exe to that sparse identity.
-    let attributes = tauri_build::Attributes::new().windows_attributes(
-        tauri_build::WindowsAttributes::new().app_manifest(include_str!("windows-app.manifest")),
-    );
+    // Tauri's icon and version resource remains binary-only. The application
+    // manifest is compiled separately below because Cargo unit tests are also
+    // Windows executables and need the Common Controls v6 activation context.
+    let attributes = tauri_build::Attributes::new()
+        .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
     tauri_build::try_build(attributes).expect("failed to run tauri-build");
+
+    println!("cargo:rerun-if-changed=windows-app-manifest.rc");
+    println!("cargo:rerun-if-changed=windows-app.manifest");
+    embed_resource::compile_for_everything("windows-app-manifest.rc", embed_resource::NONE)
+        .manifest_required()
+        .expect("failed to embed the Windows application manifest");
 }

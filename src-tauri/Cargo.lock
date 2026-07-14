@@ -5361,6 +5361,7 @@ dependencies = [
  "apple-native-keyring-store",
  "async-openai",
  "dirs",
+ "embed-resource",
  "encoding_rs",
  "eventsource-stream",
  "futures",
