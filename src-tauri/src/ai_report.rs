@@ -549,12 +549,12 @@ mod tests {
         );
         let issues = vec![issue(IssueSeverity::Critical, "Disk failing", true)];
 
-        let tight = build_report_context(&results, &issues, None, 600).unwrap();
+        let tight = build_report_context(&results, &issues, None, 500).unwrap();
         // Mandatory coverage and complete high-priority records survive tight
         // budgets; low-priority diagnostics are counted as omissions.
         assert!(tight.contains("tasks:1 collected,1 failed"));
         assert!(tight.contains("access denied"));
-        assert!(tight.chars().count() <= 600);
+        assert!(tight.chars().count() <= 500);
         assert!(tight.contains("diagnostics=1"));
         let roomy = build_report_context(&results, &issues, None, 10_000).unwrap();
         assert!(roomy.contains("diagnostic/collected"));
