@@ -11,6 +11,12 @@ use windows::Win32::Security::Cryptography::{
 
 #[cfg(windows)]
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
+#[cfg(windows)]
+use windows::Win32::Storage::FileSystem::{
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+};
+#[cfg(windows)]
+use windows::core::PCWSTR;
 
 /// Encrypted file header containing metadata
 const VERSION: u8 = 2; // Bumped version for DPAPI format
@@ -184,8 +190,7 @@ impl EncryptedStorage {
                 .map_err(|e| anyhow!("Failed to flush encrypted file: {}", e))?;
         }
 
-        fs::rename(&temp_path, &file_path)
-            .map_err(|e| anyhow!("Failed to finalize encrypted file: {}", e))?;
+        atomic_replace(&temp_path, &file_path)?;
 
         Ok(())
     }
@@ -299,6 +304,37 @@ impl EncryptedStorage {
     }
 }
 
+#[cfg(windows)]
+fn atomic_replace(temp_path: &std::path::Path, file_path: &std::path::Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let temp_wide: Vec<u16> = temp_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let file_wide: Vec<u16> = file_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        MoveFileExW(
+            PCWSTR(temp_wide.as_ptr()),
+            PCWSTR(file_wide.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|error| anyhow!("Failed to atomically replace encrypted file: {}", error))
+}
+
+#[cfg(not(windows))]
+fn atomic_replace(temp_path: &std::path::Path, file_path: &std::path::Path) -> Result<()> {
+    fs::rename(temp_path, file_path)
+        .map_err(|error| anyhow!("Failed to finalize encrypted file: {}", error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +376,31 @@ mod tests {
         assert_eq!(test_data, loaded_data);
 
         // Cleanup
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn storing_same_id_atomically_replaces_existing_value() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("wfdiag_test_replace_{}", std::process::id()));
+        let storage = EncryptedStorage::new(temp_dir.clone()).expect("create storage");
+        let first = TestData {
+            id: "same".to_string(),
+            values: HashMap::new(),
+            sensitive_info: "first".to_string(),
+        };
+        let second = TestData {
+            id: "same".to_string(),
+            values: HashMap::new(),
+            sensitive_info: "second".to_string(),
+        };
+
+        storage.store("same", &first).expect("store first");
+        storage.store("same", &second).expect("replace first");
+
+        let loaded: TestData = storage.load("same").expect("load replacement");
+        assert_eq!(loaded, second);
+        assert!(!temp_dir.join("same.enc.tmp").exists());
         let _ = fs::remove_dir_all(temp_dir);
     }
 }

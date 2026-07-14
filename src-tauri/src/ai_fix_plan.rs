@@ -4,8 +4,8 @@
 //! (ids + labels + descriptions + tiers) and proposes which remediations to
 //! run, in order. SAFETY CHAIN: the model emits only catalog IDs →
 //! [`parse_fix_plan`] drops anything not in the catalog or not among the
-//! detected issues → the user clicks Run → the normal `run_remediation`
-//! confirmation gate applies. The model never executes anything and its
+//! detected issues → the user reviews a broker proposal → one-use
+//! authorization executes the immutable catalog entry. The model never executes anything and its
 //! strings never reach an argv.
 
 use crate::ai_service::AIProvider;
@@ -18,6 +18,7 @@ use tauri::State;
 
 const MAX_PLAN_ENTRIES: usize = 8;
 const MAX_RATIONALE_CHARS: usize = 300;
+const MAX_NOTES_CHARS: usize = 1_000;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FixPlanEntry {
@@ -32,6 +33,10 @@ pub struct FixPlan {
     pub entries: Vec<FixPlanEntry>,
     pub notes: String,
     pub provider_used: AIProvider,
+    /// Evidence/catalog versions the action broker must still observe before
+    /// it will prepare any entry from this plan.
+    pub scan_fingerprint: String,
+    pub catalog_fingerprint: String,
 }
 
 /// Build the strict-JSON planning prompt. Pure for testability.
@@ -118,7 +123,12 @@ pub(crate) fn parse_fix_plan(
         return (Vec::new(), "The AI did not return a usable plan.".into());
     };
 
-    let notes = value["notes"].as_str().unwrap_or("").to_string();
+    let notes = value["notes"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(MAX_NOTES_CHARS)
+        .collect();
     let mut entries: Vec<FixPlanEntry> = Vec::new();
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
 
@@ -167,13 +177,23 @@ pub(crate) fn parse_fix_plan(
 
 /// Propose a fix plan for the current scan's detected issues.
 #[tauri::command]
-pub async fn ai_propose_fix_plan(
-    state: State<'_, AppState>,
-    api_key: Option<String>,
-) -> Result<FixPlan, String> {
+pub async fn ai_propose_fix_plan(state: State<'_, AppState>) -> Result<FixPlan, String> {
     let pref = crate::ai_service::get_user_preference();
-    let frontend_key = api_key.as_deref().is_some_and(|k| !k.is_empty());
-    let provider = crate::ai_service::determine_active_provider_with_key(pref, frontend_key).await;
+    let initial_provider = crate::ai_service::determine_active_provider(pref).await;
+    // Planning across every detected issue and catalog entry is a wide,
+    // structured-output workload. In Auto, use the next available private
+    // local model instead of squeezing it through Phi's small context. An
+    // explicit Phi preference is still honored, and this surface never
+    // crosses into cloud fallback without a consent flow.
+    let provider = if pref == crate::ai_service::AIProviderPreference::Auto
+        && initial_provider == AIProvider::PhiSilica
+    {
+        crate::ai_service::next_auto_local_provider(pref, &[initial_provider])
+            .await
+            .unwrap_or(initial_provider)
+    } else {
+        initial_provider
+    };
     if provider == AIProvider::None {
         return Err(
             "No AI provider available. Add an API key in Settings, sign in with a ChatGPT or \
@@ -181,13 +201,16 @@ pub async fn ai_propose_fix_plan(
                 .to_string(),
         );
     }
-    let cfg = crate::ai_providers::resolve_config(provider, api_key).await?;
+    let cfg = crate::ai_providers::resolve_config(provider).await?;
 
     // Detect from the current session
-    let issues = {
+    let (issues, scan_fingerprint) = {
         let session = state.current_session.lock().await;
         let Some(session) = session.as_ref() else {
-            return Err("No scan data yet — run a scan first.".to_string());
+            return Err(
+                "No scan data is available for a fix plan. The application should collect a Quick Scan and retry automatically."
+                    .to_string(),
+            );
         };
         // Match the UI's detect_issues so the same issues (incl. temp_files)
         // are in scope — otherwise a planned clear_temp_files entry would be
@@ -200,7 +223,10 @@ pub async fn ai_propose_fix_plan(
             now: crate::timestamp::Timestamp::now(),
             temp_file_count,
         };
-        crate::issue_catalog::detect_all(&ctx)
+        (
+            crate::issue_catalog::detect_all(&ctx),
+            crate::action_broker::scan_fingerprint(Some(session)),
+        )
     };
     let detected: Vec<Issue> = issues.into_iter().filter(|i| i.detected).collect();
     if detected.is_empty() {
@@ -208,6 +234,8 @@ pub async fn ai_propose_fix_plan(
             entries: Vec::new(),
             notes: "No issues detected — nothing to plan.".to_string(),
             provider_used: provider,
+            scan_fingerprint,
+            catalog_fingerprint: crate::action_broker::catalog_fingerprint(),
         });
     }
 
@@ -225,6 +253,8 @@ pub async fn ai_propose_fix_plan(
         entries,
         notes,
         provider_used: provider,
+        scan_fingerprint,
+        catalog_fingerprint: crate::action_broker::catalog_fingerprint(),
     })
 }
 
@@ -331,11 +361,13 @@ mod tests {
             })
             .collect();
         let text = format!(
-            r#"{{"entries": [{}], "notes": ""}}"#,
-            entries_json.join(",")
+            r#"{{"entries": [{}], "notes": "{}"}}"#,
+            entries_json.join(","),
+            "n".repeat(2_000),
         );
-        let (entries, _) = parse_fix_plan(&text, &detected, remediations());
+        let (entries, notes) = parse_fix_plan(&text, &detected, remediations());
         assert_eq!(entries.len(), super::MAX_PLAN_ENTRIES);
         assert!(entries[0].rationale.chars().count() <= super::MAX_RATIONALE_CHARS);
+        assert_eq!(notes.chars().count(), super::MAX_NOTES_CHARS);
     }
 }

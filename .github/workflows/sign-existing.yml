@@ -2,9 +2,6 @@ name: Sign Existing Binaries
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
 
 permissions:
   id-token: write   # Required for OIDC authentication with Sigstore

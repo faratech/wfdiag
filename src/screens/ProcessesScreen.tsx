@@ -1,21 +1,10 @@
 import React, { useMemo, useState } from 'react'
-import { useMonitoring } from '../hooks/useMonitoring'
-import type { ProcessInfo } from '../types/monitoring'
-import { Skeleton } from '../components/ui'
+import { EmptyState, Skeleton } from '../components/ui'
+import { useProcessExplorer, type ProcessSortDirection, type ProcessSortKey } from '../hooks/useProcessExplorer'
+import type { ProcessExplorerRow } from '../types/monitoring'
 import { formatBytesMb } from './util'
 
-type SortKey =
-  | 'name'
-  | 'pid'
-  | 'cpu_percent'
-  | 'gpu_percent'
-  | 'gpu_memory_mb'
-  | 'npu_percent'
-  | 'npu_memory_mb'
-  | 'memory_mb'
-  | 'thread_count'
-  | 'user'
-type SortDir = 'asc' | 'desc'
+const PAGE_SIZE = 100
 
 /** Muted per-process glyph, keyed off the executable name. */
 function procIcon(name: string): string {
@@ -36,156 +25,200 @@ function procIcon(name: string): string {
   return 'fa-window-maximize'
 }
 
-export const ProcessesScreen: React.FC = () => {
-  const { processes, stats, isActive, isLoading, toggle, refresh } = useMonitoring({
-    autoStart: true,
-    componentName: 'ProcessesScreen',
-    includeProcessAdapterStats: true,
-  })
-  const [sortBy, setSortBy] = useState<SortKey>('cpu_percent')
-  const [sortDir, setSortDir] = useState<SortDir>('desc')
-  const [search, setSearch] = useState('')
-
-  const setSort = (key: SortKey) => {
-    if (key === sortBy) {
-      setSortDir(d => (d === 'desc' ? 'asc' : 'desc'))
-    } else {
-      setSortBy(key)
-      // Numeric columns read best descending, text columns ascending
-      setSortDir(key === 'name' || key === 'user' ? 'asc' : 'desc')
-    }
-  }
-
-  const sorted = useMemo(() => {
-    let list = [...processes]
-    if (search.trim()) {
-      const q = search.toLowerCase()
-      list = list.filter(p => p.name.toLowerCase().includes(q) || (p.command || '').toLowerCase().includes(q))
-    }
-    const dir = sortDir === 'desc' ? 1 : -1
-    list.sort((a, b) => {
-      const av = a[sortBy] as number | string
-      const bv = b[sortBy] as number | string
-      const cmp = typeof bv === 'number' ? (bv as number) - (av as number) : String(bv).localeCompare(String(av))
-      return cmp * dir
-    })
-    return list
-  }, [processes, sortBy, sortDir, search])
-
-  const totalCpu = processes.reduce((s, p) => s + p.cpu_percent, 0)
-  const totalMem = processes.reduce((s, p) => s + p.memory_mb, 0)
-  const showGpu = Boolean(stats?.gpu_available || processes.some(p => p.gpu_percent > 0 || p.gpu_memory_mb > 0))
-  const showNpu = Boolean(stats?.npu_available || processes.some(p => p.npu_percent > 0 || p.npu_memory_mb > 0))
-
-  const cols: [SortKey, string][] = [
-    ['name', 'Process'],
-    ['pid', 'PID'],
-    ['cpu_percent', 'CPU'],
-    ...(showGpu ? [['gpu_percent', 'GPU'], ['gpu_memory_mb', 'GPU Mem']] as [SortKey, string][] : []),
-    ...(showNpu ? [['npu_percent', 'NPU'], ['npu_memory_mb', 'NPU Mem']] as [SortKey, string][] : []),
-    ['memory_mb', 'Memory'],
-    ['thread_count', 'Threads'],
-    ['user', 'User'],
-  ]
-  const summary = [
-    `Showing ${sorted.length} of ${processes.length}`,
-    `${totalCpu.toFixed(1)}% CPU`,
-    `${(totalMem / 1024).toFixed(1)} GB RAM`,
-    ...(showGpu ? [`${(stats?.gpu_utilization ?? 0).toFixed(1)}% GPU`] : []),
-    ...(showNpu ? [`${(stats?.npu_utilization ?? 0).toFixed(1)}% NPU`] : []),
-  ].join(' · ')
-
-  const renderPercentCell = (value: number) => (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end' }}>
+function PercentCell({ value }: { value: number }) {
+  const normalized = Math.max(0, Math.min(100, value))
+  return (
+    <div className="proc-percent">
       <span>{value.toFixed(1)}%</span>
-      <div className={`proc-bar ${value > 10 ? 'warn' : ''} ${value > 25 ? 'danger' : ''}`}>
-        <span style={{ width: `${Math.min(100, value * 4)}%` }} />
+      <div className={`proc-bar ${value > 50 ? 'warn' : ''} ${value > 80 ? 'danger' : ''}`} aria-hidden="true">
+        <span style={{ width: `${normalized}%` }} />
       </div>
     </div>
   )
+}
+
+interface SortHeadingProps {
+  field: ProcessSortKey
+  children: React.ReactNode
+  active: ProcessSortKey
+  direction: ProcessSortDirection
+  onSort: (field: ProcessSortKey) => void
+  className?: string
+}
+
+function SortHeading({ field, children, active, direction, onSort, className }: SortHeadingProps) {
+  return (
+    <th className={className} aria-sort={active === field ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+      <button className="th-sort" onClick={() => onSort(field)}>
+        {children}
+        {active === field && <span className="sort-arrow" aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span>}
+      </button>
+    </th>
+  )
+}
+
+export const ProcessesScreen: React.FC = () => {
+  const [sortBy, setSortBy] = useState<ProcessSortKey>('cpu_percent')
+  const [sortDirection, setSortDirection] = useState<ProcessSortDirection>('desc')
+  const [search, setSearch] = useState('')
+  const [offset, setOffset] = useState(0)
+  const [selected, setSelected] = useState<ProcessExplorerRow | null>(null)
+
+  const query = useMemo(() => ({ search, sortBy, sortDirection, offset, limit: PAGE_SIZE }), [offset, search, sortBy, sortDirection])
+  const { page, isLoading, isRefreshing, isPaused, error, refresh, togglePaused } = useProcessExplorer(query)
+  const selectedProcess = selected
+    ? page?.items.find(item => item.pid === selected.pid && item.start_time === selected.start_time) ?? null
+    : null
+
+  const setSort = (field: ProcessSortKey) => {
+    setOffset(0)
+    if (field === sortBy) {
+      setSortDirection(current => current === 'desc' ? 'asc' : 'desc')
+    } else {
+      setSortBy(field)
+      setSortDirection(field === 'name' || field === 'status' ? 'asc' : 'desc')
+    }
+  }
+
+  const total = page?.total ?? 0
+  // Process counts can shrink between requests; the backend returns the new
+  // last valid page. Drive controls from that effective offset rather than a
+  // now-stale requested offset.
+  const pageOffset = page?.offset ?? offset
+  const first = total === 0 ? 0 : pageOffset + 1
+  const last = Math.min(total, pageOffset + (page?.items.length ?? 0))
+  const canPrevious = pageOffset > 0
+  const canNext = pageOffset + PAGE_SIZE < total
 
   return (
     <>
-      <div className="row-gap-12 screen-toolbar" style={{ justifyContent: 'space-between' }}>
-        <div className="row-gap-12">
+      <div className="screen-toolbar process-toolbar">
+        <div className="row-gap-12 process-toolbar-main">
+          <label className="sr-only" htmlFor="process-filter">Filter processes</label>
           <input
+            id="process-filter"
             className="field-input filter-input"
-            type="text"
+            type="search"
             placeholder="Filter processes…"
-            aria-label="Filter processes"
             value={search}
-            onChange={e => setSearch(e.target.value)}
+            onChange={event => {
+              setSearch(event.target.value)
+              setOffset(0)
+              setSelected(null)
+            }}
           />
-          <span style={{ fontSize: 12, color: 'var(--wf-text-muted)' }}>
-            {summary}
+          <span className="process-summary" aria-live="polite">
+            {error ? 'Process data unavailable' : `Showing ${first}–${last} of ${total} processes`}
           </span>
         </div>
         <div className="row-gap-12">
-          <button className="btn" onClick={() => refresh()}><i className="fa-solid fa-arrows-rotate" /> Refresh</button>
-          <button className="btn" onClick={() => toggle()} disabled={isLoading}><i className={`fa-solid ${isActive ? 'fa-pause' : 'fa-play'}`} /> {isActive ? 'Pause' : 'Resume'}</button>
+          <button className="btn" onClick={() => void refresh()} disabled={isRefreshing}>
+            <i className={`fa-solid fa-arrows-rotate ${isRefreshing ? 'fa-spin' : ''}`} aria-hidden="true" /> Refresh
+          </button>
+          <button className="btn" onClick={togglePaused}>
+            <i className={`fa-solid ${isPaused ? 'fa-play' : 'fa-pause'}`} aria-hidden="true" /> {isPaused ? 'Resume' : 'Pause'}
+          </button>
         </div>
       </div>
 
-      <div className="scrollable screen-pad">
-        <div className="wf-block">
-          <table className="proc-table">
-            <thead>
-              <tr>
-                {cols.map(([k, label]) => (
-                  <th key={k} aria-sort={sortBy === k ? (sortDir === 'asc' ? 'ascending' : 'descending') : undefined}>
-                    <button className="th-sort" onClick={() => setSort(k)}>
-                      {label}{sortBy === k && <span className="sort-arrow">{sortDir === 'asc' ? '↑' : '↓'}</span>}
-                    </button>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {processes.length === 0 && (
-                <tr>
-                  <td colSpan={cols.length} style={{ padding: 14 }}>
-                    <Skeleton variant="text" count={8} height={22} />
-                  </td>
-                </tr>
-              )}
-              {sorted.map((p: ProcessInfo) => (
-                <tr key={p.pid}>
-                  <td>
-                    <div className="pname">
-                      <i className={`fa-solid ${procIcon(p.name)} pico`} aria-hidden="true" />
-                      <div>
-                        <div>{p.name}</div>
-                        <div style={{ fontSize: 11, color: 'var(--wf-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.command || p.exe_path || p.status}</div>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="num">{p.pid}</td>
-                  <td className="num">{renderPercentCell(p.cpu_percent)}</td>
-                  {showGpu && (
-                    <>
-                      <td className="num">{renderPercentCell(p.gpu_percent)}</td>
-                      <td className="num">{formatBytesMb(p.gpu_memory_mb)}</td>
-                    </>
-                  )}
-                  {showNpu && (
-                    <>
-                      <td className="num">{renderPercentCell(p.npu_percent)}</td>
-                      <td className="num">{formatBytesMb(p.npu_memory_mb)}</td>
-                    </>
-                  )}
-                  <td className="num">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end' }}>
-                      <span>{formatBytesMb(p.memory_mb)}</span>
-                      <div className="proc-bar"><span style={{ width: `${Math.min(100, p.memory_mb / 20)}%` }} /></div>
-                    </div>
-                  </td>
-                  <td className="num">{p.thread_count}</td>
-                  <td>{p.user}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      <div className="scrollable screen-pad process-screen-scroll">
+        {error && page && (
+          <div className="inline-error" role="alert">
+            <span><i className="fa-solid fa-triangle-exclamation" /> {error}</span>
+            <button className="btn" onClick={() => void refresh()}>Try again</button>
+          </div>
+        )}
+        {error && !page ? (
+          <EmptyState
+            icon="fa-triangle-exclamation"
+            title="Processes could not be loaded"
+            sub={error}
+            actions={<button className="btn primary" onClick={() => void refresh()}>Try again</button>}
+          />
+        ) : (
+          <div className="process-layout">
+            <div className="wf-block process-table-block">
+              <div className="process-table-scroll" tabIndex={0} aria-label="Running processes table; scroll horizontally for more columns">
+                <table className="proc-table">
+                  <thead>
+                    <tr>
+                      <SortHeading field="name" active={sortBy} direction={sortDirection} onSort={setSort} className="process-col-name">Process</SortHeading>
+                      <SortHeading field="pid" active={sortBy} direction={sortDirection} onSort={setSort} className="process-col-pid">PID</SortHeading>
+                      <SortHeading field="cpu_percent" active={sortBy} direction={sortDirection} onSort={setSort} className="process-col-cpu">CPU</SortHeading>
+                      <SortHeading field="memory_percent" active={sortBy} direction={sortDirection} onSort={setSort} className="process-col-memory">Memory</SortHeading>
+                      <SortHeading field="status" active={sortBy} direction={sortDirection} onSort={setSort} className="process-col-status">Status</SortHeading>
+                      <SortHeading field="thread_count" active={sortBy} direction={sortDirection} onSort={setSort} className="process-col-threads">Threads</SortHeading>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {isLoading && !page && (
+                      <tr><td colSpan={6} className="process-loading"><Skeleton variant="text" count={8} height={22} /></td></tr>
+                    )}
+                    {!isLoading && page?.items.length === 0 && (
+                      <tr><td colSpan={6} className="process-empty">No processes match “{search}”.</td></tr>
+                    )}
+                    {page?.items.map(process => {
+                      const isSelected = selected?.pid === process.pid && selected.start_time === process.start_time
+                      return (
+                        <tr
+                          key={`${process.pid}:${process.start_time}`}
+                          className={isSelected ? 'selected' : undefined}
+                          aria-selected={isSelected}
+                          onClick={() => setSelected(process)}
+                        >
+                          <td className="process-col-name">
+                            <button className="process-name-button" onClick={() => setSelected(process)}>
+                              <i className={`fa-solid ${procIcon(process.name)} pico`} aria-hidden="true" />
+                              <span>{process.name}</span>
+                            </button>
+                          </td>
+                          <td className="num process-col-pid">{process.pid}</td>
+                          <td className="num process-col-cpu"><PercentCell value={process.cpu_percent} /></td>
+                          <td className="num process-col-memory">
+                            <div className="process-memory-cell">
+                              <span>{formatBytesMb(process.memory_mb)}</span>
+                              <PercentCell value={process.memory_percent} />
+                            </div>
+                          </td>
+                          <td className="process-col-status">{process.status}</td>
+                          <td className="num process-col-threads">{process.thread_count}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="process-pagination" aria-label="Process pages">
+                <button className="btn" disabled={!canPrevious} onClick={() => setOffset(Math.max(0, pageOffset - PAGE_SIZE))}>Previous</button>
+                <span>{first}–{last} of {total}</span>
+                <button className="btn" disabled={!canNext} onClick={() => setOffset(pageOffset + PAGE_SIZE)}>Next</button>
+              </div>
+            </div>
+
+            {selectedProcess && (
+              <aside className="wf-block process-details" aria-label={`${selectedProcess.name} details`}>
+                <div className="section-head">
+                  <div>
+                    <strong>{selectedProcess.name}</strong>
+                    <span>PID {selectedProcess.pid}</span>
+                  </div>
+                  <button className="icon-btn" aria-label="Close process details" onClick={() => setSelected(null)}><i className="fa-solid fa-xmark" /></button>
+                </div>
+                <dl className="process-detail-grid">
+                  <div><dt>CPU</dt><dd>{selectedProcess.cpu_percent.toFixed(1)}%</dd></div>
+                  <div><dt>Memory</dt><dd>{formatBytesMb(selectedProcess.memory_mb)} ({selectedProcess.memory_percent.toFixed(1)}%)</dd></div>
+                  <div><dt>Virtual memory</dt><dd>{formatBytesMb(selectedProcess.virtual_memory_mb)}</dd></div>
+                  <div><dt>Threads</dt><dd>{selectedProcess.thread_count}</dd></div>
+                  <div><dt>Handles</dt><dd>{selectedProcess.handle_count}</dd></div>
+                  <div><dt>CPU time</dt><dd>{selectedProcess.cpu_time_secs}s</dd></div>
+                  <div><dt>Read</dt><dd>{formatBytesMb(selectedProcess.io_read_bytes / (1024 * 1024))}</dd></div>
+                  <div><dt>Written</dt><dd>{formatBytesMb(selectedProcess.io_write_bytes / (1024 * 1024))}</dd></div>
+                </dl>
+                <p className="muted-note">Path, owner, architecture, and elevation are omitted when Windows does not expose them without an additional privileged query.</p>
+              </aside>
+            )}
+          </div>
+        )}
       </div>
     </>
   )

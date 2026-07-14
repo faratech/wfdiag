@@ -38,3 +38,55 @@ export function toKeyValues(obj: unknown, prefix = ''): [string, string][] {
   }
   return out
 }
+
+/** Human-facing rows for diagnostics whose raw schema needs explanation. */
+export function toDiagnosticKeyValues(taskId: string, obj: unknown): [string, string][] {
+  if (taskId !== 'pending_reboot' || obj == null || typeof obj !== 'object' || Array.isArray(obj)) {
+    return toKeyValues(obj)
+  }
+  const value = obj as Record<string, unknown>
+  const reasons = Array.isArray(value.reasons)
+    ? value.reasons.filter((reason): reason is string => typeof reason === 'string')
+    : []
+  const highConfidenceReason = reasons.some(
+    reason => reason === 'windows_update' || reason === 'component_based_servicing',
+  )
+  const legacyDeferredReason = reasons.some(
+    reason => reason === 'pending_file_rename' || reason === 'pending_file_operations',
+  )
+  const explicitRestart = typeof value.restart_required === 'boolean'
+    ? value.restart_required
+    : undefined
+  const legacyPending = typeof value.pending === 'boolean' ? value.pending : undefined
+  const contradictory = explicitRestart !== undefined
+    ? explicitRestart !== highConfidenceReason
+      || (legacyPending !== undefined && legacyPending !== explicitRestart)
+    : (legacyPending === true && !highConfidenceReason && !legacyDeferredReason)
+      || (legacyPending === false && highConfidenceReason)
+  const restartRequired = explicitRestart !== undefined
+    ? explicitRestart
+    : value.pending === true && highConfidenceReason
+  const requiredBy = reasons.flatMap(reason => {
+    if (reason === 'windows_update') return ['Windows Update']
+    if (reason === 'component_based_servicing') return ['Windows component servicing']
+    return []
+  })
+  const deferred = value.deferred_file_operations && typeof value.deferred_file_operations === 'object'
+    ? value.deferred_file_operations as Record<string, unknown>
+    : {}
+  const deferredPending = deferred.pending === true || reasons.some(
+    reason => reason === 'pending_file_rename' || reason === 'pending_file_operations',
+  )
+  const count = typeof deferred.operation_count === 'number' ? deferred.operation_count : null
+  const rows: [string, string][] = [
+    ['Restart required', contradictory ? 'Could not determine — retry this check' : restartRequired ? 'Yes' : 'No'],
+    ['Required by', contradictory
+      ? 'Conflicting restart-marker data'
+      : requiredBy.length ? requiredBy.join(' and ') : 'No Windows Update or component-servicing marker'],
+    ['Deferred file operations', deferredPending
+      ? `${count ?? 'Some'} operation${count === 1 ? '' : 's'} queued for the next restart; this marker alone does not establish that you must restart now`
+      : 'None queued'],
+  ]
+  if (typeof value.summary === 'string' && value.summary.trim()) rows.push(['Summary', value.summary])
+  return rows
+}

@@ -4,8 +4,8 @@
 //! - Auth via the `x-goog-api-key` HEADER, never the `?key=` query param —
 //!   keys must not appear in URLs (they end up in logs and error messages).
 //! - The assistant role is `"model"`.
-//! - Tool calls have NO ids; correlation is by function name. Ids are
-//!   synthesized (`name#index`) for the unified layer and dropped on the wire.
+//! - Gemini 3 tool calls have ids and thought signatures. Both are preserved
+//!   across the app's provider-neutral tool loop and returned exactly.
 //! - `functionResponse.response` must be a JSON OBJECT — plain text results
 //!   are wrapped as `{"result": <text>}`.
 
@@ -14,11 +14,72 @@ use super::{
     ToolSpec, sse,
 };
 use serde_json::{Value, json};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use tokio::sync::mpsc;
 
 /// Default model when the `geminiModel` setting is empty.
-pub const GEMINI_DEFAULT_MODEL: &str = "gemini-2.5-flash";
+pub const GEMINI_DEFAULT_MODEL: &str = "gemini-3.5-flash";
 pub(crate) const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
+
+const MAX_CALL_METADATA: usize = 2_048;
+const LEGACY_CALL_PREFIX: &str = "wfdiag-gemini-legacy-";
+
+#[derive(Debug, Clone)]
+struct GeminiCallMetadata {
+    wire_id: Option<String>,
+    thought_signature: Option<String>,
+}
+
+#[derive(Default)]
+struct MetadataCache {
+    entries: HashMap<String, GeminiCallMetadata>,
+    order: VecDeque<String>,
+}
+
+fn metadata_cache() -> &'static Mutex<MetadataCache> {
+    static CACHE: OnceLock<Mutex<MetadataCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(MetadataCache::default()))
+}
+
+fn remember_call(wire_id: Option<&str>, thought_signature: Option<&str>, name: &str) -> String {
+    static NEXT_LEGACY_ID: AtomicU64 = AtomicU64::new(1);
+    let public_id = wire_id
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "{LEGACY_CALL_PREFIX}{}-{name}",
+                NEXT_LEGACY_ID.fetch_add(1, Ordering::Relaxed)
+            )
+        });
+    if let Ok(mut cache) = metadata_cache().lock() {
+        if !cache.entries.contains_key(&public_id) {
+            cache.order.push_back(public_id.clone());
+        }
+        cache.entries.insert(
+            public_id.clone(),
+            GeminiCallMetadata {
+                wire_id: wire_id.map(str::to_string),
+                thought_signature: thought_signature.map(str::to_string),
+            },
+        );
+        while cache.entries.len() > MAX_CALL_METADATA {
+            if let Some(oldest) = cache.order.pop_front() {
+                cache.entries.remove(&oldest);
+            }
+        }
+    }
+    public_id
+}
+
+fn call_metadata(public_id: &str) -> Option<GeminiCallMetadata> {
+    metadata_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.entries.get(public_id).cloned())
+}
 
 /// Build a generateContent request body. Pure and network-free for testability.
 pub(crate) fn build_generate_body(
@@ -40,20 +101,43 @@ pub(crate) fn build_generate_body(
                     parts.push(json!({"text": message.content}));
                 }
                 for call in &message.tool_calls {
-                    parts.push(json!({
-                        "functionCall": {"name": call.name, "args": call.arguments}
-                    }));
+                    let metadata = call_metadata(&call.id);
+                    let mut function_call = json!({
+                        "name": call.name,
+                        "args": call.arguments,
+                    });
+                    if let Some(wire_id) = metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.wire_id.as_deref())
+                    {
+                        function_call["id"] = json!(wire_id);
+                    }
+                    let mut part = json!({"functionCall": function_call});
+                    if let Some(signature) = metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.thought_signature.as_deref())
+                    {
+                        part["thoughtSignature"] = json!(signature);
+                    }
+                    parts.push(part);
                 }
                 contents.push(json!({"role": "model", "parts": parts}));
             }
             ChatRole::Tool => {
-                let response_part = json!({
-                    "functionResponse": {
-                        "name": message.tool_name.clone().unwrap_or_default(),
-                        // Must be an object, not a bare string
-                        "response": {"result": message.content},
-                    }
+                let mut function_response = json!({
+                    "name": message.tool_name.clone().unwrap_or_default(),
+                    // Must be an object, not a bare string
+                    "response": {"result": message.content},
                 });
+                if let Some(wire_id) = message
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(call_metadata)
+                    .and_then(|metadata| metadata.wire_id)
+                {
+                    function_response["id"] = json!(wire_id);
+                }
+                let response_part = json!({"functionResponse": function_response});
                 // Gemini requires every function response from one round of
                 // parallel tool calls to be a part of a SINGLE content entry
                 // — sending each as its own "user" turn causes a 400. Append
@@ -104,9 +188,11 @@ pub(crate) fn build_generate_body(
     body
 }
 
-fn map_finish_reason(reason: Option<&str>, has_tool_calls: bool) -> FinishReason {
+fn map_finish_reason(reason: Option<&str>, has_tool_calls: bool) -> Result<FinishReason, String> {
     match reason {
-        Some("MAX_TOKENS") => FinishReason::MaxTokens,
+        Some("STOP") if has_tool_calls => Ok(FinishReason::ToolUse),
+        Some("STOP") => Ok(FinishReason::Stop),
+        Some("MAX_TOKENS") => Ok(FinishReason::MaxTokens),
         // All of these mean the model did NOT produce a normal completion —
         // treating them as Stop would make a blocked/malformed generation
         // look like a successful (if empty) answer.
@@ -116,10 +202,59 @@ fn map_finish_reason(reason: Option<&str>, has_tool_calls: bool) -> FinishReason
         | Some("RECITATION")
         | Some("SPII")
         | Some("OTHER")
-        | Some("MALFORMED_FUNCTION_CALL") => FinishReason::Refusal,
-        _ if has_tool_calls => FinishReason::ToolUse,
-        _ => FinishReason::Stop,
+        | Some("MALFORMED_FUNCTION_CALL")
+        | Some("LANGUAGE")
+        | Some("IMAGE_SAFETY")
+        | Some("IMAGE_PROHIBITED_CONTENT")
+        | Some("IMAGE_OTHER")
+        | Some("NO_IMAGE")
+        | Some("IMAGE_RECITATION")
+        | Some("UNEXPECTED_TOOL_CALL")
+        | Some("TOO_MANY_TOOL_CALLS")
+        | Some("MISSING_THOUGHT_SIGNATURE")
+        | Some("MALFORMED_RESPONSE") => Ok(FinishReason::Refusal),
+        Some(other) => Err(format!("Gemini returned unknown finish reason '{other}'")),
+        None => Err("Gemini response ended without a finish reason".to_string()),
     }
+}
+
+fn collect_parts(
+    parts: &[Value],
+    text: &mut String,
+    tool_calls: &mut Vec<ToolCall>,
+) -> Result<Vec<String>, String> {
+    let mut deltas = Vec::new();
+    for part in parts {
+        if let Some(delta) = part.get("text").and_then(Value::as_str)
+            && !delta.is_empty()
+        {
+            text.push_str(delta);
+            deltas.push(delta.to_string());
+        }
+        let Some(call) = part.get("functionCall") else {
+            continue;
+        };
+        let name = call
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| "Gemini returned a function call without a name".to_string())?;
+        let arguments = call.get("args").cloned().unwrap_or_else(|| json!({}));
+        if !arguments.is_object() {
+            return Err(format!("Gemini returned non-object arguments for {name}"));
+        }
+        let id = remember_call(
+            call.get("id").and_then(Value::as_str),
+            part.get("thoughtSignature").and_then(Value::as_str),
+            name,
+        );
+        tool_calls.push(ToolCall {
+            id,
+            name: name.to_string(),
+            arguments,
+        });
+    }
+    Ok(deltas)
 }
 
 /// Parse a generateContent response. Pure for testability.
@@ -148,31 +283,14 @@ pub(crate) fn parse_generate_response(v: &Value) -> Result<ChatTurn, String> {
         .pointer("/content/parts")
         .and_then(Value::as_array)
     {
-        for part in parts {
-            if let Some(t) = part.get("text").and_then(Value::as_str) {
-                text.push_str(t);
-            }
-            if let Some(call) = part.get("functionCall") {
-                let name = call
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                tool_calls.push(ToolCall {
-                    // Gemini has no call ids — synthesize one for correlation
-                    id: format!("{}#{}", name, tool_calls.len()),
-                    name,
-                    arguments: call.get("args").cloned().unwrap_or_else(|| json!({})),
-                });
-            }
-        }
+        collect_parts(parts, &mut text, &mut tool_calls)?;
     }
 
     let finish = candidate.get("finishReason").and_then(Value::as_str);
     Ok(ChatTurn {
         text,
         tool_calls: tool_calls.clone(),
-        finished: map_finish_reason(finish, !tool_calls.is_empty()),
+        finished: map_finish_reason(finish, !tool_calls.is_empty())?,
     })
 }
 
@@ -242,10 +360,14 @@ pub async fn one_shot(
         .await
         .map_err(|e| format!("Unexpected Gemini response: {}", e))?;
     let turn = parse_generate_response(&v)?;
-    if turn.finished == FinishReason::Refusal {
-        return Err("Gemini declined to answer this request.".to_string());
+    match turn.finished {
+        FinishReason::Stop if !turn.text.trim().is_empty() => Ok(turn.text),
+        FinishReason::MaxTokens => {
+            Err("Gemini response was truncated before completion".to_string())
+        }
+        FinishReason::Refusal => Err("Gemini declined to answer this request.".to_string()),
+        _ => Err("Gemini returned an unexpected one-shot response".to_string()),
     }
-    Ok(turn.text)
 }
 
 /// Streaming chat with optional tools. Each SSE `data:` line is a complete
@@ -269,10 +391,8 @@ pub async fn chat_stream(
     let mut finish: Option<String> = None;
 
     sse::for_each_event(response, |_event, data| {
-        let v: Value = match serde_json::from_str(data) {
-            Ok(v) => v,
-            Err(_) => return Ok(true), // tolerate keep-alive noise
-        };
+        let v: Value = serde_json::from_str(data)
+            .map_err(|error| format!("Malformed Gemini stream event: {error}"))?;
         if let Some(error) = v.get("error") {
             let message = error
                 .get("message")
@@ -280,27 +400,15 @@ pub async fn chat_stream(
                 .unwrap_or("unknown stream error");
             return Err(format!("Gemini stream error: {}", message));
         }
-        if let Some(parts) = v
-            .pointer("/candidates/0/content/parts")
+        let candidate = v
+            .pointer("/candidates/0")
+            .ok_or_else(|| "Gemini stream event omitted its candidate".to_string())?;
+        if let Some(parts) = candidate
+            .pointer("/content/parts")
             .and_then(Value::as_array)
         {
-            for part in parts {
-                if let Some(t) = part.get("text").and_then(Value::as_str) {
-                    text.push_str(t);
-                    let _ = tx.try_send(t.to_string());
-                }
-                if let Some(call) = part.get("functionCall") {
-                    let name = call
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    tool_calls.push(ToolCall {
-                        id: format!("{}#{}", name, tool_calls.len()),
-                        name,
-                        arguments: call.get("args").cloned().unwrap_or_else(|| json!({})),
-                    });
-                }
+            for delta in collect_parts(parts, &mut text, &mut tool_calls)? {
+                let _ = tx.try_send(delta);
             }
         }
         if let Some(reason) = v
@@ -313,7 +421,13 @@ pub async fn chat_stream(
     })
     .await?;
 
-    let finished = map_finish_reason(finish.as_deref(), !tool_calls.is_empty());
+    let finished = map_finish_reason(finish.as_deref(), !tool_calls.is_empty())?;
+    if finished == FinishReason::Refusal {
+        return Err("Gemini blocked or could not complete this response".to_string());
+    }
+    if text.trim().is_empty() && tool_calls.is_empty() && finished != FinishReason::Refusal {
+        return Err("Gemini completed without text or tool calls".to_string());
+    }
     Ok(ChatTurn {
         text,
         tool_calls,
@@ -324,6 +438,11 @@ pub async fn chat_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_tracks_the_current_flash_generation() {
+        assert_eq!(GEMINI_DEFAULT_MODEL, "gemini-3.5-flash");
+    }
 
     #[test]
     fn body_maps_roles_and_system_instruction() {
@@ -412,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_text_and_synthesizes_tool_call_ids() {
+    fn parses_text_and_synthesizes_legacy_tool_call_ids() {
         let v = json!({
             "candidates": [{
                 "content": {"parts": [
@@ -424,7 +543,7 @@ mod tests {
         });
         let turn = parse_generate_response(&v).unwrap();
         assert_eq!(turn.text, "Checking.");
-        assert_eq!(turn.tool_calls[0].id, "run_diagnostic#0");
+        assert!(turn.tool_calls[0].id.starts_with(LEGACY_CALL_PREFIX));
         assert_eq!(turn.tool_calls[0].arguments["task_id"], "os_info");
         // Tool calls present → ToolUse even though Gemini said STOP
         assert_eq!(turn.finished, FinishReason::ToolUse);
@@ -442,12 +561,79 @@ mod tests {
             "MALFORMED_FUNCTION_CALL",
         ] {
             assert_eq!(
-                map_finish_reason(Some(reason), false),
+                map_finish_reason(Some(reason), false).unwrap(),
                 FinishReason::Refusal,
                 "{reason} should not map to Stop"
             );
         }
-        assert_eq!(map_finish_reason(Some("STOP"), false), FinishReason::Stop);
+        for reason in [
+            "LANGUAGE",
+            "IMAGE_SAFETY",
+            "UNEXPECTED_TOOL_CALL",
+            "TOO_MANY_TOOL_CALLS",
+            "MISSING_THOUGHT_SIGNATURE",
+            "MALFORMED_RESPONSE",
+        ] {
+            assert_eq!(
+                map_finish_reason(Some(reason), false).unwrap(),
+                FinishReason::Refusal
+            );
+        }
+        assert_eq!(
+            map_finish_reason(Some("STOP"), false).unwrap(),
+            FinishReason::Stop
+        );
+        assert!(map_finish_reason(None, false).is_err());
+        assert!(map_finish_reason(Some("NEW_REASON"), false).is_err());
+    }
+
+    #[test]
+    fn gemini_three_id_and_thought_signature_round_trip_exactly() {
+        let response = json!({
+            "candidates": [{
+                "content": {"parts": [{
+                    "functionCall": {
+                        "id": "call_abc123",
+                        "name": "run_diagnostic",
+                        "args": {"task_id": "os_info"}
+                    },
+                    "thoughtSignature": "encrypted-signature"
+                }]},
+                "finishReason": "STOP"
+            }]
+        });
+        let turn = parse_generate_response(&response).unwrap();
+        assert_eq!(turn.tool_calls[0].id, "call_abc123");
+
+        let messages = vec![
+            ChatMessage::assistant_with_tools("", turn.tool_calls),
+            ChatMessage::tool_result("call_abc123", "run_diagnostic", "Windows 11 24H2"),
+        ];
+        let body = build_generate_body(None, &messages, &[], None);
+        let call = &body["contents"][0]["parts"][0];
+        assert_eq!(call["functionCall"]["id"], "call_abc123");
+        assert_eq!(call["thoughtSignature"], "encrypted-signature");
+        assert_eq!(
+            body["contents"][1]["parts"][0]["functionResponse"]["id"],
+            "call_abc123"
+        );
+    }
+
+    #[test]
+    fn rejects_non_object_function_arguments() {
+        let response = json!({
+            "candidates": [{
+                "content": {"parts": [{
+                    "functionCall": {"id": "call_1", "name": "bad", "args": "not an object"}
+                }]},
+                "finishReason": "STOP"
+            }]
+        });
+        assert!(
+            parse_generate_response(&response)
+                .unwrap_err()
+                .contains("non-object")
+        );
     }
 
     #[test]

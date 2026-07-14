@@ -10,7 +10,7 @@
   <Identity
     Name="32827MikeFara.WindowsForumDiagnostics"
     Publisher="CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4"
-    Version="2.5.4.0"
+    Version="2.5.5.0"
     ProcessorArchitecture="x64" />
 
   <mp:PhoneIdentity PhoneProductId="32827e7c-77d2-43e5-ab82-9cdb9daa11b3" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>

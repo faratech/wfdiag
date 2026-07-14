@@ -49,7 +49,7 @@ build_application() {
             npm run tauri build -- --bundles nsis
             ;;
         "exe")
-            cd src-tauri && cargo build --release && cd ..
+            cd src-tauri && cargo build --locked --release && cd ..
             ;;
         *)
             npm run tauri build

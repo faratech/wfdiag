@@ -1,6 +1,6 @@
 [package]
 name = "wfdiag-tauri"
-version = "2.5.4"
+version = "2.5.5"
 description = "WindowsForum Diagnostic Tool"
 authors = ["WindowsForum"]
 edition = "2024"
@@ -28,10 +28,8 @@ tauri-build = { version = "2.6", features = [] }
 tauri = { version = "2.11", features = ["tray-icon"] }
 
 # Tauri v2 plugins
-tauri-plugin-fs = "2.5"
 tauri-plugin-dialog = "2.7"
 tauri-plugin-clipboard-manager = "2.3"
-tauri-plugin-shell = "2.3"
 tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2.4.2"
 

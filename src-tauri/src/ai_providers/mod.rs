@@ -188,13 +188,9 @@ impl ResolvedProviderConfig {
     }
 }
 
-/// Resolve key/endpoint/model for a provider. `frontend_openai_key` is the
-/// OpenAI key the frontend passes per call (wins over stored keys, OpenAI
-/// only). Errors carry user-actionable messages.
-pub async fn resolve_config(
-    provider: AIProvider,
-    frontend_openai_key: Option<String>,
-) -> Result<ResolvedProviderConfig, String> {
+/// Resolve key/endpoint/model for a provider. Credentials come exclusively
+/// from backend secure storage; per-request IPC can never override them.
+pub async fn resolve_config(provider: AIProvider) -> Result<ResolvedProviderConfig, String> {
     use crate::commands::settings::{load_provider_key_internal, read_settings_from_disk};
     use crate::dpapi::ProviderKeyId;
 
@@ -211,17 +207,14 @@ pub async fn resolve_config(
         .into()),
         AIProvider::PhiSilica => Ok(ResolvedProviderConfig::default()),
         AIProvider::OpenAI => {
-            let api_key = match frontend_openai_key.filter(|k| !k.is_empty()) {
-                Some(k) => k,
-                None => load_provider_key_internal(ProviderKeyId::OpenAI)
-                    .await
-                    .ok_or_else(|| {
-                        String::from(DiagError::api_key(
-                            "load",
-                            "OpenAI API key not configured. Please enter your API key in Settings.",
-                        ))
-                    })?,
-            };
+            let api_key = load_provider_key_internal(ProviderKeyId::OpenAI)
+                .await
+                .ok_or_else(|| {
+                    String::from(DiagError::api_key(
+                        "load",
+                        "OpenAI API key not configured. Please enter your API key in Settings.",
+                    ))
+                })?;
             let model = settings
                 .open_ai_model
                 .clone()
@@ -444,9 +437,10 @@ pub async fn one_shot(
         AIProvider::PhiSilica => phi::one_shot(prompt).await,
         AIProvider::OpenAI => openai::one_shot(cfg, system, prompt).await,
         AIProvider::FoundryLocal => foundry::one_shot(cfg, system, prompt).await,
-        AIProvider::Ollama | AIProvider::CustomOpenAI | AIProvider::DeepSeek => {
+        AIProvider::Ollama | AIProvider::CustomOpenAI => {
             openai_compat::one_shot(provider, cfg, system, prompt).await
         }
+        AIProvider::DeepSeek => deepseek::one_shot(cfg, system, prompt).await,
         AIProvider::CodexCli => codex::one_shot(cfg, system, prompt).await,
         AIProvider::ClaudeCode => claude_cli::one_shot(cfg, system, prompt).await,
         AIProvider::Anthropic => anthropic::one_shot(cfg, system, prompt).await,
@@ -470,8 +464,8 @@ pub async fn chat_stream(
         AIProvider::OpenAI
         | AIProvider::FoundryLocal
         | AIProvider::Ollama
-        | AIProvider::CustomOpenAI
-        | AIProvider::DeepSeek => openai_compat::chat_stream(provider, cfg, req, tx).await,
+        | AIProvider::CustomOpenAI => openai_compat::chat_stream(provider, cfg, req, tx).await,
+        AIProvider::DeepSeek => deepseek::chat_stream(cfg, req, tx).await,
         AIProvider::CodexCli => codex::chat_single_shot(cfg, req, tx).await,
         AIProvider::ClaudeCode => claude_cli::chat_single_shot(cfg, req, tx).await,
         AIProvider::Anthropic => anthropic::chat_stream(cfg, req, tx).await,
@@ -494,9 +488,9 @@ pub struct ProviderCaps {
 /// Single source of truth for provider capabilities.
 ///
 /// Phi Silica keeps the empirically validated 4k-token budget from
-/// `ai_service`/`ai_prompts` — do not raise it. Foundry Local is conservative
-/// (no tools) until its `/v1/chat/completions` path is verified on a real
-/// install; its one-shot path stays on `/v1/responses`.
+/// `ai_service`/`ai_prompts` — do not raise it. Foundry Local remains
+/// conservative (no model tools) even though text streaming uses its
+/// documented `/v1/chat/completions` endpoint.
 pub fn capabilities(provider: AIProvider) -> ProviderCaps {
     match provider {
         AIProvider::None => ProviderCaps {

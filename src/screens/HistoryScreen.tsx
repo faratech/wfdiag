@@ -26,14 +26,34 @@ const preStyle: React.CSSProperties = {
   borderRadius: 4,
 }
 
-/** Side-by-side previous/current output, plus a field-level change list when both sides parse as JSON. */
-const TaskDiffDetail: React.FC<{ change: TaskChange }> = ({ change }) => {
+interface TaskDiffPayload {
+  task_id: string
+  current_output: string
+  previous_output: string
+}
+
+/** Lazily fetch side-by-side output only when a task is expanded. */
+const TaskDiffDetail: React.FC<{ change: TaskChange; currentId: string; previousId: string }> = ({ change, currentId, previousId }) => {
   const { findJsonDifferences, formatDifference } = useJsonDiff()
+  const [detail, setDetail] = useState<TaskDiffPayload | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    invoke<TaskDiffPayload>('get_scan_task_diff', { currentId, previousId, taskId: change.task_id })
+      .then(result => { if (!cancelled) setDetail(result) })
+      .catch(cause => { if (!cancelled) setError(String(cause)) })
+    return () => { cancelled = true }
+  }, [change.task_id, currentId, previousId])
+
   const diffs: JsonDifference[] | null = useMemo(
-    () => findJsonDifferences(change.previous_output, change.current_output),
+    () => detail ? findJsonDifferences(detail.previous_output, detail.current_output) : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [change.previous_output, change.current_output]
+    [detail?.previous_output, detail?.current_output]
   )
+
+  if (error) return <div className="inline-error">Could not load task details: {error}</div>
+  if (!detail) return <div className="history-detail-loading"><i className="fa-solid fa-circle-notch fa-spin" /> Loading details…</div>
 
   return (
     <div style={{ marginTop: 6 }}>
@@ -52,11 +72,11 @@ const TaskDiffDetail: React.FC<{ change: TaskChange }> = ({ change }) => {
       <div className="diff-cols">
         <div>
           <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--wf-text-muted)', fontWeight: 700, marginBottom: 4 }}>Previous</div>
-          <pre style={preStyle}>{change.previous_output || '(empty)'}</pre>
+          <pre style={preStyle}>{detail.previous_output || '(empty)'}</pre>
         </div>
         <div>
           <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--wf-text-muted)', fontWeight: 700, marginBottom: 4 }}>Current</div>
-          <pre style={preStyle}>{change.current_output || '(empty)'}</pre>
+          <pre style={preStyle}>{detail.current_output || '(empty)'}</pre>
         </div>
       </div>
     </div>
@@ -72,7 +92,7 @@ const kindTag: Record<ChangeKind, { cls: string; label: string }> = {
 }
 
 export const HistoryScreen: React.FC = () => {
-  const { scans, loading, refreshScans } = useScanHistory()
+  const { scans, loading, error: historyError, refreshScans } = useScanHistory()
   const { comparison, loading: cmpLoading, error: cmpError, compareScans, clearComparison } = useComparison()
   const { showSuccess, showError } = useToast()
   const [selected, setSelected] = useState<string | null>(null)
@@ -90,12 +110,13 @@ export const HistoryScreen: React.FC = () => {
     invoke<TaskTrend[]>('get_task_trends', { limit: 10 })
       .then(list => setTrends(new Map(list.map(t => [t.task_id, t]))))
       .catch(() => setTrends(new Map())) // trends are decorative — never block the screen
-  }, [scans.length])
+  }, [current?.id])
 
   const filteredScans = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return scans
     return scans.filter(s =>
+      (s.label || '').toLowerCase().includes(q) ||
       (s.tags || []).some(t => t.toLowerCase().includes(q)) ||
       new Date(s.timestamp).toLocaleString().toLowerCase().includes(q) ||
       s.computer_name.toLowerCase().includes(q)
@@ -106,12 +127,18 @@ export const HistoryScreen: React.FC = () => {
     setSelected(id)
     setExpandedTask(null)
     setEditingLabel(false)
-    clearComparison()
-    if (current && id !== current.id) {
-      // compareScans never rejects — failures land in cmpError, rendered below
-      void compareScans(current.id, id)
-    }
   }
+
+  useEffect(() => {
+    if (!selected || !current || selected === current.id) {
+      clearComparison()
+      return
+    }
+    void compareScans(current.id, selected)
+    // compareScans/clearComparison are stable enough for this ID-driven refresh;
+    // including their hook identities would retrigger on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current?.id, selected])
 
   const clearHistory = async () => {
     setClearingHistory(true)
@@ -135,7 +162,7 @@ export const HistoryScreen: React.FC = () => {
     if (!selectedScan) return
     const label = labelDraft.trim()
     try {
-      await invoke('update_scan_tags', { scanId: selectedScan.id, tags: label ? [label] : [] })
+      await invoke('update_scan_label', { scanId: selectedScan.id, label: label || null })
       setEditingLabel(false)
       showSuccess(label ? `Labeled "${label}"` : 'Label removed')
       await refreshScans()
@@ -157,8 +184,8 @@ export const HistoryScreen: React.FC = () => {
     const t = trends.get(taskId)
     if (!t || t.failed < 2) return null
     return (
-      <span className="tag warning" style={{ marginLeft: 6, padding: '0 6px' }} title={`This task failed in ${t.failed} of the last ${t.scans_considered} scans`}>
-        {t.failed}/{t.scans_considered} fails
+      <span className="tag warning" style={{ marginLeft: 6, padding: '0 6px' }} title={`This diagnostic had a collection error in ${t.failed} of the last ${t.scans_considered} scans`}>
+        {t.failed}/{t.scans_considered} errors
       </span>
     )
   }
@@ -196,8 +223,8 @@ export const HistoryScreen: React.FC = () => {
           <div>
             <div className="history-row head">
               <span></span><span>Timestamp</span><span>Label</span>
-              <span style={{ textAlign: 'right' }}>Pass</span>
-              <span style={{ textAlign: 'right' }}>Fail</span>
+              <span style={{ textAlign: 'right' }}>Collected</span>
+              <span style={{ textAlign: 'right' }}>Errors</span>
               <span style={{ textAlign: 'right' }}>Time</span>
             </div>
             {loading && scans.length === 0 && (
@@ -205,20 +232,26 @@ export const HistoryScreen: React.FC = () => {
                 <Skeleton variant="block" count={4} height={38} />
               </div>
             )}
+            {historyError && (
+              <div className="inline-error history-error" role="alert">
+                <span>{historyError}</span>
+                <button className="btn" onClick={() => void refreshScans()}>Try again</button>
+              </div>
+            )}
             {filteredScans.map(h => (
-              <div key={h.id} className={`history-row ${selected === h.id ? 'selected' : ''}`} onClick={() => select(h.id)}>
+              <button type="button" key={h.id} className={`history-row ${selected === h.id ? 'selected' : ''}`} onClick={() => select(h.id)}>
                 <span className={`status-dot ${h.failure_count > 0 ? 'warning' : 'success'}`} />
                 <span className="ts">{new Date(h.timestamp).toLocaleString()}</span>
                 <span className="name">
-                  {h.tags?.[0] || 'Scan'}
+                  {h.label || h.tags?.[0] || 'Scan'}
                   {current && h.id === current.id && <span className="tag" style={{ marginLeft: 6, padding: '0 6px' }}>Latest</span>}
                 </span>
-                <span className="stat passed">{h.success_count}</span>
+                <span className="stat collected">{h.success_count}</span>
                 <span className="stat failed">{h.failure_count > 0 ? h.failure_count : '—'}</span>
                 <span className="stat">{(h.duration_ms / 1000).toFixed(1)}s</span>
-              </div>
+              </button>
             ))}
-            {!loading && scans.length === 0 && (
+            {!loading && !historyError && scans.length === 0 && (
               <EmptyState
                 icon="fa-clock-rotate-left"
                 title="No saved scans yet"
@@ -253,12 +286,12 @@ export const HistoryScreen: React.FC = () => {
                   </>
                 ) : (
                   <>
-                    <strong>{selectedScan.tags?.[0] || 'Scan'}</strong>
+                    <strong>{selectedScan.label || selectedScan.tags?.[0] || 'Scan'}</strong>
                     <button
                       className="btn ghost"
                       style={{ padding: '2px 8px' }}
                       aria-label="Edit scan label"
-                      onClick={() => { setLabelDraft(selectedScan.tags?.[0] || ''); setEditingLabel(true) }}
+                      onClick={() => { setLabelDraft(selectedScan.label || selectedScan.tags?.[0] || ''); setEditingLabel(true) }}
                     >
                       <i className="fa-solid fa-pen" />
                     </button>
@@ -278,11 +311,11 @@ export const HistoryScreen: React.FC = () => {
                 </div>
                 <div className="kv-grid">
                   <div className="kv-row" style={{ gridTemplateColumns: '1fr 90px' }}>
-                    <span className="k">New failures</span>
+                    <span className="k">New collection errors</span>
                     <span className="v" style={{ textAlign: 'right', color: 'var(--err-fg)' }}>{comparison.new_failures.length}</span>
                   </div>
                   <div className="kv-row" style={{ gridTemplateColumns: '1fr 90px' }}>
-                    <span className="k">New successes</span>
+                    <span className="k">Newly collected</span>
                     <span className="v" style={{ textAlign: 'right', color: 'var(--ok-fg)' }}>{comparison.new_successes.length}</span>
                   </div>
                   <div className="kv-row" style={{ gridTemplateColumns: '1fr 90px' }}>
@@ -313,7 +346,13 @@ export const HistoryScreen: React.FC = () => {
                         {change.task_name}
                         {trendBadge(change.task_id)}
                       </button>
-                      {open && <TaskDiffDetail change={change} />}
+                      {open && comparison && (
+                        <TaskDiffDetail
+                          change={change}
+                          currentId={comparison.current_scan.id}
+                          previousId={comparison.previous_scan.id}
+                        />
+                      )}
                     </div>
                   )
                 })}

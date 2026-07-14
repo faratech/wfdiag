@@ -76,12 +76,8 @@ pub async fn claude_prompt(
     // CLAUDECODE is the adapter's recursion guard (it refuses to start when
     // set); the key vars would override the CLI's stored login and turn
     // subscription runs into API billing.
-    for var in [
-        "CLAUDECODE",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "OPENAI_API_KEY",
-    ] {
+    cmd.env_remove("CLAUDECODE");
+    for var in cli_bridge::SUBSCRIPTION_OVERRIDE_ENV_VARS {
         cmd.env_remove(var);
     }
     if let Some(model) = model {
@@ -209,13 +205,7 @@ pub async fn claude_prompt(
 
     let text = collected.lock().map(|t| t.clone()).unwrap_or_default();
     match turn {
-        Ok(v1::StopReason::Refusal) => {
-            AdapterOutcome::Failed("The model declined to answer this request".to_string())
-        }
-        Ok(_) if !text.trim().is_empty() => AdapterOutcome::Answer(text),
-        Ok(stop) => AdapterOutcome::Failed(format!(
-            "Claude Code returned no text (turn ended with {stop:?})"
-        )),
+        Ok(stop) => finish_adapter_turn(stop, text),
         Err(e) => {
             let stderr = stderr_buf.lock().map(|b| b.clone()).unwrap_or_default();
             let stderr_tail = cli_bridge::tail(stderr.trim(), 300);
@@ -225,6 +215,30 @@ pub async fn claude_prompt(
                 format!("Claude Code (ACP) failed: {e} — {stderr_tail}")
             })
         }
+    }
+}
+
+fn finish_adapter_turn(stop: v1::StopReason, text: String) -> AdapterOutcome {
+    match stop {
+        v1::StopReason::EndTurn if !text.trim().is_empty() => AdapterOutcome::Answer(text),
+        v1::StopReason::EndTurn => {
+            AdapterOutcome::Failed("Claude Code completed without an answer".to_string())
+        }
+        v1::StopReason::MaxTokens => AdapterOutcome::Failed(
+            "Claude Code reached its token limit before completing the answer".to_string(),
+        ),
+        v1::StopReason::MaxTurnRequests => AdapterOutcome::Failed(
+            "Claude Code reached its turn limit before completing the answer".to_string(),
+        ),
+        v1::StopReason::Refusal => {
+            AdapterOutcome::Failed("The model declined to answer this request".to_string())
+        }
+        v1::StopReason::Cancelled => {
+            AdapterOutcome::Failed("Claude Code cancelled the request".to_string())
+        }
+        _ => AdapterOutcome::Failed(format!(
+            "Claude Code ended with an unsupported stop reason ({stop:?})"
+        )),
     }
 }
 
@@ -270,6 +284,29 @@ mod tests {
         assert!(matches!(
             reject_outcome(&[option("allow", v1::PermissionOptionKind::AllowOnce)]),
             v1::RequestPermissionOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn only_end_turn_is_a_successful_prompt_completion() {
+        assert!(matches!(
+            finish_adapter_turn(v1::StopReason::EndTurn, "answer".into()),
+            AdapterOutcome::Answer(text) if text == "answer"
+        ));
+        for stop in [
+            v1::StopReason::MaxTokens,
+            v1::StopReason::MaxTurnRequests,
+            v1::StopReason::Refusal,
+            v1::StopReason::Cancelled,
+        ] {
+            assert!(matches!(
+                finish_adapter_turn(stop, "partial".into()),
+                AdapterOutcome::Failed(_)
+            ));
+        }
+        assert!(matches!(
+            finish_adapter_turn(v1::StopReason::EndTurn, "  ".into()),
+            AdapterOutcome::Failed(_)
         ));
     }
 }

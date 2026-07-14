@@ -22,52 +22,7 @@
     "core:window:allow-start-dragging",
     "core:window:allow-set-progress-bar",
     "notification:default",
-    "fs:default",
-    "fs:allow-read-file",
-    "fs:allow-write-file",
-    "fs:allow-read-dir",
-    "fs:allow-create",
-    "fs:allow-remove",
-    "fs:allow-exists",
-    "dialog:default",
-    "dialog:allow-open",
     "dialog:allow-save",
-    "dialog:allow-message",
-    "dialog:allow-ask",
-    "dialog:allow-confirm",
-    "clipboard-manager:default",
-    "clipboard-manager:allow-write-text",
-    "clipboard-manager:allow-read-text",
-    "shell:default",
-    "shell:allow-open",
-    {
-      "identifier": "fs:scope",
-      "allow": [
-        "$APPDATA/wfdiag-tauri/**",
-        "$TEMP/wfdiag_*.txt",
-        "$TEMP/wfdiag_*.html",
-        "$HOME/Documents/**",
-        "$HOME/Desktop/**",
-        "$HOME/Downloads/**"
-      ]
-    },
-    {
-      "identifier": "fs:scope",
-      "allow": [
-        "C:\\Windows\\System32\\drivers\\etc\\hosts"
-      ],
-      "deny": [
-        "C:\\Windows\\System32\\drivers\\etc\\**"
-      ]
-    },
-    {
-      "identifier": "fs:scope", 
-      "allow": [
-        "C:\\Windows\\Minidump\\*.dmp"
-      ],
-      "deny": [
-        "C:\\Windows\\**"
-      ]
-    }
+    "clipboard-manager:allow-write-text"
   ]
 }

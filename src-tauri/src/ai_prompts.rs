@@ -247,26 +247,12 @@ fn format_field_name(name: &str) -> String {
     result
 }
 
-/// Format a number, converting bytes to human-readable
+/// Preserve untyped JSON numbers exactly. A large number is not necessarily a
+/// byte count (it may be a timestamp, counter, identifier, or frequency).
+/// Byte formatting is applied only by `render_object_as_text` when the field
+/// name establishes byte semantics.
 fn format_number_value(n: &serde_json::Number) -> String {
-    if let Some(i) = n.as_u64() {
-        // Check if it looks like bytes (very large number)
-        if i > 1_000_000_000 {
-            format!("{:.1} GB", i as f64 / 1_073_741_824.0)
-        } else if i > 1_000_000 {
-            format!("{:.1} MB", i as f64 / 1_048_576.0)
-        } else {
-            i.to_string()
-        }
-    } else if let Some(f) = n.as_f64() {
-        if f > 1_000_000_000.0 {
-            format!("{:.1} GB", f / 1_073_741_824.0)
-        } else {
-            format!("{:.1}", f)
-        }
-    } else {
-        n.to_string()
-    }
+    n.to_string()
 }
 
 /// Format a string as bytes if it looks like a byte count
@@ -361,49 +347,24 @@ Rank by priority, brief reason each, which to fix first. {length_hint}"#,
 pub(crate) fn truncate_output(output: &str, max_chars: usize) -> String {
     let total = output.chars().count();
     if total <= max_chars {
-        output.to_string()
-    } else {
-        let head: String = output.chars().take(max_chars).collect();
-        format!(
-            "{}... [truncated, {} more characters]",
-            head,
-            total - max_chars
-        )
+        return output.to_string();
     }
-}
-
-/// Compress diagnostic output for Phi Silica's limited context
-/// Extracts key information and removes verbose content
-#[allow(dead_code)] // Available for Phi Silica optimizations
-pub fn compress_for_phi_silica(output: &str, max_chars: usize) -> String {
-    // Remove excessive whitespace
-    let compressed: String = output
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| line.trim())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    // If still too long, truncate smartly
-    if compressed.len() <= max_chars {
-        compressed
-    } else {
-        // Try to keep first part (usually headers/summary) and last part (usually
-        // important). Slice by char count, not byte index, to avoid a char-boundary panic.
-        let half = max_chars / 2;
-        let total = compressed.chars().count();
-        let first_part: String = compressed.chars().take(half).collect();
-        let last_part: String = compressed
-            .chars()
-            .skip(total.saturating_sub(half))
-            .collect();
-
-        format!(
-            "{}\n... [content truncated] ...\n{}",
-            first_part.trim(),
-            last_part.trim()
-        )
+    if max_chars == 0 {
+        return String::new();
     }
+
+    // The old implementation took `max_chars` and then appended a suffix,
+    // silently violating every provider budget. Use a fixed-size suffix whose
+    // length is included in the bound. It reports the original size rather
+    // than an inaccurate "remaining" count that changes with suffix length.
+    let suffix = format!("… [truncated from {} chars]", total);
+    let suffix_chars = suffix.chars().count();
+    if suffix_chars >= max_chars {
+        return suffix.chars().take(max_chars).collect();
+    }
+    let mut bounded: String = output.chars().take(max_chars - suffix_chars).collect();
+    bounded.push_str(&suffix);
+    bounded
 }
 
 #[cfg(test)]
@@ -417,7 +378,7 @@ mod tests {
 
         let long = "a".repeat(200);
         let truncated = truncate_output(&long, 100);
-        assert!(truncated.chars().count() < 200);
+        assert_eq!(truncated.chars().count(), 100);
         assert!(truncated.contains("[truncated"));
     }
 
@@ -425,23 +386,21 @@ mod tests {
     fn test_truncate_output_multibyte_no_panic() {
         // Regression: byte-index slicing panicked when the cut landed inside a
         // multi-byte UTF-8 char. Each 'é' is 2 bytes, so a byte slice at 100 would
-        // split a char. Char-based truncation must keep exactly `max_chars` chars.
+        // split a char. Char-based truncation must fit exactly within the cap.
         let multibyte = "é".repeat(200);
         let truncated = truncate_output(&multibyte, 100);
-        assert!(truncated.starts_with(&"é".repeat(100)));
-        assert!(truncated.contains("[truncated, 100 more characters]"));
+        assert_eq!(truncated.chars().count(), 100);
+        assert!(truncated.starts_with('é'));
+        assert!(truncated.contains("[truncated from 200 chars]"));
 
         // Emoji are 4 bytes; truncating right at a boundary must also not panic.
         let emoji = "🚀".repeat(50);
         let _ = truncate_output(&emoji, 25);
         let _ = render_json_value(&serde_json::Value::String("界".repeat(300)), 0);
-    }
 
-    #[test]
-    fn test_compress_for_phi_silica() {
-        let verbose = "line1\n\n\n  line2  \n\n  line3  ";
-        let compressed = compress_for_phi_silica(verbose, 1000);
-        assert_eq!(compressed, "line1\nline2\nline3");
+        for cap in 0..40 {
+            assert!(truncate_output(&"🧭".repeat(100), cap).chars().count() <= cap);
+        }
     }
 
     #[test]
@@ -483,5 +442,16 @@ mod tests {
         assert!(prompt.contains("not a raw WindowsUpdate.log file"));
         assert!(prompt.contains("treat that as non-empty data"));
         assert!(prompt.contains("Hot Fix ID: KB5094126"));
+    }
+
+    #[test]
+    fn untyped_large_numbers_are_not_mislabeled_as_bytes() {
+        let rendered = json_to_readable_text(
+            r#"{"timestamp":1718123456789,"event_id":4294967296,"Capacity":17179869184}"#,
+            1_000,
+        );
+        assert!(rendered.contains("timestamp: 1718123456789"));
+        assert!(rendered.contains("event_id: 4294967296"));
+        assert!(rendered.contains("Capacity: 16.0 GB"));
     }
 }

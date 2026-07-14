@@ -218,7 +218,7 @@ describe('AIContext analysis dedup and cache', () => {
     })
 
     const { rerender } = renderHook(() => useAIContext(), { wrapper })
-    await waitFor(() => expect(invokeMock.mock.calls.filter(c => c[0] === 'ai_get_status')).toHaveLength(2))
+    await waitFor(() => expect(invokeMock.mock.calls.filter(c => c[0] === 'ai_get_status')).toHaveLength(1))
 
     appContextValue = {
       settings: {
@@ -231,8 +231,147 @@ describe('AIContext analysis dedup and cache', () => {
     rerender()
 
     await waitFor(() => {
-      expect(invokeMock.mock.calls.filter(c => c[0] === 'ai_get_status').length).toBeGreaterThanOrEqual(3)
+      expect(invokeMock.mock.calls.filter(c => c[0] === 'ai_get_status')).toHaveLength(2)
     })
+  })
+
+  it('waits for a Codex-to-Phi preference update before fetching Phi status', async () => {
+    const phiPreference = deferred<void>()
+    const codexStatus = {
+      ...okStatus,
+      preferred_provider: 'codex_cli',
+      active_provider: 'codex_cli',
+      providers: [
+        { id: 'codex_cli', available: true, configured: true },
+        { id: 'phi_silica', available: false, configured: false },
+      ],
+    }
+    const phiStatus = {
+      ...okStatus,
+      preferred_provider: 'phi_silica',
+      phi_silica_available: true,
+      phi_silica_ready: true,
+      active_provider: 'phi_silica',
+      providers: [
+        { id: 'codex_cli', available: true, configured: true },
+        { id: 'phi_silica', available: true, configured: true },
+      ],
+    }
+    let statusCalls = 0
+    invokeMock.mockImplementation((cmd: string, args?: { preference?: string }) => {
+      if (cmd === 'ai_set_preference' && args?.preference === 'phi_silica') {
+        return phiPreference.promise
+      }
+      if (cmd === 'ai_get_status') {
+        statusCalls++
+        return Promise.resolve(statusCalls === 1 ? codexStatus : phiStatus)
+      }
+      return Promise.resolve(undefined)
+    })
+    appContextValue = {
+      settings: { preferredAIProvider: 'codex_cli' },
+      settingsLoaded: true,
+    }
+
+    const { result, rerender } = renderHook(() => useAIContext(), { wrapper })
+    await waitFor(() => expect(result.current.activeProvider).toBe('codex_cli'))
+    expect(statusCalls).toBe(1)
+
+    appContextValue = {
+      settings: { preferredAIProvider: 'phi_silica' },
+      settingsLoaded: true,
+    }
+    rerender()
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('ai_set_preference', { preference: 'phi_silica' })
+      expect(result.current.isLoading).toBe(true)
+      expect(result.current.aiStatus).toBeNull()
+    })
+    // The status request describing Phi must not race ahead of the backend
+    // preference write (the source of the provider-switch hang/regression).
+    expect(statusCalls).toBe(1)
+
+    await act(async () => {
+      phiPreference.resolve()
+      await phiPreference.promise
+    })
+
+    await waitFor(() => {
+      expect(statusCalls).toBe(2)
+      expect(result.current.aiStatus?.active_provider).toBe('phi_silica')
+      expect(result.current.isLoading).toBe(false)
+    })
+    const phiSetIndex = invokeMock.mock.calls.findIndex(
+      call => call[0] === 'ai_set_preference' && call[1]?.preference === 'phi_silica',
+    )
+    const secondStatusIndex = invokeMock.mock.calls.findIndex(
+      (call, index) => call[0] === 'ai_get_status'
+        && index > invokeMock.mock.calls.findIndex(first => first[0] === 'ai_get_status'),
+    )
+    expect(phiSetIndex).toBeLessThan(secondStatusIndex)
+  })
+
+  it('does not let a stale provider status overwrite a newer Phi selection', async () => {
+    const staleCodexStatus = deferred<Record<string, unknown>>()
+    const freshPhiStatus = deferred<Record<string, unknown>>()
+    const phiStatus = {
+      ...okStatus,
+      preferred_provider: 'phi_silica',
+      phi_silica_available: true,
+      phi_silica_ready: true,
+      active_provider: 'phi_silica',
+      providers: [{ id: 'phi_silica', available: true, configured: true }],
+    }
+    let statusCalls = 0
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'ai_set_preference') return Promise.resolve(undefined)
+      if (cmd === 'ai_get_status') {
+        statusCalls++
+        if (statusCalls === 1) return Promise.resolve(okStatus)
+        if (statusCalls === 2) return staleCodexStatus.promise
+        return freshPhiStatus.promise
+      }
+      return Promise.resolve(undefined)
+    })
+
+    const { result, rerender } = renderHook(() => useAIContext(), { wrapper })
+    await waitFor(() => expect(statusCalls).toBe(1))
+
+    appContextValue = {
+      settings: { preferredAIProvider: 'codex_cli' },
+      settingsLoaded: true,
+    }
+    rerender()
+    await waitFor(() => expect(statusCalls).toBe(2))
+
+    appContextValue = {
+      settings: { preferredAIProvider: 'phi_silica' },
+      settingsLoaded: true,
+    }
+    rerender()
+    await waitFor(() => expect(statusCalls).toBe(3))
+
+    await act(async () => {
+      freshPhiStatus.resolve(phiStatus)
+      await freshPhiStatus.promise
+    })
+    await waitFor(() => {
+      expect(result.current.aiStatus?.active_provider).toBe('phi_silica')
+      expect(result.current.activeProvider).toBe('phi_silica')
+    })
+
+    await act(async () => {
+      staleCodexStatus.resolve({
+        ...okStatus,
+        preferred_provider: 'codex_cli',
+        active_provider: 'codex_cli',
+        providers: [{ id: 'codex_cli', available: true, configured: true }],
+      })
+      await staleCodexStatus.promise
+    })
+    expect(result.current.aiStatus?.active_provider).toBe('phi_silica')
+    expect(result.current.activeProvider).toBe('phi_silica')
   })
 
   it('clears local interpretations when provider configuration changes', async () => {

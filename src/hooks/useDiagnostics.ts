@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from 'react'
+import { useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
@@ -40,9 +40,9 @@ export const useDiagnostics = () => {
     availableTasks,
     setAvailableTasks,
     sessionId,
-    results,
     settings,
     setIssues,
+    setDiagnosticsError,
   } = useAppContext()
 
   const { showSuccess, showError } = useToast()
@@ -53,8 +53,9 @@ export const useDiagnostics = () => {
       setSystemInfo(info)
     } catch (error) {
       logger.error('useDiagnostics', 'Failed to load system info', error)
+      setDiagnosticsError(`System information could not be loaded: ${errorMessage(error)}`)
     }
-  }, [setSystemInfo])
+  }, [setDiagnosticsError, setSystemInfo])
 
   const loadAvailableTasks = useCallback(async () => {
     try {
@@ -62,8 +63,9 @@ export const useDiagnostics = () => {
       setAvailableTasks(tasks)
     } catch (error) {
       logger.error('useDiagnostics', 'Failed to load tasks', error)
+      setDiagnosticsError(`The diagnostic catalog could not be loaded: ${errorMessage(error)}`)
     }
-  }, [setAvailableTasks])
+  }, [setAvailableTasks, setDiagnosticsError])
 
   const detectIssues = useCallback(async () => {
     try {
@@ -73,14 +75,6 @@ export const useDiagnostics = () => {
       logger.error('useDiagnostics', 'Failed to detect issues', error)
     }
   }, [setIssues])
-
-  const getHealthScore = useCallback(() => {
-    const totalTasks = Object.keys(results).length
-    if (totalTasks === 0) return null
-
-    const successfulTasks = Object.values(results).filter(r => r.success).length
-    return Math.round((successfulTasks / totalTasks) * 100)
-  }, [results])
 
   const copyToClipboard = useCallback(async () => {
     if (!sessionId) return
@@ -323,18 +317,12 @@ ${content}`
     }
   }, [showError])
 
-  useEffect(() => {
-    loadSystemInfo()
-    loadAvailableTasks()
-  }, [loadSystemInfo, loadAvailableTasks])
-
   return {
     systemInfo,
     availableTasks,
     loadSystemInfo,
     loadAvailableTasks,
     detectIssues,
-    getHealthScore,
     copyToClipboard,
     exportResults,
     shareToWindowsForum,

@@ -270,8 +270,8 @@ pub fn get_all_tasks() -> Vec<DiagnosticTask> {
         },
         DiagnosticTask {
             id: "pending_reboot".to_string(),
-            name: "Pending Reboot".to_string(),
-            description: "Whether Windows is waiting for a restart".to_string(),
+            name: "Restart Requirements".to_string(),
+            description: "Windows restart markers and deferred file operations".to_string(),
             category: "System".to_string(),
             admin_required: false,
         },
@@ -307,7 +307,15 @@ pub fn get_all_tasks() -> Vec<DiagnosticTask> {
         DiagnosticTask {
             id: "dism_health".to_string(),
             name: "DISM Health Check".to_string(),
-            description: "Windows image health status".to_string(),
+            description: "Quick Windows image health status".to_string(),
+            category: "System".to_string(),
+            admin_required: true,
+        },
+        DiagnosticTask {
+            id: "dism_scan_health".to_string(),
+            name: "DISM Deep Health Scan".to_string(),
+            description: "Thorough Windows image corruption scan (can take several minutes)"
+                .to_string(),
             category: "System".to_string(),
             admin_required: true,
         },
@@ -390,6 +398,7 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             "minidump" => diagnostics.get_minidumps(),
             "chkdsk" => diagnostics.get_disk_health(),
             "dism_health" => diagnostics.run_dism_health(),
+            "dism_scan_health" => diagnostics.run_dism_scan_health(),
             "ipconfig" => diagnostics.run_ipconfig(),
             "hosts_file" => diagnostics.read_hosts_file(),
             "dsregcmd" => diagnostics.run_dsregcmd(),
@@ -429,9 +438,14 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
                 "ipconfig" => run_command("ipconfig", &["/all"]),
                 "hosts_file" => read_hosts_file(),
                 "dsregcmd" => run_command("dsregcmd", &["/status"]),
-                "dism_health" => {
-                    run_command("dism", &["/online", "/cleanup-image", "/checkhealth"])
-                }
+                "dism_health" => run_command(
+                    "dism",
+                    &["/online", "/cleanup-image", "/checkhealth", "/english"],
+                ),
+                "dism_scan_health" => run_command(
+                    "dism",
+                    &["/online", "/cleanup-image", "/scanhealth", "/english"],
+                ),
                 "driver_verifier" => run_command("verifier", &["/querysettings"]),
                 // These now have native implementations, return detailed error
                 "store_apps" | "performance" | "scheduled_tasks" | "chkdsk" | "windows_update" => {
@@ -442,6 +456,12 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
                         duration_ms: 0,
                     }
                 }
+                _ if get_all_tasks().iter().any(|task| task.id == task_id) => TaskResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Native diagnostic failed: {}", error_msg)),
+                    duration_ms: 0,
+                },
                 _ => TaskResult {
                     success: false,
                     output: String::new(),

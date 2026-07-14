@@ -2,10 +2,43 @@ use crate::ai_service::ContextType;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use tokio_util::sync::CancellationToken;
 
 const WINDOWSFORUM_MCP_URL: &str = "https://mcp.windowsforum.com/";
 const MAX_QUERY_CHARS: usize = 420;
 const SOURCE_EXCERPT_CHARS: usize = 650;
+const SAFE_QUERY_FIELDS: &[&str] = &[
+    "Caption",
+    "ProductName",
+    "DisplayVersion",
+    "ReleaseId",
+    "CurrentBuild",
+    "CurrentBuildNumber",
+    "BuildNumber",
+    "Version",
+    "UBR",
+    "HotFixID",
+    "InstalledOn",
+    "EditionID",
+    "InstallationType",
+    "OSArchitecture",
+    "Status",
+    "SourceName",
+    "EventCode",
+    "LogFile",
+    "Type",
+    "Level",
+    "source",
+    "code",
+    "driver_version",
+    "DriverVersion",
+    "DriverProviderName",
+    "DeviceClass",
+    "State",
+    "StartMode",
+    "Model",
+    "Manufacturer",
+];
 
 #[derive(Debug, Clone)]
 struct GroundingSource {
@@ -46,6 +79,16 @@ enum GroundingMode {
     KnowledgeBase,
 }
 
+/// Why a prompt needs current network evidence. Keeping this decision pure
+/// lets chat and one-shot analysis avoid a network request unless the user is
+/// actually asking for a time-sensitive Windows fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GroundingDemand {
+    None,
+    CurrentWindowsFact,
+    KnowledgeBase,
+}
+
 #[derive(Debug, Clone)]
 struct GroundingQuery {
     text: String,
@@ -62,7 +105,7 @@ pub async fn analysis_grounding(
     data: &str,
     max_chars: usize,
 ) -> Option<AnalysisGrounding> {
-    if !should_ground(context_type) {
+    if !analysis_needs_live_grounding(context_type, label, data) {
         return None;
     }
     if !grounding_enabled() {
@@ -73,7 +116,7 @@ pub async fn analysis_grounding(
                 query: String::new(),
                 source_count: 0,
                 sources: Vec::new(),
-                error: Some("Disabled by WFDIAG_AI_GROUNDING".to_string()),
+                error: Some("Network grounding is disabled in Settings".to_string()),
             },
         });
     }
@@ -93,14 +136,26 @@ pub async fn analysis_grounding(
     Some(search_analysis_grounding(query, max_chars).await)
 }
 
-/// Live RAG search used by the agentic chat tool.
-pub async fn search_grounding(query: &str, max_chars: usize) -> Result<String, String> {
+/// Cancellable live RAG search used by chat. Dropping the MCP request future
+/// on cancellation also aborts its underlying HTTP request.
+pub async fn search_grounding_cancellable(
+    query: &str,
+    max_chars: usize,
+    cancel: &CancellationToken,
+) -> Result<String, String> {
+    if !grounding_enabled() {
+        return Err("Network grounding is disabled in Settings".to_string());
+    }
     let query = compact_text(query, MAX_QUERY_CHARS);
     if query.trim().is_empty() {
         return Err("search_windows_knowledge requires a query".to_string());
     }
 
-    let sources = search_sources(&query, GroundingMode::General).await?;
+    let sources = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err("Grounding request cancelled".to_string()),
+        result = search_sources(&query, GroundingMode::General) => result?,
+    };
     if sources.is_empty() {
         return Err("No live grounding sources returned results".to_string());
     }
@@ -117,6 +172,81 @@ pub fn chat_grounding_query(user_query: &str, os_output: Option<&str>) -> String
     };
     let os_query = build_safe_query("Operating System", os_output).text;
     compact_text(&format!("{} {}", user_query, os_query), MAX_QUERY_CHARS)
+}
+
+/// Return the network-grounding demand for user-authored text. A KB article id
+/// is an explicit request for external evidence. Other text must combine a
+/// time-sensitive intent (for example "latest" or "still supported") with a
+/// Windows release/update/driver subject. Generic words such as "current"
+/// alone intentionally do not trigger web traffic for local live metrics.
+pub(crate) fn grounding_demand(text: &str) -> GroundingDemand {
+    if !kb_ids(text).is_empty() {
+        return GroundingDemand::KnowledgeBase;
+    }
+
+    let normalized = normalized_demand_text(text);
+    let terms: HashSet<&str> = normalized.split_whitespace().collect();
+    let time_sensitive = [
+        "latest",
+        "newest",
+        "outdated",
+        "supported",
+        "unsupported",
+        "preview",
+        "insider",
+        "pending",
+    ]
+    .iter()
+    .any(|term| terms.contains(term))
+        || contains_phrase(
+            &normalized,
+            &[
+                "up to date",
+                "still supported",
+                "end of support",
+                "support status",
+                "known issue",
+                "known issues",
+                "current build",
+                "current version",
+                "current release",
+                "current driver",
+                "release channel",
+                "update available",
+                "available update",
+                "patch tuesday",
+            ],
+        );
+    let windows_subject = [
+        "windows", "build", "version", "update", "updates", "patch", "hotfix", "release",
+        "support", "driver", "drivers", "insider", "preview", "channel",
+    ]
+    .iter()
+    .any(|term| terms.contains(term));
+
+    if time_sensitive && windows_subject {
+        GroundingDemand::CurrentWindowsFact
+    } else {
+        GroundingDemand::None
+    }
+}
+
+pub(crate) fn needs_live_grounding(text: &str) -> bool {
+    grounding_demand(text) != GroundingDemand::None
+}
+
+/// Demand gate for one-shot diagnostic analysis. This deliberately evaluates
+/// the label/data only after confirming the analysis kind can use live facts.
+pub(crate) fn analysis_needs_live_grounding(
+    context_type: ContextType,
+    label: Option<&str>,
+    data: &str,
+) -> bool {
+    if !grounding_supported_for(context_type) {
+        return false;
+    }
+    let combined = format!("{} {}", label.unwrap_or_default(), data);
+    needs_live_grounding(&combined)
 }
 
 async fn search_analysis_grounding(query: GroundingQuery, max_chars: usize) -> AnalysisGrounding {
@@ -191,17 +321,10 @@ fn windowsforum_endpoint() -> String {
 }
 
 fn grounding_enabled() -> bool {
-    std::env::var("WFDIAG_AI_GROUNDING")
-        .map(|v| {
-            !matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "off"
-            )
-        })
-        .unwrap_or(true)
+    crate::commands::settings::network_grounding_enabled()
 }
 
-fn should_ground(context_type: ContextType) -> bool {
+fn grounding_supported_for(context_type: ContextType) -> bool {
     matches!(
         context_type,
         ContextType::DiagnosticInterpretation
@@ -209,6 +332,30 @@ fn should_ground(context_type: ContextType) -> bool {
             | ContextType::IssuePrioritization
             | ContextType::GeneralAnalysis
     )
+}
+
+fn normalized_demand_text(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn contains_phrase(text: &str, phrases: &[&str]) -> bool {
+    phrases.iter().any(|phrase| {
+        text == *phrase
+            || text.starts_with(&format!("{} ", phrase))
+            || text.ends_with(&format!(" {}", phrase))
+            || text.contains(&format!(" {} ", phrase))
+    })
 }
 
 async fn search_windowsforum(endpoint: &str, query: &str) -> Result<Vec<GroundingSource>, String> {
@@ -306,24 +453,60 @@ fn first_string(value: &Value, keys: &[&str]) -> Option<String> {
 }
 
 fn format_grounding(query: &str, sources: &[GroundingSource], max_chars: usize) -> String {
-    let mut lines = vec![
-        "LIVE RAG GROUNDING (WindowsForum MCP)".to_string(),
-        "All sources below were retrieved through WindowsForum MCP, including proxied Microsoft KB/support material. Use them only when relevant. Cite title/URL when using a web fact. Do not infer release channel, support, preview status, or update compliance unless the diagnostic data and current Microsoft sources prove it.".to_string(),
-        "Important: a base Windows BuildNumber such as 26200 is not a full patch-level OS build. Do not claim missing cumulative updates unless UBR/FullBuild is present and older than an update source. Do not call an installed build Insider/Preview unless a current source explicitly says that exact installed build is Insider/Preview.".to_string(),
-        format!("Query: {}", query),
+    if max_chars == 0 {
+        return String::new();
+    }
+    let query_budget = (max_chars / 6).clamp(40, 100);
+    let base = vec![
+        "LIVE WINDOWS EVIDENCE (WindowsForum MCP)".to_string(),
+        "RULE: Cite title/URL. BuildNumber alone does not prove patch, support, or preview status."
+            .to_string(),
+        format!("QUERY: {}", compact_text(query, query_budget)),
     ];
+    let render = |records: &[String], omitted: usize| {
+        let mut lines = base.clone();
+        lines.extend(records.iter().cloned());
+        lines.push(format!("OMITTED sources={omitted}"));
+        lines.join("\n")
+    };
 
-    for source in sources {
-        lines.push(format!("- [{}] {}", source.source, source.title));
-        if let Some(url) = &source.url {
-            lines.push(format!("  URL: {}", url));
-        }
-        if !source.excerpt.is_empty() {
-            lines.push(format!("  Excerpt: {}", source.excerpt));
+    let minimal = render(&[], sources.len());
+    if minimal.chars().count() > max_chars {
+        return crate::ai_prompts::truncate_output(&minimal, max_chars);
+    }
+
+    let mut records = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        let title = compact_text(&source.title, 70);
+        let source_name = compact_text(source.source, 32);
+        let prefix = format!("S{} [{}] {}", index + 1, source_name, title);
+        let citation = source
+            .url
+            .as_deref()
+            .map(|url| format!("{} | URL {}", prefix, compact_text(url, 120)));
+        let full = citation.as_ref().map(|citation| {
+            if source.excerpt.is_empty() {
+                citation.clone()
+            } else {
+                format!("{} | {}", citation, compact_text(&source.excerpt, 120))
+            }
+        });
+        let variants = [full.as_deref(), citation.as_deref(), Some(prefix.as_str())];
+        if let Some(variant) = variants.into_iter().flatten().find(|variant| {
+            let mut trial = records.clone();
+            trial.push((*variant).to_string());
+            render(&trial, sources.len().saturating_sub(trial.len()))
+                .chars()
+                .count()
+                <= max_chars
+        }) {
+            records.push(variant.to_string());
         }
     }
 
-    crate::ai_prompts::truncate_output(&lines.join("\n"), max_chars)
+    let grounded = render(&records, sources.len().saturating_sub(records.len()));
+    debug_assert!(grounded.chars().count() <= max_chars);
+    grounded
 }
 
 fn trace_from_sources(
@@ -375,11 +558,42 @@ fn build_safe_query(label: &str, data: &str) -> GroundingQuery {
         }
         collect_safe_terms(&value, &mut parts, 18);
     } else {
-        parts.push(compact_text(data, 180));
+        collect_safe_plain_terms(data, &mut parts, 18);
     }
     GroundingQuery {
         text: compact_text(&parts.join(" "), MAX_QUERY_CHARS),
         mode: GroundingMode::General,
+    }
+}
+
+fn collect_safe_plain_terms(data: &str, out: &mut Vec<String>, limit: usize) {
+    for kb_id in kb_ids(data) {
+        if out.len() >= limit {
+            return;
+        }
+        out.push(kb_id);
+    }
+    for line in data.lines() {
+        if out.len() >= limit {
+            return;
+        }
+        let Some((key, value)) = line.split_once(':').or_else(|| line.split_once('=')) else {
+            continue;
+        };
+        let key = key.trim();
+        if !is_safe_query_field(key) {
+            continue;
+        }
+        let value = value.trim();
+        if value.is_empty()
+            || value.contains('@')
+            || value.contains("\\Users\\")
+            || value.contains("/Users/")
+            || value.len() > 160
+        {
+            continue;
+        }
+        out.push(format!("{} {}", key, value));
     }
 }
 
@@ -498,39 +712,9 @@ fn collect_safe_terms(value: &Value, out: &mut Vec<String>, limit: usize) {
 }
 
 fn is_safe_query_field(key: &str) -> bool {
-    matches!(
-        key,
-        "Caption"
-            | "ProductName"
-            | "DisplayVersion"
-            | "ReleaseId"
-            | "CurrentBuild"
-            | "CurrentBuildNumber"
-            | "BuildNumber"
-            | "Version"
-            | "UBR"
-            | "HotFixID"
-            | "InstalledOn"
-            | "EditionID"
-            | "InstallationType"
-            | "OSArchitecture"
-            | "Status"
-            | "SourceName"
-            | "EventCode"
-            | "LogFile"
-            | "Type"
-            | "Level"
-            | "source"
-            | "code"
-            | "driver_version"
-            | "DriverVersion"
-            | "DriverProviderName"
-            | "DeviceClass"
-            | "State"
-            | "StartMode"
-            | "Model"
-            | "Manufacturer"
-    )
+    SAFE_QUERY_FIELDS
+        .iter()
+        .any(|allowed| key.eq_ignore_ascii_case(allowed))
 }
 
 fn safe_value_term(key: &str, value: &Value) -> Option<String> {
@@ -568,12 +752,22 @@ fn compact_text(text: &str, max_chars: usize) -> String {
 fn kb_ids(query: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
-    for token in query.split(|ch: char| !ch.is_ascii_alphanumeric()) {
-        let token = token.trim();
+    let tokens: Vec<_> = query
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    for (index, token) in tokens.iter().enumerate() {
         let digits = token
             .strip_prefix("KB")
             .or_else(|| token.strip_prefix("kb"))
-            .unwrap_or(token);
+            .filter(|digits| !digits.is_empty())
+            .or_else(|| {
+                token
+                    .eq_ignore_ascii_case("kb")
+                    .then(|| tokens.get(index + 1).copied())
+                    .flatten()
+            });
+        let Some(digits) = digits else { continue };
         if digits.len() >= 6 && digits.len() <= 8 && digits.chars().all(|ch| ch.is_ascii_digit()) {
             let id = format!("KB{}", digits);
             if seen.insert(id.clone()) {
@@ -643,6 +837,18 @@ mod tests {
     }
 
     #[test]
+    fn safe_plain_query_uses_allowlisted_fields_only() {
+        let data = "Caption: Microsoft Windows 11 Pro\nBuildNumber: 26200\nRegisteredUser: person@example.com\nMACAddress: 00-11-22-33-44-55\nIPAddress: 203.0.113.42\nSystemDirectory: C:\\WINDOWS\\system32";
+        let query = build_safe_query("Operating System", data);
+        assert!(query.text.contains("Caption Microsoft Windows 11 Pro"));
+        assert!(query.text.contains("BuildNumber 26200"));
+        assert!(!query.text.contains("person@example.com"));
+        assert!(!query.text.contains("00-11-22"));
+        assert!(!query.text.contains("203.0.113"));
+        assert!(!query.text.contains("system32"));
+    }
+
+    #[test]
     fn extracts_structured_sources() {
         let result = json!({
             "structuredContent": {
@@ -666,10 +872,26 @@ mod tests {
     }
 
     #[test]
+    fn compact_grounding_budget_keeps_a_citable_source_record() {
+        let sources = vec![GroundingSource {
+            source: "WindowsForum MCP KB proxy",
+            title: "Windows 11 release information".to_string(),
+            url: Some("https://support.microsoft.com/help/5094126".to_string()),
+            excerpt: "Current Microsoft support and OS build details.".repeat(8),
+        }];
+        let rendered = format_grounding("Windows 11 latest build support status", &sources, 405);
+        assert!(rendered.chars().count() <= 405);
+        assert!(rendered.contains("Windows 11 release information"));
+        assert!(rendered.contains("https://support.microsoft.com/help/5094126"));
+        assert!(rendered.contains("OMITTED sources=0"));
+    }
+
+    #[test]
     fn extracts_kb_ids() {
-        let ids = kb_ids("Windows KB5094126 and kb5089549");
-        assert_eq!(ids.len(), 2);
-        assert_eq!(ids, vec!["KB5094126", "KB5089549"]);
+        let ids = kb_ids("Windows KB5094126, kb5089549, and KB 5071234");
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids, vec!["KB5094126", "KB5089549", "KB5071234"]);
+        assert!(kb_ids("serial 12345678").is_empty());
     }
 
     #[test]
@@ -713,5 +935,67 @@ mod tests {
         assert!(query.contains("version 26H1"));
         assert!(!query.contains("person@example.com"));
         assert!(!query.contains("00330"));
+    }
+
+    #[test]
+    fn demand_gate_accepts_current_windows_facts_and_kb_ids() {
+        assert_eq!(
+            grounding_demand("Am I on the latest Windows build?"),
+            GroundingDemand::CurrentWindowsFact
+        );
+        assert_eq!(
+            grounding_demand("Is KB5094126 related to this failure?"),
+            GroundingDemand::KnowledgeBase
+        );
+        assert_eq!(
+            grounding_demand("Open KB 5094126"),
+            GroundingDemand::KnowledgeBase
+        );
+        assert!(needs_live_grounding(
+            "Is this display driver still supported?"
+        ));
+    }
+
+    #[test]
+    fn demand_gate_rejects_local_metrics_and_incidental_substrings() {
+        assert_eq!(
+            grounding_demand("What is my current memory usage?"),
+            GroundingDemand::None
+        );
+        assert_eq!(
+            grounding_demand("Explain the RAM modules in this scan"),
+            GroundingDemand::None
+        );
+        assert_eq!(
+            grounding_demand("The previewer process uses memory"),
+            GroundingDemand::None
+        );
+        assert_eq!(
+            grounding_demand("My updater.exe process is slow"),
+            GroundingDemand::None
+        );
+        assert_eq!(
+            grounding_demand("Device serial 12345678 was collected"),
+            GroundingDemand::None
+        );
+    }
+
+    #[test]
+    fn one_shot_grounding_is_demand_driven() {
+        assert!(!analysis_needs_live_grounding(
+            ContextType::DiagnosticInterpretation,
+            Some("Physical Memory"),
+            r#"[{"Capacity": 34359738368}]"#,
+        ));
+        assert!(analysis_needs_live_grounding(
+            ContextType::DiagnosticInterpretation,
+            Some("Operating System"),
+            "Is Windows build 26200 still supported?",
+        ));
+        assert!(analysis_needs_live_grounding(
+            ContextType::SectionSummary,
+            Some("Windows Update History"),
+            r#"{"HotFixID":"KB5094126"}"#,
+        ));
     }
 }

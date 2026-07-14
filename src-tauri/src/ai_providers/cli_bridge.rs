@@ -37,6 +37,15 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(180);
 const SIGN_OUT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Environment credentials that would override a CLI's subscription login.
+/// Keep this closed list shared by every bridge invocation, including probes.
+pub(super) const SUBSCRIPTION_OVERRIDE_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CODEX_API_KEY",
+    "OPENAI_API_KEY",
+];
+
 /// Static description of one bridged CLI.
 struct BridgeSpec {
     /// Bare executable name looked up on PATH (`where.exe` / `which`)
@@ -298,11 +307,7 @@ pub async fn run_headless(
     // headless mode these env vars silently override the stored login ("the
     // key is always used when present"), turning subscription runs into API
     // billing — or failing outright on a stale key.
-    for var in [
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "OPENAI_API_KEY",
-    ] {
+    for var in SUBSCRIPTION_OVERRIDE_ENV_VARS {
         cmd.env_remove(var);
     }
     cmd.stdin(if stdin_payload.is_some() {
@@ -528,5 +533,20 @@ mod tests {
         assert_eq!(tail("ab", 3), "ab");
         // Multi-byte chars at the cut point must not panic
         assert_eq!(tail("héllo wörld", 5), "wörld");
+    }
+
+    #[test]
+    fn subscription_override_keys_are_all_scrubbed() {
+        for key in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CODEX_API_KEY",
+            "OPENAI_API_KEY",
+        ] {
+            assert!(
+                SUBSCRIPTION_OVERRIDE_ENV_VARS.contains(&key),
+                "bridge forgot to scrub {key}"
+            );
+        }
     }
 }

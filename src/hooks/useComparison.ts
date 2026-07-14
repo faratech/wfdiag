@@ -9,8 +9,6 @@ export interface TaskChange {
   category: string
   current_success: boolean
   previous_success: boolean
-  current_output: string
-  previous_output: string
   output_changed: boolean
 }
 
@@ -23,15 +21,12 @@ export interface ComparisonResult {
   status_unchanged: TaskChange[]
 }
 
-export type ComparisonFilter = 'all' | 'failures' | 'successes' | 'changes'
-
 interface UseComparisonReturn {
   comparison: ComparisonResult | null
   loading: boolean
   error: string | null
   compareScans: (currentId: string, previousId: string) => Promise<void>
   clearComparison: () => void
-  getFilteredChanges: (filter: ComparisonFilter) => TaskChange[]
 }
 
 export function useComparison(): UseComparisonReturn {
@@ -61,7 +56,7 @@ export function useComparison(): UseComparisonReturn {
       }
       
       // Call backend comparison
-      const result = await invoke<ComparisonResult>('compare_scans', {
+      const result = await invoke<ComparisonResult>('compare_scans_summary', {
         currentId,
         previousId
       })
@@ -118,35 +113,11 @@ export function useComparison(): UseComparisonReturn {
     setLoading(false)
   }
 
-  const getFilteredChanges = (filter: ComparisonFilter): TaskChange[] => {
-    if (!comparison) return []
-
-    switch (filter) {
-      case 'failures':
-        return comparison.new_failures
-
-      case 'successes':
-        return comparison.new_successes
-
-      case 'changes':
-        return comparison.status_unchanged.filter(change => change.output_changed)
-
-      case 'all':
-      default:
-        return [
-          ...comparison.new_failures,
-          ...comparison.new_successes,
-          ...comparison.status_unchanged.filter(change => change.output_changed)
-        ]
-    }
-  }
-
   return {
     comparison,
     loading,
     error,
     compareScans,
     clearComparison,
-    getFilteredChanges
   }
 }

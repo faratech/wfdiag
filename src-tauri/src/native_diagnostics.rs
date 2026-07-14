@@ -36,6 +36,97 @@ struct EventRecord {
     event_data: serde_json::Map<String, Value>,
 }
 
+/// `PendingFileRenameOperations` is a REG_MULTI_SZ containing source/
+/// destination pairs. An empty destination means delete-on-reboot. Only the
+/// operation count leaves the collector: even a basename can contain private
+/// user or customer data, and diagnostic output may be exported or sent to an
+/// explicitly configured AI provider.
+fn count_pending_file_operations(entries: &[String]) -> usize {
+    entries
+        .chunks(2)
+        .filter(|pair| pair.first().is_some_and(|source| !source.trim().is_empty()))
+        .count()
+}
+
+fn registry_key_exists(hive: &RegKey, path: &str, label: &str) -> Result<bool> {
+    match hive.open_subkey(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(anyhow::anyhow!(
+            "Could not read the {label} restart marker: {error}"
+        )),
+    }
+}
+
+fn read_pending_file_operations(hive: &RegKey) -> Result<Vec<String>> {
+    let key = match hive.open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager") {
+        Ok(key) => key,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "Could not read deferred file operations: {error}"
+            ));
+        }
+    };
+    match key.get_value::<Vec<String>, _>("PendingFileRenameOperations") {
+        Ok(entries) => Ok(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(anyhow::anyhow!(
+            "Could not read deferred file operations: {error}"
+        )),
+    }
+}
+
+fn pending_reboot_output(
+    component_servicing: bool,
+    windows_update: bool,
+    operation_count: usize,
+) -> Value {
+    let mut reasons = Vec::new();
+    if component_servicing {
+        reasons.push("component_based_servicing");
+    }
+    if windows_update {
+        reasons.push("windows_update");
+    }
+    let restart_required = !reasons.is_empty();
+    let summary = if restart_required {
+        let labels = reasons
+            .iter()
+            .map(|reason| match *reason {
+                "windows_update" => "Windows Update",
+                "component_based_servicing" => "Windows component servicing",
+                _ => "Windows",
+            })
+            .collect::<Vec<_>>()
+            .join(" and ");
+        format!("A restart is required by {labels}.")
+    } else if operation_count > 0 {
+        let operation_label = if operation_count == 1 {
+            "operation"
+        } else {
+            "operations"
+        };
+        format!(
+            "Windows Update and component servicing do not require a restart. Windows has {operation_count} deferred file {operation_label} queued for the next restart; this marker alone does not establish that you must restart now."
+        )
+    } else {
+        "Windows Update and component servicing do not require a restart.".to_string()
+    };
+    json!({
+        // `pending` remains for stored-scan compatibility. It now has the
+        // same strict meaning as `restart_required`.
+        "pending": restart_required,
+        "restart_required": restart_required,
+        "reasons": reasons,
+        "summary": summary,
+        "deferred_file_operations": {
+            "pending": operation_count > 0,
+            "operation_count": operation_count,
+        }
+    })
+}
+
 #[allow(dead_code)]
 impl NativeDiagnostics {
     pub fn new() -> Result<Self> {
@@ -310,32 +401,29 @@ impl NativeDiagnostics {
         Ok(String::from_utf16_lossy(&buffer[..len]))
     }
 
-    /// Pending-reboot detection via the canonical registry markers.
+    /// Required-restart detection plus non-actionable deferred file cleanup.
+    ///
+    /// Windows Update/CBS markers are high-confidence requirements. The
+    /// PendingFileRenameOperations queue is real, but by itself does not say
+    /// which component queued the work or establish restart urgency.
     pub fn get_pending_reboot(&self) -> Result<Value> {
         let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-        let mut reasons: Vec<&str> = Vec::new();
-        if hklm
-            .open_subkey(
-                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
-            )
-            .is_ok()
-        {
-            reasons.push("component_based_servicing");
-        }
-        if hklm
-            .open_subkey(
-                r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
-            )
-            .is_ok()
-        {
-            reasons.push("windows_update");
-        }
-        if let Ok(key) = hklm.open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager")
-            && key.get_raw_value("PendingFileRenameOperations").is_ok()
-        {
-            reasons.push("pending_file_rename");
-        }
-        Ok(json!({ "pending": !reasons.is_empty(), "reasons": reasons }))
+        let component_servicing = registry_key_exists(
+            &hklm,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
+            "Windows component servicing",
+        )?;
+        let windows_update = registry_key_exists(
+            &hklm,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
+            "Windows Update",
+        )?;
+        let pending_file_entries = read_pending_file_operations(&hklm)?;
+        Ok(pending_reboot_output(
+            component_servicing,
+            windows_update,
+            count_pending_file_operations(&pending_file_entries),
+        ))
     }
 
     /// Devices reporting a Device Manager problem code (yellow-bang devices).
@@ -909,9 +997,22 @@ impl NativeDiagnostics {
     }
 
     pub fn run_dism_health(&self) -> Result<Value> {
-        // Run DISM health check using secure execution
+        // /English makes the parser deterministic on localized Windows
+        // installations. The routine check stays intentionally lightweight;
+        // /ScanHealth is a separate, explicit deep diagnostic because it can
+        // take several minutes.
+        Self::run_dism_check("/checkhealth", "CheckHealth")
+    }
+
+    /// Explicit deep component-store scan. Kept separate from the routine
+    /// health check because DISM documents ScanHealth as potentially slow.
+    pub fn run_dism_scan_health(&self) -> Result<Value> {
+        Self::run_dism_check("/scanhealth", "ScanHealth")
+    }
+
+    fn run_dism_check(mode: &str, label: &str) -> Result<Value> {
         let output =
-            Self::execute_secure_command("dism", &["/online", "/cleanup-image", "/checkhealth"])?;
+            Self::execute_secure_command("dism", &["/online", "/cleanup-image", mode, "/english"])?;
 
         if output.status.success() {
             let output_str = crate::security::decode_windows_output(&output.stdout);
@@ -920,7 +1021,8 @@ impl NativeDiagnostics {
             let mut health_info = json!({
                 "raw_output": output_str.to_string(),
                 "status": "Unknown",
-                "repairable": false
+                "repairable": false,
+                "check": label
             });
 
             // Check for common DISM responses
@@ -938,39 +1040,10 @@ impl NativeDiagnostics {
                 health_info["repairable"] = json!(true);
             }
 
-            // Try to run scanhealth for more detailed info
-            let scan_output =
-                Self::execute_secure_command("dism", &["/online", "/cleanup-image", "/scanhealth"]);
-
-            if let Ok(scan) = scan_output
-                && scan.status.success()
-            {
-                let scan_str = crate::security::decode_windows_output(&scan.stdout);
-                health_info["scan_output"] = json!(scan_str.clone());
-
-                // Extract percentage if available
-                if let Some(percent_pos) = scan_str.find("The component store is") {
-                    let relevant_text = &scan_str[percent_pos..];
-                    if let Some(end) = relevant_text.find('\n') {
-                        health_info["scan_result"] = json!(&relevant_text[..end]);
-                    }
-                }
-            }
-
             Ok(health_info)
         } else {
             let error_str = crate::security::decode_windows_output(&output.stderr);
-
-            // Check if it's an elevation error
-            if error_str.contains("Error: 740") || error_str.contains("elevation required") {
-                Ok(json!({
-                    "error": "DISM requires administrator privileges",
-                    "suggestion": "Please run as administrator to check Windows image health",
-                    "raw_error": error_str.clone()
-                }))
-            } else {
-                Err(anyhow::anyhow!("DISM health check failed: {}", error_str))
-            }
+            Err(anyhow::anyhow!("DISM {} failed: {}", label, error_str))
         }
     }
 
@@ -1005,28 +1078,29 @@ impl NativeDiagnostics {
             Ok(content) => Ok(json!({
                 "path": hosts_path,
                 "content": content,
-                "entries": self.parse_hosts_file(&content)
+                "entries": Self::parse_hosts_file(&content)
             })),
-            Err(e) => Ok(json!({
-                "path": hosts_path,
-                "error": format!("Failed to read hosts file: {}", e)
-            })),
+            Err(e) => Err(anyhow::anyhow!("Failed to read hosts file: {}", e)),
         }
     }
 
-    fn parse_hosts_file(&self, content: &str) -> Vec<Value> {
+    fn parse_hosts_file(content: &str) -> Vec<Value> {
         let mut entries = Vec::new();
 
         for line in content.lines() {
-            let line = line.trim();
-            if !line.is_empty() && !line.starts_with('#') {
+            let line = line.split('#').next().unwrap_or_default().trim();
+            if !line.is_empty() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 2 {
-                    entries.push(json!({
-                        "ip": parts[0],
-                        "hostname": parts[1],
-                        "aliases": parts[2..].join(" ")
-                    }));
+                    // Every alias is an independent mapping. Keeping only the
+                    // first hostname allowed suspicious aliases later on the
+                    // same line to evade the detector.
+                    for hostname in &parts[1..] {
+                        entries.push(json!({
+                            "ip": parts[0],
+                            "hostname": hostname
+                        }));
+                    }
                 }
             }
         }
@@ -1339,58 +1413,40 @@ impl NativeDiagnostics {
         }
 
         let mut dumps = Vec::new();
-        let start_time = std::time::Instant::now();
-        let search_timeout = std::time::Duration::from_secs(5);
-
-        if let Ok(entries) = fs::read_dir(minidump_path) {
-            let mut all_entries = Vec::new();
-
-            // Collect entries first to sort them
-            for entry in entries.filter_map(Result::ok) {
-                if start_time.elapsed() > search_timeout {
-                    break;
-                }
-                all_entries.push(entry);
+        let entries = fs::read_dir(minidump_path)
+            .map_err(|error| anyhow::anyhow!("Failed to read minidump directory: {}", error))?;
+        let mut candidates = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                anyhow::anyhow!("Failed to enumerate minidump directory: {}", error)
+            })?;
+            if entry.path().extension().and_then(|value| value.to_str()) != Some("dmp") {
+                continue;
             }
+            let metadata = entry.metadata().map_err(|error| {
+                anyhow::anyhow!("Failed to read metadata for {:?}: {}", entry.path(), error)
+            })?;
+            let modified = metadata.modified().map_err(|error| {
+                anyhow::anyhow!(
+                    "Failed to read modification time for {:?}: {}",
+                    entry.path(),
+                    error
+                )
+            })?;
+            candidates.push((entry, metadata, modified));
+        }
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.2));
 
-            // Sort by modification time (newest first)
-            // Files with inaccessible metadata sort to the end (oldest position) - this is intentional
-            // as we want to prioritize recent, readable minidumps over potentially corrupted ones
-            all_entries.sort_by(|a, b| {
-                let a_time = a
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .unwrap_or(std::time::UNIX_EPOCH);
-                let b_time = b
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .unwrap_or(std::time::UNIX_EPOCH);
-                b_time.cmp(&a_time)
-            });
-
-            // Filter to .dmp files BEFORE taking the 10 most recent, so stray non-.dmp
-            // entries don't consume slots and cause real minidumps to be under-reported.
-            for entry in all_entries
-                .into_iter()
-                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("dmp"))
-                .take(10)
-            {
-                if let Ok(metadata) = entry.metadata() {
-                    dumps.push(json!({
-                        "filename": entry.file_name().to_string_lossy(),
-                        "size": metadata.len(),
-                        "created": metadata.created().ok().map(|t| {
-                            match t.duration_since(std::time::UNIX_EPOCH) {
-                                Ok(d) => d.as_secs(),
-                                Err(_) => 0
-                            }
-                        }).unwrap_or(0),
-                        "path": entry.path().to_string_lossy()
-                    }));
-                }
-            }
+        for (entry, metadata, modified) in candidates.into_iter().take(10) {
+            dumps.push(json!({
+                "filename": entry.file_name().to_string_lossy(),
+                "size": metadata.len(),
+                "created": metadata.created().unwrap_or(modified)
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(0),
+                "path": entry.path().to_string_lossy()
+            }));
         }
 
         // Check if Desktop\Minidumps exists
@@ -2028,4 +2084,60 @@ fn xml_unescape(text: &str) -> String {
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NativeDiagnostics, count_pending_file_operations, pending_reboot_output};
+
+    #[test]
+    fn hosts_parser_expands_aliases_and_ignores_inline_comments() {
+        let entries = NativeDiagnostics::parse_hosts_file(
+            "127.0.0.1 localhost microsoft.com # local aliases\n10.0.0.5 nas.local\n",
+        );
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0]["hostname"], "localhost");
+        assert_eq!(entries[1]["hostname"], "microsoft.com");
+        assert_eq!(entries[2]["hostname"], "nas.local");
+    }
+
+    #[test]
+    fn pending_file_operations_count_nonempty_sources_without_emitting_paths() {
+        let entries = vec![
+            r"\??\C:\Program Files\Google\Chrome\Application\old_chrome.exe".to_string(),
+            String::new(),
+            r"\??\C:\Program Files (x86)\Microsoft\Edge\old_msedge.exe".to_string(),
+            String::new(),
+        ];
+        assert_eq!(count_pending_file_operations(&entries), 2);
+        assert_eq!(
+            count_pending_file_operations(&[String::new(), String::new()]),
+            0
+        );
+
+        let output = pending_reboot_output(false, false, 2);
+        assert_eq!(output["restart_required"], false);
+        assert_eq!(output["deferred_file_operations"]["operation_count"], 2);
+        let encoded = output.to_string();
+        assert!(!encoded.contains("old_chrome"));
+        assert!(!encoded.contains("Program Files"));
+        assert!(encoded.contains("does not establish that you must restart now"));
+    }
+
+    #[test]
+    fn restart_output_names_each_authoritative_marker() {
+        let output = pending_reboot_output(true, true, 0);
+        assert_eq!(output["pending"], true);
+        assert_eq!(output["restart_required"], true);
+        assert_eq!(
+            output["reasons"],
+            serde_json::json!(["component_based_servicing", "windows_update"])
+        );
+        assert!(
+            output["summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("Windows Update")
+                    && summary.contains("Windows component servicing"))
+        );
+    }
 }

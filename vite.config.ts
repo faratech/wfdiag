@@ -1,10 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// Generate build timestamp in YYMMDDHH format
-const now = new Date()
-const buildTime = `${String(now.getFullYear()).slice(-2)}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}${String(now.getHours()).padStart(2, '0')}`
-
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
@@ -58,8 +54,5 @@ export default defineConfig({
     // built-in (Oxc) minifier instead of the old 'esbuild' setting.
     minify: !process.env.TAURI_DEBUG,
     sourcemap: !!process.env.TAURI_DEBUG,
-  },
-  define: {
-    __BUILD_TIME__: JSON.stringify(buildTime),
   },
 })

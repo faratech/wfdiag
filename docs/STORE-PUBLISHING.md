@@ -6,28 +6,15 @@ This document describes how to set up automated Microsoft Store publishing via G
 
 The `build-and-publish-store.yml` workflow automates:
 1. Building x64 and ARM64 executables
-2. Creating MSIX packages with AI SDK DLLs for Phi Silica support
-3. Creating an MSIX bundle
-4. Signing the bundle (optional)
-5. Generating GitHub artifact attestations
-6. Publishing to Microsoft Store (optional)
-7. Creating a GitHub Release
+2. Creating an unsigned MSIX bundle with x64/ARM64 packages and the Phi Silica AI SDK DLLs
+3. Validating the package identity, capabilities, framework dependency, contents, and architectures
+4. Generating GitHub artifact attestations
+5. Creating a GitHub Release
+6. Sending the bundle to Microsoft Store certification when requested
+
+The repository does not apply the production Store signature. Microsoft signs the package delivered to customers after Store certification.
 
 ## Required GitHub Secrets
-
-### For Code Signing (Optional but Recommended)
-
-| Secret | Description |
-|--------|-------------|
-| `CERTIFICATE_BASE64` | Base64-encoded PFX certificate file |
-| `CERTIFICATE_PASSWORD` | Password for the PFX certificate |
-
-**To encode your certificate:**
-```powershell
-$certBytes = [IO.File]::ReadAllBytes("your-certificate.pfx")
-$certBase64 = [Convert]::ToBase64String($certBytes)
-$certBase64 | Set-Clipboard  # Copies to clipboard
-```
 
 ### For Microsoft Store Publishing
 
@@ -36,7 +23,7 @@ $certBase64 | Set-Clipboard  # Copies to clipboard
 | `AZURE_TENANT_ID` | Your Azure AD tenant ID |
 | `AZURE_CLIENT_ID` | Azure AD application (client) ID |
 | `AZURE_CLIENT_SECRET` | Azure AD application client secret |
-| `STORE_PRODUCT_ID` | Your app's Product ID from Partner Center |
+| `STORE_SELLER_ID` | Partner Center seller ID used by the Store CLI |
 
 ## Setting Up Microsoft Store API Access
 
@@ -92,19 +79,14 @@ Tags control what gets released:
 
 | Tag Format | Example | GitHub Release | Store Publish |
 |------------|---------|----------------|---------------|
-| `v{version}` | `v2.1.6` | Yes | No |
-| `v{version}-store` | `v2.1.6-store` | Yes | Yes |
+| `v{major}.{minor}.{patch}` | `v2.5.4` | Yes | Yes |
 
-**Release to GitHub only:**
-```bash
-git tag v2.1.6
-git push origin v2.1.6
-```
+The tag must match the version synchronized in `version.json` and every package/UI version source. CI and the release workflow enforce this before packaging.
 
-**Release to GitHub AND Microsoft Store:**
+**Release to GitHub and Microsoft Store:**
 ```bash
-git tag v2.1.6-store
-git push origin v2.1.6-store
+git tag v2.5.4
+git push origin v2.5.4
 ```
 
 ### Manual Dispatch
@@ -112,7 +94,7 @@ git push origin v2.1.6-store
 For releases without creating a tag:
 ```bash
 gh workflow run build-and-publish-store.yml \
-  -f version=2.1.6 \
+  -f version=2.5.4 \
   -f publish_to_store=true \
   -f create_release=true
 ```
@@ -123,23 +105,25 @@ gh workflow run build-and-publish-store.yml \
 ┌──────────────┐     ┌───────────────┐
 │  build-x64   │     │  build-arm64  │
 └──────┬───────┘     └───────┬───────┘
-       │                     │
-       └─────────┬───────────┘
-                 ▼
-       ┌─────────────────────┐
-       │ create-msix-bundle  │
-       └──────────┬──────────┘
+       └──────────┬───────────┘
                   ▼
-         ┌───────────────┐
-         │  sign-bundle  │ (if certificate available)
-         └───────┬───────┘
-                 │
-        ┌────────┼────────┐
-        ▼        ▼        ▼
-┌────────────┐ ┌─────────────────┐ ┌────────────────┐
-│attest-     │ │publish-to-store │ │ create-release │
-│artifacts   │ │(if enabled)     │ │ (if enabled)   │
-└────────────┘ └─────────────────┘ └────────────────┘
+       ┌──────────────────────┐
+       │ create and validate  │
+       │ unsigned MSIX bundle │
+       └──────────┬───────────┘
+                  ▼
+       ┌──────────────────────┐
+       │ attest artifacts     │
+       └──────────┬───────────┘
+                  ▼
+       ┌──────────────────────┐
+       │ create GitHub release│
+       └──────────┬───────────┘
+                  ▼
+       ┌──────────────────────┐
+       │ optionally dispatch  │
+       │ Store publish        │
+       └──────────────────────┘
 ```
 
 ## Build Artifacts
@@ -152,7 +136,8 @@ The workflow produces:
 | `exe-arm64` | ARM64 Windows executable |
 | `frontend-dist` | Built frontend assets |
 | `msixbundle-unsigned` | Unsigned MSIX bundle |
-| `msixbundle-signed` | Signed MSIX bundle (if certificate available) |
+
+The unsigned bundle is the expected GitHub artifact and Store upload. The Microsoft-signed package is distributed by the Store and is not downloaded back into the workflow.
 
 ## MSIX Package Contents
 
@@ -174,8 +159,8 @@ All artifacts are attested using GitHub's artifact attestation feature (Sigstore
 
 To verify an attestation:
 ```bash
-gh attestation verify WindowsForum_Diagnostics_2.1.6.msixbundle \
-  --owner YOUR_GITHUB_ORG
+gh attestation verify WindowsForum_Diagnostics_2.5.4.msixbundle \
+  --owner faratech
 ```
 
 ## Troubleshooting
@@ -190,17 +175,15 @@ The GitHub-hosted Windows runners include ARM64 build tools. If builds fail:
 2. Check that the app already exists in Partner Center (the API only updates existing apps)
 3. Ensure the Azure AD app has the Manager role in Partner Center
 
-### Signing Fails
-1. Verify certificate is valid and not expired
-2. Check certificate password is correct
-3. Ensure certificate CN matches the publisher in AppxManifest.xml
-
 ## Local Development
 
 For local builds, use the existing scripts:
 
 ```bash
-# Build everything from WSL
+# Build the same unsigned bundle submitted to the Store
+python3 scripts/build-cross.py build-all --build-msix
+
+# Optional: add --sign only for a locally sideloadable test package
 python3 scripts/build-cross.py build-all --build-msix --sign
 ```
 

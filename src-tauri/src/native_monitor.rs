@@ -17,7 +17,7 @@ use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemPr
 use windows::Win32::Foundation::{HANDLE, UNICODE_STRING};
 use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
 use windows::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDriveStringsW,
+    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDriveStringsW, GetVolumeInformationW,
 };
 use windows::Win32::System::Performance::{
     PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
@@ -85,6 +85,11 @@ pub struct SystemStats {
     pub swap_total_gb: f64,
     pub swap_used_gb: f64,
     pub swap_utilization: f32,
+    /// Percentage of provisioned storage capacity currently occupied. This is
+    /// intentionally distinct from disk busy/active time.
+    pub storage_used_percent: f32,
+    /// Backward-compatible alias for older frontends. New consumers should use
+    /// `storage_used_percent`.
     pub disk_utilization: f32,
     pub disk_read_bytes: u64,
     pub disk_write_bytes: u64,
@@ -194,6 +199,111 @@ pub struct ProcessInfo {
     pub name_lower: String,
     #[serde(skip)]
     pub command_lower: String,
+}
+
+/// Fields supported by the on-demand process explorer. Monitoring continues
+/// to emit only `top_processes`; this query is used only while Processes is
+/// visible so the full list never rides the one-second stats event.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessSortKey {
+    Name,
+    Pid,
+    #[default]
+    CpuPercent,
+    MemoryPercent,
+    MemoryMb,
+    Status,
+    ThreadCount,
+    GpuPercent,
+    NpuPercent,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessSortDirection {
+    Asc,
+    #[default]
+    Desc,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProcessQuery {
+    #[serde(default)]
+    pub search: String,
+    #[serde(default)]
+    pub sort_by: ProcessSortKey,
+    #[serde(default)]
+    pub sort_direction: ProcessSortDirection,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_process_page_size")]
+    pub limit: usize,
+}
+
+fn default_process_page_size() -> usize {
+    100
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessPage {
+    pub captured_at: i64,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub items: Vec<ProcessRow>,
+}
+
+/// Truthful lightweight row for the process explorer. Fields that require an
+/// expensive or privileged process-handle query are intentionally omitted
+/// instead of being serialized as plausible-looking placeholders.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessRow {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub name: String,
+    pub cpu_percent: f32,
+    pub memory_percent: f32,
+    pub memory_mb: f64,
+    pub virtual_memory_mb: f64,
+    pub gpu_percent: Option<f32>,
+    pub gpu_memory_mb: Option<f64>,
+    pub npu_percent: Option<f32>,
+    pub npu_memory_mb: Option<f64>,
+    pub cpu_time_secs: u64,
+    pub start_time: i64,
+    pub status: String,
+    pub thread_count: u32,
+    pub handle_count: u32,
+    pub priority: i32,
+    pub io_read_bytes: u64,
+    pub io_write_bytes: u64,
+}
+
+impl From<ProcessInfo> for ProcessRow {
+    fn from(process: ProcessInfo) -> Self {
+        Self {
+            pid: process.pid,
+            parent_pid: process.parent_pid,
+            name: process.name,
+            cpu_percent: process.cpu_percent,
+            memory_percent: process.memory_percent,
+            memory_mb: process.memory_mb,
+            virtual_memory_mb: process.virtual_memory_mb,
+            gpu_percent: (process.gpu_percent > 0.0).then_some(process.gpu_percent),
+            gpu_memory_mb: (process.gpu_memory_mb > 0.0).then_some(process.gpu_memory_mb),
+            npu_percent: (process.npu_percent > 0.0).then_some(process.npu_percent),
+            npu_memory_mb: (process.npu_memory_mb > 0.0).then_some(process.npu_memory_mb),
+            cpu_time_secs: process.cpu_time_secs,
+            start_time: process.start_time,
+            status: process.status,
+            thread_count: process.thread_count,
+            handle_count: process.handle_count,
+            priority: process.priority,
+            io_read_bytes: process.io_read_bytes,
+            io_write_bytes: process.io_write_bytes,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -612,6 +722,14 @@ impl SystemMonitor {
         .await
     }
 
+    /// Query the complete current process set for the Processes screen. The
+    /// high-frequency monitor event deliberately stays small; full enumeration
+    /// happens only on demand and is filtered/sorted before crossing IPC.
+    pub async fn list_processes(&self, query: ProcessQuery) -> ProcessPage {
+        let processes = get_all_processes(&self.previous_processes).await;
+        paginate_processes(processes, query)
+    }
+
     #[allow(dead_code)]
     pub async fn set_update_interval(&self, seconds: u64) {
         let mut interval = self.update_interval.lock().await;
@@ -824,6 +942,7 @@ async fn collect_stats_optimized(
         swap_total_gb: fast_stats.swap_total as f64 / (1024.0 * 1024.0 * 1024.0),
         swap_used_gb: fast_stats.swap_used as f64 / (1024.0 * 1024.0 * 1024.0),
         swap_utilization,
+        storage_used_percent: disk_utilization,
         disk_utilization,
         disk_read_bytes: fast_stats.disk_read_bytes,
         disk_write_bytes: fast_stats.disk_write_bytes,
@@ -1395,6 +1514,26 @@ fn get_disk_info_optimized() -> Vec<DiskInfo> {
                         }
                     });
 
+                let mut file_system_buffer = [0u16; 64];
+                let file_system = if GetVolumeInformationW(
+                    PCWSTR(drive_wide.as_ptr()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(&mut file_system_buffer),
+                )
+                .is_ok()
+                {
+                    let length = file_system_buffer
+                        .iter()
+                        .position(|value| *value == 0)
+                        .unwrap_or(file_system_buffer.len());
+                    String::from_utf16_lossy(&file_system_buffer[..length])
+                } else {
+                    "Unknown".to_string()
+                };
+
                 disks.push(DiskInfo {
                     name: drive_str.trim_end_matches('\\').to_string(),
                     mount_point: drive_str.clone(),
@@ -1402,7 +1541,7 @@ fn get_disk_info_optimized() -> Vec<DiskInfo> {
                     used_gb: used_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                     available_gb: total_free_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                     utilization,
-                    file_system: "NTFS".to_string(),
+                    file_system,
                     disk_type,
                 });
             }
@@ -1543,7 +1682,7 @@ fn query_all_processes_optimized() -> Vec<NativeProcessInfo> {
                 name,
                 working_set: proc_info.working_set_size as u64,
                 private_bytes: proc_info.private_page_count as u64,
-                virtual_size: proc_info.pagefile_usage as u64,
+                virtual_size: proc_info.virtual_size as u64,
                 kernel_time: proc_info.kernel_time as u64,
                 user_time: proc_info.user_time as u64,
                 create_time: proc_info.create_time as u64,
@@ -1721,6 +1860,69 @@ pub async fn get_all_processes(
     let (processes, _, _) =
         get_top_processes_optimized(total_memory, previous_processes, false).await;
     processes
+}
+
+fn paginate_processes(mut processes: Vec<ProcessInfo>, query: ProcessQuery) -> ProcessPage {
+    let search = query.search.trim().to_lowercase();
+    if !search.is_empty() {
+        processes.retain(|process| {
+            process.name_lower.contains(&search) || process.command_lower.contains(&search)
+        });
+    }
+
+    let compare_float = |left: f32, right: f32| {
+        left.partial_cmp(&right)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    };
+    processes.sort_by(|left, right| {
+        let ordering = match query.sort_by {
+            ProcessSortKey::Name => left.name_lower.cmp(&right.name_lower),
+            ProcessSortKey::Pid => left.pid.cmp(&right.pid),
+            ProcessSortKey::CpuPercent => compare_float(left.cpu_percent, right.cpu_percent),
+            ProcessSortKey::MemoryPercent => {
+                compare_float(left.memory_percent, right.memory_percent)
+            }
+            ProcessSortKey::MemoryMb => left
+                .memory_mb
+                .partial_cmp(&right.memory_mb)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            ProcessSortKey::Status => left.status.cmp(&right.status),
+            ProcessSortKey::ThreadCount => left.thread_count.cmp(&right.thread_count),
+            ProcessSortKey::GpuPercent => compare_float(left.gpu_percent, right.gpu_percent),
+            ProcessSortKey::NpuPercent => compare_float(left.npu_percent, right.npu_percent),
+        }
+        .then_with(|| left.pid.cmp(&right.pid));
+
+        match query.sort_direction {
+            ProcessSortDirection::Asc => ordering,
+            ProcessSortDirection::Desc => ordering.reverse(),
+        }
+    });
+
+    let total = processes.len();
+    let limit = query.limit.clamp(1, 250);
+    // Process counts change continuously. If a client is viewing a page that
+    // disappears, return the new last page instead of an empty, impossible
+    // range such as "201–150 of 150".
+    let offset = if total == 0 {
+        0
+    } else {
+        query.offset.min(((total - 1) / limit) * limit)
+    };
+    let items = processes
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(ProcessRow::from)
+        .collect();
+
+    ProcessPage {
+        captured_at: crate::timestamp::Timestamp::now().secs,
+        total,
+        offset,
+        limit,
+        items,
+    }
 }
 
 #[inline]
@@ -2179,6 +2381,43 @@ fn format_npu_description(name: &str, tops: Option<u32>) -> String {
 mod tests {
     use super::*;
 
+    fn process(pid: u32, name: &str, cpu_percent: f32, memory_percent: f32) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            parent_pid: 0,
+            name: name.to_string(),
+            exe_path: String::new(),
+            command: name.to_string(),
+            user: String::new(),
+            cpu_percent,
+            memory_percent,
+            memory_mb: f64::from(memory_percent) * 10.0,
+            virtual_memory_mb: 100.0,
+            shared_memory_mb: 0.0,
+            gpu_percent: 0.0,
+            gpu_memory_mb: 0.0,
+            npu_percent: 0.0,
+            npu_memory_mb: 0.0,
+            cpu_time_secs: 0,
+            start_time: 1,
+            status: "Running".to_string(),
+            thread_count: 1,
+            handle_count: 1,
+            priority: 0,
+            io_read_bytes: 0,
+            io_write_bytes: 0,
+            is_elevated: false,
+            efficiency_mode: false,
+            arch: ProcessArch::Native,
+            tree_depth: 0,
+            tree_prefix: String::new(),
+            has_children: false,
+            is_collapsed: false,
+            name_lower: name.to_lowercase(),
+            command_lower: name.to_lowercase(),
+        }
+    }
+
     #[test]
     fn process_cpu_history_prunes_exited_pids() {
         let now = Instant::now();
@@ -2194,5 +2433,50 @@ mod tests {
         assert!(prev.contains_key(&100));
         assert!(!prev.contains_key(&200));
         assert!(prev.contains_key(&300));
+    }
+
+    #[test]
+    fn process_page_filters_sorts_and_clamps_page_size() {
+        let page = paginate_processes(
+            vec![
+                process(1, "alpha.exe", 5.0, 10.0),
+                process(2, "beta.exe", 20.0, 30.0),
+                process(3, "beta-helper.exe", 10.0, 20.0),
+            ],
+            ProcessQuery {
+                search: "BETA".to_string(),
+                sort_by: ProcessSortKey::CpuPercent,
+                sort_direction: ProcessSortDirection::Desc,
+                offset: 0,
+                limit: 999,
+            },
+        );
+
+        assert_eq!(page.total, 2);
+        assert_eq!(page.limit, 250);
+        assert_eq!(page.items[0].pid, 2);
+        assert_eq!(page.items[1].pid, 3);
+    }
+
+    #[test]
+    fn process_page_moves_an_out_of_range_offset_to_the_last_page() {
+        let page = paginate_processes(
+            vec![
+                process(1, "alpha.exe", 5.0, 10.0),
+                process(2, "beta.exe", 20.0, 30.0),
+                process(3, "gamma.exe", 10.0, 20.0),
+            ],
+            ProcessQuery {
+                search: String::new(),
+                sort_by: ProcessSortKey::Name,
+                sort_direction: ProcessSortDirection::Asc,
+                offset: 100,
+                limit: 2,
+            },
+        );
+
+        assert_eq!(page.offset, 2);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].name, "gamma.exe");
     }
 }

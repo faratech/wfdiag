@@ -38,6 +38,7 @@ function makeContext(overrides: Partial<MockContext> = {}): MockContext {
     setIsRunning: vi.fn(),
     setCurrentProgress: vi.fn(),
     setCurrentTaskName: vi.fn(),
+    setDiagnosticsError: vi.fn(),
     setScanStartTime: vi.fn(),
     setScanEndTime: vi.fn(),
     setTaskStatuses: vi.fn(),
@@ -304,7 +305,9 @@ describe('useScanner scan lock', () => {
     contextValue = makeContext({ settings: { autoSave: true, maxConcurrentTasks: 2 } })
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'start_diagnostics') return 'session-1'
-      if (cmd === 'run_diagnostics_parallel') return []
+      if (cmd === 'run_diagnostics_parallel') {
+        return [['os_info', { success: true, output: '{}', duration_ms: 1 }]]
+      }
       if (cmd === 'save_current_scan') return 'saved-id'
       return undefined
     })
@@ -335,6 +338,7 @@ describe('useScanner scan lock', () => {
     })
 
     expect(invokeMock.mock.calls.some(c => c[0] === 'save_current_scan')).toBe(false)
+    expect(invokeMock.mock.calls.some(c => c[0] === 'cancel_diagnostics')).toBe(false)
 
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'start_diagnostics') return 'session-2'
@@ -387,7 +391,9 @@ describe('useScanner scan lock', () => {
     })
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'start_diagnostics') return 'session-1'
-      if (cmd === 'run_diagnostics_parallel') return []
+      if (cmd === 'run_diagnostics_parallel') {
+        return [['os_info', { success: true, output: '{}', duration_ms: 1 }]]
+      }
       if (cmd === 'save_current_scan') return 'saved-id'
       return undefined
     })
@@ -402,6 +408,81 @@ describe('useScanner scan lock', () => {
     expect(invokeMock).toHaveBeenCalledWith('save_current_scan', expect.objectContaining({
       tags: ['Full Scan'],
     }))
+    expect(invokeMock).toHaveBeenCalledWith('start_diagnostics', expect.objectContaining({
+      scanKind: 'full',
+    }))
+  })
+
+  it('rolls back an incomplete replacement scan and reports failure to tracked callers', async () => {
+    const previous = { os_info: { success: true, output: '{"before":true}', duration_ms: 1 } }
+    const setResults = vi.fn()
+    const setSessionId = vi.fn()
+    contextValue = makeContext({
+      sessionId: 'quick-session',
+      results: previous,
+      setResults,
+      setSessionId,
+      availableTasks: [
+        { id: 'os_info', name: 'OS Info', admin_required: false },
+        { id: 'logical_disk', name: 'Logical disk', admin_required: false },
+      ],
+    })
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_diagnostics') return 'full-session'
+      if (cmd === 'run_diagnostics_parallel') {
+        return [['os_info', { success: true, output: '{}', duration_ms: 1 }]]
+      }
+      return undefined
+    })
+
+    const useScanner = await loadHook()
+    const { result } = renderHook(() => useScanner())
+    let outcome: unknown
+    await act(async () => {
+      outcome = await result.current.runFullScanTracked()
+    })
+
+    expect(outcome).toBe('failed')
+    expect(invokeMock).toHaveBeenCalledWith('cancel_diagnostics', { sessionId: 'full-session' })
+    expect(setResults).toHaveBeenLastCalledWith(previous)
+    expect(setSessionId).toHaveBeenLastCalledWith('quick-session')
+  })
+
+  it('reruns one diagnostic in the active session without discarding other results', async () => {
+    const previousResult = { success: true, output: '{"before":true}', error: null, duration_ms: 3 }
+    const replacementResult = { success: true, output: '{"after":true}', error: null, duration_ms: 4 }
+    const setResults = vi.fn()
+    const setIssues = vi.fn()
+    contextValue = makeContext({
+      sessionId: 'session-existing',
+      results: { previous_task: previousResult },
+      setResults,
+      setIssues,
+    })
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'run_diagnostic_task') return replacementResult
+      if (cmd === 'detect_issues') return []
+      return undefined
+    })
+
+    const useScanner = await loadHook()
+    const { result } = renderHook(() => useScanner())
+
+    await act(async () => {
+      await result.current.rerunDiagnostic('os_info')
+    })
+
+    expect(startCalls()).toHaveLength(0)
+    expect(invokeMock).toHaveBeenCalledWith('run_diagnostic_task', { taskId: 'os_info' })
+    const merge = setResults.mock.calls[0]?.[0] as (
+      previous: Record<string, unknown>
+    ) => Record<string, unknown>
+    expect(merge({ previous_task: previousResult })).toEqual({
+      previous_task: previousResult,
+      os_info: replacementResult,
+    })
+    expect(invokeMock).toHaveBeenCalledWith('detect_issues')
+    expect(setIssues).toHaveBeenCalledWith([])
   })
 })
 
@@ -435,6 +516,7 @@ describe('useScanner quick-scan detection coverage', () => {
     for (const id of detectionIds) {
       expect(quickTaskIds()).toContain(id)
     }
+    expect(startCalls()[0]?.[1]).toEqual(expect.objectContaining({ scanKind: 'quick' }))
   })
 
   it('unions detection sources into a customised quick-scan list', async () => {

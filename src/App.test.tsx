@@ -1,11 +1,13 @@
 import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, waitFor, screen, fireEvent } from '@testing-library/react'
+import { render, waitFor, screen } from '@testing-library/react'
 import App from './App'
 
 const mocks = vi.hoisted(() => ({
   runQuickScan: vi.fn(),
   detectIssues: vi.fn(),
+  loadSystemInfo: vi.fn(),
+  loadAvailableTasks: vi.fn(),
   appContextValue: {} as Record<string, unknown>,
 }))
 
@@ -21,6 +23,11 @@ vi.mock('./contexts/ThemeContext', () => ({
 
 vi.mock('./contexts/AIContext', () => ({
   AIProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  useAIContext: () => ({ aiStatus: null }),
+}))
+
+vi.mock('./contexts/AIWorkspaceContext', () => ({
+  AIWorkspaceProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }))
 
 vi.mock('./contexts/ToastContext', () => ({
@@ -35,6 +42,8 @@ vi.mock('./hooks/useDiagnostics', () => ({
     shareToWindowsForum: vi.fn(),
     emailReport: vi.fn(),
     generateSupportPackage: vi.fn(),
+    loadSystemInfo: mocks.loadSystemInfo,
+    loadAvailableTasks: mocks.loadAvailableTasks,
   }),
 }))
 
@@ -95,6 +104,15 @@ beforeEach(() => {
 })
 
 describe('App startup scan', () => {
+  it('loads native system information and the task catalog once from the persistent shell', async () => {
+    render(<App />)
+
+    await waitFor(() => {
+      expect(mocks.loadSystemInfo).toHaveBeenCalledTimes(1)
+      expect(mocks.loadAvailableTasks).toHaveBeenCalledTimes(1)
+    })
+  })
+
   it('runs one quick scan when scanOnStartup is enabled and tasks are loaded', async () => {
     render(<App />)
 
@@ -104,21 +122,16 @@ describe('App startup scan', () => {
   })
 })
 
-describe('App command bar', () => {
-  it('switches to Diagnostics when Quick Scan starts from another tab', () => {
-    const setSelectedTab = vi.fn()
+describe('App navigation rail', () => {
+  it('does not duplicate the Diagnostics Quick Scan action in the rail', () => {
     mocks.appContextValue = {
       ...mocks.appContextValue,
       selectedTab: 'issues',
-      setSelectedTab,
       settings: { scanOnStartup: false, theme: 'dark' },
     }
 
     render(<App />)
-    fireEvent.click(screen.getAllByRole('button', { name: /Quick Scan/i })[0])
 
-    expect(setSelectedTab).toHaveBeenCalledWith('diagnostics')
-    expect(mocks.runQuickScan).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: /Quick Scan/i })).not.toBeInTheDocument()
   })
-
 })

@@ -57,17 +57,16 @@ describe('ScanReportPanel', () => {
   it('prompts to run a scan when there are no results', () => {
     contextValue = makeContext({ results: {} })
     render(<ScanReportPanel />)
-    expect(screen.getByText(/Run a scan, then generate/)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /Run a scan first/ })).toBeInTheDocument()
   })
 
   it('generates a streamed report from delta events', async () => {
     invokeMock.mockResolvedValue({ reportId: 'r1', cached: false, provider: 'openai' })
     render(<ScanReportPanel />)
-    fireEvent.click(screen.getByRole('button', { name: /Explain this scan/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Generate report/ }))
 
     expect(invokeMock).toHaveBeenCalledWith('ai_generate_report', {
       previousScanId: null,
-      apiKey: 'sk-test',
       forceRefresh: false,
     })
     await waitFor(() => expect(eventHandlers.size).toBe(3))
@@ -87,7 +86,7 @@ describe('ScanReportPanel', () => {
     const ack = deferred<{ reportId: string; cached: boolean; provider: string }>()
     invokeMock.mockReturnValue(ack.promise)
     render(<ScanReportPanel />)
-    fireEvent.click(screen.getByRole('button', { name: /Explain this scan/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Generate report/ }))
     await waitFor(() => expect(eventHandlers.size).toBe(3))
 
     act(() => {
@@ -110,7 +109,7 @@ describe('ScanReportPanel', () => {
     invokeMock.mockReturnValue(ack.promise)
     render(<ScanReportPanel />)
 
-    const generate = screen.getByRole('button', { name: /Explain this scan/ })
+    const generate = screen.getByRole('button', { name: /Generate report/ })
     fireEvent.click(generate)
     fireEvent.click(generate)
 
@@ -127,9 +126,67 @@ describe('ScanReportPanel', () => {
       reportId: 'r1', cached: true, provider: 'openai', report: '## Health summary\nCached verdict.',
     })
     render(<ScanReportPanel />)
-    fireEvent.click(screen.getByRole('button', { name: /Explain this scan/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Generate report/ }))
     await waitFor(() => expect(screen.getByText('Cached verdict.')).toBeInTheDocument())
     expect(screen.getByText('Cached verdict.').closest('.scan-report-content')).toBeTruthy()
+  })
+
+  it('does not present a report from an earlier result snapshot as the latest scan', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'ai_generate_report') {
+        return Promise.resolve({
+          reportId: 'r-old', cached: true, provider: 'openai', report: '## Health summary\nOld verdict.',
+        })
+      }
+      if (command === 'ai_report_cancel') return Promise.resolve()
+      return Promise.reject(new Error(`Unexpected command: ${command}`))
+    })
+    const view = render(<ScanReportPanel />)
+    fireEvent.click(screen.getByRole('button', { name: /Generate report/ }))
+    await waitFor(() => expect(screen.getByText('Old verdict.')).toBeInTheDocument())
+
+    contextValue = makeContext({
+      results: { os_info: { success: true, output: '{"new":true}', error: null, duration_ms: 2 } },
+    })
+    view.rerender(<ScanReportPanel />)
+
+    expect(screen.queryByText('Old verdict.')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Generate report/ })).toBeInTheDocument()
+  })
+
+  it('ignores a stale request error after a newer report succeeds', async () => {
+    const first = deferred<{ reportId: string; cached: boolean; provider: string; report?: string }>()
+    let generation = 0
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'ai_generate_report') {
+        generation += 1
+        return generation === 1
+          ? first.promise
+          : Promise.resolve({
+              reportId: 'r-new', cached: true, provider: 'openai', report: '## Health summary\nNew verdict.',
+            })
+      }
+      if (command === 'ai_report_cancel') return Promise.resolve()
+      return Promise.reject(new Error(`Unexpected command: ${command}`))
+    })
+
+    const view = render(<ScanReportPanel />)
+    fireEvent.click(screen.getByRole('button', { name: /Generate report/ }))
+
+    contextValue = makeContext({
+      results: { os_info: { success: true, output: '{"new":true}', error: null, duration_ms: 2 } },
+    })
+    view.rerender(<ScanReportPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: /Generate report/ }))
+    await waitFor(() => expect(screen.getByText('New verdict.')).toBeInTheDocument())
+
+    await act(async () => {
+      first.reject(new Error('old request failed'))
+      await first.promise.catch(() => undefined)
+    })
+
+    expect(screen.getByText('New verdict.')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('bypasses cache when regenerating a report', async () => {
@@ -142,7 +199,7 @@ describe('ScanReportPanel', () => {
       })
 
     render(<ScanReportPanel />)
-    fireEvent.click(screen.getByRole('button', { name: /Explain this scan/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Generate report/ }))
     await waitFor(() => expect(screen.getByTitle('Regenerate')).toBeInTheDocument())
 
     fireEvent.click(screen.getByTitle('Regenerate'))
@@ -150,7 +207,6 @@ describe('ScanReportPanel', () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenLastCalledWith('ai_generate_report', {
         previousScanId: null,
-        apiKey: 'sk-test',
         forceRefresh: true,
       })
     })
@@ -159,32 +215,93 @@ describe('ScanReportPanel', () => {
   it('shows backend errors with a retry action', async () => {
     invokeMock.mockRejectedValue('No scan data yet')
     render(<ScanReportPanel />)
-    fireEvent.click(screen.getByRole('button', { name: /Explain this scan/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Generate report/ }))
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('No scan data yet'))
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
   })
 
-  it('auto-generates and clears the deep-link flag', async () => {
-    const setPendingScanReport = vi.fn()
-    contextValue = makeContext({ pendingScanReport: true, setPendingScanReport })
-    invokeMock.mockResolvedValue({ reportId: 'r1', cached: false, provider: 'openai' })
+  it('cancels an in-flight report', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'ai_generate_report') return Promise.resolve({ reportId: 'r1', cached: false, provider: 'openai' })
+      if (command === 'ai_report_cancel') return Promise.resolve()
+      return Promise.reject(new Error(`Unexpected command: ${command}`))
+    })
     render(<ScanReportPanel />)
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('ai_generate_report', expect.anything()))
-    expect(setPendingScanReport).toHaveBeenCalledWith(false)
+    fireEvent.click(screen.getByRole('button', { name: /Generate report/ }))
+    const stop = await screen.findByRole('button', { name: /Stop/ })
+    fireEvent.click(stop)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('ai_report_cancel', { reportId: 'r1' }))
+  })
+
+  it('waits for backend cancellation cleanup before allowing regeneration', async () => {
+    const cancellation = deferred<void>()
+    let generations = 0
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'ai_generate_report') {
+        generations += 1
+        return Promise.resolve({ reportId: `r${generations}`, cached: false, provider: 'openai' })
+      }
+      if (command === 'ai_report_cancel') return cancellation.promise
+      return Promise.reject(new Error(`Unexpected command: ${command}`))
+    })
+
+    render(<ScanReportPanel />)
+    fireEvent.click(screen.getByRole('button', { name: /Generate report/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /^Stop$/ }))
+
+    expect(await screen.findByRole('button', { name: /Stopping/ })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: /Generate report/ })).not.toBeInTheDocument()
+
+    await act(async () => {
+      cancellation.resolve()
+      await cancellation.promise
+    })
+    fireEvent.click(await screen.findByRole('button', { name: /Generate report/ }))
+    await waitFor(() => expect(generations).toBe(2))
+  })
+
+  it('stops locally even when the backend cancel request fails', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'ai_generate_report') return Promise.resolve({ reportId: 'r1', cached: false, provider: 'openai' })
+      if (command === 'ai_report_cancel') return Promise.reject(new Error('cancel transport failed'))
+      return Promise.reject(new Error(`Unexpected command: ${command}`))
+    })
+    render(<ScanReportPanel />)
+    fireEvent.click(screen.getByRole('button', { name: /Generate report/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Stop/ }))
+
+    expect(await screen.findByRole('button', { name: /Generate report/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Stop/ })).not.toBeInTheDocument()
+  })
+
+  it('honors stop while report setup is still waiting for its acknowledgement', async () => {
+    const ack = deferred<{ reportId: string; cached: boolean; provider: string }>()
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'ai_generate_report') return ack.promise
+      if (command === 'ai_report_cancel') return Promise.resolve()
+      return Promise.reject(new Error(`Unexpected command: ${command}`))
+    })
+    render(<ScanReportPanel />)
+    fireEvent.click(screen.getByRole('button', { name: /Generate report/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Stop/ }))
+
+    await act(async () => {
+      ack.resolve({ reportId: 'r-late', cached: false, provider: 'openai' })
+      await ack.promise
+    })
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('ai_report_cancel', { reportId: 'r-late' }))
+    expect(screen.getByRole('button', { name: /Generate report/ })).toBeInTheDocument()
   })
 
   it('does not generate when AI insights are disabled', async () => {
-    const setPendingScanReport = vi.fn()
     contextValue = makeContext({
       settings: { openAiApiKey: 'sk-test', aiEnabled: false },
-      pendingScanReport: true,
-      setPendingScanReport,
     })
     render(<ScanReportPanel />)
 
-    expect(screen.getByText(/AI insights are disabled/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /Explain this scan/ })).not.toBeInTheDocument()
-    await waitFor(() => expect(setPendingScanReport).toHaveBeenCalledWith(false))
+    expect(screen.getByRole('heading', { name: /AI insights are turned off/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Generate report/ })).not.toBeInTheDocument()
     expect(invokeMock).not.toHaveBeenCalledWith('ai_generate_report', expect.anything())
   })
 })

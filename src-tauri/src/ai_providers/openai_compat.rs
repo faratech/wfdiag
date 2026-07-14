@@ -109,7 +109,7 @@ pub(crate) fn to_openai_messages(
 }
 
 /// Map provider-neutral tool specs onto chat-completions function tools.
-pub(crate) fn to_openai_tools(tools: &[ToolSpec]) -> Vec<ChatCompletionTools> {
+pub(crate) fn to_openai_tools(tools: &[ToolSpec], strict: bool) -> Vec<ChatCompletionTools> {
     tools
         .iter()
         .map(|tool| {
@@ -118,7 +118,7 @@ pub(crate) fn to_openai_tools(tools: &[ToolSpec]) -> Vec<ChatCompletionTools> {
                     name: tool.name.clone(),
                     description: Some(tool.description.clone()),
                     parameters: Some(tool.parameters.clone()),
-                    strict: None,
+                    strict: strict.then_some(true),
                 },
             })
         })
@@ -139,15 +139,100 @@ fn client_for(provider: AIProvider, cfg: &ResolvedProviderConfig) -> Client<Open
     Client::with_config(config)
 }
 
-fn map_finish(reason: Option<OpenAIFinishReason>, has_tool_calls: bool) -> FinishReason {
+fn map_finish(reason: OpenAIFinishReason, has_tool_calls: bool) -> FinishReason {
     match reason {
-        Some(OpenAIFinishReason::ToolCalls) => FinishReason::ToolUse,
-        Some(OpenAIFinishReason::Length) => FinishReason::MaxTokens,
-        Some(OpenAIFinishReason::ContentFilter) => FinishReason::Refusal,
+        OpenAIFinishReason::ToolCalls | OpenAIFinishReason::FunctionCall => FinishReason::ToolUse,
+        OpenAIFinishReason::Length => FinishReason::MaxTokens,
+        OpenAIFinishReason::ContentFilter => FinishReason::Refusal,
         // Some compat servers report "stop" even when tool calls are present
-        _ if has_tool_calls => FinishReason::ToolUse,
-        _ => FinishReason::Stop,
+        OpenAIFinishReason::Stop if has_tool_calls => FinishReason::ToolUse,
+        OpenAIFinishReason::Stop => FinishReason::Stop,
     }
+}
+
+fn require_one_shot_text(
+    finish: Option<OpenAIFinishReason>,
+    refusal: Option<&str>,
+    content: Option<String>,
+) -> Result<String, String> {
+    if let Some(refusal) = refusal.filter(|text| !text.trim().is_empty()) {
+        return Err(format!("The model declined to answer: {refusal}"));
+    }
+    match finish {
+        Some(OpenAIFinishReason::Stop) => content
+            .filter(|text| !text.trim().is_empty())
+            .ok_or_else(|| "The model completed without returning any text".to_string()),
+        Some(OpenAIFinishReason::Length) => {
+            Err("The model response was truncated before completion".to_string())
+        }
+        Some(OpenAIFinishReason::ContentFilter) => {
+            Err("The model response was blocked by content filtering".to_string())
+        }
+        Some(OpenAIFinishReason::ToolCalls | OpenAIFinishReason::FunctionCall) => {
+            Err("The model unexpectedly requested a tool during one-shot analysis".to_string())
+        }
+        None => Err("The model response ended without a finish reason".to_string()),
+    }
+}
+
+fn finish_streamed_turn(
+    provider: AIProvider,
+    text: String,
+    refusal: String,
+    finish: Option<OpenAIFinishReason>,
+    pending: BTreeMap<u32, (Option<String>, String, String)>,
+) -> Result<ChatTurn, String> {
+    let finish = finish
+        .ok_or_else(|| format!("{provider} stream ended without a terminal finish reason"))?;
+    let mut tool_calls = Vec::with_capacity(pending.len());
+    for (index, (id, name, arguments)) in pending.into_values().enumerate() {
+        if name.trim().is_empty() {
+            return Err(format!("{provider} returned a tool call without a name"));
+        }
+        let id = match id.filter(|id| !id.trim().is_empty()) {
+            Some(id) => id,
+            None if provider == AIProvider::OpenAI => {
+                return Err("OpenAI returned a tool call without an id".to_string());
+            }
+            None => format!("{}#{}", name, index),
+        };
+        let arguments: serde_json::Value = serde_json::from_str(&arguments).map_err(|error| {
+            format!("{provider} returned invalid JSON arguments for {name}: {error}")
+        })?;
+        if !arguments.is_object() {
+            return Err(format!(
+                "{provider} returned non-object arguments for {name}"
+            ));
+        }
+        tool_calls.push(ToolCall {
+            id,
+            name,
+            arguments,
+        });
+    }
+
+    let finished = if !refusal.trim().is_empty() {
+        FinishReason::Refusal
+    } else {
+        map_finish(finish, !tool_calls.is_empty())
+    };
+    if finished == FinishReason::Refusal && refusal.trim().is_empty() {
+        return Err(format!(
+            "{provider} blocked the response with content filtering"
+        ));
+    }
+    if text.trim().is_empty() && tool_calls.is_empty() && finished != FinishReason::Refusal {
+        return Err(format!("{provider} completed without text or tool calls"));
+    }
+    Ok(ChatTurn {
+        text: if finished == FinishReason::Refusal && text.trim().is_empty() {
+            refusal
+        } else {
+            text
+        },
+        tool_calls,
+        finished,
+    })
 }
 
 fn friendly_error(provider: AIProvider, error: impl std::fmt::Display) -> String {
@@ -193,12 +278,16 @@ pub async fn one_shot(
         .await
         .map_err(|e| friendly_error(provider, e))?;
 
-    Ok(response
+    let choice = response
         .choices
         .into_iter()
         .next()
-        .and_then(|choice| choice.message.content)
-        .unwrap_or_default())
+        .ok_or_else(|| format!("{provider} returned no completion choices"))?;
+    require_one_shot_text(
+        choice.finish_reason,
+        choice.message.refusal.as_deref(),
+        choice.message.content,
+    )
 }
 
 /// Streaming chat with optional tools. Text deltas go through `tx`; tool-call
@@ -213,8 +302,15 @@ pub async fn chat_stream(
     let mut args = CreateChatCompletionRequestArgs::default();
     args.model(cfg.model_or_err(provider)?)
         .messages(to_openai_messages(req.system.as_deref(), &req.messages));
-    if !req.tools.is_empty() {
-        args.tools(to_openai_tools(&req.tools));
+    let include_tools = if provider == AIProvider::Ollama && !req.tools.is_empty() {
+        let endpoint = cfg.endpoint_or_err(provider)?;
+        let model = cfg.model_or_err(provider)?;
+        super::ollama::model_supports_tools(endpoint, model).await?
+    } else {
+        true
+    };
+    if !req.tools.is_empty() && include_tools {
+        args.tools(to_openai_tools(&req.tools, provider == AIProvider::OpenAI));
     }
     let chat_request = args
         .build()
@@ -228,6 +324,7 @@ pub async fn chat_stream(
 
     let mut text = String::new();
     let mut finish: Option<OpenAIFinishReason> = None;
+    let mut refusal = String::new();
     // index -> (id, name, accumulated argument JSON fragments)
     let mut pending: BTreeMap<u32, (Option<String>, String, String)> = BTreeMap::new();
 
@@ -241,6 +338,12 @@ pub async fn chat_stream(
         {
             text.push_str(&content);
             let _ = tx.send(content).await;
+        }
+        if let Some(delta) = choice.delta.refusal
+            && !delta.is_empty()
+        {
+            refusal.push_str(&delta);
+            let _ = tx.send(delta).await;
         }
         if let Some(fragments) = choice.delta.tool_calls {
             for fragment in fragments {
@@ -263,22 +366,7 @@ pub async fn chat_stream(
         }
     }
 
-    let tool_calls: Vec<ToolCall> = pending
-        .into_values()
-        .enumerate()
-        .map(|(index, (id, name, arguments))| ToolCall {
-            id: id.unwrap_or_else(|| format!("{}#{}", name, index)),
-            name,
-            arguments: serde_json::from_str(&arguments).unwrap_or_else(|_| serde_json::json!({})),
-        })
-        .collect();
-
-    let finished = map_finish(finish, !tool_calls.is_empty());
-    Ok(ChatTurn {
-        text,
-        tool_calls,
-        finished,
-    })
+    finish_streamed_turn(provider, text, refusal, finish, pending)
 }
 
 #[cfg(test)]
@@ -333,27 +421,80 @@ mod tests {
 
     #[test]
     fn tools_serialize_as_function_declarations() {
-        let wire = serde_json::to_value(to_openai_tools(&[spec()])).unwrap();
+        let wire = serde_json::to_value(to_openai_tools(&[spec()], true)).unwrap();
         assert_eq!(wire[0]["type"], "function");
         assert_eq!(wire[0]["function"]["name"], "run_diagnostic");
         assert_eq!(wire[0]["function"]["parameters"]["type"], "object");
+        assert_eq!(wire[0]["function"]["strict"], true);
     }
 
     #[test]
     fn finish_reason_maps_tool_calls_and_server_quirks() {
         assert_eq!(
-            map_finish(Some(OpenAIFinishReason::ToolCalls), true),
+            map_finish(OpenAIFinishReason::ToolCalls, true),
             FinishReason::ToolUse
         );
         assert_eq!(
-            map_finish(Some(OpenAIFinishReason::Length), false),
+            map_finish(OpenAIFinishReason::Length, false),
             FinishReason::MaxTokens
         );
         // Compat servers sometimes say "stop" while still returning tool calls
         assert_eq!(
-            map_finish(Some(OpenAIFinishReason::Stop), true),
+            map_finish(OpenAIFinishReason::Stop, true),
             FinishReason::ToolUse
         );
-        assert_eq!(map_finish(None, false), FinishReason::Stop);
+        assert_eq!(
+            map_finish(OpenAIFinishReason::Stop, false),
+            FinishReason::Stop
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_tool_arguments_and_missing_terminal_reason() {
+        let mut pending = BTreeMap::new();
+        pending.insert(
+            0,
+            (
+                Some("call_1".into()),
+                "run_diagnostic".into(),
+                "{not json".into(),
+            ),
+        );
+        assert!(
+            finish_streamed_turn(
+                AIProvider::OpenAI,
+                String::new(),
+                String::new(),
+                Some(OpenAIFinishReason::ToolCalls),
+                pending,
+            )
+            .unwrap_err()
+            .contains("invalid JSON")
+        );
+        assert!(
+            finish_streamed_turn(
+                AIProvider::OpenAI,
+                "partial".into(),
+                String::new(),
+                None,
+                BTreeMap::new(),
+            )
+            .unwrap_err()
+            .contains("terminal finish reason")
+        );
+    }
+
+    #[test]
+    fn refusal_is_not_an_empty_success() {
+        let turn = finish_streamed_turn(
+            AIProvider::OpenAI,
+            String::new(),
+            "I cannot help with that.".into(),
+            Some(OpenAIFinishReason::Stop),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(turn.finished, FinishReason::Refusal);
+        assert_eq!(turn.text, "I cannot help with that.");
     }
 }

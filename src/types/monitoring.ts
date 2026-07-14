@@ -55,6 +55,37 @@ export interface ProcessInfo {
   disk_write_bytes?: number
 }
 
+/** Truthful, lightweight row returned by the on-demand Processes API. */
+export interface ProcessExplorerRow {
+  pid: number
+  parent_pid: number
+  name: string
+  cpu_percent: number
+  memory_percent: number
+  memory_mb: number
+  virtual_memory_mb: number
+  gpu_percent: number | null
+  gpu_memory_mb: number | null
+  npu_percent: number | null
+  npu_memory_mb: number | null
+  cpu_time_secs: number
+  start_time: number
+  status: string
+  thread_count: number
+  handle_count: number
+  priority: number
+  io_read_bytes: number
+  io_write_bytes: number
+}
+
+export interface ProcessPage {
+  captured_at: number
+  total: number
+  offset: number
+  limit: number
+  items: ProcessExplorerRow[]
+}
+
 export interface NetworkConnection {
   protocol: string
   local_addr: string
@@ -73,6 +104,8 @@ export interface SystemStats {
   swap_total_gb: number
   swap_used_gb: number
   swap_utilization: number
+  storage_used_percent: number
+  /** @deprecated compatibility alias; use storage_used_percent */
   disk_utilization: number
   disk_read_bytes: number
   disk_write_bytes: number
