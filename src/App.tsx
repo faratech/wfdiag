@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { AppProvider, useAppContext } from './contexts/AppContext'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
-import { AIProvider } from './contexts/AIContext'
+import { AIProvider, useAIContext } from './contexts/AIContext'
 import { ToastProvider } from './contexts/ToastContext'
+import { AIWorkspaceProvider } from './contexts/AIWorkspaceContext'
 import { useDiagnostics } from './hooks/useDiagnostics'
 import { useScanner } from './hooks/useScanner'
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts'
@@ -34,12 +36,12 @@ const PAGE_META: Record<TabValue, { title: string; sub: string }> = {
   diagnostics: { title: 'System Analysis', sub: 'Read-only diagnostics across hardware, storage, network and logs' },
   monitoring: { title: 'Live Monitor', sub: 'Real-time CPU, memory, disk, network and NPU telemetry' },
   processes: { title: 'Processes', sub: 'Running processes with live resource usage' },
-  ai: { title: 'AI Analysis', sub: 'On-device intelligence powered by Phi Silica' },
+  ai: { title: 'AI Analysis', sub: 'Ask about this PC or turn the latest scan into a focused health report' },
   issues: { title: 'Issues', sub: 'Problems detected in the latest scan, with one-click fixes' },
   history: { title: 'History', sub: 'Past scans — spot drift and regressions over time' },
 }
 
-const APP_VERSION = '2.5.4'
+const APP_VERSION = '2.5.5'
 
 const AppContent: React.FC = () => {
   const {
@@ -47,8 +49,9 @@ const AppContent: React.FC = () => {
     scanStartTime, scanEndTime, issues, navRailCollapsed, setNavRailCollapsed,
     showSettings, setShowSettings, showAbout, setShowAbout, settings, saveSettings,
   } = useAppContext()
+  const { aiStatus, isLoading: aiStatusLoading } = useAIContext()
   const { setThemeMode, isDark } = useTheme()
-  const { detectIssues, exportResults, shareToWindowsForum } = useDiagnostics()
+  const { detectIssues, exportResults, shareToWindowsForum, loadSystemInfo, loadAvailableTasks } = useDiagnostics()
   const { runQuickScan } = useScanner()
   const runQuickScanAndShow = useCallback(() => {
     setSelectedTab('diagnostics')
@@ -68,6 +71,13 @@ const AppContent: React.FC = () => {
     onShowHelp: () => setHelpOpen(true),
     disabled: showSettings || showAbout || paletteOpen || helpOpen,
   })
+
+  // Bootstrap once in the persistent shell. Other screens also use
+  // useDiagnostics for actions, so initialization must not live inside the
+  // hook itself or every tab mount repeats both native calls.
+  useEffect(() => {
+    void Promise.all([loadSystemInfo(), loadAvailableTasks()])
+  }, [loadAvailableTasks, loadSystemInfo])
 
   // Re-detect issues once per scan, when its results first arrive. Keying on
   // the session id (not the result COUNT) is essential: the quick-scan task set
@@ -103,8 +113,7 @@ const AppContent: React.FC = () => {
   useEffect(() => {
     let unlisten: (() => void) | undefined
     let cancelled = false
-    import('@tauri-apps/api/event')
-      .then(({ listen }) => listen('tray://quick-scan', () => runQuickScanRef.current()))
+    listen('tray://quick-scan', () => runQuickScanRef.current())
       .then(fn => {
         // Effect may have cleaned up while listen() was still in flight (e.g.
         // React StrictMode's dev double-invoke) — tear the listener down
@@ -124,9 +133,9 @@ const AppContent: React.FC = () => {
   }, [])
 
   const resultValues = Object.values(results)
-  const passed = resultValues.filter(r => r.success).length
-  const failed = resultValues.filter(r => !r.success).length
-  const hasResults = passed + failed > 0
+  const collected = resultValues.filter(r => r.success).length
+  const errors = resultValues.filter(r => !r.success).length
+  const hasResults = collected + errors > 0
   const durationMs = scanEndTime > 0 ? scanEndTime - scanStartTime : 0
   const issueCount = issues.filter(i => i.detected).length
   const meta = PAGE_META[selectedTab]
@@ -183,28 +192,24 @@ const AppContent: React.FC = () => {
 
           <div className="rail-section-title">Tools</div>
           <div className="nav-list">
-            <button className="nav-item tool" onClick={runQuickScanAndShow} disabled={isRunning}>
-              <i className="fa-solid fa-bolt item-icon" />
-              <span className="item-label">Quick Scan</span>
-            </button>
-            <button className="nav-item tool" onClick={() => exportResults()} disabled={!hasResults}>
-              <i className="fa-solid fa-file-export item-icon" />
+            <button className="nav-item tool" onClick={() => exportResults()} disabled={!hasResults} aria-label="Export Report" title={railCollapsed ? 'Export Report' : undefined}>
+              <i className="fa-solid fa-file-export item-icon" aria-hidden="true" />
               <span className="item-label">Export Report</span>
             </button>
-            <button className="nav-item tool" onClick={() => shareToWindowsForum()} disabled={!hasResults}>
-              <i className="fa-solid fa-share-nodes item-icon" />
+            <button className="nav-item tool" onClick={() => shareToWindowsForum()} disabled={!hasResults} aria-label="Share to Forum" title={railCollapsed ? 'Share to Forum' : undefined}>
+              <i className="fa-solid fa-share-nodes item-icon" aria-hidden="true" />
               <span className="item-label">Share to Forum</span>
             </button>
           </div>
 
           <div className="rail-footer">
-            <button className="nav-item tool" onClick={() => setShowSettings(true)}><i className="fa-solid fa-gear item-icon" /><span className="item-label">Settings</span></button>
-            <button className="nav-item tool" onClick={() => setShowAbout(true)}><i className="fa-solid fa-circle-info item-icon" /><span className="item-label">About</span></button>
+            <button className="nav-item tool" onClick={() => setShowSettings(true)} aria-label="Settings" title={railCollapsed ? 'Settings' : undefined}><i className="fa-solid fa-gear item-icon" aria-hidden="true" /><span className="item-label">Settings</span></button>
+            <button className="nav-item tool" onClick={() => setShowAbout(true)} aria-label="About" title={railCollapsed ? 'About' : undefined}><i className="fa-solid fa-circle-info item-icon" aria-hidden="true" /><span className="item-label">About</span></button>
             {/* Hidden while the narrow window forces a collapse — toggling a
                 preference with no visible effect would just confuse */}
             {!forceCollapsed && (
-              <button className="nav-item tool" onClick={() => setNavRailCollapsed(!navRailCollapsed)}>
-                <i className={`fa-solid ${navRailCollapsed ? 'fa-angles-right' : 'fa-angles-left'} item-icon`} />
+              <button className="nav-item tool" onClick={() => setNavRailCollapsed(!navRailCollapsed)} aria-label={navRailCollapsed ? 'Expand navigation' : 'Collapse navigation'}>
+                <i className={`fa-solid ${navRailCollapsed ? 'fa-angles-right' : 'fa-angles-left'} item-icon`} aria-hidden="true" />
                 <span className="item-label">Collapse</span>
               </button>
             )}
@@ -248,7 +253,7 @@ const AppContent: React.FC = () => {
               {isRunning ? (
                 <><i className="fa-solid fa-circle-notch fa-spin ico-accent" aria-hidden="true" /><span>Running: {currentTaskName || '…'}</span></>
               ) : hasResults ? (
-                <><i className="fa-solid fa-circle-check ico-ok" aria-hidden="true" /><span>{passed} passed · {failed} failed</span></>
+                <><i className={`fa-solid ${errors > 0 ? 'fa-triangle-exclamation ico-warn' : 'fa-circle-check ico-ok'}`} aria-hidden="true" /><span>{collected} collected · {errors} errors</span></>
               ) : (
                 <><i className="fa-solid fa-circle-info" aria-hidden="true" /><span>Ready — no scan data</span></>
               )}
@@ -266,6 +271,8 @@ const AppContent: React.FC = () => {
         open={showSettings}
         onOpenChange={setShowSettings}
         settings={settings}
+        aiStatus={aiStatus}
+        aiStatusLoading={aiStatusLoading}
         onSave={async (s) => { await saveSettings(s); setThemeMode((s.theme as 'dark' | 'light' | 'auto') || 'dark'); setShowSettings(false) }}
       />
       <AboutDialog open={showAbout} onOpenChange={setShowAbout} updateInfo={updateInfo} />
@@ -282,7 +289,9 @@ const ThemedApp: React.FC = () => {
     <ThemeProvider initialMode={(settings.theme as 'dark' | 'light' | 'auto') || 'dark'}>
       <AIProvider>
         <ToastProvider>
-          <AppContent />
+          <AIWorkspaceProvider>
+            <AppContent />
+          </AIWorkspaceProvider>
         </ToastProvider>
       </AIProvider>
     </ThemeProvider>

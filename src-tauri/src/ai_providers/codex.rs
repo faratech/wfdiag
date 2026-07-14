@@ -19,6 +19,22 @@ use tokio::sync::mpsc;
 /// Codex plans multi-step agent turns; give it more room than an API call.
 const EXEC_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// The invariant part of every Codex invocation. User configuration and
+/// repository rules are deliberately disabled because a bridge run must be
+/// isolated from machine-local instructions as well as workspace files.
+const CODEX_EXEC_ARGS: &[&str] = &[
+    "exec",
+    "--json",
+    "--ephemeral",
+    "--skip-git-repo-check",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--color",
+    "never",
+    "--sandbox",
+    "read-only",
+];
+
 /// One-shot analysis. Codex exec has no separate system-prompt flag, so the
 /// system text is prepended (same pattern as Foundry's one-shot).
 pub async fn one_shot(
@@ -48,16 +64,7 @@ async fn exec(cfg: &ResolvedProviderConfig, payload: String) -> Result<String, S
     let cli = cfg.endpoint_or_err(AIProvider::CodexCli)?;
     let workdir = cli_bridge::bridge_workdir()?;
     let mut cmd = tokio::process::Command::new(cli);
-    cmd.args([
-        "exec",
-        "--json",
-        "--ephemeral",
-        "--skip-git-repo-check",
-        "--color",
-        "never",
-        "--sandbox",
-        "read-only",
-    ]);
+    cmd.args(CODEX_EXEC_ARGS);
     cmd.arg("-C").arg(&workdir);
     if let Some(model) = cfg.model.as_deref() {
         cmd.arg("-m").arg(cli_bridge::sanitize_model(model)?);
@@ -126,12 +133,16 @@ fn extract_error(stdout: &str) -> Option<String> {
 fn parse_exec_jsonl(stdout: &str) -> Result<String, String> {
     let mut answer: Option<String> = None;
     let mut error: Option<String> = None;
+    let mut completed = false;
+    let mut failed: Option<String> = None;
+    let mut malformed_event = false;
     for line in stdout.lines() {
         let line = line.trim();
         if !line.starts_with('{') {
             continue;
         }
         let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            malformed_event = true;
             continue;
         };
         match event.get("type").and_then(|t| t.as_str()) {
@@ -151,13 +162,35 @@ fn parse_exec_jsonl(stdout: &str) -> Result<String, String> {
                         .to_string(),
                 );
             }
+            Some("turn.completed") => completed = true,
+            Some("turn.failed") => {
+                failed = Some(
+                    event
+                        .pointer("/error/message")
+                        .or_else(|| event.get("message"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("unknown turn failure")
+                        .to_string(),
+                );
+            }
             _ => {}
         }
     }
-    match (answer, error) {
-        (Some(text), _) => Ok(text),
-        (None, Some(message)) => Err(format!("Codex CLI reported an error: {message}")),
-        (None, None) => Err("Codex CLI returned no answer (unexpected output format)".to_string()),
+    if let Some(message) = failed {
+        return Err(format!("Codex CLI turn failed: {message}"));
+    }
+    if malformed_event {
+        return Err("Codex CLI returned malformed JSONL output".to_string());
+    }
+    if !completed {
+        return Err(match error {
+            Some(message) => format!("Codex CLI did not complete: {message}"),
+            None => "Codex CLI ended before turn.completed".to_string(),
+        });
+    }
+    match answer.filter(|text| !text.trim().is_empty()) {
+        Some(text) => Ok(text),
+        None => Err("Codex CLI completed without an answer".to_string()),
     }
 }
 
@@ -185,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn error_event_fails_only_without_an_answer() {
+    fn error_event_fails_without_a_completed_turn() {
         let failed = r#"{"type":"error","message":"stream disconnected"}"#;
         assert!(
             parse_exec_jsonl(failed)
@@ -197,6 +230,8 @@ mod tests {
             r#"{"type":"error","message":"retrying"}"#,
             "\n",
             r#"{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}"#,
+            "\n",
+            r#"{"type":"turn.completed"}"#,
         );
         assert_eq!(parse_exec_jsonl(recovered).unwrap(), "ok");
     }
@@ -224,9 +259,51 @@ mod tests {
             "Reading prompt from stdin...\n",
             "not json at all\n",
             r#"{"type":"item.completed","item":{"type":"agent_message","text":"hi"}}"#,
+            "\n",
+            r#"{"type":"turn.completed"}"#,
         );
         assert_eq!(parse_exec_jsonl(noisy).unwrap(), "hi");
         assert!(parse_exec_jsonl("").is_err());
         assert!(parse_exec_jsonl("plain text only").is_err());
+    }
+
+    #[test]
+    fn partial_answer_does_not_hide_turn_failure() {
+        let out = concat!(
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}"#,
+            "\n",
+            r#"{"type":"turn.failed","error":{"message":"model overloaded"}}"#,
+        );
+        assert!(
+            parse_exec_jsonl(out)
+                .unwrap_err()
+                .contains("model overloaded")
+        );
+    }
+
+    #[test]
+    fn answer_without_terminal_event_is_rejected() {
+        let out = r#"{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}"#;
+        assert!(
+            parse_exec_jsonl(out)
+                .unwrap_err()
+                .contains("turn.completed")
+        );
+    }
+
+    #[test]
+    fn invocation_is_ephemeral_read_only_and_ignores_local_instructions() {
+        for flag in [
+            "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--sandbox",
+            "read-only",
+        ] {
+            assert!(
+                CODEX_EXEC_ARGS.contains(&flag),
+                "missing isolation arg {flag}"
+            );
+        }
     }
 }

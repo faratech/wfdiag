@@ -6,7 +6,7 @@
 //! - `save_settings` - Save application settings to disk
 //! - `load_settings` - Load application settings from disk
 //! - `store_api_key` - Store OpenAI API key securely (legacy single-key command)
-//! - `load_api_key` - Load OpenAI API key from secure storage
+//! - `load_api_key` - Legacy command retained as a write-only-policy error
 //! - `clear_api_key` - Remove stored OpenAI API key
 //! - `store_provider_api_key` / `clear_provider_api_key` - Per-provider keys
 //!   (openai, anthropic, gemini, custom_openai)
@@ -16,13 +16,14 @@
 //! - Windows: DPAPI encryption (one file per provider)
 //! - Other platforms: System keyring (one entry per provider)
 //!
-//! Keys are NEVER written to the settings JSON file — `settings_for_disk`
-//! strips every key field before serialization.
+//! Keys are NEVER returned to the webview or written to settings JSON — the
+//! secret fields deserialize write requests but are skipped by Serialize.
 
 use crate::dpapi::ProviderKeyId;
 use crate::error::DiagError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 #[cfg(not(windows))]
 use keyring_core::{Entry, Error as KeyringError};
@@ -31,6 +32,21 @@ use std::sync::OnceLock;
 
 #[cfg(not(windows))]
 static KEYRING_STORE_INIT: OnceLock<Result<(), String>> = OnceLock::new();
+
+static NETWORK_GROUNDING_ENABLED: AtomicBool = AtomicBool::new(false);
+// 0 = ask, 1 = allow, 2 = never
+static CLOUD_FALLBACK_POLICY: AtomicU8 = AtomicU8::new(0);
+
+/// Whether an automatic local-provider failure may cross the network trust
+/// boundary. `Ask` is deliberately the default for existing installs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudFallbackPolicy {
+    #[default]
+    Ask,
+    Allow,
+    Never,
+}
 
 /// Application settings that persist across sessions
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,21 +75,43 @@ pub struct AppSettings {
     pub ai_enabled: bool,
     #[serde(default = "default_ai_provider", rename = "preferredAIProvider")]
     pub preferred_ai_provider: String,
-    // API keys — stored in DPAPI/keyring, included in the frontend response,
-    // NEVER written to the settings file (see settings_for_disk)
+    /// Live WindowsForum/Microsoft grounding is a network request. It is
+    /// opt-in so selecting an on-device/local provider never silently sends
+    /// diagnostic context off the machine.
     #[serde(default)]
+    pub network_grounding_enabled: bool,
+    /// Controls whether Auto may fall back from an on-device/local provider
+    /// to a subscription/API cloud provider.
+    #[serde(default)]
+    pub cloud_fallback_policy: CloudFallbackPolicy,
+    // API keys are write-only IPC inputs. They are accepted by save_settings
+    // and routed to DPAPI/keyring, but Serialize must never expose decrypted
+    // material back to the webview or settings file.
+    #[serde(default, skip_serializing)]
     pub open_ai_api_key: Option<String>,
     // OpenAI model override; empty falls back to openai::OPENAI_MODEL
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_ai_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub anthropic_api_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub gemini_api_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub deepseek_api_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub custom_api_key: Option<String>,
+    // Non-secret availability flags returned to the webview. They are never
+    // accepted from IPC and are reset when settings are read from disk.
+    #[serde(default, skip_deserializing)]
+    pub open_ai_api_key_set: bool,
+    #[serde(default, skip_deserializing)]
+    pub anthropic_api_key_set: bool,
+    #[serde(default, skip_deserializing)]
+    pub gemini_api_key_set: bool,
+    #[serde(default, skip_deserializing)]
+    pub deepseek_api_key_set: bool,
+    #[serde(default, skip_deserializing)]
+    pub custom_api_key_set: bool,
     // Per-provider model overrides; empty falls back to the provider module's
     // default constant (anthropic.rs / gemini.rs)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -143,12 +181,19 @@ impl Default for AppSettings {
             history_limit: default_history_limit(),
             ai_enabled: true,
             preferred_ai_provider: default_ai_provider(),
+            network_grounding_enabled: false,
+            cloud_fallback_policy: CloudFallbackPolicy::Ask,
             open_ai_api_key: None,
             open_ai_model: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             deepseek_api_key: None,
             custom_api_key: None,
+            open_ai_api_key_set: false,
+            anthropic_api_key_set: false,
+            gemini_api_key_set: false,
+            deepseek_api_key_set: false,
+            custom_api_key_set: false,
             anthropic_model: None,
             gemini_model: None,
             deepseek_model: None,
@@ -304,11 +349,21 @@ fn settings_for_disk(settings: &AppSettings) -> AppSettings {
     s.gemini_api_key = None;
     s.deepseek_api_key = None;
     s.custom_api_key = None;
+    // These are derived from the secret store at load time, not persisted.
+    s.open_ai_api_key_set = false;
+    s.anthropic_api_key_set = false;
+    s.gemini_api_key_set = false;
+    s.deepseek_api_key_set = false;
+    s.custom_api_key_set = false;
     s
 }
 
 #[tauri::command]
 pub async fn save_settings(settings: AppSettings) -> Result<(), String> {
+    // Validate provider admission before keyring/DPAPI writes or touching the
+    // settings file. In particular, a loose executable must never persist an
+    // explicit Phi preference that it cannot serve.
+    crate::ai_service::parse_and_validate_provider_preference(&settings.preferred_ai_provider)?;
     let path = get_settings_path()?;
 
     // Route any provided keys to secure storage (separate from settings file)
@@ -339,28 +394,31 @@ pub async fn save_settings(settings: AppSettings) -> Result<(), String> {
 /// Mirror settings that backend code reads on hot paths into in-memory state
 /// (AI provider routing, the close-to-tray window handler).
 fn sync_in_memory_state(settings: &AppSettings) {
-    let pref = match settings.preferred_ai_provider.to_lowercase().as_str() {
-        "openai" => crate::ai_service::AIProviderPreference::OpenAI,
-        "phi_silica" | "phisilica" => crate::ai_service::AIProviderPreference::PhiSilica,
-        "foundry_local" | "foundrylocal" => crate::ai_service::AIProviderPreference::FoundryLocal,
-        "ollama" => crate::ai_service::AIProviderPreference::Ollama,
-        "custom_openai" | "custom" => crate::ai_service::AIProviderPreference::CustomOpenAI,
-        "codex_cli" | "codexcli" | "codex" => crate::ai_service::AIProviderPreference::CodexCli,
-        "claude_code" | "claudecode" | "claude" => {
-            crate::ai_service::AIProviderPreference::ClaudeCode
-        }
-        "anthropic" => crate::ai_service::AIProviderPreference::Anthropic,
-        "gemini" => crate::ai_service::AIProviderPreference::Gemini,
-        "deepseek" => crate::ai_service::AIProviderPreference::DeepSeek,
-        _ => crate::ai_service::AIProviderPreference::Auto,
-    };
+    let pref = crate::ai_service::provider_preference_for_runtime(&settings.preferred_ai_provider);
     crate::ai_service::set_user_preference(pref);
     crate::tray::set_close_to_tray(settings.close_to_tray);
+    NETWORK_GROUNDING_ENABLED.store(settings.network_grounding_enabled, Ordering::Relaxed);
+    CLOUD_FALLBACK_POLICY.store(
+        match settings.cloud_fallback_policy {
+            CloudFallbackPolicy::Ask => 0,
+            CloudFallbackPolicy::Allow => 1,
+            CloudFallbackPolicy::Never => 2,
+        },
+        Ordering::Relaxed,
+    );
 }
 
 pub(crate) fn sync_in_memory_state_from_disk() {
     let settings = read_settings_from_disk().unwrap_or_default();
     sync_in_memory_state(&settings);
+}
+
+fn normalize_unavailable_provider_for_runtime(settings: &mut AppSettings) {
+    if crate::ai_service::parse_and_validate_provider_preference(&settings.preferred_ai_provider)
+        .is_err()
+    {
+        settings.preferred_ai_provider = "auto".to_string();
+    }
 }
 
 #[tauri::command]
@@ -376,15 +434,32 @@ pub async fn load_settings() -> Result<AppSettings, String> {
         serde_json::from_str(&json).map_err(|e| DiagError::serialization(e.to_string()))?
     };
 
+    // Older loose builds allowed `phi_silica` to be persisted even though
+    // Windows AI cannot run without package identity. Normalize only the
+    // in-memory/IPC view; leave the file untouched so installing the Store
+    // package later does not destroy the user's original preference.
+    normalize_unavailable_provider_for_runtime(&mut settings);
+
     // Sync loaded settings to in-memory state
     sync_in_memory_state(&settings);
 
-    // Hydrate API keys from secure storage into the response
-    settings.open_ai_api_key = load_provider_key_internal(ProviderKeyId::OpenAI).await;
-    settings.anthropic_api_key = load_provider_key_internal(ProviderKeyId::Anthropic).await;
-    settings.gemini_api_key = load_provider_key_internal(ProviderKeyId::Gemini).await;
-    settings.deepseek_api_key = load_provider_key_internal(ProviderKeyId::DeepSeek).await;
-    settings.custom_api_key = load_provider_key_internal(ProviderKeyId::Custom).await;
+    // Return only configured/not-configured flags. Decrypted key material is
+    // backend-only and must never cross into the webview.
+    settings.open_ai_api_key_set = load_provider_key_internal(ProviderKeyId::OpenAI)
+        .await
+        .is_some();
+    settings.anthropic_api_key_set = load_provider_key_internal(ProviderKeyId::Anthropic)
+        .await
+        .is_some();
+    settings.gemini_api_key_set = load_provider_key_internal(ProviderKeyId::Gemini)
+        .await
+        .is_some();
+    settings.deepseek_api_key_set = load_provider_key_internal(ProviderKeyId::DeepSeek)
+        .await
+        .is_some();
+    settings.custom_api_key_set = load_provider_key_internal(ProviderKeyId::Custom)
+        .await
+        .is_some();
 
     println!("Settings loaded from {:?}", path);
     Ok(settings)
@@ -411,9 +486,62 @@ pub async fn store_api_key(key: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn load_api_key() -> Result<String, String> {
-    load_api_key_internal()
-        .await
-        .ok_or_else(|| DiagError::api_key("load", "No API key set").into())
+    Err(DiagError::api_key(
+        "load",
+        "API keys are write-only and cannot be returned to the webview",
+    )
+    .into())
+}
+
+/// Network grounding is enabled only by the persisted opt-in. The legacy
+/// environment variable remains a kill-switch, but cannot enable grounding
+/// when the user setting is off.
+pub(crate) fn network_grounding_enabled() -> bool {
+    let opted_in = NETWORK_GROUNDING_ENABLED.load(Ordering::Relaxed);
+    let env_allows = std::env::var("WFDIAG_AI_GROUNDING")
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off"
+            )
+        })
+        .unwrap_or(true);
+    opted_in && env_allows
+}
+
+pub(crate) fn cloud_fallback_policy() -> CloudFallbackPolicy {
+    match CLOUD_FALLBACK_POLICY.load(Ordering::Relaxed) {
+        1 => CloudFallbackPolicy::Allow,
+        2 => CloudFallbackPolicy::Never,
+        _ => CloudFallbackPolicy::Ask,
+    }
+}
+
+/// Current scan-history retention policy for backend save/cleanup paths.
+pub(crate) fn history_retention() -> (bool, u32) {
+    let settings = read_settings_from_disk().unwrap_or_default();
+    (settings.retain_history, settings.history_limit)
+}
+
+/// Persist a fallback choice made in the typed consent flow without ever
+/// loading or rewriting secret material.
+pub(crate) fn persist_cloud_fallback_policy(policy: CloudFallbackPolicy) -> Result<(), String> {
+    let path = get_settings_path()?;
+    let mut settings = read_settings_from_disk().unwrap_or_default();
+    settings.cloud_fallback_policy = policy;
+    let json = serde_json::to_string_pretty(&settings_for_disk(&settings))
+        .map_err(|e| DiagError::serialization(e.to_string()))?;
+    std::fs::write(&path, json)
+        .map_err(|e| String::from(DiagError::file(path.display().to_string(), e.to_string())))?;
+    CLOUD_FALLBACK_POLICY.store(
+        match policy {
+            CloudFallbackPolicy::Ask => 0,
+            CloudFallbackPolicy::Allow => 1,
+            CloudFallbackPolicy::Never => 2,
+        },
+        Ordering::Relaxed,
+    );
+    Ok(())
 }
 
 /// Internal function for loading the OpenAI API key (used by ai_service)
@@ -477,6 +605,21 @@ mod tests {
         assert_eq!(settings.history_limit, 30);
         assert!(settings.ai_enabled);
         assert_eq!(settings.preferred_ai_provider, "auto");
+        assert!(!settings.network_grounding_enabled);
+        assert_eq!(settings.cloud_fallback_policy, CloudFallbackPolicy::Ask);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn stale_phi_setting_is_normalized_in_memory_without_touching_other_fields() {
+        let mut settings = AppSettings {
+            preferred_ai_provider: "phi_silica".to_string(),
+            theme: "light".to_string(),
+            ..AppSettings::default()
+        };
+        normalize_unavailable_provider_for_runtime(&mut settings);
+        assert_eq!(settings.preferred_ai_provider, "auto");
+        assert_eq!(settings.theme, "light");
     }
 
     #[test]
@@ -519,10 +662,11 @@ mod tests {
         // The TS SettingsData interface depends on these exact JSON keys
         let json = serde_json::to_string(&settings_with_keys()).unwrap();
         for field in [
-            "\"anthropicApiKey\"",
-            "\"geminiApiKey\"",
-            "\"customApiKey\"",
-            "\"deepseekApiKey\"",
+            "\"openAiApiKeySet\"",
+            "\"anthropicApiKeySet\"",
+            "\"geminiApiKeySet\"",
+            "\"customApiKeySet\"",
+            "\"deepseekApiKeySet\"",
             "\"anthropicModel\"",
             "\"geminiModel\"",
             "\"customEndpoint\"",
@@ -536,6 +680,8 @@ mod tests {
             "\"openAiModel\"",
             "\"localAiModel\"",
             "\"preferredAIProvider\"",
+            "\"networkGroundingEnabled\"",
+            "\"cloudFallbackPolicy\"",
         ] {
             // geminiModel is None in the fixture and skipped — check it on a
             // populated copy instead
@@ -547,6 +693,19 @@ mod tests {
                 assert!(json.contains(field), "missing JSON key {}", field);
             }
         }
+        for secret_field in [
+            "\"openAiApiKey\"",
+            "\"anthropicApiKey\"",
+            "\"geminiApiKey\"",
+            "\"customApiKey\"",
+            "\"deepseekApiKey\"",
+        ] {
+            assert!(
+                !json.contains(secret_field),
+                "secret field {} was serialized",
+                secret_field
+            );
+        }
     }
 
     #[test]
@@ -557,5 +716,7 @@ mod tests {
         assert!(s.auto_save);
         assert!(s.anthropic_api_key.is_none());
         assert!(s.ollama_endpoint.is_none());
+        assert!(!s.network_grounding_enabled);
+        assert_eq!(s.cloud_fallback_policy, CloudFallbackPolicy::Ask);
     }
 }

@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { type TabValue, type SettingsData } from '../components'
+import type { ChatPrompt } from '../components/types'
 import * as logger from '../utils/logger'
 
 export interface SystemInfo {
@@ -33,6 +34,66 @@ export interface RemediationSummary {
   requires_restart: boolean
   long_running: boolean
   maintenance: boolean
+  batch_eligible: boolean
+  cancellable: boolean
+}
+
+export interface ActionRequest {
+  remediationId: string
+  issueId?: string
+}
+
+export interface ActionPreview {
+  remediation: RemediationSummary
+  issueId?: string
+  steps: string[]
+}
+
+export interface ActionProposal {
+  proposalId: string
+  approvalScope: 'exact' | 'batch'
+  actions: ActionPreview[]
+  scanFingerprint: string
+  catalogFingerprint: string
+  createdAtMs: number
+  expiresAtMs: number
+}
+
+export interface ActionStepResult {
+  action: string
+  status: 'succeeded' | 'already_satisfied' | 'failed' | 'cancelled'
+  detail?: string
+}
+
+export interface ActionFixResult {
+  success: boolean
+  message: string
+  actions_taken: string[]
+  requires_restart: boolean
+  completion_status: 'succeeded' | 'partial' | 'failed' | 'cancelled'
+  steps: ActionStepResult[]
+}
+
+export interface ActionItemRun {
+  remediationId: string
+  label: string
+  cancellable: boolean
+  status: 'pending' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled' | 'skipped'
+  result?: ActionFixResult
+  error?: string
+}
+
+export interface ActionRunSummary {
+  runId: string
+  proposalId: string
+  authorizationId: string
+  status: 'running' | 'cancel_requested' | 'succeeded' | 'partial' | 'failed' | 'cancelled'
+  actions: ActionItemRun[]
+  currentIndex?: number | null
+  approvedAtMs: number
+  completedAtMs?: number
+  scanFingerprint: string
+  catalogFingerprint: string
 }
 
 export interface Issue {
@@ -43,8 +104,8 @@ export interface Issue {
   category: string
   recommendation?: string
   detected: boolean
-  /** detected = active issue; ok = passed; skipped = source diagnostic was unavailable */
-  status?: 'detected' | 'ok' | 'skipped'
+  /** unknown means the source check could not establish a trustworthy result. */
+  status?: 'detected' | 'ok' | 'unknown' | 'skipped'
   /** Diagnostic tasks this issue was derived from (used by "Ask AI") */
   source_tasks?: string[]
   /** The vetted remediation for this issue, when one applies */
@@ -63,23 +124,19 @@ interface AppContextType {
   sessionId: string | null
   setSessionId: (id: string | null) => void
   results: Record<string, TaskResult>
-  setResults: (results: Record<string, TaskResult>) => void
+  setResults: React.Dispatch<React.SetStateAction<Record<string, TaskResult>>>
   isRunning: boolean
   setIsRunning: (running: boolean) => void
   currentProgress: number
   setCurrentProgress: (progress: number) => void
   currentTaskName: string
   setCurrentTaskName: (name: string) => void
+  diagnosticsError: string | null
+  setDiagnosticsError: (message: string | null) => void
   // Per-task status of the current scan, keyed by task id (drives the
   // per-category progress chips in the scanning hero)
   taskStatuses: Record<string, 'running' | 'done'>
   setTaskStatuses: React.Dispatch<React.SetStateAction<Record<string, 'running' | 'done'>>>
-  showComparison: boolean
-  setShowComparison: (show: boolean) => void
-  searchQuery: string
-  setSearchQuery: (query: string) => void
-  filteredResults: Record<string, TaskResult>
-  setFilteredResults: (results: Record<string, TaskResult>) => void
   scanStartTime: number
   setScanStartTime: (time: number) => void
   scanEndTime: number
@@ -106,9 +163,11 @@ interface AppContextType {
   // Deep-link from "Explain this scan" into the AI screen's report panel
   pendingScanReport: boolean
   setPendingScanReport: (pending: boolean) => void
+  aiMode: 'assistant' | 'report'
+  setAIMode: (mode: 'assistant' | 'report') => void
   // Deep-link from an issue's "Ask AI" into the agentic chat (pre-seeded prompt)
-  pendingChatPrompt: string | null
-  setPendingChatPrompt: (prompt: string | null) => void
+  pendingChatPrompt: ChatPrompt | string | null
+  setPendingChatPrompt: React.Dispatch<React.SetStateAction<ChatPrompt | string | null>>
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined)
@@ -144,10 +203,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const [isRunning, setIsRunning] = useState(false)
   const [currentProgress, setCurrentProgress] = useState(0)
   const [currentTaskName, setCurrentTaskName] = useState('')
+  const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null)
   const [taskStatuses, setTaskStatuses] = useState<Record<string, 'running' | 'done'>>({})
-  const [showComparison, setShowComparison] = useState(false)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [filteredResults, setFilteredResults] = useState<Record<string, TaskResult>>({})
   const [scanStartTime, setScanStartTime] = useState<number>(0)
   const [scanEndTime, setScanEndTime] = useState<number>(0)
   const [issues, setIssues] = useState<Issue[]>([])
@@ -165,6 +222,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     historyLimit: 30,
     aiEnabled: true,
     preferredAIProvider: 'auto',
+    networkGroundingEnabled: false,
+    cloudFallbackPolicy: 'ask',
   })
   const [settingsLoaded, setSettingsLoaded] = useState(false)
 
@@ -184,10 +243,11 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   // "Explain this scan" pressed — consumed (and cleared) by ScanReportPanel,
   // which auto-generates the report when this is set
   const [pendingScanReport, setPendingScanReport] = useState(false)
+  const [aiMode, setAIMode] = useState<'assistant' | 'report'>('assistant')
 
   // An issue's "Ask AI" pressed — consumed (and cleared) by AIScreen, which
   // sends it into the agentic chat
-  const [pendingChatPrompt, setPendingChatPrompt] = useState<string | null>(null)
+  const [pendingChatPrompt, setPendingChatPrompt] = useState<ChatPrompt | string | null>(null)
 
   // Load settings from backend on startup
   useEffect(() => {
@@ -210,27 +270,24 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const saveSettings = async (newSettings: SettingsData) => {
     try {
       await invoke('save_settings', { settings: newSettings })
-
-      // Also store API key in keyring if provided (for AI service compatibility)
-      if (newSettings.openAiApiKey) {
-        try {
-          await invoke('store_api_key', { key: newSettings.openAiApiKey })
-          logger.debug('AppContext', 'API key stored in keyring')
-        } catch (keyError) {
-          logger.warn('AppContext', 'Failed to store API key in keyring', String(keyError))
-          // Don't throw - settings are still saved, just keyring failed
-        }
-      } else if (settings.openAiApiKey && !newSettings.openAiApiKey) {
-        // API key was cleared
-        try {
-          await invoke('clear_api_key')
-          logger.debug('AppContext', 'API key cleared from keyring')
-        } catch (keyError) {
-          logger.warn('AppContext', 'Failed to clear API key from keyring', String(keyError))
-        }
-      }
-
-      setSettings(newSettings)
+      // Credentials are write-only IPC inputs. Once the backend has persisted
+      // them, retain only presence flags in webview memory.
+      const {
+        openAiApiKey,
+        anthropicApiKey,
+        geminiApiKey,
+        deepseekApiKey,
+        customApiKey,
+        ...nonSecretSettings
+      } = newSettings
+      setSettings({
+        ...nonSecretSettings,
+        openAiApiKeySet: openAiApiKey === undefined ? newSettings.openAiApiKeySet : openAiApiKey.trim().length > 0,
+        anthropicApiKeySet: anthropicApiKey === undefined ? newSettings.anthropicApiKeySet : anthropicApiKey.trim().length > 0,
+        geminiApiKeySet: geminiApiKey === undefined ? newSettings.geminiApiKeySet : geminiApiKey.trim().length > 0,
+        deepseekApiKeySet: deepseekApiKey === undefined ? newSettings.deepseekApiKeySet : deepseekApiKey.trim().length > 0,
+        customApiKeySet: customApiKey === undefined ? newSettings.customApiKeySet : customApiKey.trim().length > 0,
+      })
       logger.debug('AppContext', 'Settings saved to backend')
     } catch (error) {
       logger.error('AppContext', 'Failed to save settings', String(error))
@@ -255,14 +312,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     setCurrentProgress,
     currentTaskName,
     setCurrentTaskName,
+    diagnosticsError,
+    setDiagnosticsError,
     taskStatuses,
     setTaskStatuses,
-    showComparison,
-    setShowComparison,
-    searchQuery,
-    setSearchQuery,
-    filteredResults,
-    setFilteredResults,
     scanStartTime,
     setScanStartTime,
     scanEndTime,
@@ -285,6 +338,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     setSelectedDiagnosticId,
     pendingScanReport,
     setPendingScanReport,
+    aiMode,
+    setAIMode,
     pendingChatPrompt,
     setPendingChatPrompt,
   }

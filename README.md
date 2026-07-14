@@ -1,50 +1,42 @@
-# WF Diagnostics v2.5.4 - WindowsForum Diagnostic Tool
+# WF Diagnostics v2.5.5 - WindowsForum Diagnostic Tool
 
 [![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC_BY--NC--ND_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
-[![Version](https://img.shields.io/badge/version-2.5.4-blue.svg)](https://github.com/faratech/wfdiag/releases)
+[![Version](https://img.shields.io/badge/version-2.5.5-blue.svg)](https://github.com/faratech/wfdiag/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightblue.svg)](https://github.com/faratech/wfdiag)
 [![Security](https://img.shields.io/badge/security-hardened-green.svg)](https://github.com/faratech/wfdiag)
 [![AI](https://img.shields.io/badge/AI-Hybrid-purple.svg)](https://github.com/faratech/wfdiag)
 
-A **security-hardened**, modern diagnostic tool built with **Tauri v2** and **React** for Windows systems. Developed by **Fara Technologies LLC** for **WindowsForum.com**. This comprehensive utility features advanced security architecture, encrypted data storage, and a unique **Hybrid AI** analysis engine that leverages both OpenAI and local **Phi Silica** models on Copilot+ PCs.
+A Windows diagnostics application built with Tauri v2, Rust, React, and TypeScript. It combines native system checks, live monitoring, issue detection and guided remediation, encrypted scan history, process inspection, and an optional multi-provider AI assistant.
 
 ## 🚀 Key Features
 
 ### **Core Capabilities**
-- **38+ Diagnostic Tasks** across 8 categories (System, Hardware, Storage, Network, etc.)
+- **46 Diagnostic Tasks** across system, hardware, storage, network, security, software, logs, graphics, drivers, performance, and debugging
 - **Real-time System Monitoring** with live CPU, memory, disk, and network visualization (Non-blocking)
-- **Encrypted Data Storage** using AES-256-GCM with machine-specific keys
-- **Automated Issue Detection** identifies critical problems (low disk space, firewall disabled, etc.)
-- **One-Click Fixes** for common system issues
+- **Encrypted Scan History** protected for the current Windows user with DPAPI
+- **29 Deterministic Issue Rules** with explicit verified, detected, and unknown outcomes
+- **Tiered Remediation** with backend-enforced confirmation for repair operations
 - **Scan History & Comparison** with intelligent change detection
-- **Multiple Export Formats** (JSON, Text, HTML, Forum-formatted)
+- **Process Explorer** with backend filtering, sorting, pagination, pause, and detail lookup
+- **Multiple Export Formats** (JSON, text, HTML, and forum-friendly text)
 
-### **Hybrid AI Architecture** 🧠
-- **Unified AI Service**: Seamlessly switches between Cloud (OpenAI) and Edge (Phi Silica) models.
-- **Local AI (Phi Silica)**: Runs entirely on-device using the NPU on Copilot+ PCs (Windows 11 24H2+).
-- **Cloud AI (OpenAI)**: Fallback integration for standard PCs with function calling support.
-- **Context-Aware Analysis**: Intelligent interpretation of diagnostic results and health scores.
+### **Optional AI Assistant** 🧠
+- **Local/self-hosted options:** Phi Silica in the Microsoft Store build, Foundry Local, Ollama, and custom OpenAI-compatible servers
+- **Subscription bridges:** Codex CLI and Claude Code CLI use their own installed sign-in; wfdiag does not extract or store subscription tokens
+- **Cloud APIs:** OpenAI, Anthropic, Gemini, and DeepSeek with per-provider keys stored outside `settings.json`
+- **Privacy controls:** WindowsForum network grounding is opt-in, and local-to-cloud fallback follows the saved Ask/Allow/Never policy
+- **Two focused views:** Assistant conversation and Scan Report; provider configuration stays in Settings
 
 ### **Security Architecture** 🔒
-- **Command Injection Prevention** with strict command whitelisting (12 allowed commands)
-- **PowerShell Script Filtering** blocks dangerous operations, allows only diagnostic cmdlets
-- **Filesystem Access Restrictions** limited to specific safe directories
-- **Encrypted Local Storage** for sensitive scan data and API keys
-- **Secure OAuth2 Implementation** with PKCE for WindowsForum.com integration
-- **Input Validation & Sanitization** on all user inputs and system commands
+- Diagnostic subprocesses use a closed command allowlist, validated arguments, hidden windows, and timeouts
+- AI chat tools are read-only; repairs always execute through the separate remediation catalog
+- Scan history uses current-user DPAPI protection and atomic file replacement
+- API keys use one DPAPI/keyring entry per provider and are never returned to the webview
+- Tauri capabilities expose only the required core/window operations, notifications, save dialog, and clipboard-write access
 
 ## 📋 Diagnostic Categories
 
-| Category | Tasks | Description |
-|----------|-------|-------------|
-| **System** | 7 | OS info, BIOS, boot config, environment variables, updates |
-| **Hardware** | 6 | CPU, RAM, motherboard, TPM, device enumeration |
-| **Storage** | 5 | Disks, partitions, volumes, fragmentation, SMART health |
-| **Network** | 4 | Adapters, IP config, routing, connectivity, DNS |
-| **Drivers** | 3 | System drivers, versions, digital signatures |
-| **Software** | 6 | Programs, services, Windows features, startup apps |
-| **Logs** | 4 | Event logs, Windows Update history, reliability |
-| **Debug** | 3 | BSOD analysis, crash dumps, system files |
+The registry currently contains 46 checks. `src-tauri/src/diagnostics.rs` is the authoritative task catalog; the UI derives its category counts from that registry instead of maintaining a second list.
 
 ## 🛠️ Architecture
 
@@ -52,46 +44,33 @@ A **security-hardened**, modern diagnostic tool built with **Tauri v2** and **Re
 ┌─────────────────────────────────────────────────────────┐
 │                    Frontend (React + TypeScript)        │
 ├─────────────────────────────────────────────────────────┤
-│  • App.tsx - Main application layout & routing         │
-│  • SystemMonitoring.tsx - Real-time stats dashboard    │
-│  • IssuesTab.tsx - Issue detection & remediation UI    │
-│  • AIInterpretationPanel.tsx - AI analysis display     │
-│  • HealthModel.tsx - System health scoring visualization│
+│  • screens/ - Diagnostics, Monitor, Processes, AI,     │
+│    Issues, and History                                 │
+│  • contexts/ + hooks/ - shared state and behavior      │
+│  • components/ui/ - reusable accessible primitives     │
 ├─────────────────────────────────────────────────────────┤
 │                    Tauri v2 IPC Bridge                 │
 ├─────────────────────────────────────────────────────────┤
 │                Backend (Pure Rust)                     │
 ├─────────────────────────────────────────────────────────┤
-│  • lib.rs - Command exposure & app state management    │
+│  • lib.rs - IPC registration and app lifecycle         │
 │  • diagnostics.rs - Core diagnostic task execution     │
-│  • ai_service.rs - Unified AI provider abstraction     │
-│  • phi_silica.rs - Local AI (Windows App SDK/WinRT)    │
-│  • issue_detector.rs - Automated problem identification│
-│  • security.rs - Command validation & input filtering  │
-│  • encrypted_storage.rs - AES-256-GCM data encryption  │
+│  • native_diagnostics.rs - Windows-specific checks      │
+│  • ai_service.rs + ai_providers/ - provider routing    │
+│  • issue_catalog.rs + issue_detector.rs - issue engine │
+│  • remediation.rs - closed repair catalog              │
+│  • results_storage.rs - encrypted scan history          │
 │  • native_monitor.rs - Real-time performance counters  │
 └─────────────────────────────────────────────────────────┘
 ```
 
-## 🔐 Security Features
-
-### **Command Execution Hardening**
-- **Whitelist-Only Execution**: Only 12 pre-approved system commands
-- **Argument Validation**: Strict parameter checking for each command
-- **PowerShell Protection**: Blocks dangerous cmdlets (Invoke-Expression, Start-Process, etc.)
-
-### **Data Protection**
-- **AES-256-GCM Encryption**: All scan data encrypted at rest
-- **Machine-Specific Keys**: Derived from Windows GUID + user context
-- **DPAPI Integration**: Secure storage for API keys and tokens
-
 ## 📦 Installation & Usage
 
 ### **Prerequisites**
-- **Windows 10/11** (x64)
-- **Rust**: `winget install Rustlang.Rust.GNU`
+- **Windows 10/11** on x64 or ARM64
+- **Rust MSVC toolchain** and Visual Studio C++ build tools for native development
 - **Node.js**: `winget install OpenJS.NodeJS`
-- **(Optional) Copilot+ PC**: Required for local Phi Silica AI features (Windows 11 24H2+)
+- **Optional Phi Silica:** Copilot+ PC, Windows 11 24H2+, and the Microsoft Store package identity
 
 ### **Development Setup**
 ```bash
@@ -108,41 +87,39 @@ npm run tauri dev
 # Build for production
 npm run tauri build
 
-# Build the Microsoft Store/Phi Silica MSIX bundle
-python3 scripts/build-cross.py build-all --build-msix --sign
+# Build the unsigned Microsoft Store/Phi Silica MSIX bundle
+python3 scripts/build-cross.py build-all --build-msix
 ```
 
-The direct Tauri MSIX config (`src-tauri/tauri.msix.conf.json`) is a basic MSIX experiment and is not the Store/Phi Silica package. Store submissions and `systemAIModels` validation must use `scripts/build-cross.py`, which generates the full Store identity manifest and MSIX bundle.
+The Store workflow uploads an unsigned bundle; Microsoft signs the package delivered through the Store. Add `--sign` only when creating a locally sideloadable test bundle. The direct Tauri MSIX config (`src-tauri/tauri.msix.conf.json`) is a basic MSIX experiment and is not the Store/Phi Silica package.
 
 ## 🎯 Tauri Commands API
 
 ### **Core Diagnostics**
 - `start_diagnostics(task_ids)` - Begin diagnostic session
 - `run_diagnostics_parallel(task_ids)` - Batch execution (5 concurrent)
-- `detect_issues()` - Analyze results for specific problems
-- `fix_issue(issue_id)` - Attempt to automatically resolve an issue
+- `detect_issues()` - Return detected and unverified checks
+- `run_remediation(id, confirmed)` - Execute a cataloged remediation with per-step results
 
 ### **AI & Analysis**
-- `ai_get_status()` - Check availability of OpenAI and Phi Silica
-- `ai_analyze_diagnostic(...)` - Interpret specific task results
-- `analyze_with_phi_silica(prompt)` - Direct interaction with local model
-- `ensure_phi_silica()` - Initialize/Download local model
+- `ai_get_status()` - Probe configured/local AI providers
+- `ai_chat_send(...)` / `ai_chat_cancel(...)` - Start or cancel a streamed assistant turn
+- `ai_chat_get_history(...)` - Rehydrate a conversation after navigation
+- `ai_generate_report(...)` - Generate the dedicated scan report
 
 ### **Data Management**
 - `save_current_scan(results)` - Store encrypted scan results
-- `compare_scans(current_id, previous_id)` - Intelligent comparison
+- `compare_scans_summary(...)` / `get_scan_task_diff(...)` - Lazy scan comparison
+- `list_processes(query)` - Paginated and sortable process data
 - `export_results(format)` - Export as JSON/Text/HTML
 
 ## 🧠 AI Capabilities
 
-The tool employs a **Hybrid AI Strategy**:
-
-1.  **Phi Silica (Local):** Prioritized on supported hardware (Copilot+ PCs). It runs locally on the NPU, ensuring privacy and zero latency. It uses the `Microsoft.Windows.AI.Text` API via Windows App SDK.
-2.  **OpenAI (Cloud):** Fallback for standard PCs. Requires an API key. Supports advanced function calling to autonomously select and run diagnostic tasks based on user queries.
+Auto routing is local-first: Phi Silica → Foundry Local → Ollama → custom OpenAI-compatible → Codex CLI → Claude Code → OpenAI → Anthropic → Gemini → DeepSeek. An explicit provider selection never silently routes elsewhere. See `ai_providers::capabilities()` for the authoritative provider capabilities and context budgets.
 
 ## 🔄 Version History
 
-### **v2.5.4 (Current) - Performance & Accuracy Improvements**
+### **v2.5.5 (Current) - Performance & Accuracy Improvements**
 - ✅ **Non-blocking System Monitor**: Decoupled slow polling operations (Disk, NPU) for instant UI responsiveness.
 - ✅ **Network Rate Fix**: Corrected transfer rate calculation to eliminate spikes during startup.
 - ✅ ✅ **Accurate Swap Metrics**: Switched to native PDH counters for true paging file utilization.

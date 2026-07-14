@@ -8,7 +8,7 @@ The version is defined in `/version.json`:
 
 ```json
 {
-  "version": "2.1.1",
+  "version": "2.5.4",
   "name": "WF Diagnostics", 
   "description": "WindowsForum Diagnostic Tool"
 }
@@ -58,9 +58,13 @@ All entry points delegate to `bump-version.py` and update:
 
 ## MSIX Build Paths
 
-Use `python3 scripts/build-cross.py build-all --build-msix --sign` for the Microsoft Store/Phi Silica package. That path generates the Store identity manifest with `runFullTrust`, `systemAIModels`, Windows App Runtime dependency floors, and the architecture-specific MSIX bundle.
+Use `python3 scripts/build-cross.py build-all --build-msix` for the unsigned Microsoft Store/Phi Silica package. That path generates the Store identity manifest with `runFullTrust`, `systemAIModels`, Windows App Runtime dependency floors, and the architecture-specific MSIX bundle. Microsoft signs the package distributed through the Store; `--sign` is only for locally sideloadable test bundles.
 
 `src-tauri/tauri.msix.conf.json` is kept in version sync only for basic Tauri MSIX experiments. Do not use it for Store submissions or Phi Silica validation; Tauri's MSIX config does not represent the Store package manifest used by the release workflow.
+
+`src-tauri/src/windows_ai_bindings.rs` is reviewed, tracked generated source. Ordinary builds never rewrite it. Regenerate it explicitly with `python3 scripts/build-cross.py generate-bindings`, review the diff, and commit the result separately from a release build.
+
+CI and release builds run `scripts/check-version-sync.py` before packaging. It verifies `version.json`, npm and Cargo manifests/locks, both Tauri/MSIX manifests, the frontend displays, and README version markers. Rust build commands use `--locked` so a release cannot silently resolve a different dependency graph.
 
 ## Workflow
 

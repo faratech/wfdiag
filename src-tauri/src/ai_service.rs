@@ -101,6 +101,85 @@ pub enum AIProviderPreference {
     DeepSeek,
 }
 
+/// Explicit Phi selection is meaningful only for a process with registered
+/// package identity. Keep this message shared by settings and request
+/// dispatch so an unpackaged build never degrades into a generic
+/// "no provider" error.
+pub const PHI_SILICA_STORE_REQUIRED: &str = "Phi Silica requires the Microsoft Store version of this app (registered package identity with the systemAIModels capability). Select Auto or another available provider in this build.";
+
+/// Parse the provider preference accepted by settings and the legacy
+/// `ai_set_preference` command. Unknown values retain the historical Auto
+/// fallback instead of making old settings files unreadable.
+pub(crate) fn parse_provider_preference(preference: &str) -> AIProviderPreference {
+    match preference.trim().to_ascii_lowercase().as_str() {
+        "openai" => AIProviderPreference::OpenAI,
+        "phi_silica" | "phisilica" => AIProviderPreference::PhiSilica,
+        "foundry_local" | "foundrylocal" => AIProviderPreference::FoundryLocal,
+        "ollama" => AIProviderPreference::Ollama,
+        "custom_openai" | "custom" => AIProviderPreference::CustomOpenAI,
+        "codex_cli" | "codexcli" | "codex" => AIProviderPreference::CodexCli,
+        "claude_code" | "claudecode" | "claude" => AIProviderPreference::ClaudeCode,
+        "anthropic" => AIProviderPreference::Anthropic,
+        "gemini" => AIProviderPreference::Gemini,
+        "deepseek" => AIProviderPreference::DeepSeek,
+        _ => AIProviderPreference::Auto,
+    }
+}
+
+fn phi_package_identity_available() -> bool {
+    #[cfg(windows)]
+    {
+        crate::sparse_identity::has_package_identity()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn validate_provider_preference_with_identity(
+    preference: AIProviderPreference,
+    has_package_identity: bool,
+) -> Result<AIProviderPreference, String> {
+    if preference == AIProviderPreference::PhiSilica && !has_package_identity {
+        return Err(PHI_SILICA_STORE_REQUIRED.to_string());
+    }
+    Ok(preference)
+}
+
+/// Reject a provider choice that can never run in the current process. This
+/// is deliberately a cheap identity check: readiness remains the normal
+/// provider probe, while a loose executable never enters the WinRT path.
+pub(crate) fn validate_provider_preference(
+    preference: AIProviderPreference,
+) -> Result<AIProviderPreference, String> {
+    validate_provider_preference_with_identity(preference, phi_package_identity_available())
+}
+
+pub(crate) fn parse_and_validate_provider_preference(
+    preference: &str,
+) -> Result<AIProviderPreference, String> {
+    validate_provider_preference(parse_provider_preference(preference))
+}
+
+/// Runtime migration for a stale settings file written by an older loose
+/// build. Do not rewrite the user's file; use Auto for this process and return
+/// that normalized value to the frontend.
+pub(crate) fn provider_preference_for_runtime(preference: &str) -> AIProviderPreference {
+    provider_preference_for_runtime_with_identity(preference, phi_package_identity_available())
+}
+
+fn provider_preference_for_runtime_with_identity(
+    preference: &str,
+    has_package_identity: bool,
+) -> AIProviderPreference {
+    validate_provider_preference_with_identity(
+        parse_provider_preference(preference),
+        has_package_identity,
+    )
+    .unwrap_or(AIProviderPreference::Auto)
+}
+
 /// Context type for different AI analysis scenarios
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -225,14 +304,18 @@ pub async fn check_openai_available() -> bool {
     crate::load_api_key_internal().await.is_some()
 }
 
-/// Check if Phi Silica is available
-pub fn check_phi_silica_available() -> (bool, bool, Option<String>) {
-    let status = crate::phi_silica::is_phi_silica_available();
-    (
-        status.available,
-        status.ready_state.as_deref() == Some("Ready"),
-        Some(status.message),
-    )
+/// Check if Phi Silica is available without blocking an async runtime worker.
+/// The underlying WinRT probe may create a LanguageModel and wait for a COM
+/// operation, so all service callers must use the spawn_blocking-backed command.
+pub async fn check_phi_silica_available() -> (bool, bool, Option<String>) {
+    match crate::phi_silica::check_phi_silica_available().await {
+        Ok(status) => (
+            status.available,
+            status.ready_state.as_deref() == Some("Ready"),
+            Some(status.message),
+        ),
+        Err(error) => (false, false, Some(error)),
+    }
 }
 
 /// Check if a local OpenAI-compatible endpoint (Foundry Local) is reachable.
@@ -380,18 +463,15 @@ pub fn route_provider(pref: AIProviderPreference, avail: ProviderAvailability) -
 /// Determine the active provider based on preference and availability.
 /// Probes lazily in priority order — the Foundry probe shells out and the
 /// Ollama/custom probes open sockets, so none of them run once an earlier
-/// provider has already won. `frontend_openai_key` marks an OpenAI key passed
-/// per-call from the frontend (counts as OpenAI availability, nothing more).
-pub async fn determine_active_provider_with_key(
-    pref: AIProviderPreference,
-    frontend_openai_key: bool,
-) -> AIProvider {
+/// provider has already won. Credentials are detected in backend secure
+/// storage only.
+pub async fn determine_active_provider(pref: AIProviderPreference) -> AIProvider {
     let mut avail = ProviderAvailability::default();
     match pref {
         AIProviderPreference::OpenAI => {
-            avail.openai = frontend_openai_key || check_openai_available().await;
+            avail.openai = check_openai_available().await;
         }
-        AIProviderPreference::PhiSilica => avail.phi = check_phi_silica_available().1,
+        AIProviderPreference::PhiSilica => avail.phi = check_phi_silica_available().await.1,
         AIProviderPreference::FoundryLocal => {
             avail.foundry = check_foundry_local_available().await.is_some();
         }
@@ -407,7 +487,7 @@ pub async fn determine_active_provider_with_key(
         AIProviderPreference::Gemini => avail.gemini = check_gemini_available().await,
         AIProviderPreference::DeepSeek => avail.deepseek = check_deepseek_available().await,
         AIProviderPreference::Auto => {
-            avail.phi = check_phi_silica_available().1;
+            avail.phi = check_phi_silica_available().await.1;
             avail.foundry = !avail.phi && check_foundry_local_available().await.is_some();
             let local_won = avail.phi || avail.foundry;
             avail.ollama = !local_won && check_ollama_available().await.is_some();
@@ -418,7 +498,7 @@ pub async fn determine_active_provider_with_key(
             let won = won || avail.codex;
             avail.claude = !won && check_claude_code_available().await;
             let won = won || avail.claude;
-            avail.openai = !won && (frontend_openai_key || check_openai_available().await);
+            avail.openai = !won && check_openai_available().await;
             let won = won || avail.openai;
             avail.anthropic = !won && check_anthropic_available().await;
             let won = won || avail.anthropic;
@@ -439,21 +519,14 @@ pub async fn determine_active_provider_with_key(
 pub async fn next_auto_provider(
     pref: AIProviderPreference,
     tried: &[AIProvider],
-    frontend_openai_key: bool,
 ) -> Option<AIProvider> {
     if pref != AIProviderPreference::Auto {
         return None;
     }
+    if let Some(local) = next_auto_local_provider(pref, tried).await {
+        return Some(local);
+    }
     let untried = |p: AIProvider| !tried.contains(&p);
-    if untried(AIProvider::PhiSilica) && check_phi_silica_available().1 {
-        return Some(AIProvider::PhiSilica);
-    }
-    if untried(AIProvider::FoundryLocal) && check_foundry_local_available().await.is_some() {
-        return Some(AIProvider::FoundryLocal);
-    }
-    if untried(AIProvider::Ollama) && check_ollama_available().await.is_some() {
-        return Some(AIProvider::Ollama);
-    }
     if untried(AIProvider::CustomOpenAI) && check_custom_available().await.is_some() {
         return Some(AIProvider::CustomOpenAI);
     }
@@ -463,7 +536,7 @@ pub async fn next_auto_provider(
     if untried(AIProvider::ClaudeCode) && check_claude_code_available().await {
         return Some(AIProvider::ClaudeCode);
     }
-    if untried(AIProvider::OpenAI) && (frontend_openai_key || check_openai_available().await) {
+    if untried(AIProvider::OpenAI) && check_openai_available().await {
         return Some(AIProvider::OpenAI);
     }
     if untried(AIProvider::Anthropic) && check_anthropic_available().await {
@@ -474,6 +547,29 @@ pub async fn next_auto_provider(
     }
     if untried(AIProvider::DeepSeek) && check_deepseek_available().await {
         return Some(AIProvider::DeepSeek);
+    }
+    None
+}
+
+/// The next private Auto provider only. This deliberately stops before any
+/// custom/subscription/API-cloud probes so surfaces without a typed consent
+/// flow can retry locally without even touching the cloud fallback path.
+pub async fn next_auto_local_provider(
+    pref: AIProviderPreference,
+    tried: &[AIProvider],
+) -> Option<AIProvider> {
+    if pref != AIProviderPreference::Auto {
+        return None;
+    }
+    let untried = |provider: AIProvider| !tried.contains(&provider);
+    if untried(AIProvider::PhiSilica) && check_phi_silica_available().await.1 {
+        return Some(AIProvider::PhiSilica);
+    }
+    if untried(AIProvider::FoundryLocal) && check_foundry_local_available().await.is_some() {
+        return Some(AIProvider::FoundryLocal);
+    }
+    if untried(AIProvider::Ollama) && check_ollama_available().await.is_some() {
+        return Some(AIProvider::Ollama);
     }
     None
 }
@@ -502,7 +598,7 @@ pub async fn get_ai_status() -> AIProviderStatus {
     let pref = get_user_preference();
     let settings = crate::commands::settings::read_settings_from_disk().unwrap_or_default();
     let openai_available = check_openai_available().await;
-    let (phi_available, phi_ready, phi_message) = check_phi_silica_available();
+    let (phi_available, phi_ready, phi_message) = check_phi_silica_available().await;
     let foundry_endpoint = check_foundry_local_available().await;
     let ollama_endpoint = check_ollama_available().await;
     let custom_endpoint = check_custom_available().await;
@@ -750,104 +846,147 @@ fn one_shot_effective_data_budget(
     }
 }
 
-/// Analyze with the appropriate provider
-/// If api_key is provided, it counts as OpenAI availability for routing
+/// Analyze with the appropriate provider. Credentials are resolved
+/// exclusively from backend secure storage.
 pub async fn analyze(
     request: AIRequest,
     session_id: &str,
-    api_key: Option<String>,
     force_refresh: bool,
 ) -> Result<AIResponse, String> {
-    // Determine the provider first — it is part of the cache key
     let pref = get_user_preference();
-    let frontend_key = api_key.as_deref().is_some_and(|k| !k.is_empty());
-    let provider = determine_active_provider_with_key(pref, frontend_key).await;
-    let cfg = crate::ai_providers::resolve_config(provider, api_key).await?;
-    let config_fingerprint = provider_config_fingerprint(provider, &cfg);
-    let data_budget = one_shot_data_budget(provider);
+    let mut provider = determine_active_provider(pref).await;
+    let mut tried = Vec::new();
+    let mut failures = Vec::new();
+    // Resolve live grounding at most once for the logical request. A provider
+    // retry must never turn into a second WindowsForum MCP call.
+    let mut grounding_resolved = false;
+    let mut grounding: Option<crate::ai_grounding::AnalysisGrounding> = None;
 
-    let grounding = if provider == AIProvider::None {
-        None
-    } else {
-        crate::ai_grounding::analysis_grounding(
-            request.context_type,
-            request
-                .task_name
-                .as_deref()
-                .or(request.section_name.as_deref()),
-            &request.data,
-            one_shot_grounding_budget(provider, data_budget),
-        )
-        .await
-    };
-    let grounding_context = grounding
-        .as_ref()
-        .and_then(|grounding| grounding.prompt_context.as_deref());
-    let grounding_trace = grounding.as_ref().map(|grounding| grounding.trace.clone());
+    loop {
+        tried.push(provider);
+        let attempt = match crate::ai_providers::resolve_config(provider).await {
+            Err(error) => Err(error),
+            Ok(cfg) => {
+                let config_fingerprint = provider_config_fingerprint(provider, &cfg);
+                let base_data_budget = one_shot_data_budget(provider);
+                if !grounding_resolved {
+                    grounding = crate::ai_grounding::analysis_grounding(
+                        request.context_type,
+                        request
+                            .task_name
+                            .as_deref()
+                            .or(request.section_name.as_deref()),
+                        &request.data,
+                        one_shot_grounding_budget(provider, base_data_budget),
+                    )
+                    .await;
+                    grounding_resolved = true;
+                }
+                let grounding_context = grounding
+                    .as_ref()
+                    .and_then(|value| value.prompt_context.as_deref());
+                let grounding_trace = grounding.as_ref().map(|value| value.trace.clone());
+                let cache_key = generate_cache_key(
+                    &request,
+                    session_id,
+                    provider,
+                    &config_fingerprint,
+                    grounding_context,
+                );
+                let cached = if force_refresh {
+                    None
+                } else {
+                    get_cache()
+                        .lock()
+                        .ok()
+                        .and_then(|mut cache| cache.get(&cache_key))
+                };
+                if let Some(interpretation) = cached {
+                    return Ok(AIResponse {
+                        interpretation,
+                        provider_used: provider,
+                        cached: true,
+                        grounding: grounding_trace,
+                        error: None,
+                    });
+                }
 
-    let cache_key = generate_cache_key(
-        &request,
-        session_id,
-        provider,
-        &config_fingerprint,
-        grounding_context,
-    );
-    if !force_refresh
-        && let Ok(mut cache) = get_cache().lock()
-        && let Some(cached) = cache.get(&cache_key)
-    {
-        return Ok(AIResponse {
-            interpretation: cached.clone(),
-            provider_used: provider,
-            cached: true,
-            grounding: grounding_trace,
-            error: None,
-        });
-    }
+                let data_budget =
+                    one_shot_effective_data_budget(provider, base_data_budget, grounding_context);
+                let prompt = match request.context_type {
+                    ContextType::DiagnosticInterpretation => {
+                        ai_prompts::diagnostic_interpretation_prompt(
+                            request.task_name.as_deref().unwrap_or("Unknown"),
+                            &request.data,
+                            data_budget,
+                        )
+                    }
+                    ContextType::SectionSummary => ai_prompts::section_summary_prompt(
+                        request.section_name.as_deref().unwrap_or("System"),
+                        &request.data,
+                        data_budget,
+                    ),
+                    ContextType::HealthScoreExplanation => {
+                        ai_prompts::health_explanation_prompt(&request.data, data_budget)
+                    }
+                    ContextType::IssuePrioritization => {
+                        ai_prompts::issue_prioritization_prompt(&request.data, data_budget)
+                    }
+                    ContextType::GeneralAnalysis => request.data.clone(),
+                };
+                let prompt = ai_prompts::attach_grounding(prompt, grounding_context);
 
-    // Generate prompt based on context type, sized to the provider's budget
-    let data_budget = one_shot_effective_data_budget(provider, data_budget, grounding_context);
-    let prompt = match request.context_type {
-        ContextType::DiagnosticInterpretation => ai_prompts::diagnostic_interpretation_prompt(
-            request.task_name.as_deref().unwrap_or("Unknown"),
-            &request.data,
-            data_budget,
-        ),
-        ContextType::SectionSummary => ai_prompts::section_summary_prompt(
-            request.section_name.as_deref().unwrap_or("System"),
-            &request.data,
-            data_budget,
-        ),
-        ContextType::HealthScoreExplanation => {
-            ai_prompts::health_explanation_prompt(&request.data, data_budget)
+                match crate::ai_providers::one_shot(provider, &cfg, SYSTEM_PROMPT, &prompt).await {
+                    Ok(interpretation) if !interpretation.trim().is_empty() => {
+                        if let Ok(mut cache) = get_cache().lock() {
+                            cache.insert(cache_key, interpretation.clone());
+                        }
+                        Ok(AIResponse {
+                            interpretation,
+                            provider_used: provider,
+                            cached: false,
+                            grounding: grounding_trace,
+                            error: None,
+                        })
+                    }
+                    Ok(_) => Err(format!("{} returned an empty analysis", provider)),
+                    Err(error) => Err(error),
+                }
+            }
+        };
+
+        match attempt {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                // Explicit provider choices never fall back. Auto may recover
+                // from Phi/Foundry onto the next private local provider, but
+                // one-shot surfaces have no typed consent UI and therefore
+                // never cross the local-to-cloud boundary on a retry.
+                let can_try_local = pref == AIProviderPreference::Auto
+                    && matches!(provider, AIProvider::PhiSilica | AIProvider::FoundryLocal);
+                if !can_try_local {
+                    if failures.is_empty() {
+                        return Err(error);
+                    }
+                    failures.push(format!("{provider}: {error}"));
+                    return Err(format!(
+                        "Eligible local AI providers failed: {}",
+                        failures.join("; ")
+                    ));
+                }
+                failures.push(format!("{provider}: {error}"));
+                match next_auto_local_provider(pref, &tried).await {
+                    Some(next) => provider = next,
+                    _ => {
+                        return Err(format!(
+                            "Eligible local AI providers failed: {}",
+                            failures.join("; ")
+                        ));
+                    }
+                }
+            }
         }
-        ContextType::IssuePrioritization => {
-            ai_prompts::issue_prioritization_prompt(&request.data, data_budget)
-        }
-        ContextType::GeneralAnalysis => request.data.clone(),
-    };
-    let prompt = ai_prompts::attach_grounding(prompt, grounding_context);
-
-    // Call the provider client with the config already used for the cache key.
-    let result = crate::ai_providers::one_shot(provider, &cfg, SYSTEM_PROMPT, &prompt).await;
-
-    // Cache successful, non-empty results. Some providers return Ok("") on a
-    // refusal or empty completion instead of an error — caching that would
-    // serve a blank analysis for the cache's full TTL.
-    if let Ok(ref interpretation) = result
-        && !interpretation.is_empty()
-        && let Ok(mut cache) = get_cache().lock()
-    {
-        cache.insert(cache_key, interpretation.clone());
     }
-
-    result.map(|interpretation| AIResponse {
-        interpretation,
-        provider_used: provider,
-        cached: false,
-        grounding: grounding_trace,
-        error: None,
-    })
 }
 
 /// Read the shared AI response cache (used by the scan report).
@@ -890,7 +1029,6 @@ pub async fn ai_analyze_diagnostic(
     task_name: String,
     diagnostic_output: String,
     session_id: String,
-    api_key: Option<String>,
     force_refresh: Option<bool>,
 ) -> Result<AIResponse, String> {
     let request = AIRequest {
@@ -901,13 +1039,7 @@ pub async fn ai_analyze_diagnostic(
         section_name: None,
     };
 
-    analyze(
-        request,
-        &session_id,
-        api_key,
-        force_refresh.unwrap_or(false),
-    )
-    .await
+    analyze(request, &session_id, force_refresh.unwrap_or(false)).await
 }
 
 /// Analyze a section (Hardware, System, Storage, Network)
@@ -916,7 +1048,6 @@ pub async fn ai_analyze_section(
     section_name: String,
     section_data: String,
     session_id: String,
-    api_key: Option<String>,
     force_refresh: Option<bool>,
 ) -> Result<AIResponse, String> {
     let request = AIRequest {
@@ -927,13 +1058,7 @@ pub async fn ai_analyze_section(
         section_name: Some(section_name),
     };
 
-    analyze(
-        request,
-        &session_id,
-        api_key,
-        force_refresh.unwrap_or(false),
-    )
-    .await
+    analyze(request, &session_id, force_refresh.unwrap_or(false)).await
 }
 
 /// Explain health scores
@@ -941,7 +1066,6 @@ pub async fn ai_analyze_section(
 pub async fn ai_explain_health(
     metrics_data: String,
     session_id: String,
-    api_key: Option<String>,
     force_refresh: Option<bool>,
 ) -> Result<AIResponse, String> {
     let request = AIRequest {
@@ -952,31 +1076,13 @@ pub async fn ai_explain_health(
         section_name: None,
     };
 
-    analyze(
-        request,
-        &session_id,
-        api_key,
-        force_refresh.unwrap_or(false),
-    )
-    .await
+    analyze(request, &session_id, force_refresh.unwrap_or(false)).await
 }
 
 /// Set AI provider preference
 #[tauri::command]
 pub async fn ai_set_preference(preference: String) -> Result<(), String> {
-    let pref = match preference.to_lowercase().as_str() {
-        "openai" => AIProviderPreference::OpenAI,
-        "phi_silica" | "phisilica" => AIProviderPreference::PhiSilica,
-        "foundry_local" | "foundrylocal" => AIProviderPreference::FoundryLocal,
-        "ollama" => AIProviderPreference::Ollama,
-        "custom_openai" | "custom" => AIProviderPreference::CustomOpenAI,
-        "codex_cli" | "codexcli" | "codex" => AIProviderPreference::CodexCli,
-        "claude_code" | "claudecode" | "claude" => AIProviderPreference::ClaudeCode,
-        "anthropic" => AIProviderPreference::Anthropic,
-        "gemini" => AIProviderPreference::Gemini,
-        "deepseek" => AIProviderPreference::DeepSeek,
-        _ => AIProviderPreference::Auto,
-    };
+    let pref = parse_and_validate_provider_preference(&preference)?;
     set_user_preference(pref);
     Ok(())
 }
@@ -987,7 +1093,6 @@ pub async fn ai_set_preference(preference: String) -> Result<(), String> {
 pub async fn ai_prioritize_issues(
     issues_data: String,
     session_id: String,
-    api_key: Option<String>,
     force_refresh: Option<bool>,
 ) -> Result<AIResponse, String> {
     let request = AIRequest {
@@ -997,13 +1102,7 @@ pub async fn ai_prioritize_issues(
         task_name: None,
         section_name: None,
     };
-    analyze(
-        request,
-        &session_id,
-        api_key,
-        force_refresh.unwrap_or(false),
-    )
-    .await
+    analyze(request, &session_id, force_refresh.unwrap_or(false)).await
 }
 
 /// Clear AI cache
@@ -1034,6 +1133,67 @@ Guidelines:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_preference_parser_is_shared_and_backwards_compatible() {
+        assert_eq!(
+            parse_provider_preference(" PhiSilica "),
+            AIProviderPreference::PhiSilica
+        );
+        assert_eq!(
+            parse_provider_preference("codex"),
+            AIProviderPreference::CodexCli
+        );
+        assert_eq!(
+            parse_provider_preference("future_provider"),
+            AIProviderPreference::Auto
+        );
+    }
+
+    #[test]
+    fn explicit_phi_without_package_identity_is_rejected_precisely() {
+        let error =
+            validate_provider_preference_with_identity(AIProviderPreference::PhiSilica, false)
+                .unwrap_err();
+        assert_eq!(error, PHI_SILICA_STORE_REQUIRED);
+        assert!(error.contains("Microsoft Store"));
+        assert!(error.contains("registered package identity"));
+    }
+
+    #[test]
+    fn provider_validation_allows_phi_with_identity_and_other_choices_without_it() {
+        assert_eq!(
+            validate_provider_preference_with_identity(AIProviderPreference::PhiSilica, true),
+            Ok(AIProviderPreference::PhiSilica)
+        );
+        for preference in [
+            AIProviderPreference::Auto,
+            AIProviderPreference::FoundryLocal,
+            AIProviderPreference::CodexCli,
+            AIProviderPreference::OpenAI,
+        ] {
+            assert_eq!(
+                validate_provider_preference_with_identity(preference, false),
+                Ok(preference)
+            );
+        }
+    }
+
+    #[test]
+    fn stale_phi_preference_normalizes_to_auto_only_without_identity() {
+        assert_eq!(
+            provider_preference_for_runtime_with_identity("phi_silica", false),
+            AIProviderPreference::Auto
+        );
+        assert_eq!(
+            provider_preference_for_runtime_with_identity("phi_silica", true),
+            AIProviderPreference::PhiSilica
+        );
+        assert_eq!(
+            provider_preference_for_runtime_with_identity("codex_cli", false),
+            AIProviderPreference::CodexCli
+        );
+    }
 
     /// Everything available
     fn all() -> ProviderAvailability {

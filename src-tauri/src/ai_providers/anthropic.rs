@@ -103,13 +103,22 @@ pub(crate) fn build_messages_body(
     body
 }
 
-fn map_stop_reason(stop_reason: Option<&str>, has_tool_calls: bool) -> FinishReason {
+fn map_stop_reason(
+    stop_reason: Option<&str>,
+    has_tool_calls: bool,
+) -> Result<FinishReason, String> {
     match stop_reason {
-        Some("refusal") => FinishReason::Refusal,
-        Some("tool_use") => FinishReason::ToolUse,
-        Some("max_tokens") => FinishReason::MaxTokens,
-        _ if has_tool_calls => FinishReason::ToolUse,
-        _ => FinishReason::Stop,
+        Some("refusal") => Ok(FinishReason::Refusal),
+        Some("tool_use") => Ok(FinishReason::ToolUse),
+        Some("max_tokens" | "model_context_window_exceeded") => Ok(FinishReason::MaxTokens),
+        Some("end_turn" | "stop_sequence") if has_tool_calls => Ok(FinishReason::ToolUse),
+        Some("end_turn" | "stop_sequence") => Ok(FinishReason::Stop),
+        Some("pause_turn") => Err(
+            "Anthropic paused the turn before completion; this client does not use server tools"
+                .to_string(),
+        ),
+        Some(other) => Err(format!("Anthropic returned unknown stop reason '{other}'")),
+        None => Err("Anthropic response ended without a stop reason".to_string()),
     }
 }
 
@@ -144,18 +153,30 @@ pub(crate) fn parse_message_response(v: &Value) -> Result<ChatTurn, String> {
                     }
                 }
                 Some("tool_use") => {
+                    let id = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.trim().is_empty())
+                        .ok_or_else(|| {
+                            "Anthropic returned a tool_use block without an id".to_string()
+                        })?;
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .filter(|name| !name.trim().is_empty())
+                        .ok_or_else(|| {
+                            "Anthropic returned a tool_use block without a name".to_string()
+                        })?;
+                    let arguments = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                    if !arguments.is_object() {
+                        return Err(format!(
+                            "Anthropic returned non-object arguments for {name}"
+                        ));
+                    }
                     tool_calls.push(ToolCall {
-                        id: block
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                        name: block
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                        arguments: block.get("input").cloned().unwrap_or_else(|| json!({})),
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        arguments,
                     });
                 }
                 _ => {}
@@ -163,7 +184,10 @@ pub(crate) fn parse_message_response(v: &Value) -> Result<ChatTurn, String> {
         }
     }
 
-    let finished = map_stop_reason(stop_reason, !tool_calls.is_empty());
+    let finished = map_stop_reason(stop_reason, !tool_calls.is_empty())?;
+    if text.trim().is_empty() && tool_calls.is_empty() && finished != FinishReason::Refusal {
+        return Err("Anthropic completed without text or tool calls".to_string());
+    }
     Ok(ChatTurn {
         text,
         tool_calls,
@@ -237,10 +261,14 @@ pub async fn one_shot(
         .await
         .map_err(|e| format!("Unexpected Anthropic response: {}", e))?;
     let turn = parse_message_response(&v)?;
-    if turn.finished == FinishReason::Refusal {
-        return Err("Anthropic declined to answer this request.".to_string());
+    match turn.finished {
+        FinishReason::Stop if !turn.text.trim().is_empty() => Ok(turn.text),
+        FinishReason::MaxTokens => {
+            Err("Anthropic response was truncated before completion".to_string())
+        }
+        FinishReason::Refusal => Err("Anthropic declined to answer this request.".to_string()),
+        _ => Err("Anthropic returned an unexpected one-shot response".to_string()),
     }
-    Ok(turn.text)
 }
 
 /// Streaming chat with optional tools. Text deltas go through `tx`; tool
@@ -278,25 +306,37 @@ pub async fn chat_stream(
     sse::for_each_event(response, |event, data| {
         match event {
             "content_block_start" => {
-                let v: Value = serde_json::from_str(data).unwrap_or_default();
+                let v: Value = serde_json::from_str(data).map_err(|error| {
+                    format!("Malformed Anthropic content_block_start event: {error}")
+                })?;
                 if v.pointer("/content_block/type").and_then(Value::as_str) == Some("tool_use") {
-                    let index = v.get("index").and_then(Value::as_u64).unwrap_or_default();
+                    let index = v
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| "Anthropic tool_use block omitted its index".to_string())?;
                     let id = v
                         .pointer("/content_block/id")
                         .and_then(Value::as_str)
-                        .unwrap_or_default()
+                        .filter(|id| !id.trim().is_empty())
+                        .ok_or_else(|| "Anthropic tool_use block omitted its id".to_string())?
                         .to_string();
                     let name = v
                         .pointer("/content_block/name")
                         .and_then(Value::as_str)
-                        .unwrap_or_default()
+                        .filter(|name| !name.trim().is_empty())
+                        .ok_or_else(|| "Anthropic tool_use block omitted its name".to_string())?
                         .to_string();
                     open_tools.insert(index, (id, name, String::new()));
                 }
             }
             "content_block_delta" => {
-                let v: Value = serde_json::from_str(data).unwrap_or_default();
-                let index = v.get("index").and_then(Value::as_u64).unwrap_or_default();
+                let v: Value = serde_json::from_str(data).map_err(|error| {
+                    format!("Malformed Anthropic content_block_delta event: {error}")
+                })?;
+                let index = v
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| "Anthropic content delta omitted its index".to_string())?;
                 match v.pointer("/delta/type").and_then(Value::as_str) {
                     Some("text_delta") => {
                         if let Some(t) = v.pointer("/delta/text").and_then(Value::as_str) {
@@ -318,28 +358,44 @@ pub async fn chat_stream(
                 }
             }
             "content_block_stop" => {
-                let v: Value = serde_json::from_str(data).unwrap_or_default();
-                let index = v.get("index").and_then(Value::as_u64).unwrap_or_default();
+                let v: Value = serde_json::from_str(data).map_err(|error| {
+                    format!("Malformed Anthropic content_block_stop event: {error}")
+                })?;
+                let index = v
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| "Anthropic content block stop omitted its index".to_string())?;
                 if let Some((id, name, input)) = open_tools.remove(&index) {
+                    let arguments = if input.is_empty() {
+                        json!({})
+                    } else {
+                        serde_json::from_str(&input).map_err(|error| {
+                            format!("Anthropic returned invalid JSON arguments for {name}: {error}")
+                        })?
+                    };
                     tool_calls.push(ToolCall {
                         id,
                         name,
-                        arguments: serde_json::from_str(&input).unwrap_or_else(|_| json!({})),
+                        arguments,
                     });
                 }
             }
             "message_delta" => {
-                let v: Value = serde_json::from_str(data).unwrap_or_default();
-                if let Some(reason) = v.pointer("/delta/stop_reason").and_then(Value::as_str) {
-                    stop_reason = Some(reason.to_string());
-                }
+                let v: Value = serde_json::from_str(data)
+                    .map_err(|error| format!("Malformed Anthropic message_delta event: {error}"))?;
+                let reason = v
+                    .pointer("/delta/stop_reason")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "Anthropic message_delta omitted stop_reason".to_string())?;
+                stop_reason = Some(reason.to_string());
             }
             "message_stop" => {
                 saw_message_stop = true;
                 return Ok(false);
             }
             "error" => {
-                let v: Value = serde_json::from_str(data).unwrap_or_default();
+                let v: Value = serde_json::from_str(data)
+                    .map_err(|error| format!("Malformed Anthropic error event: {error}"))?;
                 let message = v
                     .pointer("/error/message")
                     .and_then(Value::as_str)
@@ -363,8 +419,17 @@ pub async fn chat_stream(
                 .to_string(),
         );
     }
+    if !open_tools.is_empty() {
+        return Err("Anthropic stream ended with an unfinished tool call".to_string());
+    }
 
-    let finished = map_stop_reason(stop_reason.as_deref(), !tool_calls.is_empty());
+    let finished = map_stop_reason(stop_reason.as_deref(), !tool_calls.is_empty())?;
+    if finished == FinishReason::Refusal {
+        return Err("Anthropic declined to answer this request".to_string());
+    }
+    if text.trim().is_empty() && tool_calls.is_empty() && finished != FinishReason::Refusal {
+        return Err("Anthropic completed without text or tool calls".to_string());
+    }
     Ok(ChatTurn {
         text,
         tool_calls,
@@ -466,6 +531,45 @@ mod tests {
             parse_message_response(&v)
                 .unwrap_err()
                 .contains("Overloaded")
+        );
+    }
+
+    #[test]
+    fn stop_reasons_distinguish_truncation_pause_and_unknown_values() {
+        assert_eq!(
+            map_stop_reason(Some("model_context_window_exceeded"), false).unwrap(),
+            FinishReason::MaxTokens
+        );
+        assert!(
+            map_stop_reason(Some("pause_turn"), false)
+                .unwrap_err()
+                .contains("paused")
+        );
+        assert!(map_stop_reason(Some("future_reason"), false).is_err());
+        assert!(map_stop_reason(None, false).is_err());
+    }
+
+    #[test]
+    fn malformed_tool_blocks_are_rejected_instead_of_defaulted() {
+        let missing_id = json!({
+            "content": [{"type": "tool_use", "name": "run_diagnostic", "input": {}}],
+            "stop_reason": "tool_use"
+        });
+        assert!(parse_message_response(&missing_id).is_err());
+
+        let wrong_input = json!({
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "run_diagnostic",
+                "input": "not an object"
+            }],
+            "stop_reason": "tool_use"
+        });
+        assert!(
+            parse_message_response(&wrong_input)
+                .unwrap_err()
+                .contains("non-object")
         );
     }
 }

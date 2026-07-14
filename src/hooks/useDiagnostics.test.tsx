@@ -43,6 +43,7 @@ function makeContext(exportFormat: 'text' | 'json' | 'html' = 'text') {
     results: {},
     settings: { exportFormat },
     setIssues: vi.fn(),
+    setDiagnosticsError: vi.fn(),
   }
 }
 

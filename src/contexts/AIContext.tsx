@@ -159,6 +159,12 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   // Track previous settings to detect changes
   const prevSettingsRef = useRef<{ availabilityKey?: string; provider?: string }>({})
   const analysisGenerationRef = useRef(0)
+  // Provider changes and status reads form one ordered control-plane
+  // transaction. A slow status response for the old provider must never
+  // overwrite a newer selection, and a status read must not race ahead of the
+  // backend preference update it is meant to describe.
+  const statusRequestGenerationRef = useRef(0)
+  const preferenceSyncRef = useRef<Promise<void>>(Promise.resolve())
 
   // Use settings from AppContext (with defaults)
   const aiEnabled = settings.aiEnabled ?? true
@@ -167,7 +173,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   // Derived state used by the frontend mirror below. The OpenAI key in settings
   // counts while status is refreshing because one-shot calls pass it to the backend.
   const backendAvailable = !!aiStatus && aiStatus.active_provider !== 'none'
-  const hasSettingsApiKey = !!settings.openAiApiKey
+  const hasSettingsApiKey = !!settings.openAiApiKey || !!settings.openAiApiKeySet
 
   // Determine the active provider — a frontend mirror of the backend's
   // route_provider(): explicit preference never falls back; Auto walks the
@@ -199,8 +205,8 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
   const isAIAvailable = activeProvider !== 'none'
 
   // Pure status fetch: returns a safe fallback on error and never calls
-  // setState. Keeping the setState out of here lets the mount effect apply the
-  // result inline (after the await), off the synchronous-setState-in-effect path.
+  // setState. The generation-guarded callers below decide whether a response
+  // is still current before publishing it.
   const loadStatus = useCallback(async (): Promise<AIProviderStatus> => {
     try {
       const status = await invoke<AIProviderStatus>('ai_get_status')
@@ -220,31 +226,18 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     }
   }, [])
 
-  const fetchStatus = useCallback(async () => {
-    setAiStatus(await loadStatus())
+  // User-initiated refreshes join any provider update already in flight and
+  // supersede older status requests. Only the newest request may publish.
+  const refreshStatus = useCallback(async () => {
+    const generation = ++statusRequestGenerationRef.current
+    setIsLoading(true)
+    await preferenceSyncRef.current
+    if (generation !== statusRequestGenerationRef.current) return
+    const status = await loadStatus()
+    if (generation !== statusRequestGenerationRef.current) return
+    setAiStatus(status)
     setIsLoading(false)
   }, [loadStatus])
-
-  // User/settings-initiated refresh: surface the loading state immediately,
-  // then fetch.
-  const refreshStatus = useCallback(async () => {
-    setIsLoading(true)
-    await fetchStatus()
-  }, [fetchStatus])
-
-  // Initial status load once settings are loaded. `isLoading` already starts
-  // true; applying the result inside the promise callback (post-await) keeps it
-  // off the synchronous-setState-in-effect path.
-  useEffect(() => {
-    if (!settingsLoaded) return
-    let cancelled = false
-    void loadStatus().then(status => {
-      if (cancelled) return
-      setAiStatus(status)
-      setIsLoading(false)
-    })
-    return () => { cancelled = true }
-  }, [settingsLoaded, loadStatus])
 
   // Refresh status when relevant settings change
   useEffect(() => {
@@ -252,14 +245,19 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
 
     const availabilityKey = [
       settings.openAiApiKey || '',
+      settings.openAiApiKeySet ? '1' : '',
       settings.openAiModel || '',
       settings.anthropicApiKey || '',
+      settings.anthropicApiKeySet ? '1' : '',
       settings.anthropicModel || '',
       settings.geminiApiKey || '',
+      settings.geminiApiKeySet ? '1' : '',
       settings.geminiModel || '',
       settings.deepseekApiKey || '',
+      settings.deepseekApiKeySet ? '1' : '',
       settings.deepseekModel || '',
       settings.customApiKey || '',
+      settings.customApiKeySet ? '1' : '',
       settings.customEndpoint || '',
       settings.customModel || '',
       settings.ollamaEndpoint || '',
@@ -271,6 +269,8 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       settings.localAiEndpoint || '',
       settings.localAiModel || '',
       settings.phiSilicaLafToken || '',
+      settings.networkGroundingEnabled ? '1' : '0',
+      settings.cloudFallbackPolicy || 'ask',
     ].join('\u0001')
     const currentProvider = settings.preferredAIProvider || 'auto'
     const prevAvailabilityKey = prevSettingsRef.current.availabilityKey || ''
@@ -280,6 +280,14 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     if (availabilityKey !== prevAvailabilityKey || currentProvider !== prevProvider) {
       logger.debug('AIContext', 'AI settings changed, refreshing status')
       prevSettingsRef.current = { availabilityKey, provider: currentProvider }
+      const generation = ++statusRequestGenerationRef.current
+      let cancelled = false
+
+      // Do this in the same effect turn as the settings change. Clearing the
+      // old snapshot prevents a newly selected provider from being authorized
+      // by availability data that belonged to the previous selection.
+      setIsLoading(true)
+      setAiStatus(null)
       if (prevAvailabilityKey || currentProvider !== prevProvider) {
         analysisGenerationRef.current++
         setIsAnalyzing({})
@@ -289,36 +297,53 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         inFlightRef.current.clear()
       }
 
-      // Update backend preference if it changed
+      // Serialize preference writes. Rapid A -> B -> C changes must reach the
+      // backend in that order, and the status fetch for C waits for the whole
+      // chain before asking which provider is active.
       if (currentProvider !== prevProvider) {
-        invoke('ai_set_preference', { preference: currentProvider }).catch((error) => {
-          logger.error('AIContext', 'Failed to set AI preference', String(error))
-          // Store error in context state for UI consumption
-          const errorMsg = error instanceof Error ? error.message : String(error)
-          setErrors((prev) => ({
-            ...prev,
-            'preference:update': `Failed to update AI preference: ${errorMsg}`,
-          }))
+        preferenceSyncRef.current = preferenceSyncRef.current.then(async () => {
+          try {
+            await invoke('ai_set_preference', { preference: currentProvider })
+          } catch (error) {
+            logger.error('AIContext', 'Failed to set AI preference', String(error))
+            if (!cancelled && generation === statusRequestGenerationRef.current) {
+              const errorMsg = error instanceof Error ? error.message : String(error)
+              setErrors((prev) => ({
+                ...prev,
+                'preference:update': `Failed to update AI preference: ${errorMsg}`,
+              }))
+            }
+          }
         })
       }
 
-      // Refresh status after a short delay to allow keyring update to complete
-      const timer = setTimeout(() => {
-        refreshStatus()
-      }, 100)
+      const preferenceSync = preferenceSyncRef.current
+      void (async () => {
+        await preferenceSync
+        if (cancelled || generation !== statusRequestGenerationRef.current) return
+        const status = await loadStatus()
+        if (cancelled || generation !== statusRequestGenerationRef.current) return
+        setAiStatus(status)
+        setIsLoading(false)
+      })()
 
-      return () => clearTimeout(timer)
+      return () => { cancelled = true }
     }
   }, [
     settings.openAiApiKey,
+    settings.openAiApiKeySet,
     settings.openAiModel,
     settings.anthropicApiKey,
+    settings.anthropicApiKeySet,
     settings.anthropicModel,
     settings.geminiApiKey,
+    settings.geminiApiKeySet,
     settings.geminiModel,
     settings.deepseekApiKey,
+    settings.deepseekApiKeySet,
     settings.deepseekModel,
     settings.customApiKey,
+    settings.customApiKeySet,
     settings.customEndpoint,
     settings.customModel,
     settings.ollamaEndpoint,
@@ -330,9 +355,11 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
     settings.localAiEndpoint,
     settings.localAiModel,
     settings.phiSilicaLafToken,
+    settings.networkGroundingEnabled,
+    settings.cloudFallbackPolicy,
     settings.preferredAIProvider,
     settingsLoaded,
-    refreshStatus,
+    loadStatus,
   ])
 
   // Dummy setters for backwards compatibility (settings are managed via AppContext now)
@@ -442,11 +469,10 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         taskName,
         diagnosticOutput: output,
         sessionId,
-        apiKey: settings.openAiApiKey || null,
         forceRefresh
       })
     )
-  }, [aiEnabled, isAIAvailable, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
+  }, [aiEnabled, isAIAvailable, interpretations, sessionId, runDedupedAnalysis])
 
   const analyzeSection = useCallback(async (
     sectionName: string,
@@ -466,11 +492,10 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         sectionName,
         sectionData,
         sessionId,
-        apiKey: settings.openAiApiKey || null,
         forceRefresh: false
       })
     )
-  }, [aiEnabled, isAIAvailable, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
+  }, [aiEnabled, isAIAvailable, interpretations, sessionId, runDedupedAnalysis])
 
   const explainHealth = useCallback(async (metricsData: string): Promise<string> => {
     if (!aiEnabled || !isAIAvailable) {
@@ -486,11 +511,10 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       invoke<AIResponse>('ai_explain_health', {
         metricsData,
         sessionId,
-        apiKey: settings.openAiApiKey || null,
         forceRefresh: false
       })
     )
-  }, [aiEnabled, isAIAvailable, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
+  }, [aiEnabled, isAIAvailable, interpretations, sessionId, runDedupedAnalysis])
 
   // Generic analysis function for monitoring, processes, comparisons, etc.
   const analyzeGeneric = useCallback(async (
@@ -513,11 +537,10 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
         sectionName: cacheKey,
         sectionData: prompt,
         sessionId,
-        apiKey: settings.openAiApiKey || null,
         forceRefresh
       })
     )
-  }, [aiEnabled, isAIAvailable, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
+  }, [aiEnabled, isAIAvailable, interpretations, sessionId, runDedupedAnalysis])
 
   // Rank detected issues with the backend's dedicated prioritization prompt.
   // Content-hashed cache key: a re-scan with different issues re-analyzes.
@@ -536,11 +559,10 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
       invoke<AIResponse>('ai_prioritize_issues', {
         issuesData: issuesJson,
         sessionId,
-        apiKey: settings.openAiApiKey || null,
         forceRefresh
       })
     )
-  }, [aiEnabled, isAIAvailable, interpretations, sessionId, settings.openAiApiKey, runDedupedAnalysis])
+  }, [aiEnabled, isAIAvailable, interpretations, sessionId, runDedupedAnalysis])
 
   // Cache management
   const clearCache = useCallback(async (targetSessionId?: string) => {

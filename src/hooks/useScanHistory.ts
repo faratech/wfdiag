@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import type { TaskResult } from '../contexts/AppContext'
 import * as logger from '../utils/logger'
 
 export interface ScanSummary {
@@ -11,20 +10,7 @@ export interface ScanSummary {
   success_count: number
   failure_count: number
   duration_ms: number
-  tags: string[]
-}
-
-export interface ScanRecord {
-  id: string
-  timestamp: string
-  computer_name: string
-  os_version: string
-  is_admin: boolean
-  results: Record<string, TaskResult>
-  task_count: number
-  success_count: number
-  failure_count: number
-  duration_ms: number
+  label?: string | null
   tags: string[]
 }
 
@@ -33,7 +19,6 @@ interface UseScanHistoryReturn {
   loading: boolean
   error: string | null
   refreshScans: () => Promise<void>
-  loadScan: (scanId: string) => Promise<ScanRecord | null>
 }
 
 export function useScanHistory(): UseScanHistoryReturn {
@@ -92,35 +77,6 @@ export function useScanHistory(): UseScanHistoryReturn {
     await fetchScans()
   }, [fetchScans])
 
-  const loadScan = async (scanId: string): Promise<ScanRecord | null> => {
-    try {
-      logger.debug('useScanHistory', 'Loading scan', scanId)
-
-      if (!scanId) {
-        throw new Error('Scan ID is required')
-      }
-      
-      const scan = await invoke<ScanRecord>('load_scan', { scanId })
-      
-      if (!scan) {
-        throw new Error('Scan not found')
-      }
-      
-      // Validate scan structure
-      if (!scan.id || !scan.timestamp || !scan.results) {
-        throw new Error('Invalid scan data structure')
-      }
-
-      logger.info('useScanHistory', `Successfully loaded scan ${scan.id} with ${scan.task_count} results`)
-      return scan
-
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err)
-      logger.error('useScanHistory', `Failed to load scan ${scanId}`, errorMessage)
-      return null
-    }
-  }
-
   // Load scans on mount. `loading` already starts true; applying the result
   // inside the promise callback (post-await) keeps this off the
   // synchronous-setState-in-effect path.
@@ -144,6 +100,5 @@ export function useScanHistory(): UseScanHistoryReturn {
     loading,
     error,
     refreshScans,
-    loadScan
   }
 }

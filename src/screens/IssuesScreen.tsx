@@ -1,6 +1,13 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { useAppContext, type Issue, type RemediationSummary } from '../contexts/AppContext'
+import {
+  useAppContext,
+  type ActionProposal,
+  type ActionRequest,
+  type ActionRunSummary,
+  type Issue,
+  type RemediationSummary,
+} from '../contexts/AppContext'
 import { useAIContext } from '../contexts/AIContext'
 import { useDiagnostics } from '../hooks/useDiagnostics'
 import { useToast } from '../contexts/ToastContext'
@@ -10,13 +17,16 @@ import { ConfirmFixModal } from '../components/issues/ConfirmFixModal'
 import { renderMarkdownLite } from '../utils/markdownLite'
 import * as logger from '../utils/logger'
 
-interface FixResultWire { success: boolean; message?: string; requires_restart?: boolean }
-type FixOutcome =
-  | { status: 'needs_confirmation'; remediation: RemediationSummary }
-  | { status: 'completed'; result: FixResultWire }
-
 interface FixPlanEntry { issue_id: string; remediation_id: string; rationale: string; tier: RemediationSummary['tier'] }
-interface FixPlan { entries: FixPlanEntry[]; notes: string }
+interface FixPlan {
+  entries: FixPlanEntry[]
+  notes: string
+  scan_fingerprint?: string
+  catalog_fingerprint?: string
+}
+
+const terminalRun = (status: ActionRunSummary['status']) =>
+  status === 'succeeded' || status === 'partial' || status === 'failed' || status === 'cancelled'
 
 const sevClass = (s: string) =>
   ({ critical: 'critical', warning: 'warning', info: 'info', ok: 'ok' } as Record<string, string>)[s.toLowerCase()] || 'info'
@@ -32,21 +42,28 @@ const TIER_ICON: Record<RemediationSummary['tier'], string> = {
 
 export const IssuesScreen: React.FC = () => {
   const {
-    issues, results, fixingIssue, setFixingIssue, isRunning, systemInfo,
-    setPendingChatPrompt, setSelectedTab, settings,
+    issues, fixingIssue, setFixingIssue, isRunning, systemInfo,
+    setPendingChatPrompt, setAIMode, setSelectedTab, settings,
   } = useAppContext()
   const { prioritizeIssues } = useAIContext()
-  const { detectIssues, restartAsAdmin } = useDiagnostics()
+  const { restartAsAdmin } = useDiagnostics()
   const { runQuickScan } = useScanner()
   const { showInfo, showWarning, showError } = useToast()
 
   const [maintenance, setMaintenance] = useState<RemediationSummary[]>([])
-  const [confirming, setConfirming] = useState<RemediationSummary | null>(null)
+  const [confirming, setConfirming] = useState<ActionProposal | null>(null)
+  const [activeRun, setActiveRun] = useState<ActionRunSummary | null>(null)
   const [triageState, setTriageState] = useState({ signature: '', text: '' })
   const [triageBusy, setTriageBusy] = useState(false)
   const [planState, setPlanState] = useState<{ signature: string; plan: FixPlan | null }>({ signature: '', plan: null })
   const [planBusy, setPlanBusy] = useState(false)
-  const remediationInFlightRef = useRef(false)
+  const actionRequestInFlightRef = useRef(false)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   useEffect(() => {
     invoke<RemediationSummary[]>('get_remediations')
@@ -55,66 +72,139 @@ export const IssuesScreen: React.FC = () => {
   }, [])
 
   const detected = issues.filter(i => i.detected || i.status === 'detected')
-  const skipped = issues.filter(i => !i.detected && i.status === 'skipped')
-  const passed = issues.filter(i => !i.detected && i.status !== 'skipped')
+  // `skipped` is retained for compatibility with older backends, but both
+  // statuses mean the app could not verify the condition — never count them
+  // as green/passed.
+  const unknown = issues.filter(i => !i.detected && (i.status === 'unknown' || i.status === 'skipped'))
+  const passed = issues.filter(i => !i.detected && i.status !== 'unknown' && i.status !== 'skipped')
   const critical = detected.filter(i => i.severity.toLowerCase() === 'critical').length
   const warnings = detected.filter(i => i.severity.toLowerCase() === 'warning').length
   const aiEnabled = settings.aiEnabled ?? true
-  const remediationBusy = fixingIssue !== null
+  const remediationBusy = fixingIssue !== null || confirming !== null || (!!activeRun && !terminalRun(activeRun.status))
   const detectedIssueSignature = detected.map(i => i.id || i.title).sort().join('\n')
   const detectedIssueIds = new Set(detected.map(i => i.id).filter((id): id is string => !!id))
   const triage = triageState.signature === detectedIssueSignature ? triageState.text : ''
   const plan = planState.signature === detectedIssueSignature ? planState.plan : null
 
-  // ---- remediation execution (the backend enforces the Repair gate) ----
-  const runRemediation = useCallback(async (remediation: RemediationSummary, confirmed: boolean) => {
-    if (remediationInFlightRef.current) return
-    remediationInFlightRef.current = true
-    setFixingIssue(remediation.id)
-    if (remediation.long_running) {
-      showInfo('Repair started', `${remediation.label} can take 10+ minutes. Keep the app open.`)
+  const reportRun = useCallback((run: ActionRunSummary, proposal: ActionProposal) => {
+    const results = run.actions.map(action => action.result).filter((result): result is NonNullable<typeof result> => !!result)
+    const failedSteps = results.flatMap(result => result.steps.filter(step => step.status === 'failed'))
+    const completedSteps = results.flatMap(result => result.steps.filter(step => step.status === 'succeeded'))
+    const alreadySatisfied = results.flatMap(result => result.steps.filter(step => step.status === 'already_satisfied'))
+    const restart = results.some(result => result.requires_restart)
+    const scheduledRestart = proposal.actions.some(action => action.remediation.id === 'restart_system')
+    if (run.status === 'cancelled') {
+      showWarning('Action cancelled', 'Review the completed steps below, then re-run the relevant diagnostic.')
+    } else if (run.status === 'partial') {
+      const details = [
+        completedSteps.length ? `Completed: ${completedSteps.map(step => step.action).join('; ')}.` : '',
+        alreadySatisfied.length ? `Already satisfied: ${alreadySatisfied.map(step => step.action).join('; ')}.` : '',
+        failedSteps.length ? `Could not complete: ${failedSteps.map(step => `${step.action}${step.detail ? ` (${step.detail})` : ''}`).join('; ')}.` : '',
+        restart ? 'Restart Windows, then re-run the relevant diagnostic.' : 'Re-run the relevant diagnostic.',
+      ].filter(Boolean).join(' ')
+      showWarning(restart ? 'Partly completed — restart required' : 'Action partly completed', details)
+    } else if (run.status === 'failed') {
+      const message = run.actions.find(action => action.error)?.error || results.find(result => result.message)?.message || 'The action could not be applied.'
+      showWarning('Action did not complete', message)
+    } else if (scheduledRestart) {
+      showInfo('Restart scheduled', 'Windows will restart in 60 seconds. Save your work now; run “shutdown /a” to cancel.')
+    } else if (proposal.actions.length === 1 && proposal.actions[0].remediation.tier === 'open_tool') {
+      showInfo('Tool opened', 'Complete the action in the Windows tool, then re-run the relevant diagnostic.')
+    } else {
+      showInfo(
+        restart ? 'Done — restart required' : proposal.actions.length > 1 ? 'Actions completed' : 'Fix applied',
+        restart ? 'Restart Windows, then re-run the relevant diagnostic.' : 'Re-run the relevant diagnostic to verify the current state.'
+      )
+    }
+  }, [showInfo, showWarning])
+
+  const monitorRun = useCallback(async (initial: ActionRunSummary, proposal: ActionProposal) => {
+    let current = initial
+    if (mountedRef.current) setActiveRun(current)
+    while (!terminalRun(current.status)) {
+      await new Promise(resolve => setTimeout(resolve, 250))
+      if (!mountedRef.current) return
+      current = await invoke<ActionRunSummary>('action_get_status', { runId: current.runId })
+      if (mountedRef.current) setActiveRun(current)
+    }
+    if (mountedRef.current) reportRun(current, proposal)
+  }, [reportRun])
+
+  const prepareActions = useCallback(async (
+    actions: ActionRequest[],
+    expected?: Pick<FixPlan, 'scan_fingerprint' | 'catalog_fingerprint'>,
+  ) => {
+    if (actionRequestInFlightRef.current || remediationBusy) return
+    actionRequestInFlightRef.current = true
+    try {
+      const proposal = await invoke<ActionProposal>('action_prepare', {
+        request: {
+          actions,
+          expectedScanFingerprint: expected?.scan_fingerprint,
+          expectedCatalogFingerprint: expected?.catalog_fingerprint,
+        },
+      })
+      setConfirming(proposal)
+    } catch (error) {
+      showError('Could not prepare action', error instanceof Error ? error.message : String(error))
+    } finally {
+      actionRequestInFlightRef.current = false
+    }
+  }, [remediationBusy, showError])
+
+  const handleFixClick = (remediation: RemediationSummary, issueId?: string, sourcePlan?: FixPlan) => {
+    void prepareActions(
+      [{ remediationId: remediation.id, ...(issueId ? { issueId } : {}) }],
+      sourcePlan,
+    )
+  }
+
+  const approveProposal = useCallback(async (proposalId: string) => {
+    const proposal = confirming
+    if (!proposal || proposal.proposalId !== proposalId || actionRequestInFlightRef.current) return
+    actionRequestInFlightRef.current = true
+    setConfirming(null)
+    setFixingIssue(proposal.actions[0].remediation.id)
+    if (proposal.actions.some(action => action.remediation.long_running)) {
+      const canStop = proposal.actions.every(action => action.remediation.cancellable)
+      showInfo(
+        'Repair started',
+        canStop
+          ? 'This can take 10+ minutes. Keep the app open; you can stop it from the status panel.'
+          : 'This can take 10+ minutes. Keep the app open; this repair cannot be stopped safely once it starts.'
+      )
     }
     try {
-      const outcome = await invoke<FixOutcome>('run_remediation', {
-        remediationId: remediation.id,
-        confirmed,
-      })
-      if (outcome.status === 'needs_confirmation') {
-        // Defensive backstop — the UI normally confirms repair tier up front
-        setConfirming(outcome.remediation)
-        return
-      }
-      const result = outcome.result
-      if (!result.success) {
-        showWarning('Fix did not complete', result.message || 'The fix could not be applied.')
-        return
-      }
-      showInfo(
-        result.requires_restart ? 'Done — restart required' : 'Fix applied',
-        result.message || 'Re-run a scan to verify the issue is resolved.'
-      )
-      try { await detectIssues() } catch { /* re-detect is best-effort */ }
-    } catch (e) {
-      logger.error('IssuesScreen', 'Failed to run remediation', e)
-      showError('Fix failed', e instanceof Error ? e.message : String(e))
+      const run = await invoke<ActionRunSummary>('action_approve', { proposalId })
+      await monitorRun(run, proposal)
+    } catch (error) {
+      logger.error('IssuesScreen', 'Failed to run authorized action', error)
+      setActiveRun(null)
+      showError('Action failed', error instanceof Error ? error.message : String(error))
     } finally {
-      remediationInFlightRef.current = false
+      actionRequestInFlightRef.current = false
       setFixingIssue(null)
     }
-  }, [setFixingIssue, showInfo, showWarning, showError, detectIssues])
+  }, [confirming, monitorRun, setFixingIssue, showError, showInfo])
 
-  const handleFixClick = (remediation: RemediationSummary) => {
-    if (remediationInFlightRef.current || fixingIssue) return
-    if (remediation.admin_required && !systemInfo?.is_admin) {
-      setConfirming(remediation)
-      return
+  const dismissProposal = useCallback(() => {
+    const proposalId = confirming?.proposalId
+    setConfirming(null)
+    if (proposalId) {
+      void invoke('action_discard_proposal', { proposalId }).catch(error =>
+        logger.error('IssuesScreen', 'Failed to discard action preview', error))
     }
-    if (remediation.tier === 'repair') {
-      setConfirming(remediation)
-    } else {
-      void runRemediation(remediation, false)
+  }, [confirming])
+
+  const cancelActiveRun = useCallback(async () => {
+    if (!activeRun || terminalRun(activeRun.status)) return
+    try {
+      const run = await invoke<ActionRunSummary>('action_cancel', { runId: activeRun.runId })
+      setActiveRun(run)
+    } catch (error) {
+      showError('Could not stop action', error instanceof Error ? error.message : String(error))
     }
-  }
+  }, [activeRun, showError])
 
   // ---- AI: per-issue chat handoff ----
   const askAi = (issue: Issue) => {
@@ -122,18 +212,22 @@ export const IssuesScreen: React.FC = () => {
       showError('AI disabled', 'Enable AI insights in Settings to use AI assistance.')
       return
     }
-    let prompt = `Help me with this issue found by a diagnostic scan:\n${JSON.stringify({
-      id: issue.id, severity: issue.severity, title: issue.title, description: issue.description,
-    })}`
-    for (const taskId of issue.source_tasks ?? []) {
-      const output = results[taskId]?.output
-      if (output) {
-        prompt += `\n\nDiagnostic data (${taskId}):\n${output.slice(0, 1500)}`
-      }
-      if (prompt.length > 3000) break
-    }
-    prompt += '\n\nExplain what this means on my machine and walk me through fixing it.'
-    setPendingChatPrompt(prompt)
+    const query = `Help me with this issue found by a diagnostic scan:\n${JSON.stringify({
+      id: issue.id,
+      severity: issue.severity,
+      title: issue.title,
+      description: issue.description,
+      recommendation: issue.recommendation,
+    })}\n\nExplain what this means on my machine and walk me through fixing it.`
+    setPendingChatPrompt({
+      displayText: `Help me understand and fix “${issue.title}”.`,
+      query,
+      contextRefs: [
+        ...(issue.id ? [{ kind: 'issue' as const, id: issue.id }] : []),
+        ...(issue.source_tasks ?? []).map(id => ({ kind: 'diagnostic' as const, id })),
+      ],
+    })
+    setAIMode('assistant')
     setSelectedTab('ai')
   }
 
@@ -167,9 +261,7 @@ export const IssuesScreen: React.FC = () => {
     const signature = detectedIssueSignature
     setPlanState({ signature, plan: null })
     try {
-      const result = await invoke<FixPlan>('ai_propose_fix_plan', {
-        apiKey: settings.openAiApiKey || null,
-      })
+      const result = await invoke<FixPlan>('ai_propose_fix_plan')
       setPlanState({ signature, plan: result })
     } catch (e) {
       showError('AI fix plan failed', e instanceof Error ? e.message : String(e))
@@ -182,6 +274,10 @@ export const IssuesScreen: React.FC = () => {
     maintenance.find(r => r.id === id) ||
     issues.map(i => i.remediation).find(r => r?.id === id) || undefined
   const visiblePlanEntries = plan?.entries.filter(entry => detectedIssueIds.has(entry.issue_id)) ?? []
+  const batchPlanEntries = visiblePlanEntries
+    .map(entry => ({ entry, remediation: remediationById(entry.remediation_id) }))
+    .filter((item): item is { entry: FixPlanEntry; remediation: RemediationSummary } => !!item.remediation?.batch_eligible)
+    .slice(0, 5)
 
   return (
     <>
@@ -197,8 +293,28 @@ export const IssuesScreen: React.FC = () => {
         {issues.length > 0 && (
           <div className="issues-summary">
             {detected.length === 0
-              ? `All clear — no issues detected · ${issues.length - skipped.length} checks passed`
+              ? unknown.length
+                ? `No issues detected in completed checks · ${passed.length} checks passed · ${unknown.length} couldn’t verify`
+                : `All clear — no issues detected · ${passed.length} checks passed`
               : `${detected.length} issue${detected.length === 1 ? '' : 's'} need${detected.length === 1 ? 's' : ''} attention · detected by the latest scan${critical > 0 ? ` · ${critical} critical` : ''}${warnings > 0 ? ` · ${warnings} warning${warnings === 1 ? '' : 's'}` : ''}`}
+          </div>
+        )}
+
+        {activeRun && (
+          <div className="wf-block" style={{ marginBottom: 12, padding: 12 }} role="status" aria-live="polite">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <i className={`fa-solid ${terminalRun(activeRun.status) ? activeRun.status === 'succeeded' ? 'fa-circle-check' : 'fa-circle-info' : 'fa-circle-notch fa-spin'}`} aria-hidden="true" />
+              <div style={{ flex: 1 }}>
+                <strong>{activeRun.status.replace('_', ' ')}</strong>
+                <div style={{ color: 'var(--wf-text-muted)', fontSize: 12 }}>
+                  {activeRun.actions.map(action => `${action.label}: ${action.status.replace('_', ' ')}`).join(' · ')}
+                </div>
+              </div>
+              {!terminalRun(activeRun.status) && activeRun.status !== 'cancel_requested' &&
+                (activeRun.currentIndex == null || activeRun.actions[activeRun.currentIndex]?.cancellable) && (
+                <button className="btn" type="button" onClick={() => { void cancelActiveRun() }}>Stop safely</button>
+              )}
+            </div>
           </div>
         )}
 
@@ -226,6 +342,20 @@ export const IssuesScreen: React.FC = () => {
                 {triage && <div className="report-body">{renderMarkdownLite(triage)}</div>}
                 {plan && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: triage ? 10 : 0 }}>
+                    {batchPlanEntries.length > 1 && (
+                      <div>
+                        <button
+                          className="btn primary"
+                          disabled={remediationBusy}
+                          onClick={() => { void prepareActions(
+                            batchPlanEntries.map(({ entry, remediation }) => ({ remediationId: remediation.id, issueId: entry.issue_id })),
+                            plan,
+                          ) }}
+                        >
+                          <i className="fa-solid fa-list-check" /> Review {batchPlanEntries.length} low-impact actions together
+                        </button>
+                      </div>
+                    )}
                     {visiblePlanEntries.length === 0 && <span style={{ color: 'var(--wf-text-muted)' }}>{plan.entries.length === 0 ? (plan.notes || 'No plan entries.') : 'This plan no longer matches the current issue set.'}</span>}
                     {visiblePlanEntries.map(entry => {
                       const remediation = remediationById(entry.remediation_id)
@@ -242,7 +372,7 @@ export const IssuesScreen: React.FC = () => {
                           </div>
                           <div className="actions">
                             {remediation && (
-                              <button className="btn primary" disabled={remediationBusy} onClick={() => handleFixClick(remediation)}>
+                              <button className="btn primary" disabled={remediationBusy} onClick={() => handleFixClick(remediation, entry.issue_id, plan)}>
                                 {fixingIssue === remediation.id
                                   ? <><i className="fa-solid fa-spinner fa-spin" /> Running…</>
                                   : <><i className={`fa-solid ${TIER_ICON[remediation.tier]}`} /> {remediation.label}</>}
@@ -303,7 +433,7 @@ export const IssuesScreen: React.FC = () => {
               </div>
               <div className="actions">
                 {remediation && (
-                  <button className="btn primary" disabled={remediationBusy} onClick={() => handleFixClick(remediation)}>
+                  <button className="btn primary" disabled={remediationBusy} onClick={() => handleFixClick(remediation, issue.id)}>
                     {fixingIssue === remediation.id
                       ? <><i className="fa-solid fa-spinner fa-spin" /> Running…</>
                       : <><i className={`fa-solid ${TIER_ICON[remediation.tier]}`} /> {remediation.label}</>}
@@ -335,13 +465,13 @@ export const IssuesScreen: React.FC = () => {
           </details>
         )}
 
-        {skipped.length > 0 && (
+        {unknown.length > 0 && (
           <details className="wf-block" style={{ marginTop: 12, padding: '10px 14px' }}>
             <summary style={{ cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
-              {skipped.length} checks skipped
+              Couldn’t verify ({unknown.length})
             </summary>
             <div style={{ paddingTop: 8 }}>
-              {skipped.map((issue, idx) => (
+              {unknown.map((issue, idx) => (
                 <div key={issue.id || idx} style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '4px 0', fontSize: 12.5, borderBottom: '1px solid var(--hairline)' }}>
                   <i className="fa-solid fa-circle-minus" style={{ color: 'var(--wf-text-muted)', fontSize: 11 }} />
                   <strong>{issue.title}</strong>
@@ -380,14 +510,11 @@ export const IssuesScreen: React.FC = () => {
       </div>
 
       <ConfirmFixModal
-        remediation={confirming}
+        proposal={confirming}
         isAdmin={!!systemInfo?.is_admin}
-        onCancel={() => setConfirming(null)}
-        onRestartAsAdmin={() => { setConfirming(null); void restartAsAdmin() }}
-        onConfirm={remediation => {
-          setConfirming(null)
-          void runRemediation(remediation, true)
-        }}
+        onCancel={dismissProposal}
+        onRestartAsAdmin={() => { dismissProposal(); void restartAsAdmin() }}
+        onConfirm={proposalId => { void approveProposal(proposalId) }}
       />
     </>
   )

@@ -68,6 +68,11 @@ jobs:
             $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
           }
 
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Host "::error::Version must be X.Y.Z without a leading v; got '$version'."
+            exit 1
+          }
+
           # The publish-to-store job depends on create-release succeeding —
           # requesting a store publish without a release silently no-ops
           # both downstream jobs (create-release is skipped, which is not
@@ -84,6 +89,9 @@ jobs:
           Write-Host "Building version: $version"
           Write-Host "Publish to store: $publishToStore"
           Write-Host "Create release: $createRelease"
+
+      - name: Verify source and requested versions match
+        run: python scripts/check-version-sync.py --expected "${{ steps.version.outputs.version }}"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -111,7 +119,7 @@ jobs:
 
       - name: Build x64 executable
         working-directory: src-tauri
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
         env:
           # Match the ARM64 job: statically link the VC++ runtime so the
           # portable exe doesn't need the redistributable on a clean machine.
@@ -185,7 +193,7 @@ jobs:
         shell: pwsh
         run: |
           # Set up environment for ARM64 cross-compilation
-          cargo build --release --target aarch64-pc-windows-msvc
+          cargo build --locked --release --target aarch64-pc-windows-msvc
         env:
           # Ensure linker can find ARM64 libs
           RUSTFLAGS: -C target-feature=+crt-static
@@ -352,6 +360,92 @@ jobs:
           Write-Host "`nBundle created: $bundlePath"
           echo "bundle_path=$bundlePath" >> $env:GITHUB_OUTPUT
 
+      - name: Validate Store bundle contents
+        shell: pwsh
+        run: |
+          $version = "${{ needs.build-x64.outputs.version }}"
+          $bundle = "msix-build/${{ env.PROJECT_NAME }}_${version}.msixbundle"
+          if (-not (Test-Path $bundle)) { throw "Bundle not found: $bundle" }
+
+          $sdkPath = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*" -Directory |
+                     Sort-Object Name -Descending |
+                     Select-Object -First 1
+          $makeAppx = Join-Path $sdkPath.FullName "x64\MakeAppx.exe"
+          $inspectRoot = "msix-build/inspect"
+          Remove-Item $inspectRoot -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "$inspectRoot/bundle" | Out-Null
+
+          & $makeAppx unbundle /p $bundle /d "$inspectRoot/bundle" /o
+          if ($LASTEXITCODE -ne 0) { throw "MakeAppx could not unpack the bundle" }
+
+          $packages = @(Get-ChildItem "$inspectRoot/bundle" -Filter "*.msix")
+          if ($packages.Count -ne 2) {
+            throw "Expected two architecture packages; found $($packages.Count)"
+          }
+
+          $requiredFiles = @(
+            "dist/index.html",
+            "Logo.png",
+            "Square150x150Logo.png",
+            "Square44x44Logo.png",
+            "Wide310x150Logo.png",
+            "Microsoft.Windows.AI.Text.dll",
+            "Microsoft.Windows.AI.Text.Projection.dll",
+            "Microsoft.WindowsAppRuntime.dll",
+            "Microsoft.WindowsAppRuntime.Bootstrap.dll",
+            "WinRT.Runtime.dll"
+          )
+          $foundArchitectures = @()
+
+          foreach ($package in $packages) {
+            $unpacked = Join-Path $inspectRoot $package.BaseName
+            New-Item -ItemType Directory -Force -Path $unpacked | Out-Null
+            & $makeAppx unpack /p $package.FullName /d $unpacked /o
+            if ($LASTEXITCODE -ne 0) { throw "Could not unpack $($package.Name)" }
+
+            [xml]$manifest = Get-Content -Raw (Join-Path $unpacked "AppxManifest.xml")
+            $identity = $manifest.SelectSingleNode("/*[local-name()='Package']/*[local-name()='Identity']")
+            $identityName = $identity.GetAttribute("Name")
+            $publisher = $identity.GetAttribute("Publisher")
+            $packageVersion = $identity.GetAttribute("Version")
+            $architecture = $identity.GetAttribute("ProcessorArchitecture")
+            if ($identityName -ne "32827MikeFara.WindowsForumDiagnostics") {
+              throw "$($package.Name): wrong package identity '$identityName'"
+            }
+            if ($publisher -ne "${{ env.PUBLISHER }}") {
+              throw "$($package.Name): wrong publisher '$publisher'"
+            }
+            if ($packageVersion -ne "$version.0") {
+              throw "$($package.Name): version '$packageVersion' does not match '$version.0'"
+            }
+            if ($architecture -notin @("x64", "arm64")) {
+              throw "$($package.Name): unexpected architecture '$architecture'"
+            }
+            $foundArchitectures += $architecture
+
+            $capabilities = @($manifest.SelectNodes("//*[local-name()='Capability']") | ForEach-Object { $_.GetAttribute("Name") })
+            foreach ($requiredCapability in @("runFullTrust", "systemAIModels")) {
+              if ($requiredCapability -notin $capabilities) {
+                throw "$($package.Name): missing $requiredCapability capability"
+              }
+            }
+
+            $framework = $manifest.SelectSingleNode("//*[local-name()='PackageDependency' and @Name='Microsoft.WindowsAppRuntime.1.8']")
+            if (-not $framework) { throw "$($package.Name): missing Windows App Runtime 1.8 dependency" }
+
+            @($requiredFiles + "${{ env.PROJECT_NAME }}.exe") | ForEach-Object {
+              if (-not (Test-Path (Join-Path $unpacked $_))) {
+                throw "$($package.Name): missing required file $_"
+              }
+            }
+          }
+
+          $architectureSet = @($foundArchitectures | Sort-Object -Unique) -join ','
+          if ($architectureSet -ne 'arm64,x64') {
+            throw "Bundle architectures are '$($foundArchitectures -join ',')', expected x64 and arm64"
+          }
+          Write-Host "Validated Store identity, capabilities, framework, assets, AI DLLs, and both architectures."
+
       - name: Upload unsigned bundle
         uses: actions/upload-artifact@v4
         with:
@@ -488,13 +582,8 @@ jobs:
             echo "**[Get from Microsoft Store](https://apps.microsoft.com/detail/9nj59rh053pv)** - Signed by Microsoft, automatic updates"
             echo
             echo "### Alternative Downloads"
-            echo "- **MSIX Bundle**: Unsigned, for sideloading (requires developer mode or self-signed cert)"
+            echo "- **MSIX Bundle**: Unsigned Store-submission artifact; it is not directly installable"
             echo "- **Portable EXE**: Standalone executables for x64 and ARM64, no installation required"
-            echo
-            echo "### Manual MSIX Installation"
-            echo '```powershell'
-            echo "Add-AppxPackage -Path \"WindowsForum_Diagnostics_${VERSION}.msixbundle\""
-            echo '```'
           } > release/RELEASE_NOTES.md
 
       - name: Create Release

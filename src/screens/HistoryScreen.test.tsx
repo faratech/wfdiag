@@ -30,7 +30,6 @@ const comparison = {
   new_failures: [{
     task_id: 'os_info', task_name: 'OS Information', category: 'System',
     current_success: false, previous_success: true,
-    current_output: '{"build": 26200}', previous_output: '{"build": 26100}',
     output_changed: true,
   }],
   new_successes: [],
@@ -44,7 +43,10 @@ beforeEach(() => {
     if (cmd === 'get_task_trends') return [
       { task_id: 'os_info', failed: 3, seen_in: 10, scans_considered: 10 },
     ]
-    if (cmd === 'compare_scans') return comparison
+    if (cmd === 'compare_scans_summary') return comparison
+    if (cmd === 'get_scan_task_diff') return {
+      task_id: 'os_info', current_output: '{"build": 26200}', previous_output: '{"build": 26100}',
+    }
     return undefined
   })
 })
@@ -72,21 +74,21 @@ describe('HistoryScreen compare flow', () => {
     fireEvent.click(screen.getByText(new Date(scans[1].timestamp).toLocaleString()))
 
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('compare_scans', { currentId: 'scan_2', previousId: 'scan_1' })
+      expect(invokeMock).toHaveBeenCalledWith('compare_scans_summary', { currentId: 'scan_2', previousId: 'scan_1' })
     )
     await waitFor(() => expect(screen.getByText('regressed')).toBeInTheDocument())
     // Trend badge from get_task_trends
-    expect(screen.getByText('3/10 fails')).toBeInTheDocument()
+    expect(screen.getByText('3/10 errors')).toBeInTheDocument()
 
     // Expand the regressed task — side-by-side panes appear
     fireEvent.click(screen.getByText('OS Information'))
-    expect(screen.getByText('Previous')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('Previous')).toBeInTheDocument())
     expect(screen.getByText('Current')).toBeInTheDocument()
     // Field-level JSON diff line
     expect(screen.getByText(/Changed: build from 26100 to 26200/)).toBeInTheDocument()
   })
 
-  it('saves an edited label through update_scan_tags', async () => {
+  it('saves an edited label without replacing metadata tags', async () => {
     render(<HistoryScreen />)
     await waitFor(() => expect(screen.getByText('after-update')).toBeInTheDocument())
 
@@ -98,7 +100,7 @@ describe('HistoryScreen compare flow', () => {
     fireEvent.keyDown(screen.getByLabelText('Scan label'), { key: 'Enter' })
 
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('update_scan_tags', { scanId: 'scan_1', tags: ['baseline'] })
+      expect(invokeMock).toHaveBeenCalledWith('update_scan_label', { scanId: 'scan_1', label: 'baseline' })
     )
   })
 

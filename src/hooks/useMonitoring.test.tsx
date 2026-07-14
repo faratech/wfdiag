@@ -29,6 +29,22 @@ beforeEach(() => {
 })
 
 describe('useMonitoring lease ownership', () => {
+  it('auto-starts after React StrictMode replays mount effects', async () => {
+    let nextLease = 0
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_monitoring') return Promise.resolve(++nextLease)
+      if (cmd === 'stop_monitoring') return Promise.resolve()
+      return Promise.resolve(null)
+    })
+    const { result } = renderHook(
+      () => useMonitoring({ autoStart: true, componentName: 'strict-test' }),
+      { reactStrictMode: true }
+    )
+
+    await waitFor(() => expect(result.current.isActive).toBe(true))
+    expect(invokeMock.mock.calls.filter(call => call[0] === 'start_monitoring')).toHaveLength(1)
+  })
+
   it('prevents duplicate starts while the first start is still in flight', async () => {
     const start = deferred<number>()
     invokeMock.mockImplementation((cmd: string) => {
@@ -105,6 +121,63 @@ describe('useMonitoring lease ownership', () => {
     await act(async () => {
       secondStart.resolve(2)
       await Promise.all([second, third])
+    })
+  })
+
+  it('does not reactivate after stop while listener registration is pending', async () => {
+    const listener = deferred<() => void>()
+    const unlisten = vi.fn()
+    listenMock.mockReturnValue(listener.promise)
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_monitoring') return Promise.resolve(7)
+      if (cmd === 'stop_monitoring') return Promise.resolve()
+      return Promise.resolve(null)
+    })
+
+    const { result } = renderHook(() => useMonitoring({ componentName: 'test' }))
+
+    let starting!: Promise<void>
+    act(() => {
+      starting = result.current.start()
+    })
+    await waitFor(() => expect(listenMock).toHaveBeenCalledWith('system-stats', expect.any(Function)))
+
+    await act(async () => {
+      await result.current.stop()
+      listener.resolve(unlisten)
+      await starting
+    })
+
+    expect(unlisten).toHaveBeenCalledOnce()
+    expect(result.current.isActive).toBe(false)
+    expect(invokeMock).toHaveBeenCalledWith('stop_monitoring', { leaseId: 7 })
+  })
+
+  it('never sends an unscoped stop when stop calls overlap', async () => {
+    const stopping = deferred<void>()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_monitoring') return Promise.resolve(9)
+      if (cmd === 'stop_monitoring') return stopping.promise
+      return Promise.resolve(null)
+    })
+
+    const { result } = renderHook(() => useMonitoring({ componentName: 'test' }))
+    await act(async () => { await result.current.start() })
+
+    let first!: Promise<void>
+    let second!: Promise<void>
+    act(() => {
+      first = result.current.stop()
+      second = result.current.stop()
+    })
+
+    expect(invokeMock.mock.calls.filter(call => call[0] === 'stop_monitoring')).toEqual([
+      ['stop_monitoring', { leaseId: 9 }],
+    ])
+
+    await act(async () => {
+      stopping.resolve()
+      await Promise.all([first, second])
     })
   })
 

@@ -170,7 +170,12 @@ def build_frontend() -> bool:
 
 
 def generate_windows_ai_bindings() -> bool:
-    """Generate Rust bindings for Windows AI APIs using windows-bindgen."""
+    """Explicitly regenerate the tracked Windows AI bindings.
+
+    Normal builds compile the reviewed file already in src/. Regeneration is
+    intentionally a separate action because it rewrites tracked source and
+    depends on locally installed WinMD metadata.
+    """
     print(f"\n{'='*60}")
     print("Generating Windows AI Bindings")
     print(f"{'='*60}")
@@ -181,9 +186,8 @@ def generate_windows_ai_bindings() -> bool:
     # Check if winmd files exist
     ai_text_winmd = winmd_dir / "Microsoft.Windows.AI.Text.winmd"
     if not ai_text_winmd.exists():
-        print(f"Note: Windows AI winmd files not found at {winmd_dir}")
-        print("Skipping Windows AI bindings generation")
-        return True  # Not a failure, just skip
+        print(f"Error: Windows AI winmd files not found at {winmd_dir}")
+        return False
 
     # Create a temporary Rust project to run bindgen
     bindgen_dir = Path("/tmp/wfdiag_bindgen")
@@ -199,8 +203,8 @@ def generate_windows_ai_bindings() -> bool:
         if winmd_matches:
             windows_winmd = Path(winmd_matches[0])
         else:
-            print("Warning: Windows.winmd not found, bindings may be incomplete")
-            windows_winmd = None
+            print("Error: Windows.winmd not found")
+            return False
 
     # Write Cargo.toml
     cargo_toml = bindgen_dir / "Cargo.toml"
@@ -211,7 +215,7 @@ edition = "2024"
 rust-version = "1.97"
 
 [dependencies]
-windows-bindgen = "0.66"
+windows-bindgen = "=0.66.0"
 ''')
 
     # Build the list of input winmd files - include all AI-related winmd files
@@ -254,9 +258,9 @@ windows-bindgen = "0.66"
     if result and bindings_file.exists():
         print(f"Successfully generated Windows AI bindings: {bindings_file}")
         return True
-    else:
-        print("Warning: Windows AI bindings generation may have failed")
-        return True  # Don't fail the build
+
+    print("Error: Windows AI bindings generation failed")
+    return False
 
 
 def ensure_targets() -> bool:
@@ -360,7 +364,7 @@ def build_target(target_name: str, release: bool = True, jobs: int = None, use_s
     # bin and the cdylib/staticlib, whose .pdb collides with the bin's in debug
     # profile (a fatal "output filename collision" under plain cargo build;
     # release strips pdbs so it never surfaced).
-    cmd = ["cargo", "build", "--target", triple, "-j", str(num_jobs), "--bin", "wfdiag-tauri"]
+    cmd = ["cargo", "build", "--locked", "--target", triple, "-j", str(num_jobs), "--bin", "wfdiag-tauri"]
     if release:
         cmd.append("--release")
 
@@ -378,7 +382,7 @@ def check_target(target_name: str) -> bool:
 
     env = get_env_for_target(target_name)
 
-    cmd = ["cargo", "check", "--target", triple]
+    cmd = ["cargo", "check", "--locked", "--target", triple]
 
     return run_command(cmd, env=env, cwd=SRC_TAURI)
 
@@ -595,13 +599,12 @@ def build_sparse(version: str, sign: bool = False) -> bool:
                 print(f"Failed to sign {msix_path.name}")
                 return False
 
-    # Copy next to the loose exes under the stable names the app probes for at
-    # startup (sparse_identity.rs self-registers wfdiag-sparse-<arch>.msix —
-    # no PowerShell needed once the signing cert is trusted)
+    # Copy next to the loose exes under stable names for the developer-facing
+    # registration helper. The application never self-registers a package.
     for target_name, msix_path in zip(["x64", "arm64"], packages):
         dst = OUTPUT_DIR / f"wfdiag-sparse-{target_name}.msix"
         shutil.copy2(msix_path, dst)
-        print(f"  Copied for self-registration: {dst}")
+        print(f"  Copied for developer registration: {dst}")
 
     # Installer/uninstaller helper next to the loose exes
     install_script = OUTPUT_DIR / "Install-SparseIdentity.ps1"
@@ -893,8 +896,9 @@ def main():
     )
     parser.add_argument(
         "action",
-        choices=["check", "build", "build-all", "build-msix", "build-sparse"],
-        help="Action to perform: check, build, build-all, build-msix, or "
+        choices=["check", "build", "build-all", "build-msix", "build-sparse", "generate-bindings"],
+        help="Action to perform: check, build, build-all, build-msix, "
+             "generate-bindings, or "
              "build-sparse (DEV ONLY: sparse identity packages to test the "
              "Store-identity Phi Silica path on a loose exe)"
     )
@@ -950,6 +954,18 @@ def main():
 
     global BUNDLE_AI_DLLS
     BUNDLE_AI_DLLS = args.bundle_ai_dlls
+
+    # Binding regeneration only needs Cargo plus the WinMD inputs. Do not
+    # require the cross-linker, npm, or an initialized xwin cache for this
+    # source-generation action.
+    if args.action == "generate-bindings":
+        if shutil.which("cargo") is None:
+            print("Error: cargo is required to generate Windows AI bindings")
+            sys.exit(1)
+        if not generate_windows_ai_bindings():
+            sys.exit(1)
+        print("\nDone!")
+        return
 
     # Determine sccache usage - enabled by default if available
     if args.no_sccache:
@@ -1014,9 +1030,6 @@ def main():
                 sys.exit(1)
         else:
             print("\nSkipping frontend build (--skip-frontend)")
-
-        # Generate Windows AI bindings (optional - won't fail build if it fails)
-        generate_windows_ai_bindings()
 
         # Build both targets
         if not ensure_targets():

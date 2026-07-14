@@ -38,7 +38,7 @@ export function useCommands(): Command[] {
     setSelectedDiagnosticId, settings, saveSettings,
   } = useAppContext()
   const { setThemeMode, isDark } = useTheme()
-  const { runDiagnostics, runQuickScan, runFullScan, stopScan } = useScanner()
+  const { rerunDiagnostic, runQuickScan, runFullScan, stopScan } = useScanner()
   const { copyToClipboard, exportResults, shareToWindowsForum, emailReport, generateSupportPackage } = useDiagnostics()
 
   const hasResults = Object.keys(results).length > 0
@@ -160,7 +160,7 @@ export function useCommands(): Command[] {
         icon: taskIcon(task.id, task.category),
         keywords: `${task.category} ${task.id}`,
         enabled: !isRunning && !adminBlocked,
-        run: () => { runDiagnostics([task.id]) },
+        run: () => { void rerunDiagnostic(task.id) },
       })
     }
 
@@ -168,7 +168,7 @@ export function useCommands(): Command[] {
   }, [
     availableTasks, results, isRunning, hasResults, isDark, navRailCollapsed, systemInfo,
     setSelectedTab, setShowSettings, setShowAbout, setNavRailCollapsed, setSelectedDiagnosticId,
-    settings, saveSettings, setThemeMode, runDiagnostics, runQuickScan, runFullScan, stopScan,
+    settings, saveSettings, setThemeMode, rerunDiagnostic, runQuickScan, runFullScan, stopScan,
     copyToClipboard, exportResults, shareToWindowsForum, emailReport, generateSupportPackage,
   ])
 }

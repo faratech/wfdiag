@@ -25,7 +25,7 @@ vi.mock('../contexts/AppContext', () => ({
 
 vi.mock('./useScanner', () => ({
   useScanner: () => ({
-    runDiagnostics: vi.fn(),
+    rerunDiagnostic: vi.fn(),
     runQuickScan: vi.fn(),
     runFullScan: vi.fn(),
     stopScan: vi.fn(),

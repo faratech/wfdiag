@@ -11,18 +11,16 @@ timeouts before ever reaching real validation. Run in CI on every push so
 any future drift on these fields fails fast and loud instead of silently
 blocking the next Store submission.
 
-The four sources checked:
+The six sources checked:
   - src-tauri/tauri.msix.conf.json  (local build-cross.py Store MSIX path)
   - AppxManifest.xml                (Store MSIX package manifest)
-  - scripts/build-cross.py          (Python-generated manifest, both the
-                                      real Store identity and the dev-only
-                                      sparse identity)
+  - scripts/build-cross.py          (Python-generated Store and dev-only
+                                      sparse manifests)
+  - src-tauri/windows-app.manifest  (loose executable's sparse association)
   - .github/workflows/build-and-publish-store.yml (CI's inline manifest)
 
-The sparse-identity package (build-sparse) intentionally uses a different
-Identity Name (dev-only tooling, see CLAUDE.md) — only its
-publisherDisplayName and Publisher CN are checked against the canonical
-values, not its Identity Name.
+The sparse-identity package must use the Store identity because the LAF token
+is bound to the full Store package family name.
 """
 import json
 import re
@@ -72,15 +70,19 @@ find_all(f"{appx_path.name} PublisherDisplayName", r"<PublisherDisplayName>([^<]
 build_cross_path = ROOT / "scripts/build-cross.py"
 build_cross_text = build_cross_path.read_text()
 find_all(f"{build_cross_path.name} PUBLISHER constant", r'^PUBLISHER = "([^"]+)"', build_cross_text, EXPECTED_PUBLISHER_CN)
+find_all(f"{build_cross_path.name} SPARSE_PACKAGE_NAME constant", r'^SPARSE_PACKAGE_NAME = "([^"]+)"', build_cross_text, EXPECTED_IDENTITY_NAME)
 find_all(f"{build_cross_path.name} PublisherDisplayName", r"<PublisherDisplayName>([^<]+)</PublisherDisplayName>", build_cross_text, EXPECTED_PUBLISHER_DISPLAY_NAME)
-# Only create_appx_manifest() uses the real Identity Name; create_sparse_manifest()
-# intentionally uses a different dev-only identity (SPARSE_PACKAGE_NAME) — checked
-# by name instead of position so reordering the two functions can't skip this.
 appx_manifest_fn = re.search(r"def create_appx_manifest\(.*?\n(?=def |\Z)", build_cross_text, re.S)
 if not appx_manifest_fn:
     errors.append(f"{build_cross_path.name}: create_appx_manifest() not found")
 else:
     find_all(f"{build_cross_path.name} create_appx_manifest Identity Name", r'<Identity\b[^>]*\bName="([^"]+)"', appx_manifest_fn.group(0), EXPECTED_IDENTITY_NAME)
+
+# --- src-tauri/windows-app.manifest ---
+windows_manifest_path = ROOT / "src-tauri/windows-app.manifest"
+windows_manifest_text = windows_manifest_path.read_text()
+find_all(f"{windows_manifest_path.name} msix publisher", r'<msix\b[^>]*\bpublisher="([^"]+)"', windows_manifest_text, EXPECTED_PUBLISHER_CN)
+find_all(f"{windows_manifest_path.name} msix packageName", r'<msix\b[^>]*\bpackageName="([^"]+)"', windows_manifest_text, EXPECTED_IDENTITY_NAME)
 
 # --- .github/workflows/build-and-publish-store.yml ---
 ci_manifest_path = ROOT / ".github/workflows/build-and-publish-store.yml"

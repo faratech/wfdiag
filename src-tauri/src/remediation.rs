@@ -5,9 +5,9 @@
 //! - **OpenTool** — launches a Windows GUI (Task Manager, Disk Cleanup, …).
 //! - **AutoSafe** — non-destructive commands/cleanups, one click.
 //! - **Repair**  — admin and/or system-altering (DISM, SFC, network reset,
-//!   restart). The backend REFUSES to run these without `confirmed = true`;
-//!   the UI shows a confirmation modal first. This gate is enforced here, not
-//!   in the frontend.
+//!   restart). Production execution is reachable only after the action broker
+//!   atomically consumes an unexpired, exact catalog proposal approved by the
+//!   user. The webview cannot submit an execution boolean or an argv.
 //!
 //! SAFETY: every command is a compile-time constant — no user or model input
 //! ever reaches an argv. The AI fix-plan path only ever yields catalog IDs,
@@ -17,13 +17,47 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixResult {
+    /// Compatibility summary: true only when every required step succeeded
+    /// or was already satisfied.
     pub success: bool,
     pub message: String,
     pub actions_taken: Vec<String>,
     pub requires_restart: bool,
+    #[serde(default)]
+    pub completion_status: FixCompletionStatus,
+    #[serde(default)]
+    pub steps: Vec<RemediationStepResult>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixCompletionStatus {
+    #[default]
+    Succeeded,
+    Partial,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemediationStepStatus {
+    Succeeded,
+    AlreadySatisfied,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemediationStepResult {
+    pub action: String,
+    pub status: RemediationStepStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,13 +80,20 @@ pub struct RemediationSummary {
     pub requires_restart: bool,
     pub long_running: bool,
     pub maintenance: bool,
+    /// Eligible for an exact, bounded batch authorization. Repair, elevated,
+    /// restart-requiring and long-running actions are deliberately excluded.
+    pub batch_eligible: bool,
+    /// Whether an in-flight action has a safe cancellation boundary.
+    pub cancellable: bool,
 }
 
-/// Outcome of run_remediation: either the confirmation gate fired, or the
-/// remediation ran to completion (successfully or not).
+/// Test-only shape for the removed boolean confirmation path. Keeping this in
+/// regression tests proves repair commands are never constructed pre-approval
+/// without carrying that legacy shape into production IPC.
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub enum FixOutcome {
+enum FixOutcome {
     NeedsConfirmation { remediation: RemediationSummary },
     Completed { result: FixResult },
 }
@@ -60,8 +101,8 @@ pub enum FixOutcome {
 pub struct CmdStep {
     pub program: &'static str,
     pub args: &'static [&'static str],
-    /// Continue the sequence even if this step fails (e.g. stopping a service
-    /// that is already stopped)
+    /// Continue the sequence even if this step fails. The failure is still
+    /// returned to the caller and makes the overall result partial/failed.
     pub ignore_failure: bool,
     pub action_label: &'static str,
 }
@@ -80,7 +121,7 @@ pub enum RunKind {
     },
     /// Filesystem-based cleanups that don't shell out
     Custom {
-        f: fn() -> anyhow::Result<FixResult>,
+        f: fn(&CancellationToken) -> anyhow::Result<FixResult>,
     },
 }
 
@@ -99,6 +140,46 @@ pub struct RemediationSpec {
 }
 
 impl RemediationSpec {
+    pub fn batch_eligible(&self) -> bool {
+        self.tier == RemediationTier::AutoSafe
+            && !self.admin_required
+            && !self.requires_restart
+            && !self.long_running
+    }
+
+    pub fn cancellable(&self) -> bool {
+        match &self.run {
+            // Do not terminate integrity-repair tools midway through a write.
+            RunKind::Steps { .. } => !self.long_running && self.id != "restart_system",
+            RunKind::Custom { .. } => matches!(self.id, "clear_icon_cache" | "clear_temp_files"),
+            RunKind::Spawn { .. } => false,
+        }
+    }
+
+    /// Human-facing, immutable preview derived only from catalog constants.
+    pub fn preview_steps(&self) -> Vec<String> {
+        match &self.run {
+            RunKind::Spawn { program, args } => vec![format!(
+                "Open {}{}",
+                program,
+                if !args.is_empty() {
+                    format!(" {}", args.join(" "))
+                } else {
+                    String::new()
+                }
+            )],
+            RunKind::Steps { steps, .. } => steps
+                .iter()
+                .map(|step| {
+                    format!("{} {}", step.program, step.args.join(" "))
+                        .trim()
+                        .to_string()
+                })
+                .collect(),
+            RunKind::Custom { .. } => vec![self.description.to_string()],
+        }
+    }
+
     pub fn summary(&self) -> RemediationSummary {
         RemediationSummary {
             id: self.id.to_string(),
@@ -109,6 +190,8 @@ impl RemediationSpec {
             requires_restart: self.requires_restart,
             long_running: self.long_running,
             maintenance: self.maintenance,
+            batch_eligible: self.batch_eligible(),
+            cancellable: self.cancellable(),
         }
     }
 }
@@ -129,8 +212,13 @@ type RunFuture<'a> = Pin<Box<dyn Future<Output = anyhow::Result<CmdOutput>> + Se
 /// assert exactly which commands would run without touching the system.
 pub trait CommandRunner: Send + Sync {
     fn spawn(&self, program: &str, args: &[&str]) -> anyhow::Result<()>;
-    fn run<'a>(&'a self, program: &'a str, args: &'a [&'a str], timeout: Duration)
-    -> RunFuture<'a>;
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [&'a str],
+        timeout: Duration,
+        cancel: &'a CancellationToken,
+    ) -> RunFuture<'a>;
 }
 
 /// Real runner: tokio process with hidden console windows and timeouts.
@@ -157,6 +245,7 @@ impl CommandRunner for RealRunner {
         program: &'a str,
         args: &'a [&'a str],
         timeout: Duration,
+        cancel: &'a CancellationToken,
     ) -> RunFuture<'a> {
         Box::pin(async move {
             let mut cmd =
@@ -169,15 +258,21 @@ impl CommandRunner for RealRunner {
             }
             cmd.kill_on_drop(true);
             let child = cmd.spawn()?;
-            let output = tokio::time::timeout(timeout, child.wait_with_output())
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "'{}' timed out after {} minute(s) and was stopped",
-                        program,
-                        timeout.as_secs() / 60
-                    )
-                })??;
+            let output = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    return Err(anyhow::anyhow!("Remediation cancelled"));
+                }
+                result = tokio::time::timeout(timeout, child.wait_with_output()) => {
+                    result.map_err(|_| {
+                        anyhow::anyhow!(
+                            "'{}' timed out after {} minute(s) and was stopped",
+                            program,
+                            timeout.as_secs() / 60
+                        )
+                    })??
+                }
+            };
             #[cfg(windows)]
             let (stdout, stderr) = (
                 crate::security::decode_windows_output(&output.stdout),
@@ -339,21 +434,10 @@ pub fn remediations() -> &'static [RemediationSpec] {
             },
         },
         RemediationSpec {
-            id: "clear_prefetch",
-            label: "Clear prefetch files",
-            description: "Deletes .pf files from C:\\Windows\\Prefetch (Windows rebuilds them).",
-            tier: RemediationTier::AutoSafe,
-            admin_required: true,
-            requires_restart: false,
-            long_running: false,
-            maintenance: true,
-            run: RunKind::Custom { f: clear_prefetch },
-        },
-        RemediationSpec {
             id: "empty_recycle_bin",
             label: "Empty Recycle Bin",
-            description: "Empties the Recycle Bin using the Windows Shell API.",
-            tier: RemediationTier::AutoSafe,
+            description: "Permanently removes the current contents of the Recycle Bin using the Windows Shell API.",
+            tier: RemediationTier::Repair,
             admin_required: false,
             requires_restart: false,
             long_running: false,
@@ -365,9 +449,8 @@ pub fn remediations() -> &'static [RemediationSpec] {
         RemediationSpec {
             id: "clear_temp_files",
             label: "Clean temp files",
-            description: "Best-effort delete of files in the user temp folder (locked files are \
-                          skipped).",
-            tier: RemediationTier::AutoSafe,
+            description: "Permanently deletes files and folders in the user temp directory; locked items are skipped.",
+            tier: RemediationTier::Repair,
             admin_required: false,
             requires_restart: false,
             long_running: false,
@@ -501,7 +584,7 @@ pub fn remediations() -> &'static [RemediationSpec] {
                     CmdStep {
                         program: "netsh",
                         args: &["int", "ip", "reset"],
-                        ignore_failure: true, // partial resets still log success lines
+                        ignore_failure: false,
                         action_label: "Reset TCP/IP stack",
                     },
                 ],
@@ -547,176 +630,340 @@ pub fn summary(remediation_id: &str) -> Option<RemediationSummary> {
 // Engine
 // ============================================================================
 
-/// Execute a remediation. The Repair confirmation gate lives HERE: a Repair
-/// tier id without `confirmed` returns NeedsConfirmation before any command
-/// is constructed or run.
-pub async fn execute(
+/// Test-only adapter that preserves the old confirmation-gate regression
+/// checks. Production has no confirmation boolean; it enters through the
+/// action broker's consumed grant and calls `execute_authorized`.
+#[cfg(test)]
+async fn execute(
     remediation_id: &str,
     confirmed: bool,
     runner: &dyn CommandRunner,
 ) -> Result<FixOutcome, String> {
     let spec =
         find(remediation_id).ok_or_else(|| format!("Unknown remediation '{}'", remediation_id))?;
-
     if spec.tier == RemediationTier::Repair && !confirmed {
         return Ok(FixOutcome::NeedsConfirmation {
             remediation: spec.summary(),
         });
     }
+    execute_authorized(remediation_id, runner, &CancellationToken::new())
+        .await
+        .map(|result| FixOutcome::Completed { result })
+}
 
-    let result = match &spec.run {
-        RunKind::Spawn { program, args } => match runner.spawn(program, args) {
-            Ok(()) => FixResult {
-                success: true,
-                message: format!("{} opened.", spec.label),
-                actions_taken: vec![format!("Launched {}", program)],
-                requires_restart: false,
+/// Authorized catalog execution with cooperative cancellation. The action
+/// broker is the only production caller; model and frontend strings never
+/// become programs, arguments, or a confirmation boolean.
+pub(crate) async fn execute_authorized(
+    remediation_id: &str,
+    runner: &dyn CommandRunner,
+    cancel: &CancellationToken,
+) -> Result<FixResult, String> {
+    let spec =
+        find(remediation_id).ok_or_else(|| format!("Unknown remediation '{}'", remediation_id))?;
+
+    let result = if cancel.is_cancelled() {
+        cancelled_result("Remediation cancelled before it started")
+    } else {
+        match &spec.run {
+            RunKind::Spawn { program, args } => match runner.spawn(program, args) {
+                Ok(()) => FixResult {
+                    success: true,
+                    message: format!("{} opened.", spec.label),
+                    actions_taken: vec![format!("Launched {}", program)],
+                    requires_restart: false,
+                    completion_status: FixCompletionStatus::Succeeded,
+                    steps: vec![RemediationStepResult {
+                        action: format!("Launch {}", program),
+                        status: RemediationStepStatus::Succeeded,
+                        detail: None,
+                    }],
+                },
+                Err(e) => FixResult {
+                    success: false,
+                    message: format!("Could not launch {}: {}", program, e),
+                    actions_taken: vec![],
+                    requires_restart: false,
+                    completion_status: FixCompletionStatus::Failed,
+                    steps: vec![RemediationStepResult {
+                        action: format!("Launch {}", program),
+                        status: RemediationStepStatus::Failed,
+                        detail: Some(e.to_string()),
+                    }],
+                },
             },
-            Err(e) => FixResult {
-                success: false,
-                message: format!("Could not launch {}: {}", program, e),
-                actions_taken: vec![],
-                requires_restart: false,
-            },
-        },
-        RunKind::Steps {
-            steps,
-            timeout_secs,
-            success_msg,
-        } => {
-            let mut actions_taken = Vec::new();
-            let timeout = Duration::from_secs(*timeout_secs);
-            let mut failure: Option<String> = None;
-            for step in *steps {
-                match runner.run(step.program, step.args, timeout).await {
-                    Ok(output) if output.success => {
-                        actions_taken.push(step.action_label.to_string());
-                    }
-                    Ok(output) => {
-                        if step.ignore_failure {
-                            continue;
-                        }
-                        let detail = if output.stderr.trim().is_empty() {
-                            output.stdout
-                        } else {
-                            output.stderr
-                        };
-                        failure = Some(format!(
-                            "'{} {}' failed: {}",
-                            step.program,
-                            step.args.join(" "),
-                            detail.trim().chars().take(400).collect::<String>()
-                        ));
+            RunKind::Steps {
+                steps,
+                timeout_secs,
+                success_msg,
+            } => {
+                let mut actions_taken = Vec::new();
+                let mut step_results = Vec::new();
+                let timeout = Duration::from_secs(*timeout_secs);
+                let mut failures = Vec::new();
+                for step in *steps {
+                    if cancel.is_cancelled() {
+                        step_results.push(RemediationStepResult {
+                            action: step.action_label.to_string(),
+                            status: RemediationStepStatus::Cancelled,
+                            detail: Some("Cancelled before this step started".to_string()),
+                        });
                         break;
                     }
-                    Err(e) => {
-                        if step.ignore_failure {
-                            continue;
+                    match runner.run(step.program, step.args, timeout, cancel).await {
+                        Ok(output) if output.success => {
+                            actions_taken.push(step.action_label.to_string());
+                            step_results.push(RemediationStepResult {
+                                action: step.action_label.to_string(),
+                                status: RemediationStepStatus::Succeeded,
+                                detail: None,
+                            });
                         }
-                        failure = Some(e.to_string());
-                        break;
+                        Ok(output) => {
+                            let detail = if output.stderr.trim().is_empty() {
+                                output.stdout
+                            } else {
+                                output.stderr
+                            };
+                            let detail = detail.trim().chars().take(400).collect::<String>();
+                            if command_already_satisfied(&detail) {
+                                step_results.push(RemediationStepResult {
+                                    action: step.action_label.to_string(),
+                                    status: RemediationStepStatus::AlreadySatisfied,
+                                    detail: (!detail.is_empty()).then_some(detail),
+                                });
+                                continue;
+                            }
+                            let failure = format!(
+                                "'{} {}' failed: {}",
+                                step.program,
+                                step.args.join(" "),
+                                detail
+                            );
+                            step_results.push(RemediationStepResult {
+                                action: step.action_label.to_string(),
+                                status: RemediationStepStatus::Failed,
+                                detail: Some(failure.clone()),
+                            });
+                            failures.push(failure);
+                            if !step.ignore_failure {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            if cancel.is_cancelled() {
+                                step_results.push(RemediationStepResult {
+                                    action: step.action_label.to_string(),
+                                    status: RemediationStepStatus::Cancelled,
+                                    detail: Some(
+                                        "Cancelled while this step was running".to_string(),
+                                    ),
+                                });
+                                break;
+                            }
+                            let failure = e.to_string();
+                            step_results.push(RemediationStepResult {
+                                action: step.action_label.to_string(),
+                                status: RemediationStepStatus::Failed,
+                                detail: Some(failure.clone()),
+                            });
+                            failures.push(failure);
+                            if !step.ignore_failure {
+                                break;
+                            }
+                        }
                     }
                 }
+                let completion_status = completion_status(&step_results);
+                let success = completion_status == FixCompletionStatus::Succeeded;
+                FixResult {
+                    success,
+                    message: if completion_status == FixCompletionStatus::Cancelled {
+                        "Remediation cancelled.".to_string()
+                    } else if success {
+                        success_msg.to_string()
+                    } else {
+                        format!(
+                            "{} remediation step(s) failed: {}",
+                            failures.len(),
+                            failures.join("; ")
+                        )
+                    },
+                    requires_restart: spec.requires_restart
+                        && step_results
+                            .iter()
+                            .any(|step| step.status == RemediationStepStatus::Succeeded),
+                    actions_taken,
+                    completion_status,
+                    steps: step_results,
+                }
             }
-            match failure {
-                Some(message) => FixResult {
-                    success: false,
-                    message,
-                    actions_taken,
-                    requires_restart: false,
-                },
-                None => FixResult {
-                    success: true,
-                    message: success_msg.to_string(),
-                    actions_taken,
-                    requires_restart: spec.requires_restart,
-                },
+            RunKind::Custom { f } => {
+                // Filesystem and Windows Shell custom actions are blocking. Keep
+                // them off Tokio's async worker threads.
+                let custom = *f;
+                let cancel = cancel.clone();
+                match tokio::task::spawn_blocking(move || custom(&cancel)).await {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(e)) => failed_result(e.to_string()),
+                    Err(e) => failed_result(format!("Remediation worker failed: {}", e)),
+                }
             }
         }
-        RunKind::Custom { f } => match f() {
-            Ok(result) => result,
-            Err(e) => FixResult {
-                success: false,
-                message: e.to_string(),
-                actions_taken: vec![],
-                requires_restart: false,
-            },
-        },
     };
 
-    Ok(FixOutcome::Completed { result })
+    Ok(result)
+}
+
+fn command_already_satisfied(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("already been started")
+        || detail.contains("service is already running")
+        || detail.contains("instance of the service is already running")
+}
+
+fn completion_status(steps: &[RemediationStepResult]) -> FixCompletionStatus {
+    let succeeded = steps.iter().any(|step| {
+        matches!(
+            step.status,
+            RemediationStepStatus::Succeeded | RemediationStepStatus::AlreadySatisfied
+        )
+    });
+    let failed = steps
+        .iter()
+        .any(|step| step.status == RemediationStepStatus::Failed);
+    let cancelled = steps
+        .iter()
+        .any(|step| step.status == RemediationStepStatus::Cancelled);
+    if cancelled {
+        return FixCompletionStatus::Cancelled;
+    }
+    match (succeeded, failed) {
+        (_, false) => FixCompletionStatus::Succeeded,
+        (true, true) => FixCompletionStatus::Partial,
+        (false, true) => FixCompletionStatus::Failed,
+    }
+}
+
+fn cancelled_result(message: &str) -> FixResult {
+    FixResult {
+        success: false,
+        message: message.to_string(),
+        actions_taken: vec![],
+        requires_restart: false,
+        completion_status: FixCompletionStatus::Cancelled,
+        steps: vec![RemediationStepResult {
+            action: "Run remediation".to_string(),
+            status: RemediationStepStatus::Cancelled,
+            detail: Some(message.to_string()),
+        }],
+    }
+}
+
+fn failed_result(message: String) -> FixResult {
+    FixResult {
+        success: false,
+        message: message.clone(),
+        actions_taken: vec![],
+        requires_restart: false,
+        completion_status: FixCompletionStatus::Failed,
+        steps: vec![RemediationStepResult {
+            action: "Run remediation".to_string(),
+            status: RemediationStepStatus::Failed,
+            detail: Some(message),
+        }],
+    }
 }
 
 // ============================================================================
 // Custom (filesystem) remediations
 // ============================================================================
 
-fn clear_icon_cache() -> anyhow::Result<FixResult> {
+fn clear_icon_cache(cancel: &CancellationToken) -> anyhow::Result<FixResult> {
     let mut actions_taken = Vec::new();
-    if let Ok(profile) = std::env::var("USERPROFILE") {
-        let icon_cache = std::path::Path::new(&profile).join(r"AppData\Local\IconCache.db");
-        if icon_cache.exists() && std::fs::remove_file(&icon_cache).is_ok() {
-            actions_taken.push("Deleted IconCache.db".to_string());
-        }
-        let explorer_dir =
-            std::path::Path::new(&profile).join(r"AppData\Local\Microsoft\Windows\Explorer");
-        if let Ok(entries) = std::fs::read_dir(&explorer_dir) {
-            let mut removed = 0;
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_lowercase();
-                if name.starts_with("thumbcache") && std::fs::remove_file(entry.path()).is_ok() {
-                    removed += 1;
-                }
-            }
-            if removed > 0 {
-                actions_taken.push(format!("Deleted {} thumbnail cache file(s)", removed));
-            }
+    let mut failures = Vec::new();
+    let profile =
+        std::env::var("USERPROFILE").map_err(|_| anyhow::anyhow!("USERPROFILE is unavailable"))?;
+    let icon_cache = std::path::Path::new(&profile).join(r"AppData\Local\IconCache.db");
+    if cancel.is_cancelled() {
+        return Ok(cancelled_result(
+            "Icon-cache cleanup cancelled before it started",
+        ));
+    }
+    if icon_cache.exists() {
+        match std::fs::remove_file(&icon_cache) {
+            Ok(()) => actions_taken.push("Deleted IconCache.db".to_string()),
+            Err(error) => failures.push(format!("IconCache.db: {}", error)),
         }
     }
-    Ok(FixResult {
-        success: true,
-        message: "Icon and thumbnail caches cleared. They rebuild after you sign in again."
-            .to_string(),
-        actions_taken,
-        requires_restart: true,
-    })
-}
-
-fn clear_prefetch() -> anyhow::Result<FixResult> {
-    let prefetch = std::path::Path::new(r"C:\Windows\Prefetch");
-    let mut removed = 0;
-    let mut denied = false;
-    if let Ok(entries) = std::fs::read_dir(prefetch) {
-        for entry in entries.flatten() {
-            if entry.path().extension().is_some_and(|ext| ext == "pf") {
-                match std::fs::remove_file(entry.path()) {
-                    Ok(()) => removed += 1,
-                    Err(_) => denied = true,
+    let explorer_dir =
+        std::path::Path::new(&profile).join(r"AppData\Local\Microsoft\Windows\Explorer");
+    if explorer_dir.exists() {
+        match std::fs::read_dir(&explorer_dir) {
+            Ok(entries) => {
+                let mut removed = 0;
+                for entry in entries {
+                    if cancel.is_cancelled() {
+                        return Ok(cancelled_result("Icon-cache cleanup cancelled"));
+                    }
+                    let Ok(entry) = entry else {
+                        failures.push("Could not enumerate a thumbnail cache entry".to_string());
+                        continue;
+                    };
+                    let name = entry.file_name().to_string_lossy().to_lowercase();
+                    if name.starts_with("thumbcache") {
+                        match std::fs::remove_file(entry.path()) {
+                            Ok(()) => removed += 1,
+                            Err(error) => failures.push(format!("{}: {}", name, error)),
+                        }
+                    }
+                }
+                if removed > 0 {
+                    actions_taken.push(format!("Deleted {} thumbnail cache file(s)", removed));
                 }
             }
+            Err(error) => failures.push(format!("Thumbnail cache directory: {}", error)),
         }
+    }
+    let completion_status = if failures.is_empty() {
+        FixCompletionStatus::Succeeded
+    } else if actions_taken.is_empty() {
+        FixCompletionStatus::Failed
     } else {
-        denied = true;
-    }
-    if removed == 0 && denied {
-        return Ok(FixResult {
-            success: false,
-            message: "Could not clear prefetch files — administrator rights are required."
-                .to_string(),
-            actions_taken: vec![],
-            requires_restart: false,
-        });
-    }
+        FixCompletionStatus::Partial
+    };
+    let changed = !actions_taken.is_empty();
     Ok(FixResult {
-        success: true,
-        message: format!("Removed {} prefetch file(s).", removed),
-        actions_taken: vec![format!("Deleted {} .pf files", removed)],
-        requires_restart: false,
+        success: failures.is_empty(),
+        message: if failures.is_empty() && !changed {
+            "Icon and thumbnail caches were already clear.".to_string()
+        } else if failures.is_empty() {
+            "Icon and thumbnail caches cleared. They rebuild after you sign in again.".to_string()
+        } else {
+            format!(
+                "Some icon-cache items could not be removed: {}",
+                failures.join("; ")
+            )
+        },
+        actions_taken,
+        requires_restart: changed && completion_status != FixCompletionStatus::Failed,
+        completion_status,
+        steps: vec![RemediationStepResult {
+            action: "Clear icon and thumbnail caches".to_string(),
+            status: if failures.is_empty() && !changed {
+                RemediationStepStatus::AlreadySatisfied
+            } else if failures.is_empty() {
+                RemediationStepStatus::Succeeded
+            } else {
+                RemediationStepStatus::Failed
+            },
+            detail: (!failures.is_empty()).then(|| failures.join("; ")),
+        }],
     })
 }
 
 #[cfg(windows)]
-fn empty_recycle_bin() -> anyhow::Result<FixResult> {
+fn empty_recycle_bin(_cancel: &CancellationToken) -> anyhow::Result<FixResult> {
     use windows::Win32::UI::Shell::{
         SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND, SHEmptyRecycleBinW,
     };
@@ -735,44 +982,80 @@ fn empty_recycle_bin() -> anyhow::Result<FixResult> {
         message: "Recycle Bin emptied.".to_string(),
         actions_taken: vec!["Emptied the Recycle Bin via Windows Shell API".to_string()],
         requires_restart: false,
+        completion_status: FixCompletionStatus::Succeeded,
+        steps: vec![RemediationStepResult {
+            action: "Empty the Recycle Bin".to_string(),
+            status: RemediationStepStatus::Succeeded,
+            detail: None,
+        }],
     })
 }
 
 #[cfg(not(windows))]
-fn empty_recycle_bin() -> anyhow::Result<FixResult> {
+fn empty_recycle_bin(_cancel: &CancellationToken) -> anyhow::Result<FixResult> {
     anyhow::bail!("Empty Recycle Bin is only supported on Windows")
 }
 
-fn clear_temp_files() -> anyhow::Result<FixResult> {
+fn clear_temp_files(cancel: &CancellationToken) -> anyhow::Result<FixResult> {
     let temp = std::env::temp_dir();
     let mut removed = 0u32;
     let mut skipped = 0u32;
-    if let Ok(entries) = std::fs::read_dir(&temp) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let outcome = if path.is_dir() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
-            match outcome {
-                Ok(()) => removed += 1,
-                Err(_) => skipped += 1, // locked by running apps — expected
-            }
+    let entries = std::fs::read_dir(&temp)
+        .map_err(|error| anyhow::anyhow!("Could not read {}: {}", temp.display(), error))?;
+    for entry in entries {
+        if cancel.is_cancelled() {
+            return Ok(cancelled_result(&format!(
+                "Temp cleanup cancelled after removing {} item(s)",
+                removed
+            )));
+        }
+        let Ok(entry) = entry else {
+            skipped += 1;
+            continue;
+        };
+        let path = entry.path();
+        let outcome = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match outcome {
+            Ok(()) => removed += 1,
+            Err(_) => skipped += 1, // locked by running apps — expected
         }
     }
     Ok(FixResult {
-        success: true,
+        success: skipped == 0,
         message: format!(
             "Removed {} temp item(s); {} in use were skipped.",
             removed, skipped
         ),
-        actions_taken: vec![format!("Cleaned {}", temp.display())],
+        actions_taken: (removed > 0)
+            .then(|| format!("Removed {} item(s) from {}", removed, temp.display()))
+            .into_iter()
+            .collect(),
         requires_restart: false,
+        completion_status: if skipped == 0 {
+            FixCompletionStatus::Succeeded
+        } else if removed > 0 {
+            FixCompletionStatus::Partial
+        } else {
+            FixCompletionStatus::Failed
+        },
+        steps: vec![RemediationStepResult {
+            action: format!("Clean {}", temp.display()),
+            status: if skipped == 0 {
+                RemediationStepStatus::Succeeded
+            } else {
+                RemediationStepStatus::Failed
+            },
+            detail: (skipped > 0)
+                .then(|| format!("{} locked item(s) could not be removed", skipped)),
+        }],
     })
 }
 
-fn reset_windows_update() -> anyhow::Result<FixResult> {
+fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult> {
     // Stop -> clear download cache -> start. Bound service-control waits so a
     // hung SCM call cannot stall the remediation indefinitely.
     let mut actions_taken = Vec::new();
@@ -809,40 +1092,105 @@ fn reset_windows_update() -> anyhow::Result<FixResult> {
         }
     };
 
-    if run_quiet("net", &["stop", "wuauserv"])? {
-        actions_taken.push("Stopped Windows Update service".to_string());
-    }
-    let download_dir = std::path::Path::new(r"C:\Windows\SoftwareDistribution\Download");
-    if let Ok(entries) = std::fs::read_dir(download_dir) {
-        let mut removed = 0;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let ok = if path.is_dir() {
-                std::fs::remove_dir_all(&path).is_ok()
-            } else {
-                std::fs::remove_file(&path).is_ok()
-            };
-            if ok {
-                removed += 1;
-            }
+    let mut steps = Vec::new();
+    match run_quiet("net", &["stop", "wuauserv"]) {
+        Ok(true) => {
+            actions_taken.push("Stopped Windows Update service".to_string());
+            steps.push(RemediationStepResult {
+                action: "Stop Windows Update service".to_string(),
+                status: RemediationStepStatus::Succeeded,
+                detail: None,
+            });
         }
-        actions_taken.push(format!("Cleared {} item(s) from the update cache", removed));
-    }
-    let restarted = run_quiet("net", &["start", "wuauserv"])?;
-    if restarted {
-        actions_taken.push("Restarted Windows Update service".to_string());
+        Ok(false) => steps.push(RemediationStepResult {
+            action: "Stop Windows Update service".to_string(),
+            status: RemediationStepStatus::Failed,
+            detail: Some("Service-control command returned a failure status".to_string()),
+        }),
+        Err(error) => steps.push(RemediationStepResult {
+            action: "Stop Windows Update service".to_string(),
+            status: RemediationStepStatus::Failed,
+            detail: Some(error.to_string()),
+        }),
     }
 
+    let download_dir = std::path::Path::new(r"C:\Windows\SoftwareDistribution\Download");
+    match std::fs::read_dir(download_dir) {
+        Ok(entries) => {
+            let mut removed = 0;
+            let mut failed = 0;
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    failed += 1;
+                    continue;
+                };
+                let path = entry.path();
+                let ok = if path.is_dir() {
+                    std::fs::remove_dir_all(&path).is_ok()
+                } else {
+                    std::fs::remove_file(&path).is_ok()
+                };
+                if ok {
+                    removed += 1;
+                } else {
+                    failed += 1;
+                }
+            }
+            actions_taken.push(format!("Cleared {} item(s) from the update cache", removed));
+            steps.push(RemediationStepResult {
+                action: "Clear Windows Update download cache".to_string(),
+                status: if failed == 0 {
+                    RemediationStepStatus::Succeeded
+                } else {
+                    RemediationStepStatus::Failed
+                },
+                detail: (failed > 0)
+                    .then(|| format!("{} cache item(s) could not be removed", failed)),
+            });
+        }
+        Err(error) => steps.push(RemediationStepResult {
+            action: "Clear Windows Update download cache".to_string(),
+            status: RemediationStepStatus::Failed,
+            detail: Some(error.to_string()),
+        }),
+    }
+
+    // Finally-style restoration: starting the service is attempted regardless
+    // of stop/cache failures so a partial reset cannot leave it disabled.
+    match run_quiet("net", &["start", "wuauserv"]) {
+        Ok(true) => {
+            actions_taken.push("Restarted Windows Update service".to_string());
+            steps.push(RemediationStepResult {
+                action: "Start Windows Update service".to_string(),
+                status: RemediationStepStatus::Succeeded,
+                detail: None,
+            });
+        }
+        Ok(false) => steps.push(RemediationStepResult {
+            action: "Start Windows Update service".to_string(),
+            status: RemediationStepStatus::Failed,
+            detail: Some("Service-control command returned a failure status".to_string()),
+        }),
+        Err(error) => steps.push(RemediationStepResult {
+            action: "Start Windows Update service".to_string(),
+            status: RemediationStepStatus::Failed,
+            detail: Some(error.to_string()),
+        }),
+    }
+
+    let completion_status = completion_status(&steps);
+    let success = completion_status == FixCompletionStatus::Succeeded;
     Ok(FixResult {
-        success: restarted,
-        message: if restarted {
+        success,
+        message: if success {
             "Windows Update components reset.".to_string()
         } else {
-            "Could not restart the Windows Update service — administrator rights are required."
-                .to_string()
+            "Windows Update reset completed only partially; review the failed steps.".to_string()
         },
         actions_taken,
         requires_restart: false,
+        completion_status,
+        steps,
     })
 }
 
@@ -856,6 +1204,7 @@ mod tests {
     struct RecordingRunner {
         calls: Mutex<Vec<String>>,
         fail_on: Option<&'static str>,
+        fail_args: Option<&'static str>,
     }
 
     impl CommandRunner for RecordingRunner {
@@ -871,10 +1220,14 @@ mod tests {
             program: &'a str,
             args: &'a [&'a str],
             _timeout: Duration,
+            _cancel: &'a CancellationToken,
         ) -> RunFuture<'a> {
             let line = format!("run:{} {}", program, args.join(" "));
             self.calls.lock().unwrap().push(line);
-            let fail = self.fail_on.is_some_and(|f| program == f);
+            let fail = self.fail_on.is_some_and(|f| program == f)
+                || self
+                    .fail_args
+                    .is_some_and(|needle| args.join(" ") == needle);
             Box::pin(async move {
                 Ok(CmdOutput {
                     success: !fail,
@@ -983,6 +1336,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn destructive_cleanups_require_confirmation() {
+        let runner = RecordingRunner::default();
+        for remediation_id in ["empty_recycle_bin", "clear_temp_files"] {
+            let outcome = execute(remediation_id, false, &runner).await.unwrap();
+            assert!(matches!(outcome, FixOutcome::NeedsConfirmation { .. }));
+        }
+        assert!(runner.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn open_tool_spawns_without_waiting() {
         let runner = RecordingRunner::default();
         let outcome = execute("open_task_manager", false, &runner).await.unwrap();
@@ -1013,9 +1376,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn later_step_failure_reports_partial_result() {
+        let runner = RecordingRunner {
+            fail_args: Some("int ip reset"),
+            ..Default::default()
+        };
+        let outcome = execute("network_reset", true, &runner).await.unwrap();
+        let FixOutcome::Completed { result } = outcome else {
+            panic!()
+        };
+        assert!(!result.success);
+        assert_eq!(result.completion_status, FixCompletionStatus::Partial);
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(result.steps[0].status, RemediationStepStatus::Succeeded);
+        assert_eq!(result.steps[1].status, RemediationStepStatus::Failed);
+        assert!(result.requires_restart);
+    }
+
+    #[test]
+    fn prefetch_cleanup_is_not_in_the_catalog() {
+        assert!(find("clear_prefetch").is_none());
+    }
+
+    #[test]
+    fn already_running_service_is_not_a_failed_step() {
+        assert!(command_already_satisfied(
+            "An instance of the service is already running."
+        ));
+        let steps = vec![RemediationStepResult {
+            action: "Start service".to_string(),
+            status: RemediationStepStatus::AlreadySatisfied,
+            detail: None,
+        }];
+        assert_eq!(completion_status(&steps), FixCompletionStatus::Succeeded);
+    }
+
+    #[tokio::test]
     async fn unknown_remediation_is_an_error() {
         let runner = RecordingRunner::default();
         assert!(execute("nuke_everything", true, &runner).await.is_err());
         assert!(runner.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_execution_never_constructs_a_command() {
+        let runner = RecordingRunner::default();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = execute_authorized("flush_dns", &runner, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(result.completion_status, FixCompletionStatus::Cancelled);
+        assert!(runner.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_low_impact_actions_are_batch_eligible() {
+        for spec in remediations() {
+            if spec.batch_eligible() {
+                assert_eq!(spec.tier, RemediationTier::AutoSafe);
+                assert!(!spec.admin_required);
+                assert!(!spec.requires_restart);
+                assert!(!spec.long_running);
+            }
+            assert_eq!(spec.summary().batch_eligible, spec.batch_eligible());
+        }
+        assert!(find("flush_dns").unwrap().batch_eligible());
+        assert!(!find("sfc_scannow").unwrap().batch_eligible());
     }
 }

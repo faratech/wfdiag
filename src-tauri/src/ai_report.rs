@@ -11,23 +11,20 @@
 
 use crate::ai_chat::{
     ChatEmitter, DeltaPayload, DonePayload, ErrorPayload, RealChatProvider, ToolPayload,
-    run_chat_turn,
+    TurnStatus, run_chat_turn,
 };
+use crate::ai_evidence::{EvidencePolicy, EvidenceRequest, build_compact_evidence};
 use crate::ai_providers::{ChatMessage, ProviderCaps, ToolCall};
 use crate::ai_service::AIProvider;
 use crate::ai_tools::{ToolExecutor, ToolFuture};
 use crate::diagnostics::TaskResult;
-use crate::issue_catalog::{DetectCtx, Issue, IssueSeverity, detect_all};
+use crate::issue_catalog::{DetectCtx, Issue, detect_all};
 use crate::results_storage::{ComparisonResult, ScanRecord, ScanStorage};
-use crate::state::AppState;
+use crate::state::{AppState, ProviderUse, ReportControl};
 use serde::Serialize;
 use std::collections::HashMap;
 use tauri::{Emitter, State};
 use tokio_util::sync::CancellationToken;
-
-/// Tasks whose (compact) output is worth quoting in the report context when
-/// budget remains, beyond failures and issues.
-const KEY_DATA_TASKS: [&str; 4] = ["os_info", "logical_disk", "physical_memory", "processor"];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +32,7 @@ pub struct ReportAck {
     pub report_id: String,
     pub cached: bool,
     pub provider: String,
+    pub provider_use: ProviderUse,
     /// Set when served from cache — no events follow
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report: Option<String>,
@@ -62,111 +60,45 @@ pub(crate) fn build_report_context(
     issues: &[Issue],
     comparison: Option<&ComparisonResult>,
     data_budget_chars: usize,
-) -> String {
-    let mut sections: Vec<String> = Vec::new();
-
-    // 1. Headline counts + failures (the report's spine)
-    let failed: Vec<(&String, &TaskResult)> = results.iter().filter(|(_, r)| !r.success).collect();
-    let mut spine = format!(
-        "Scan results: {} passed, {} failed, {} total.",
-        results.len() - failed.len(),
-        failed.len(),
-        results.len()
+) -> Result<String, String> {
+    let comparison_marker = comparison.map_or_else(
+        || "COMPARISON none".to_string(),
+        |value| {
+            let baseline = serde_json::to_string(&value.previous_scan.id)
+                .unwrap_or_else(|_| "\"<invalid scan id>\"".to_string());
+            format!(
+                "COMPARISON baseline={} total_changes={}",
+                baseline, value.total_changes
+            )
+        },
     );
-    if !failed.is_empty() {
-        let mut ids: Vec<&String> = failed.iter().map(|(id, _)| *id).collect();
-        ids.sort();
-        spine.push_str("\nFailed tasks:");
-        for id in ids {
-            let error = results[id].error.as_deref().unwrap_or("unknown error");
-            spine.push_str(&format!("\n- {}: {}", id, error));
-        }
-    }
-    sections.push(spine);
-
-    // 2. Detected issues, most severe first
-    let mut detected: Vec<&Issue> = issues.iter().filter(|i| i.detected).collect();
-    detected.sort_by_key(|i| match i.severity {
-        IssueSeverity::Critical => 0,
-        IssueSeverity::Warning => 1,
-        IssueSeverity::Info => 2,
-        IssueSeverity::Ok => 3,
-    });
-    if detected.is_empty() {
-        sections.push("Detected issues: none.".to_string());
-    } else {
-        let lines: Vec<String> = detected
-            .iter()
-            .map(|i| {
-                let severity = match i.severity {
-                    IssueSeverity::Critical => "CRITICAL",
-                    IssueSeverity::Warning => "WARNING",
-                    IssueSeverity::Info => "INFO",
-                    IssueSeverity::Ok => "OK",
-                };
-                format!(
-                    "- {} | {} — {} | Fix: {}",
-                    severity, i.title, i.description, i.recommendation
-                )
-            })
-            .collect();
-        sections.push(format!("Detected issues:\n{}", lines.join("\n")));
-    }
-
-    // 3. Changes vs the previous scan
-    match comparison {
-        Some(comparison) => {
-            let list = |changes: &[crate::results_storage::TaskChange]| {
-                if changes.is_empty() {
-                    "none".to_string()
-                } else {
-                    changes
-                        .iter()
-                        .map(|c| c.task_id.clone())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
-            };
-            sections.push(format!(
-                "Compared with previous scan ({}): {} change(s).\nNew failures: {}\nRecovered: {}",
-                comparison.previous_scan.timestamp,
-                comparison.total_changes,
-                list(&comparison.new_failures),
-                list(&comparison.new_successes),
-            ));
-        }
-        None => sections.push("No previous scan to compare.".to_string()),
-    }
-
-    // 4. Key system data while budget remains
-    let mut key_data = String::new();
-    for task_id in KEY_DATA_TASKS {
-        if let Some(result) = results.get(task_id).filter(|r| r.success) {
-            key_data.push_str(&format!(
-                "\n# {}\n{}",
-                task_id,
-                crate::ai_prompts::json_to_readable_text(&result.output, 1_500)
-            ));
-        }
-    }
-    if !key_data.is_empty() {
-        sections.push(format!("Key system data:{}", key_data));
-    }
-
-    // Assemble in priority order within the budget
-    let mut out = String::new();
-    for section in sections {
-        let used = out.chars().count();
-        if used >= data_budget_chars.saturating_sub(50) {
-            break;
-        }
-        let remaining = data_budget_chars - used;
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(&crate::ai_prompts::truncate_output(&section, remaining));
-    }
-    out
+    let marker_cost = comparison_marker.chars().count().saturating_add(1);
+    let evidence_budget = data_budget_chars.checked_sub(marker_cost).ok_or_else(|| {
+        format!(
+            "Could not assemble a safe AI report context: {} characters are required for comparison provenance, but the budget is {}",
+            marker_cost, data_budget_chars
+        )
+    })?;
+    let mut policy = EvidencePolicy::compact(evidence_budget);
+    // A report is intentionally broader than a single chat question. Include
+    // collected diagnostics when room remains, but retain failures, detected
+    // issues, unknown coverage, and changes ahead of them.
+    policy.include_collected_tasks = true;
+    build_compact_evidence(
+        EvidenceRequest {
+            question: "Create a scan health report from this evidence.",
+            scan_id: None,
+            captured_at: None,
+            age_minutes: None,
+            results,
+            issues,
+            comparison,
+            preferred_source_ids: &[],
+        },
+        policy,
+    )
+    .map(|evidence| format!("{}\n{}", evidence.rendered, comparison_marker))
+    .map_err(|error| format!("Could not assemble a safe AI report context: {error}"))
 }
 
 /// Stable id for a report: hash of every task's identity/status/output plus
@@ -234,6 +166,7 @@ impl ChatEmitter for ReportEmitter {
                 "reportId": payload.message_id,
                 "finishReason": payload.finish_reason,
                 "provider": payload.provider,
+                "providerUse": payload.provider_use,
             }),
         );
     }
@@ -249,7 +182,7 @@ impl ChatEmitter for ReportEmitter {
 struct NoToolExecutor;
 
 impl ToolExecutor for NoToolExecutor {
-    fn execute<'a>(&'a self, _call: &'a ToolCall) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, _call: &'a ToolCall, _cancel: CancellationToken) -> ToolFuture<'a> {
         Box::pin(async move { Err("The report has no tools".to_string()) })
     }
 }
@@ -262,12 +195,24 @@ pub async fn ai_generate_report(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     previous_scan_id: Option<String>,
-    api_key: Option<String>,
     force_refresh: Option<bool>,
 ) -> Result<ReportAck, String> {
     let pref = crate::ai_service::get_user_preference();
-    let frontend_key = api_key.as_deref().is_some_and(|k| !k.is_empty());
-    let provider = crate::ai_service::determine_active_provider_with_key(pref, frontend_key).await;
+    let initial_provider = crate::ai_service::determine_active_provider(pref).await;
+    // A whole-scan report is predictably wider than Phi Silica's context
+    // window. In Auto mode, prefer the next available private/local provider
+    // for this workload. Never cross into a cloud execution class here: the
+    // report surface has no typed cloud-fallback consent flow.
+    let provider = if pref == crate::ai_service::AIProviderPreference::Auto
+        && initial_provider == AIProvider::PhiSilica
+    {
+        match crate::ai_service::next_auto_local_provider(pref, &[initial_provider]).await {
+            Some(candidate) => candidate,
+            _ => initial_provider,
+        }
+    } else {
+        initial_provider
+    };
     if provider == AIProvider::None {
         return Err(
             "No AI provider available. Add an API key (OpenAI, Anthropic or Gemini) in \
@@ -276,7 +221,7 @@ pub async fn ai_generate_report(
                 .to_string(),
         );
     }
-    let cfg = crate::ai_providers::resolve_config(provider, api_key).await?;
+    let cfg = crate::ai_providers::resolve_config(provider).await?;
     let config_fingerprint = crate::ai_service::provider_config_fingerprint(provider, &cfg);
     let caps = crate::ai_providers::capabilities(provider);
 
@@ -289,7 +234,8 @@ pub async fn ai_generate_report(
             }
             _ => {
                 return Err(
-                    "No scan data yet — run a scan first, then generate the report.".to_string(),
+                    "No scan data is available for this report. The application should collect a Quick Scan and retry automatically."
+                        .to_string(),
                 );
             }
         }
@@ -328,6 +274,7 @@ pub async fn ai_generate_report(
                                     success_count,
                                     failure_count: results.len() - success_count,
                                     duration_ms: 0,
+                                    label: None,
                                     tags: Vec::new(),
                                     results: results.clone(),
                                 };
@@ -356,7 +303,10 @@ pub async fn ai_generate_report(
 
     let compact = caps.context_budget_chars <= 4_000;
     let data_budget = if compact {
-        1_600
+        // Leave Phi room for the fixed report instructions, provider
+        // envelope, and a useful answer. The evidence builder spends this on
+        // whole priority records and reports every omission explicitly.
+        800
     } else {
         (caps.context_budget_chars / 2).min(20_000)
     };
@@ -366,7 +316,7 @@ pub async fn ai_generate_report(
         temp_file_count: None,
     };
     let issues = detect_all(&detect_ctx);
-    let context = build_report_context(&results, &issues, comparison.as_ref(), data_budget);
+    let context = build_report_context(&results, &issues, comparison.as_ref(), data_budget)?;
 
     let system = if compact {
         format!("{}{}", REPORT_SYSTEM, REPORT_SYSTEM_COMPACT_SUFFIX)
@@ -381,6 +331,10 @@ pub async fn ai_generate_report(
         &config_fingerprint,
     );
     let report_id = format!("report_{}", uuid::Uuid::new_v4().simple());
+    let provider_use = ProviderUse::for_provider(
+        provider,
+        (provider != initial_provider).then_some(initial_provider),
+    );
     let cache_key = format!("report:{}:{}", provider, cache_hash);
     if !force_refresh.unwrap_or(false)
         && let Some(cached) = crate::ai_service::cached_value(&cache_key)
@@ -389,6 +343,7 @@ pub async fn ai_generate_report(
             report_id: format!("report_{}", cache_hash),
             cached: true,
             provider: provider.to_string(),
+            provider_use,
             report: Some(cached),
         });
     }
@@ -411,10 +366,21 @@ pub async fn ai_generate_report(
         report_id: report_id.clone(),
         cached: false,
         provider: provider.to_string(),
+        provider_use: provider_use.clone(),
         report: None,
     };
 
     let report_in_flight = state.report_in_flight.clone();
+    let report_cancels = state.report_cancels.clone();
+    let cancel = CancellationToken::new();
+    let finished = CancellationToken::new();
+    state.report_cancels.lock().await.insert(
+        report_id.clone(),
+        ReportControl {
+            cancel: cancel.clone(),
+            finished: finished.clone(),
+        },
+    );
     tauri::async_runtime::spawn(async move {
         let chat = RealChatProvider { provider, cfg };
         let emitter = ReportEmitter(app);
@@ -425,10 +391,8 @@ pub async fn ai_generate_report(
             ..caps
         };
         let mut messages = vec![ChatMessage::user(prompt)];
-        let provider_label = provider.to_string();
-
-        let _ = run_chat_turn(
-            &provider_label,
+        let outcome = run_chat_turn(
+            &provider_use,
             report_caps,
             &chat,
             "report",
@@ -438,7 +402,7 @@ pub async fn ai_generate_report(
             &[],
             &NoToolExecutor,
             &emitter,
-            CancellationToken::new(),
+            cancel,
             // The report is bound to one resolved provider; no chat-style
             // fallback (it manages its own provider selection).
             false,
@@ -446,16 +410,32 @@ pub async fn ai_generate_report(
         .await;
 
         // Cache the finished report (the final assistant message)
-        if let Some(last) = messages.last()
+        if matches!(outcome, Ok(TurnStatus::Completed { ref finish_reason }) if finish_reason == "stop")
+            && let Some(last) = messages.last()
             && matches!(last.role, crate::ai_providers::ChatRole::Assistant)
             && !last.content.is_empty()
         {
             crate::ai_service::cache_value(cache_key.clone(), last.content.clone());
         }
         report_in_flight.lock().await.remove(&cache_key);
+        report_cancels.lock().await.remove(&report_id);
+        // Signal only after the cache-key lock is gone. This makes a completed
+        // cancel IPC a reliable boundary for immediate regeneration.
+        finished.cancel();
     });
 
     Ok(ack)
+}
+
+/// Cancel an in-flight report. Partial or cancelled reports are never cached.
+#[tauri::command]
+pub async fn ai_report_cancel(state: State<'_, AppState>, report_id: String) -> Result<(), String> {
+    let control = state.report_cancels.lock().await.get(&report_id).cloned();
+    if let Some(control) = control {
+        control.cancel.cancel();
+        control.finished.cancelled().await;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -536,16 +516,20 @@ mod tests {
             issue(IssueSeverity::Critical, "Disk failing", true),
             issue(IssueSeverity::Info, "Not detected thing", false),
         ];
-        let context = build_report_context(&results, &issues, None, 10_000);
+        let context = build_report_context(&results, &issues, None, 10_000).unwrap();
 
-        assert!(context.starts_with("Scan results: 1 passed, 1 failed"));
-        assert!(context.contains("- chkdsk: access denied"));
-        // Critical sorts before Warning; undetected issues are excluded
-        let critical = context.find("CRITICAL | Disk failing").unwrap();
-        let warning = context.find("WARNING | Low disk space").unwrap();
+        assert!(context.starts_with("EVIDENCE v1"));
+        assert!(context.contains("COVERAGE tasks:1 collected,1 failed"));
+        assert!(context.contains("diagnostic/failed"));
+        assert!(context.contains("access denied"));
+        // Critical sorts before Warning; clear checks contribute to coverage
+        // but are not misrepresented as detected issues.
+        let critical = context.find("issue/detected/critical").unwrap();
+        let warning = context.find("issue/detected/warning").unwrap();
         assert!(critical < warning);
-        assert!(!context.contains("Not detected thing"));
-        assert!(context.contains("No previous scan to compare."));
+        assert!(!context.contains("title=Not detected thing"));
+        assert!(context.contains("checks:2 detected,1 clear"));
+        assert!(context.ends_with("COMPARISON none"));
     }
 
     #[test]
@@ -565,21 +549,24 @@ mod tests {
         );
         let issues = vec![issue(IssueSeverity::Critical, "Disk failing", true)];
 
-        let tight = build_report_context(&results, &issues, None, 220);
-        // The spine (counts + failures) survives even tight budgets…
-        assert!(tight.contains("1 failed"));
-        assert!(tight.chars().count() <= 320); // budget + truncation marker slack
-        // …while key system data only appears when there is room
-        assert!(!tight.contains("Key system data"));
-        let roomy = build_report_context(&results, &issues, None, 10_000);
-        assert!(roomy.contains("Key system data"));
-        // Multibyte content must not panic the budget accounting
+        let tight = build_report_context(&results, &issues, None, 600).unwrap();
+        // Mandatory coverage and complete high-priority records survive tight
+        // budgets; low-priority diagnostics are counted as omissions.
+        assert!(tight.contains("tasks:1 collected,1 failed"));
+        assert!(tight.contains("access denied"));
+        assert!(tight.chars().count() <= 600);
+        assert!(tight.contains("diagnostics=1"));
+        let roomy = build_report_context(&results, &issues, None, 10_000).unwrap();
+        assert!(roomy.contains("diagnostic/collected"));
+        assert!(roomy.contains("Caption"));
+        // Multibyte content must not panic, and an impossible budget must
+        // fail instead of silently dropping the report question.
         let mut emoji_results = HashMap::new();
         emoji_results.insert(
             "os_info".to_string(),
             result(false, "", Some(&"🚀".repeat(300))),
         );
-        let _ = build_report_context(&emoji_results, &[], None, 100);
+        assert!(build_report_context(&emoji_results, &[], None, 100).is_err());
     }
 
     #[test]

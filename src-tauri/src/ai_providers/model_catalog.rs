@@ -117,8 +117,7 @@ pub async fn ai_list_models(
                         "Foundry Local is not running (try 'foundry service start').".to_string()
                     })?,
             };
-            let json = get_json(&format!("{base}/v1/models"), &[]).await?;
-            Ok(sorted_desc(parse_id_list(&json)))
+            Ok(sorted_desc(super::foundry::list_models(&base).await?))
         }
         "ollama" => {
             let settings = read_settings_from_disk().unwrap_or_default();

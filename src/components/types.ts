@@ -15,6 +15,48 @@ export type AIProviderId =
   | 'gemini'
   | 'deepseek'
 
+export type AIExecutionClass =
+  | 'on_device'
+  | 'local_server'
+  | 'subscription_cloud'
+  | 'api_cloud'
+
+export interface AIProviderUse {
+  providerId: AIProviderId
+  executionClass: AIExecutionClass
+  fallbackFrom?: AIProviderId
+}
+
+export interface ChatContextRef {
+  kind: 'issue' | 'diagnostic' | 'scan'
+  id: string
+}
+
+/**
+ * A chat handoff may carry detailed context to the backend without dumping it
+ * into the visible user bubble. Strings remain accepted by the chat hook for
+ * compatibility with older callers.
+ */
+export interface ChatPrompt {
+  query: string
+  displayText?: string
+  contextRefs?: ChatContextRef[]
+  /**
+   * Frontend-only preparation state. The chat hook deliberately strips this
+   * field before invoking the backend, so a question can survive navigation
+   * while the app gathers the scan evidence it needs.
+   */
+  scanGate?: {
+    requestId: string
+    kind: 'quick' | 'full'
+    status: 'queued' | 'waiting' | 'running' | 'ready' | 'failed'
+    /** True after AppContext has visibly joined another in-flight scan. */
+    observedRunning?: boolean
+    reason?: string
+    error?: string
+  }
+}
+
 export interface SettingsData {
   openAiApiKey?: string
   /** OpenAI model override; empty uses the app default (gpt-5-nano) */
@@ -25,16 +67,22 @@ export interface SettingsData {
   anthropicModel?: string
   /** Google Gemini API key */
   geminiApiKey?: string
-  /** Gemini model override; empty uses the app default (gemini-2.5-flash) */
+  /** Gemini model override; empty uses the app default (gemini-3.5-flash) */
   geminiModel?: string
   /** DeepSeek API key */
   deepseekApiKey?: string
-  /** DeepSeek model override; empty uses the app default (deepseek-chat) */
+  /** DeepSeek model override; empty uses the app default (deepseek-v4-flash) */
   deepseekModel?: string
   /** Base URL of a custom OpenAI-compatible endpoint (OpenRouter, Groq, …) */
   customEndpoint?: string
   /** API key for the custom endpoint (optional — local proxies may not need one) */
   customApiKey?: string
+  /** Credential presence flags returned by the backend; secret values are never loaded. */
+  openAiApiKeySet?: boolean
+  anthropicApiKeySet?: boolean
+  geminiApiKeySet?: boolean
+  deepseekApiKeySet?: boolean
+  customApiKeySet?: boolean
   /** Model id on the custom endpoint (required for the provider to be usable) */
   customModel?: string
   /** Ollama endpoint; empty auto-discovers http://127.0.0.1:11434 */
@@ -68,6 +116,10 @@ export interface SettingsData {
   aiEnabled?: boolean
   /** Preferred AI provider ('auto' routes local-first) */
   preferredAIProvider?: 'auto' | AIProviderId
+  /** Allow optional web grounding for providers that support it. Off by default. */
+  networkGroundingEnabled?: boolean
+  /** What Auto should do before moving from private/local execution to cloud. */
+  cloudFallbackPolicy?: 'ask' | 'allow' | 'never'
   /** Custom task IDs for Quick Scan (if empty, uses default set) */
   quickScanTasks?: string[]
   /**

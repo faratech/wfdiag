@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react'
 import { useMonitoring } from '../hooks/useMonitoring'
 import type { SystemStats } from '../types/monitoring'
-import { Skeleton } from '../components/ui'
+import { EmptyState, Skeleton } from '../components/ui'
 import { ChartCard } from './ChartCard'
 import { formatBytesMb } from './util'
 
@@ -24,14 +24,14 @@ export const MonitorScreen: React.FC = () => {
     setSeries(prev => ({
       cpu: push(prev.cpu, s.cpu_utilization),
       mem: push(prev.mem, s.memory_utilization),
-      disk: push(prev.disk, s.disk_utilization),
+      disk: push(prev.disk, s.storage_used_percent ?? s.disk_utilization),
       net: push(prev.net, (s.network_upload_kb + s.network_download_kb) / 1024),
       gpu: push(prev.gpu, s.gpu_utilization ?? 0),
       npu: push(prev.npu, s.npu_utilization ?? 0),
     }))
   }, [])
 
-  const { isActive, isLoading, stats, toggle, refresh } = useMonitoring({ autoStart: true, onStats, componentName: 'MonitorScreen' })
+  const { isActive, isLoading, error, stats, start, toggle, refresh } = useMonitoring({ autoStart: true, onStats, componentName: 'MonitorScreen' })
 
   const last = stats || lastStats
   const netMax = Math.max(2, ...series.net) * 1.2 || 2
@@ -58,7 +58,23 @@ export const MonitorScreen: React.FC = () => {
       </div>
 
       <div className="scrollable screen-pad">
-        {!last && (
+        {error && last && (
+          <div className="inline-error" role="alert">
+            <span><i className="fa-solid fa-triangle-exclamation" /> {error}</span>
+            <button className="btn" onClick={() => void (isActive ? refresh() : start())}>
+              {isActive ? 'Retry refresh' : 'Resume monitoring'}
+            </button>
+          </div>
+        )}
+        {error && !last && (
+          <EmptyState
+            icon="fa-triangle-exclamation"
+            title="Live monitoring could not start"
+            sub={error}
+            actions={<button className="btn primary" onClick={() => void start()}>Try again</button>}
+          />
+        )}
+        {!error && !last && (
           <div className="charts-grid" aria-hidden="true">
             {Array.from({ length: 6 }, (_, i) => (
               <Skeleton key={i} variant="block" height={140} />
@@ -69,7 +85,7 @@ export const MonitorScreen: React.FC = () => {
         <div className="charts-grid">
           <ChartCard title="CPU" value={(last?.cpu_utilization ?? 0).toFixed(1)} sub="%" series={series.cpu} max={100} hint={last?.cpu_frequency ? `${(last.cpu_frequency / 1000).toFixed(2)} GHz` : 'Processor utilization'} />
           <ChartCard title="Memory" value={(last?.memory_utilization ?? 0).toFixed(1)} sub="%" series={series.mem} max={100} hint={last ? `${last.memory_used_gb.toFixed(1)} / ${last.memory_total_gb.toFixed(1)} GB used` : ''} />
-          <ChartCard title="Disk" value={(last?.disk_utilization ?? 0).toFixed(1)} sub="%" series={series.disk} max={100} hint="Active disk time" />
+          <ChartCard title="Storage" value={(last?.storage_used_percent ?? last?.disk_utilization ?? 0).toFixed(1)} sub="%" series={series.disk} max={100} hint="Provisioned storage capacity used" />
           <ChartCard title="Network" value={(((last?.network_upload_kb ?? 0) + (last?.network_download_kb ?? 0)) / 1024).toFixed(2)} sub="MB/s" series={series.net} max={netMax} hint="Up + down throughput" />
           {last?.gpu_available && (
             <ChartCard title="GPU" value={(last?.gpu_utilization ?? 0).toFixed(1)} sub="%" series={series.gpu} max={100} hint={last.gpu_memory_total_mb > 0 ? `${formatBytesMb(last.gpu_memory_used_mb)} / ${formatBytesMb(last.gpu_memory_total_mb)}` : (last.gpu_name ?? 'Graphics adapter')} />

@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import type { DiagnosticTask, TaskResult } from '../contexts/AppContext'
 import { useAIContext, diagnosticCacheKey, type AIAnalysisMeta } from '../contexts/AIContext'
 import { taskIcon } from '../ui/diagnostic-icons'
-import { formatDuration, parseOutput, toKeyValues } from './util'
+import { formatDuration, parseOutput, toDiagnosticKeyValues } from './util'
 import * as logger from '../utils/logger'
 import { renderMarkdownLite } from '../utils/markdownLite'
 
@@ -39,7 +39,7 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
 
   const success = item.result.success
   const parsed = parseOutput(item.result.output)
-  const kv = parsed ? toKeyValues(parsed) : []
+  const kv = parsed ? toDiagnosticKeyValues(item.id, parsed) : []
   // Must match AIContext's internal key (content hash included) or the
   // spinner/result/error land under a key this component never reads
   const cacheKey = diagnosticCacheKey(item.id, item.result.output)
@@ -75,9 +75,9 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
           <button className={tab === 'output' ? 'active' : ''} onClick={() => setTab('output')}>Output</button>
           <button className={tab === 'raw' ? 'active' : ''} onClick={() => setTab('raw')}>Raw</button>
         </div>
-        <span className={`tag ${success ? 'success' : 'error'}`}>
-          <i className={`fa-solid ${success ? 'fa-circle-check' : 'fa-circle-xmark'}`} />
-          {success ? 'Passed' : 'Failed'}
+        <span className={`tag ${success ? 'info' : 'error'}`}>
+          <i className={`fa-solid ${success ? 'fa-database' : 'fa-circle-xmark'}`} />
+          {success ? 'Collected' : 'Collection error'}
         </span>
         {item.admin_required && <span className="tag warning"><i className="fa-solid fa-shield" /> Admin</span>}
       </div>
@@ -87,9 +87,9 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
           <div style={{ padding: 14, background: 'var(--err-bg)', border: '1px solid var(--err-border)', borderRadius: 6, marginBottom: 12, display: 'flex', gap: 12 }}>
             <i className="fa-solid fa-circle-exclamation" style={{ color: 'var(--err-fg)', fontSize: 18, marginTop: 2 }} />
             <div>
-              <strong style={{ color: 'var(--err-fg)' }}>{item.result.error || 'Diagnostic failed'}</strong>
+              <strong style={{ color: 'var(--err-fg)' }}>{item.result.error || 'Diagnostic collection failed'}</strong>
               <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--wf-text-muted)' }}>
-                This check could not complete. Administrator-only checks require relaunching the app elevated.
+                This diagnostic could not complete. Administrator-only diagnostics require relaunching the app elevated.
               </p>
             </div>
           </div>
@@ -199,7 +199,7 @@ function providerLabelFor(provider: string): string {
 
 const AIActivity: React.FC<{ providerLabel: string }> = ({ providerLabel }) => (
   <div className="ai-activity" aria-live="polite">
-    <span><i className="fa-solid fa-circle-notch fa-spin" /> Fetching live grounding through WindowsForum MCP</span>
+    <span><i className="fa-solid fa-circle-notch fa-spin" /> Analyzing the collected diagnostic evidence</span>
     <span><i className="fa-solid fa-brain" /> Reasoning with {providerLabel}</span>
   </div>
 )
@@ -213,7 +213,9 @@ const AITrace: React.FC<{ meta: AIAnalysisMeta }> = ({ meta }) => {
         <span>{meta.cached ? 'cached response' : 'fresh response'}</span>
       </div>
       <p>
-        Compared the diagnostic values with available live grounding, then generated the final answer.
+        {grounding
+          ? 'Compared the diagnostic values with relevant live grounding, then generated the final answer.'
+          : 'Analyzed the diagnostic values directly; no live grounding was needed for this answer.'}
         Raw private model reasoning is not exposed by providers.
       </p>
       {grounding && (

@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow, ProgressBarStatus } from '@tauri-apps/api/window'
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
-import { useAppContext, type TaskResult } from '../contexts/AppContext'
+import { useAppContext, type Issue, type TaskResult } from '../contexts/AppContext'
 import * as logger from '../utils/logger'
 
 // Inventory tasks shown as the quick-scan baseline.
@@ -42,7 +42,7 @@ function setTaskbarProgress(progress: number | null) {
 
 // Fire a native Windows toast when a scan finishes while the app is in the
 // background. Best-effort; gated on the user's showNotifications setting.
-async function notifyScanComplete(passed: number, failed: number) {
+async function notifyScanComplete(collected: number, errors: number) {
   if (!('__TAURI_INTERNALS__' in window) || document.hasFocus()) return
   try {
     let granted = await isPermissionGranted()
@@ -52,7 +52,9 @@ async function notifyScanComplete(passed: number, failed: number) {
     if (granted) {
       sendNotification({
         title: 'Diagnostics complete',
-        body: failed > 0 ? `${passed} passed, ${failed} failed` : `All ${passed} checks passed`,
+        body: errors > 0
+          ? `${collected} diagnostics collected, ${errors} errors`
+          : `${collected} diagnostics collected with no collection errors`,
       })
     }
   } catch (error) {
@@ -68,8 +70,12 @@ async function notifyScanComplete(passed: number, failed: number) {
 // session-changed early return, error) frees the lock.
 let scanLockOwner: string | null = null
 let activeScanSessionId: string | null = null
+let activeScanPhase: 'collecting' | 'finalizing' | null = null
 let cancelledScanSessionId: string | null = null
 let activeAutoSaveCancel: (() => void) | null = null
+
+export type ScanRunOutcome = 'completed' | 'cancelled' | 'failed' | 'busy'
+type ScanKind = 'quick' | 'full' | 'targeted'
 
 export const useScanner = () => {
   const {
@@ -83,11 +89,10 @@ export const useScanner = () => {
     setIsRunning,
     setCurrentProgress,
     setCurrentTaskName,
+    setDiagnosticsError,
     setScanStartTime,
     setScanEndTime,
     settings,
-    searchQuery,
-    setFilteredResults,
     setTaskStatuses,
     setIssues,
   } = useAppContext()
@@ -135,24 +140,39 @@ export const useScanner = () => {
     })
   }, [])
 
-  const runDiagnostics = useCallback(async (taskIds: string[], scanTag = 'Manual Diagnostic') => {
-    if (taskIds.length === 0) return
+  const runDiagnosticsTracked = useCallback(async (
+    taskIds: string[],
+    scanTag = 'Manual Diagnostic',
+    scanKind: ScanKind = 'targeted',
+  ): Promise<ScanRunOutcome> => {
+    if (taskIds.length === 0) {
+      setDiagnosticsError('No diagnostic tasks are available. Retry loading the diagnostic catalog.')
+      return 'failed'
+    }
 
     // Prevent concurrent scans - race condition guard (per-instance AND cross-instance)
     if (isRunningRef.current || scanLockOwner !== null) {
       logger.warn('useScanner', 'Scan already in progress, ignoring new scan request')
-      return
+      return 'busy'
     }
 
     // Clear any pending auto-save from previous scan
     clearAutoSaveTimeout()
 
+    // A Full Scan escalation replaces the backend's current session while it
+    // runs. Keep the matching frontend snapshot so cancel/setup failure can
+    // restore the still-valid Quick Scan instead of leaving an empty screen.
+    const previousResults = results
+    const previousSessionId = sessionId
+
     const lockId = `lock_${Date.now()}_${Math.random().toString(36).slice(2)}`
     scanLockOwner = lockId
+    activeScanPhase = 'collecting'
     isRunningRef.current = true
     cancelledSessionRef.current = null
     cancelledScanSessionId = null
     setIsRunning(true)
+    setDiagnosticsError(null)
     setCurrentProgress(0)
     setResults({})
     setIssues([])
@@ -166,9 +186,10 @@ export const useScanner = () => {
     setScanEndTime(0) // Reset end time for new scan
 
     let unlisten: (() => void) | null = null
+    let newSessionId: string | null = null
 
     try {
-      const newSessionId = await invoke<string>('start_diagnostics', { taskIds })
+      newSessionId = await invoke<string>('start_diagnostics', { taskIds, scanKind })
 
       // Store the session ID in ref to prevent race conditions
       currentSessionRef.current = newSessionId
@@ -212,14 +233,26 @@ export const useScanner = () => {
           maxConcurrent: settings.maxConcurrentTasks || 5,
           sessionId: newSessionId
         })
+        // The backend has now committed a structurally complete replacement
+        // (or restored the prior scan). From this point through the short
+        // auto-save delay, Stop must not send a late cancellation that makes
+        // frontend and backend disagree about which completed scan is current.
+        activeScanPhase = 'finalizing'
 
         // Verify this is still the current session before updating results
         if (activeScanSessionId !== newSessionId) {
           logger.warn('useScanner', 'Scan session changed, discarding results from old session')
-          return
+          setResults(previousResults)
+          setSessionId(previousSessionId)
+          return 'cancelled'
         }
 
         if (cancelledScanSessionId !== newSessionId) {
+          if (scanResults.length < taskIds.length) {
+            throw new Error(
+              `The scan returned only ${scanResults.length} of ${taskIds.length} requested diagnostics`,
+            )
+          }
           const resultsObj = scanResults.reduce((acc, [taskId, result]) => {
             acc[taskId] = result
             return acc
@@ -228,9 +261,9 @@ export const useScanner = () => {
           setResults(resultsObj)
 
           const resultList = Object.values(resultsObj)
-          const passedCount = resultList.filter(r => r.success).length
+          const collectedCount = resultList.filter(r => r.success).length
           if (settings.showNotifications) {
-            notifyScanComplete(passedCount, resultList.length - passedCount)
+            notifyScanComplete(collectedCount, resultList.length - collectedCount)
           }
         }
       } finally {
@@ -242,6 +275,10 @@ export const useScanner = () => {
       }
 
       const wasCancelled = cancelledScanSessionId === newSessionId
+      if (wasCancelled) {
+        setResults(previousResults)
+        setSessionId(previousSessionId)
+      }
       setCurrentProgress(wasCancelled ? 0 : 100)
       setTaskbarProgress(null)
 
@@ -281,8 +318,17 @@ export const useScanner = () => {
         cancelledSessionRef.current = null
         cancelledScanSessionId = null
       }
+      return wasCancelled ? 'cancelled' : 'completed'
     } catch (error) {
       logger.error('useScanner', 'Failed to start diagnostics', error)
+      if (newSessionId) {
+        await invoke('cancel_diagnostics', { sessionId: newSessionId }).catch(cancelError =>
+          logger.error('useScanner', 'Failed to roll back incomplete diagnostics', cancelError)
+        )
+      }
+      setResults(previousResults)
+      setSessionId(previousSessionId)
+      setDiagnosticsError(`The scan could not be completed: ${error instanceof Error ? error.message : String(error)}`)
 
       // Cleanup listener on error
       if (unlisten) {
@@ -299,22 +345,27 @@ export const useScanner = () => {
       activeScanSessionId = null
       cancelledSessionRef.current = null
       cancelledScanSessionId = null
+      return 'failed'
     } finally {
       isRunningRef.current = false
       // Release the cross-instance lock only if this scan still owns it
       if (scanLockOwner === lockId) {
         scanLockOwner = null
+        activeScanPhase = null
       }
     }
   }, [
     setCurrentProgress,
     setCurrentTaskName,
+    setDiagnosticsError,
     setIsRunning,
     setIssues,
     setResults,
     setScanStartTime,
     setScanEndTime,
     setSessionId,
+    results,
+    sessionId,
     settings.autoSave,
     settings.maxConcurrentTasks,
     settings.showNotifications,
@@ -323,7 +374,7 @@ export const useScanner = () => {
     setTaskStatuses
   ])
 
-  const runQuickScan = useCallback(async () => {
+  const quickScanTaskIds = useCallback(() => {
     // Use custom quick scan tasks from settings, or fall back to defaults, then
     // always union in the detection sources so the Issues screen has data to
     // work with even when the quick list was customised.
@@ -332,20 +383,81 @@ export const useScanner = () => {
     const taskIdsToRun = Array.from(new Set([...base, ...DETECTION_SOURCE_TASKS]))
 
     // Filter to only tasks that exist in availableTasks
-    const quickTasks = availableTasks
+    return availableTasks
       .filter(task => taskIdsToRun.includes(task.id))
       .map(t => t.id)
+  }, [availableTasks, settings.quickScanTasks])
 
-    await runDiagnostics(quickTasks, 'Quick Scan')
-  }, [availableTasks, settings.quickScanTasks, runDiagnostics])
+  const runQuickScanTracked = useCallback(async () => {
+    return runDiagnosticsTracked(quickScanTaskIds(), 'Quick Scan', 'quick')
+  }, [quickScanTaskIds, runDiagnosticsTracked])
 
-  const runFullScan = useCallback(async () => {
-    const allTasks = availableTasks
+  const runQuickScan = useCallback(async () => {
+    await runQuickScanTracked()
+  }, [runQuickScanTracked])
+
+  const fullScanTaskIds = useCallback(() => {
+    return availableTasks
       .filter(task => !task.admin_required || systemInfo?.is_admin)
       .map(t => t.id)
+  }, [availableTasks, systemInfo])
 
-    await runDiagnostics(allTasks, 'Full Scan')
-  }, [availableTasks, systemInfo, runDiagnostics])
+  const runFullScanTracked = useCallback(async () => {
+    return runDiagnosticsTracked(fullScanTaskIds(), 'Full Scan', 'full')
+  }, [fullScanTaskIds, runDiagnosticsTracked])
+
+  const runFullScan = useCallback(async () => {
+    await runFullScanTracked()
+  }, [runFullScanTracked])
+
+  const runDiagnostics = useCallback(async (taskIds: string[], scanTag = 'Manual Diagnostic') => {
+    await runDiagnosticsTracked(taskIds, scanTag, 'targeted')
+  }, [runDiagnosticsTracked])
+
+  const rerunDiagnostic = useCallback(async (taskId: string) => {
+    if (!sessionId) {
+      await runDiagnostics([taskId], 'Manual Diagnostic')
+      return
+    }
+    if (isRunningRef.current || scanLockOwner !== null) {
+      logger.warn('useScanner', 'Scan already in progress, ignoring targeted rerun')
+      return
+    }
+
+    const lockId = `rerun_${Date.now()}_${Math.random().toString(36).slice(2)}`
+    scanLockOwner = lockId
+    isRunningRef.current = true
+    setIsRunning(true)
+    setCurrentTaskName(availableTasks.find(task => task.id === taskId)?.name ?? taskId)
+    setTaskStatuses(previous => ({ ...previous, [taskId]: 'running' }))
+
+    try {
+      setDiagnosticsError(null)
+      const result = await invoke<TaskResult>('run_diagnostic_task', { taskId })
+      setResults(previous => ({ ...previous, [taskId]: result }))
+      setTaskStatuses(previous => ({ ...previous, [taskId]: 'done' }))
+
+      try {
+        const nextIssues = await invoke<Issue[]>('detect_issues')
+        setIssues(nextIssues)
+      } catch (error) {
+        logger.error('useScanner', 'Targeted rerun completed but issue detection failed', error)
+      }
+    } catch (error) {
+      logger.error('useScanner', `Failed to rerun diagnostic ${taskId}`, error)
+      setDiagnosticsError(`The diagnostic could not be rerun: ${error instanceof Error ? error.message : String(error)}`)
+      setTaskStatuses(previous => {
+        const next = { ...previous }
+        delete next[taskId]
+        return next
+      })
+    } finally {
+      isRunningRef.current = false
+      setIsRunning(false)
+      setCurrentTaskName('')
+      if (scanLockOwner === lockId) scanLockOwner = null
+    }
+  }, [availableTasks, runDiagnostics, sessionId, setCurrentTaskName, setDiagnosticsError, setIsRunning, setIssues, setResults, setTaskStatuses])
 
   const stopScan = useCallback(() => {
     const sessionId = currentSessionRef.current ?? activeScanSessionId
@@ -356,6 +468,13 @@ export const useScanner = () => {
       const cancel = activeAutoSaveCancel
       activeAutoSaveCancel = null
       cancel()
+    }
+    // Collection has already committed. Stopping here only skips the pending
+    // auto-save; treating it as a scan cancellation would restore Quick data
+    // in the UI while the backend correctly retains the completed Full Scan.
+    if (activeScanPhase === 'finalizing') {
+      setTaskbarProgress(null)
+      return
     }
     // Tell the backend to skip this session's queued tasks; in-flight tasks
     // finish and the pending run_diagnostics_parallel invoke resolves quickly.
@@ -381,36 +500,8 @@ export const useScanner = () => {
     setSessionId(null)
     setCurrentProgress(0)
     setCurrentTaskName('')
-  }, [setResults, setIssues, setSessionId, setCurrentProgress, setCurrentTaskName, clearAutoSaveTimeout])
-
-  // Search and filter functionality
-  useEffect(() => {
-    if (!searchQuery) {
-      setFilteredResults(results)
-      return
-    }
-
-    const query = searchQuery.toLowerCase()
-    const filtered: Record<string, TaskResult> = {}
-
-    for (const [taskId, result] of Object.entries(results)) {
-      if (taskId.toLowerCase().includes(query)) {
-        filtered[taskId] = result
-        continue
-      }
-
-      if (result.error && result.error.toLowerCase().includes(query)) {
-        filtered[taskId] = result
-        continue
-      }
-
-      if (result.output.toLowerCase().includes(query)) {
-        filtered[taskId] = result
-      }
-    }
-
-    setFilteredResults(filtered)
-  }, [searchQuery, results, setFilteredResults])
+    setDiagnosticsError(null)
+  }, [setResults, setIssues, setSessionId, setCurrentProgress, setCurrentTaskName, setDiagnosticsError, clearAutoSaveTimeout])
 
   // Cleanup on unmount - ensure refs are reset and pending delays are resolved
   // (an unresolved awaited delay would keep the module-level scan lock held).
@@ -443,8 +534,12 @@ export const useScanner = () => {
 
   return {
     runDiagnostics,
+    runDiagnosticsTracked,
     runQuickScan,
+    runQuickScanTracked,
     runFullScan,
+    runFullScanTracked,
+    rerunDiagnostic,
     stopScan,
     clearResults,
     isRunning,

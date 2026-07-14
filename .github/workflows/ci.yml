@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: python3 scripts/check-version-sync.py
       - run: python3 scripts/check-store-identity.py
 
   frontend:
@@ -34,9 +35,8 @@ jobs:
       - run: npx tsc --noEmit
       - run: npx eslint .
       - run: npx vitest run
-      - name: npm audit (advisory only)
-        run: npm audit --audit-level=high
-        continue-on-error: true
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
 
   rust:
     # The crate is cfg(windows) end to end; clippy and tests need a Windows runner
@@ -60,9 +60,32 @@ jobs:
           key: ci
       - run: cargo fmt --check
         working-directory: src-tauri
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --locked --all-targets -- -D warnings
         working-directory: src-tauri
-      - run: cargo test
+      - run: cargo test --locked
+        working-directory: src-tauri
+
+  rust-arm64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: aarch64-pc-windows-msvc
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ci-arm64
+      - run: cargo check --locked --all-targets --target aarch64-pc-windows-msvc
+        working-directory: src-tauri
+      - run: cargo clippy --locked --all-targets --target aarch64-pc-windows-msvc -- -D warnings
         working-directory: src-tauri
 
   cargo-audit:

@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+const SUMMARY_INDEX_ID: &str = "_scan_summary_index";
+
 // Simplified scan record for storage
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanRecord {
@@ -20,6 +22,8 @@ pub struct ScanRecord {
     pub success_count: usize,
     pub failure_count: usize,
     pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub tags: Vec<String>,
 }
 
@@ -33,6 +37,8 @@ pub struct ScanSummary {
     pub success_count: usize,
     pub failure_count: usize,
     pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub tags: Vec<String>,
 }
 
@@ -45,6 +51,48 @@ pub struct ComparisonResult {
     pub new_failures: Vec<TaskChange>,
     pub new_successes: Vec<TaskChange>,
     pub status_unchanged: Vec<TaskChange>,
+}
+
+/// Lightweight comparison contract for the History screen. Full diagnostic
+/// outputs are fetched only when the user expands one task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComparisonSummary {
+    pub current_scan: ScanSummary,
+    pub previous_scan: ScanSummary,
+    pub total_changes: usize,
+    pub new_failures: Vec<TaskChangeSummary>,
+    pub new_successes: Vec<TaskChangeSummary>,
+    pub status_unchanged: Vec<TaskChangeSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskChangeSummary {
+    pub task_id: String,
+    pub task_name: String,
+    pub category: String,
+    pub current_success: bool,
+    pub previous_success: bool,
+    pub output_changed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskDiffDetail {
+    pub task_id: String,
+    pub current_output: String,
+    pub previous_output: String,
+}
+
+impl From<TaskChange> for TaskChangeSummary {
+    fn from(change: TaskChange) -> Self {
+        Self {
+            task_id: change.task_id,
+            task_name: change.task_name,
+            category: change.category,
+            current_success: change.current_success,
+            previous_success: change.previous_success,
+            output_changed: change.output_changed,
+        }
+    }
 }
 
 // Failure trend for one task across recent scans
@@ -75,11 +123,24 @@ pub struct TaskChange {
 pub struct ScanStorage {
     #[allow(dead_code)]
     storage_dir: PathBuf,
-    max_scans: usize,
     encrypted_storage: EncryptedStorage,
 }
 
 impl ScanStorage {
+    fn summary_for(scan: &ScanRecord) -> ScanSummary {
+        ScanSummary {
+            id: scan.id.clone(),
+            timestamp: scan.timestamp,
+            computer_name: scan.computer_name.clone(),
+            task_count: scan.task_count,
+            success_count: scan.success_count,
+            failure_count: scan.failure_count,
+            duration_ms: scan.duration_ms,
+            label: scan.label.clone(),
+            tags: scan.tags.clone(),
+        }
+    }
+
     pub fn new() -> Result<Self, String> {
         let storage_dir = Self::get_storage_directory()?;
 
@@ -96,7 +157,6 @@ impl ScanStorage {
 
         Ok(Self {
             storage_dir,
-            max_scans: 50,
             encrypted_storage,
         })
     }
@@ -110,6 +170,12 @@ impl ScanStorage {
 
     pub fn save_scan(&self, scan: &ScanRecord) -> Result<(), String> {
         println!("Saving encrypted scan {}", scan.id);
+
+        let (retain_history, _) = crate::commands::settings::history_retention();
+        if !retain_history {
+            println!("Scan history retention is disabled; skipping persistent save");
+            return Ok(());
+        }
 
         // Validate scan data
         if scan.id.is_empty() {
@@ -126,6 +192,7 @@ impl ScanStorage {
         self.encrypted_storage
             .store(&scan.id, scan)
             .map_err(|e| DiagError::storage("save_encrypted_scan", e.to_string()))?;
+        self.upsert_summary(Self::summary_for(scan))?;
 
         println!("Successfully saved encrypted scan {}", scan.id);
 
@@ -170,30 +237,50 @@ impl ScanStorage {
     }
 
     pub fn list_scans(&self) -> Result<Vec<ScanSummary>, String> {
-        let mut summaries = Vec::new();
-
         println!("Listing encrypted scans");
+
+        // Listing encrypted filenames is cheap and lets us detect an index
+        // write that failed after the full scan was committed. Checking only
+        // that indexed entries still existed missed orphaned scan files and
+        // made otherwise valid history permanently invisible.
+        let stored_scan_ids: std::collections::HashSet<String> = self
+            .encrypted_storage
+            .list_files()
+            .map_err(|e| DiagError::storage("list_scans", e.to_string()))?
+            .into_iter()
+            .filter(|id| id != SUMMARY_INDEX_ID)
+            .collect();
+
+        if self.encrypted_storage.exists(SUMMARY_INDEX_ID)
+            && let Ok(mut summaries) = self
+                .encrypted_storage
+                .load::<Vec<ScanSummary>>(SUMMARY_INDEX_ID)
+            && summaries.len() == stored_scan_ids.len()
+            && summaries
+                .iter()
+                .all(|summary| stored_scan_ids.contains(&summary.id))
+        {
+            summaries.sort_by_key(|summary| std::cmp::Reverse(summary.timestamp));
+            return Ok(summaries);
+        }
+
+        self.rebuild_summary_index()
+    }
+
+    fn rebuild_summary_index(&self) -> Result<Vec<ScanSummary>, String> {
+        let mut summaries = Vec::new();
 
         let scan_ids = self
             .encrypted_storage
             .list_files()
             .map_err(|e| DiagError::storage("list_scans", e.to_string()))?;
 
-        for scan_id in scan_ids {
+        for scan_id in scan_ids.into_iter().filter(|id| id != SUMMARY_INDEX_ID) {
             println!("Found encrypted scan: {}", scan_id);
 
             match self.load_scan(&scan_id) {
                 Ok(scan) => {
-                    summaries.push(ScanSummary {
-                        id: scan.id,
-                        timestamp: scan.timestamp,
-                        computer_name: scan.computer_name,
-                        task_count: scan.task_count,
-                        success_count: scan.success_count,
-                        failure_count: scan.failure_count,
-                        duration_ms: scan.duration_ms,
-                        tags: scan.tags,
-                    });
+                    summaries.push(Self::summary_for(&scan));
                 }
                 Err(e) => {
                     println!("Warning: Failed to load scan '{}': {}", scan_id, e);
@@ -207,7 +294,31 @@ impl ScanStorage {
 
         println!("Successfully loaded {} scan summaries", summaries.len());
 
+        self.encrypted_storage
+            .store(SUMMARY_INDEX_ID, &summaries)
+            .map_err(|error| DiagError::storage("write_summary_index", error.to_string()))?;
+
         Ok(summaries)
+    }
+
+    fn upsert_summary(&self, summary: ScanSummary) -> Result<(), String> {
+        let mut summaries = if self.encrypted_storage.exists(SUMMARY_INDEX_ID) {
+            match self
+                .encrypted_storage
+                .load::<Vec<ScanSummary>>(SUMMARY_INDEX_ID)
+            {
+                Ok(summaries) => summaries,
+                Err(_) => self.rebuild_summary_index()?,
+            }
+        } else {
+            self.rebuild_summary_index()?
+        };
+        summaries.retain(|existing| existing.id != summary.id);
+        summaries.push(summary);
+        summaries.sort_by_key(|item| std::cmp::Reverse(item.timestamp));
+        self.encrypted_storage
+            .store(SUMMARY_INDEX_ID, &summaries)
+            .map_err(|error| DiagError::storage("write_summary_index", error.to_string()).into())
     }
 
     pub fn compare_scans(
@@ -231,6 +342,68 @@ impl ScanStorage {
         println!("Loaded previous scan: {} results", previous.results.len());
 
         Ok(Self::compute_comparison(current, previous))
+    }
+
+    pub fn compare_scans_summary(
+        &self,
+        current_id: &str,
+        previous_id: &str,
+    ) -> Result<ComparisonSummary, String> {
+        let comparison = self.compare_scans(current_id, previous_id)?;
+        Ok(ComparisonSummary {
+            current_scan: comparison.current_scan,
+            previous_scan: comparison.previous_scan,
+            total_changes: comparison.total_changes,
+            new_failures: comparison
+                .new_failures
+                .into_iter()
+                .map(TaskChangeSummary::from)
+                .collect(),
+            new_successes: comparison
+                .new_successes
+                .into_iter()
+                .map(TaskChangeSummary::from)
+                .collect(),
+            status_unchanged: comparison
+                .status_unchanged
+                .into_iter()
+                .map(TaskChangeSummary::from)
+                .collect(),
+        })
+    }
+
+    pub fn scan_task_diff(
+        &self,
+        current_id: &str,
+        previous_id: &str,
+        task_id: &str,
+    ) -> Result<TaskDiffDetail, String> {
+        if current_id == previous_id {
+            return Err(
+                DiagError::storage("scan_task_diff", "Cannot compare scan with itself").into(),
+            );
+        }
+        let current = self.load_scan(current_id)?;
+        let previous = self.load_scan(previous_id)?;
+        let current_result = current.results.get(task_id).ok_or_else(|| {
+            DiagError::storage(
+                "scan_task_diff",
+                format!("Task '{}' is not present in the current scan", task_id),
+            )
+            .to_string()
+        })?;
+        let previous_result = previous.results.get(task_id).ok_or_else(|| {
+            DiagError::storage(
+                "scan_task_diff",
+                format!("Task '{}' is not present in the previous scan", task_id),
+            )
+            .to_string()
+        })?;
+        Ok(TaskDiffDetail {
+            task_id: task_id.to_string(),
+            current_output: current_result.output.clone(),
+            previous_output: previous_result.output.clone(),
+        })
     }
 
     /// Pure diff of two loaded scans (storage-free, so it is unit-testable).
@@ -269,7 +442,11 @@ impl ScanStorage {
                     // Task exists in both scans
                     // For JSON outputs, compare parsed data instead of raw strings
                     let output_changed = if current.success && previous.success {
-                        !Self::outputs_are_equivalent(&current.output, &previous.output)
+                        !Self::outputs_are_equivalent_for_task(
+                            &task_id,
+                            &current.output,
+                            &previous.output,
+                        )
                     } else {
                         current.output != previous.output
                     };
@@ -332,6 +509,7 @@ impl ScanStorage {
                 success_count: current.success_count,
                 failure_count: current.failure_count,
                 duration_ms: current.duration_ms,
+                label: current.label,
                 tags: current.tags,
             },
             previous_scan: ScanSummary {
@@ -342,6 +520,7 @@ impl ScanStorage {
                 success_count: previous.success_count,
                 failure_count: previous.failure_count,
                 duration_ms: previous.duration_ms,
+                label: previous.label,
                 tags: previous.tags,
             },
             total_changes,
@@ -352,10 +531,34 @@ impl ScanStorage {
     }
 
     /// Compare two outputs intelligently, parsing JSON when possible
+    #[cfg(test)]
     fn outputs_are_equivalent(output1: &str, output2: &str) -> bool {
+        Self::outputs_are_equivalent_for_task("", output1, output2)
+    }
+
+    fn outputs_are_equivalent_for_task(task_id: &str, output1: &str, output2: &str) -> bool {
         // First, try quick string comparison
         if output1 == output2 {
             return true;
+        }
+
+        // These snapshots are intentionally volatile and do not represent
+        // configuration drift. Their pass/fail transition remains visible,
+        // but comparing every sampled value produces noise rather than signal.
+        if matches!(task_id, "processes" | "performance") {
+            return true;
+        }
+
+        // Deferred-file-operation counts are volatile housekeeping, not a
+        // restart-state transition. Track only the authoritative requirement
+        // and its recognized Windows source markers.
+        if task_id == "pending_reboot"
+            && let (Some(current), Some(previous)) = (
+                Self::pending_reboot_comparison_key(output1),
+                Self::pending_reboot_comparison_key(output2),
+            )
+        {
+            return current == previous;
         }
 
         // Try to parse both as JSON for deep comparison
@@ -374,6 +577,37 @@ impl ScanStorage {
         }
     }
 
+    fn pending_reboot_comparison_key(output: &str) -> Option<(bool, Vec<String>)> {
+        let value = serde_json::from_str::<serde_json::Value>(output).ok()?;
+        let object = value.as_object()?;
+        let explicit = match object.get("restart_required") {
+            Some(value) => Some(value.as_bool()?),
+            None => None,
+        };
+        let pending = match object.get("pending") {
+            Some(value) => Some(value.as_bool()?),
+            None => None,
+        };
+        if explicit.is_none() && pending.is_none() {
+            return None;
+        }
+        let mut reasons = Vec::new();
+        for reason in object.get("reasons")?.as_array()? {
+            let reason = reason.as_str()?;
+            match reason {
+                "component_based_servicing" | "windows_update" => {
+                    reasons.push(reason.to_string());
+                }
+                "pending_file_rename" | "pending_file_operations" => {}
+                _ => return None,
+            }
+        }
+        reasons.sort_unstable();
+        reasons.dedup();
+        let required = explicit.unwrap_or_else(|| pending == Some(true) && !reasons.is_empty());
+        Some((required, reasons))
+    }
+
     /// Deep comparison of JSON values, ignoring formatting and key order
     fn json_values_equal(val1: &serde_json::Value, val2: &serde_json::Value) -> bool {
         use serde_json::Value;
@@ -387,13 +621,33 @@ impl ScanStorage {
                 if a.len() != b.len() {
                     return false;
                 }
-                // Compare array elements
-                for (item1, item2) in a.iter().zip(b.iter()) {
-                    if !Self::json_values_equal(item1, item2) {
+
+                // WMI does not guarantee row order. When rows expose a stable
+                // identity, compare them as a keyed set instead of positionally.
+                let keyed = |items: &[Value]| {
+                    let mut map = std::collections::BTreeMap::new();
+                    for item in items {
+                        let identity = Self::json_identity(item)?;
+                        if map.insert(identity, item.clone()).is_some() {
+                            return None;
+                        }
+                    }
+                    Some(map)
+                };
+                if let (Some(left), Some(right)) = (keyed(a), keyed(b)) {
+                    if left.keys().ne(right.keys()) {
                         return false;
                     }
+                    return left.iter().all(|(identity, left_value)| {
+                        right.get(identity).is_some_and(|right_value| {
+                            Self::json_values_equal(left_value, right_value)
+                        })
+                    });
                 }
-                true
+
+                a.iter()
+                    .zip(b.iter())
+                    .all(|(left, right)| Self::json_values_equal(left, right))
             }
             (Value::Object(a), Value::Object(b)) => {
                 if a.len() != b.len() {
@@ -414,6 +668,41 @@ impl ScanStorage {
             }
             _ => false, // Different types
         }
+    }
+
+    fn json_identity(value: &serde_json::Value) -> Option<String> {
+        let object = value.as_object()?;
+        const IDENTITY_KEYS: &[&str] = &[
+            "id",
+            "deviceid",
+            "device_id",
+            "pnpdeviceid",
+            "guid",
+            "name",
+            "displayname",
+            "display_name",
+            "caption",
+            "driveletter",
+            "mount_point",
+            "pid",
+        ];
+
+        for wanted in IDENTITY_KEYS {
+            if let Some((key, value)) = object
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(wanted))
+            {
+                let rendered = match value {
+                    serde_json::Value::String(value) => value.clone(),
+                    serde_json::Value::Number(value) => value.to_string(),
+                    _ => continue,
+                };
+                if !rendered.is_empty() {
+                    return Some(format!("{}={}", key.to_ascii_lowercase(), rendered));
+                }
+            }
+        }
+        None
     }
 
     fn json_numbers_equal(a: &serde_json::Number, b: &serde_json::Number) -> bool {
@@ -448,13 +737,26 @@ impl ScanStorage {
         }
     }
 
-    /// Replace the tags on a stored scan (used for user-editable labels).
+    /// Replace metadata tags on a stored scan. Kept for compatibility; user
+    /// labels are stored independently by `update_label`.
     pub fn update_tags(&self, scan_id: &str, tags: Vec<String>) -> Result<(), String> {
         let mut scan = self.load_scan(scan_id)?;
         scan.tags = tags;
         self.encrypted_storage
             .store(&scan.id, &scan)
-            .map_err(|e| DiagError::storage("update_tags", e.to_string()).into())
+            .map_err(|e| DiagError::storage("update_tags", e.to_string()))?;
+        self.upsert_summary(Self::summary_for(&scan))
+    }
+
+    pub fn update_label(&self, scan_id: &str, label: Option<String>) -> Result<(), String> {
+        let mut scan = self.load_scan(scan_id)?;
+        scan.label = label
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        self.encrypted_storage
+            .store(&scan.id, &scan)
+            .map_err(|e| DiagError::storage("update_label", e.to_string()))?;
+        self.upsert_summary(Self::summary_for(&scan))
     }
 
     /// Per-task failure counts over the newest `limit` scans, for trend
@@ -494,25 +796,38 @@ impl ScanStorage {
 
     fn cleanup_old_scans(&self) -> Result<(), String> {
         let summaries = self.list_scans()?;
+        let (_, configured_limit) = crate::commands::settings::history_retention();
+        let max_scans = configured_limit.clamp(1, 500) as usize;
 
-        if summaries.len() > self.max_scans {
+        if summaries.len() > max_scans {
             println!(
                 "Cleaning up old encrypted scans: {} total, keeping {}",
                 summaries.len(),
-                self.max_scans
+                max_scans
             );
 
             // Remove oldest scans (summaries are already sorted newest first)
-            for summary in summaries.iter().skip(self.max_scans) {
+            let mut failed_deletions = Vec::new();
+            for summary in summaries.iter().skip(max_scans) {
                 if let Err(e) = self.encrypted_storage.delete(&summary.id) {
                     println!(
                         "Warning: Failed to remove old encrypted scan '{}': {}",
                         summary.id, e
                     );
+                    // Keep the summary visible so a later cleanup can retry;
+                    // dropping it from the index would strand an encrypted
+                    // file that users could no longer see or clear normally.
+                    failed_deletions.push(summary.clone());
                 } else {
                     println!("Removed old encrypted scan: {}", summary.id);
                 }
             }
+
+            let mut retained: Vec<ScanSummary> = summaries.into_iter().take(max_scans).collect();
+            retained.extend(failed_deletions);
+            self.encrypted_storage
+                .store(SUMMARY_INDEX_ID, &retained)
+                .map_err(|error| DiagError::storage("trim_summary_index", error.to_string()))?;
         }
 
         Ok(())
@@ -532,11 +847,6 @@ impl ScanStorage {
 
         // Delete each scan - list_files returns the base filename (without .enc)
         for scan_file in scan_files {
-            // Skip if not a scan file (we only want to delete scan_* files)
-            if !scan_file.starts_with("scan_") {
-                continue;
-            }
-
             match self.encrypted_storage.delete(&scan_file) {
                 Ok(_) => {
                     deleted_count += 1;
@@ -598,6 +908,7 @@ mod tests {
             success_count,
             failure_count: results.len() - success_count,
             duration_ms: 1000,
+            label: None,
             tags: vec![],
             results,
         }
@@ -641,6 +952,69 @@ mod tests {
         let cmp = ScanStorage::compute_comparison(current, previous);
         assert_eq!(cmp.total_changes, 1);
         assert!(cmp.status_unchanged[0].output_changed);
+    }
+
+    #[test]
+    fn wmi_style_arrays_compare_by_stable_identity() {
+        let current = scan(
+            "cur",
+            vec![(
+                "services",
+                result(
+                    true,
+                    r#"[{"Name":"Beta","State":"Running"},{"Name":"Alpha","State":"Stopped"}]"#,
+                ),
+            )],
+        );
+        let previous = scan(
+            "prev",
+            vec![(
+                "services",
+                result(
+                    true,
+                    r#"[{"Name":"Alpha","State":"Stopped"},{"Name":"Beta","State":"Running"}]"#,
+                ),
+            )],
+        );
+        let cmp = ScanStorage::compute_comparison(current, previous);
+        assert_eq!(cmp.total_changes, 0);
+    }
+
+    #[test]
+    fn volatile_performance_samples_do_not_create_drift() {
+        let current = scan("cur", vec![("performance", result(true, r#"{"cpu":91}"#))]);
+        let previous = scan("prev", vec![("performance", result(true, r#"{"cpu":2}"#))]);
+        let cmp = ScanStorage::compute_comparison(current, previous);
+        assert_eq!(cmp.total_changes, 0);
+    }
+
+    #[test]
+    fn deferred_file_operation_churn_does_not_create_restart_drift() {
+        let previous = r#"{"pending":false,"restart_required":false,"reasons":[],"summary":"2 deferred operations","deferred_file_operations":{"pending":true,"operation_count":2}}"#;
+        let current = r#"{"pending":false,"restart_required":false,"reasons":[],"summary":"48 deferred operations","deferred_file_operations":{"pending":true,"operation_count":48}}"#;
+        assert!(ScanStorage::outputs_are_equivalent_for_task(
+            "pending_reboot",
+            previous,
+            current
+        ));
+    }
+
+    #[test]
+    fn authoritative_restart_source_changes_remain_visible() {
+        let clear = r#"{"pending":false,"restart_required":false,"reasons":[]}"#;
+        let update = r#"{"pending":true,"restart_required":true,"reasons":["windows_update"]}"#;
+        let servicing =
+            r#"{"pending":true,"restart_required":true,"reasons":["component_based_servicing"]}"#;
+        assert!(!ScanStorage::outputs_are_equivalent_for_task(
+            "pending_reboot",
+            clear,
+            update
+        ));
+        assert!(!ScanStorage::outputs_are_equivalent_for_task(
+            "pending_reboot",
+            update,
+            servicing
+        ));
     }
 
     #[test]

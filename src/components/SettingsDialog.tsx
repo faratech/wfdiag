@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import type { AIProviderId, SettingsData } from './types'
+import type { AIProviderStatus } from '../contexts/AIContext'
 import { Modal, Button } from './ui'
 
 export type { SettingsData } from './types'
@@ -9,6 +10,8 @@ export interface SettingsDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   settings: SettingsData
+  aiStatus?: AIProviderStatus | null
+  aiStatusLoading?: boolean
   onSave: (settings: SettingsData) => void | Promise<void>
 }
 
@@ -36,15 +39,40 @@ function configuredProviderFromSettings(settings: SettingsData): AIProviderId {
   if (settings.phiSilicaLafToken) return 'phi_silica'
   if (settings.localAiEndpoint) return 'foundry_local'
   if (settings.ollamaEndpoint || settings.ollamaModel) return 'ollama'
-  if (settings.customEndpoint || settings.customModel || settings.customApiKey) return 'custom_openai'
+  if (settings.customEndpoint || settings.customModel || settings.customApiKey || settings.customApiKeySet) return 'custom_openai'
   if (settings.codexCliPath || settings.codexModel) return 'codex_cli'
   if (settings.claudeCliPath || settings.claudeModel) return 'claude_code'
-  if (settings.openAiApiKey) return 'openai'
-  if (settings.anthropicApiKey || settings.anthropicModel) return 'anthropic'
-  if (settings.geminiApiKey || settings.geminiModel) return 'gemini'
-  if (settings.deepseekApiKey || settings.deepseekModel) return 'deepseek'
+  if (settings.openAiApiKey || settings.openAiApiKeySet) return 'openai'
+  if (settings.anthropicApiKey || settings.anthropicApiKeySet || settings.anthropicModel) return 'anthropic'
+  if (settings.geminiApiKey || settings.geminiApiKeySet || settings.geminiModel) return 'gemini'
+  if (settings.deepseekApiKey || settings.deepseekApiKeySet || settings.deepseekModel) return 'deepseek'
   return 'openai'
 }
+
+const SecretInput: React.FC<{
+  label: string
+  value: string | undefined
+  configured?: boolean
+  placeholder: string
+  onChange: (value: string) => void
+}> = ({ label, value, configured, placeholder, onChange }) => (
+  <div className="credential-control">
+    <input
+      className="field-input"
+      aria-label={label}
+      type="password"
+      value={value || ''}
+      placeholder={configured && !value ? 'Stored securely — enter a replacement' : placeholder}
+      onChange={event => onChange(event.target.value)}
+    />
+    {configured && !value && <span className="credential-state"><i className="fa-solid fa-lock" aria-hidden="true" /> Configured</span>}
+    {configured && (
+      <button type="button" className="btn ghost credential-remove" aria-label={`Remove ${label}`} onClick={() => onChange('')}>
+        Remove
+      </button>
+    )}
+  </div>
+)
 
 /** Sign-in state of a CLI bridge provider (auth lives entirely in the CLI) */
 interface BridgeStatus {
@@ -169,7 +197,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = (props) =>
 // Mounted only while open (SettingsDialog gates on it), so the draft and the
 // configured-provider selection seed straight from the live settings on mount
 // — no in-render reseeding of a long-lived dialog.
-const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange, settings, onSave }) => {
+const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange, settings, aiStatus, aiStatusLoading, onSave }) => {
   const [draft, setDraft] = useState<SettingsData>(settings)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -179,6 +207,15 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
   const [configProvider, setConfigProvider] = useState<AIProviderId>(() =>
     configuredProviderFromSettings(settings)
   )
+  const phiUnavailable = !!aiStatus
+    && (!aiStatus.phi_silica_available || !aiStatus.phi_silica_ready)
+  const phiStatusPending = aiStatusLoading === true || aiStatus === null
+  const phiBlocked = phiStatusPending || phiUnavailable
+  const phiUnavailableReason = aiStatus?.phi_silica_message
+    || 'Phi Silica is unavailable or not ready on this PC.'
+  const phiBlockedReason = phiStatusPending
+    ? 'Checking whether Phi Silica is available on this PC. Wait for the check to finish before selecting it.'
+    : phiUnavailableReason
 
   // Live model list per provider, fetched from the provider's own list API
   // when its pane opens. Draft credentials are passed so an unsaved key or
@@ -196,13 +233,20 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
       : provider === 'deepseek' ? draft.deepseekApiKey
       : provider === 'custom_openai' ? draft.customApiKey
       : undefined
+    const apiKeyConfigured =
+      provider === 'openai' ? draft.openAiApiKeySet
+      : provider === 'anthropic' ? draft.anthropicApiKeySet
+      : provider === 'gemini' ? draft.geminiApiKeySet
+      : provider === 'deepseek' ? draft.deepseekApiKeySet
+      : provider === 'custom_openai' ? draft.customApiKeySet
+      : false
     const endpoint =
       provider === 'custom_openai' ? draft.customEndpoint
       : provider === 'foundry_local' ? draft.localAiEndpoint
       : provider === 'ollama' ? draft.ollamaEndpoint
       : undefined
     // Cloud listings need a key; don't fire requests while the field is empty
-    if (['openai', 'anthropic', 'gemini', 'deepseek'].includes(provider) && !apiKey) return
+    if (['openai', 'anthropic', 'gemini', 'deepseek'].includes(provider) && !apiKey && !apiKeyConfigured) return
     if (provider === 'custom_openai' && !endpoint) return
     let cancelled = false
     // Debounced: the key/endpoint fields retrigger this as the user types
@@ -215,10 +259,15 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
   }, [
     configProvider,
     draft.openAiApiKey,
+    draft.openAiApiKeySet,
     draft.anthropicApiKey,
+    draft.anthropicApiKeySet,
     draft.geminiApiKey,
+    draft.geminiApiKeySet,
     draft.deepseekApiKey,
+    draft.deepseekApiKeySet,
     draft.customApiKey,
+    draft.customApiKeySet,
     draft.customEndpoint,
     draft.localAiEndpoint,
     draft.ollamaEndpoint,
@@ -237,10 +286,27 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
     setDraft(d => ({ ...d, [k]: v }))
   }
 
+  const setSecret = (
+    key: 'openAiApiKey' | 'anthropicApiKey' | 'geminiApiKey' | 'deepseekApiKey' | 'customApiKey',
+    flag: 'openAiApiKeySet' | 'anthropicApiKeySet' | 'geminiApiKeySet' | 'deepseekApiKeySet' | 'customApiKeySet',
+    value: string,
+  ) => {
+    setSaveError(null)
+    setDraft(current => ({
+      ...current,
+      [key]: value,
+      [flag]: value ? true : false,
+    }))
+  }
+
   const save = async () => {
     setSaving(true)
     setSaveError(null)
     try {
+      if (draft.preferredAIProvider === 'phi_silica' && phiBlocked) {
+        setSaveError(phiBlockedReason)
+        return
+      }
       await onSave(draft)
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error))
@@ -254,7 +320,7 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
       open={open}
       onClose={() => onOpenChange(false)}
       title="Settings"
-      width={560}
+      width={640}
       footer={
         <>
           <Button onClick={() => onOpenChange(false)}>Cancel</Button>
@@ -273,10 +339,13 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
           Settings were not saved: {saveError}
         </div>
       )}
-      <SectionTitle>AI</SectionTitle>
+      <SectionTitle>AI assistant</SectionTitle>
+      <p className="settings-section-intro">
+        Choose how AI is used across Assistant, Scan Report, and issue explanations. Provider credentials are managed below.
+      </p>
       <div className="form-row">
         <div><strong>Enable AI insights</strong></div>
-        <input type="checkbox" checked={draft.aiEnabled ?? true} onChange={e => set('aiEnabled', e.target.checked)} />
+        <input aria-label="Enable AI insights" type="checkbox" checked={draft.aiEnabled ?? true} onChange={e => set('aiEnabled', e.target.checked)} />
       </div>
       <div className="form-row">
         <div><strong>Active AI</strong><div className="hint">One provider answers at a time; Auto picks local first, then cloud</div></div>
@@ -292,11 +361,52 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
           }}
         >
           <option value="auto">Auto</option>
-          {PROVIDER_OPTIONS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+          {PROVIDER_OPTIONS.map(p => (
+            <option key={p.id} value={p.id} disabled={p.id === 'phi_silica' && phiBlocked}>
+              {p.label}
+            </option>
+          ))}
         </select>
+      </div>
+      {phiBlocked && (
+        <div className="settings-provider-status" role="status">
+          <i className={`fa-solid ${phiStatusPending ? 'fa-circle-notch fa-spin' : 'fa-circle-info'}`} aria-hidden="true" /> {phiBlockedReason}
+        </div>
+      )}
+
+      <div className="form-row">
+        <div>
+          <strong>Cloud fallback</strong>
+          <div className="hint">When Auto cannot finish with an on-device or local provider</div>
+        </div>
+        <select
+          className="field-input"
+          aria-label="Cloud fallback policy"
+          value={draft.cloudFallbackPolicy || 'ask'}
+          onChange={e => set('cloudFallbackPolicy', e.target.value as SettingsData['cloudFallbackPolicy'])}
+        >
+          <option value="ask">Ask every time</option>
+          <option value="allow">Allow automatically</option>
+          <option value="never">Never use cloud fallback</option>
+        </select>
+      </div>
+      <div className="form-row">
+        <div>
+          <strong>Web grounding</strong>
+          <div className="hint">Allow supported providers to look up current public information</div>
+        </div>
+        <input
+          aria-label="Enable web grounding"
+          type="checkbox"
+          checked={draft.networkGroundingEnabled ?? false}
+          onChange={e => set('networkGroundingEnabled', e.target.checked)}
+        />
       </div>
 
       <SectionTitle>Provider setup</SectionTitle>
+      <p className="settings-section-intro">
+        Local providers keep prompts on this PC. Subscription and API providers send only the question and selected diagnostic context.
+      </p>
       <div className="form-row">
         <div><strong>Configure</strong><div className="hint">Keys are stored in the OS secret store, never in the settings file</div></div>
         <select
@@ -313,7 +423,7 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
         <>
           <div className="form-row">
             <div><strong>OpenAI API key</strong></div>
-            <input className="field-input" type="password" value={draft.openAiApiKey || ''} placeholder="sk-…" onChange={e => set('openAiApiKey', e.target.value)} />
+            <SecretInput label="OpenAI API key" value={draft.openAiApiKey} configured={draft.openAiApiKeySet} placeholder="sk-…" onChange={value => setSecret('openAiApiKey', 'openAiApiKeySet', value)} />
           </div>
           <div className="form-row">
             <div><strong>Model</strong></div>
@@ -332,7 +442,7 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
         <>
           <div className="form-row">
             <div><strong>Anthropic API key</strong></div>
-            <input className="field-input" type="password" value={draft.anthropicApiKey || ''} placeholder="sk-ant-…" onChange={e => set('anthropicApiKey', e.target.value)} />
+            <SecretInput label="Anthropic API key" value={draft.anthropicApiKey} configured={draft.anthropicApiKeySet} placeholder="sk-ant-…" onChange={value => setSecret('anthropicApiKey', 'anthropicApiKeySet', value)} />
           </div>
           <div className="form-row">
             <div><strong>Model</strong></div>
@@ -351,15 +461,15 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
         <>
           <div className="form-row">
             <div><strong>Gemini API key</strong></div>
-            <input className="field-input" type="password" value={draft.geminiApiKey || ''} placeholder="AIza…" onChange={e => set('geminiApiKey', e.target.value)} />
+            <SecretInput label="Gemini API key" value={draft.geminiApiKey} configured={draft.geminiApiKeySet} placeholder="AIza…" onChange={value => setSecret('geminiApiKey', 'geminiApiKeySet', value)} />
           </div>
           <div className="form-row">
             <div><strong>Model</strong></div>
             <ModelSelect
               ariaLabel="Gemini model"
               value={draft.geminiModel}
-              defaultModel="gemini-2.5-flash"
-              options={modelsFor('gemini', ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash-lite'])}
+              defaultModel="gemini-3.5-flash"
+              options={modelsFor('gemini', ['gemini-3.5-flash', 'gemini-3.5-pro'])}
               onChange={v => set('geminiModel', v)}
             />
           </div>
@@ -370,15 +480,15 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
         <>
           <div className="form-row">
             <div><strong>DeepSeek API key</strong></div>
-            <input className="field-input" type="password" value={draft.deepseekApiKey || ''} placeholder="sk-…" onChange={e => set('deepseekApiKey', e.target.value)} />
+            <SecretInput label="DeepSeek API key" value={draft.deepseekApiKey} configured={draft.deepseekApiKeySet} placeholder="sk-…" onChange={value => setSecret('deepseekApiKey', 'deepseekApiKeySet', value)} />
           </div>
           <div className="form-row">
             <div><strong>Model</strong></div>
             <ModelSelect
               ariaLabel="DeepSeek model"
               value={draft.deepseekModel}
-              defaultModel="deepseek-chat"
-              options={modelsFor('deepseek', ['deepseek-chat', 'deepseek-reasoner'])}
+              defaultModel="deepseek-v4-flash"
+              options={modelsFor('deepseek', ['deepseek-v4-flash'])}
               onChange={v => set('deepseekModel', v)}
             />
           </div>
@@ -389,7 +499,7 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
         <>
           <div className="form-row">
             <div><strong>Endpoint</strong><div className="hint">Optional. Leave empty to auto-discover Foundry Local</div></div>
-            <input className="field-input" type="text" value={draft.localAiEndpoint || ''} placeholder="http://127.0.0.1:55769" onChange={e => set('localAiEndpoint', e.target.value)} />
+            <input className="field-input" aria-label="Foundry Local endpoint" type="text" value={draft.localAiEndpoint || ''} placeholder="http://127.0.0.1:55769" onChange={e => set('localAiEndpoint', e.target.value)} />
           </div>
           <div className="form-row">
             <div><strong>Model</strong><div className="hint">Models the running service reports; empty uses the default</div></div>
@@ -408,7 +518,7 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
         <>
           <div className="form-row">
             <div><strong>Endpoint</strong><div className="hint">Optional. Leave empty for the default port</div></div>
-            <input className="field-input" type="text" value={draft.ollamaEndpoint || ''} placeholder="http://127.0.0.1:11434" onChange={e => set('ollamaEndpoint', e.target.value)} />
+            <input className="field-input" aria-label="Ollama endpoint" type="text" value={draft.ollamaEndpoint || ''} placeholder="http://127.0.0.1:11434" onChange={e => set('ollamaEndpoint', e.target.value)} />
           </div>
           <div className="form-row">
             <div><strong>Model</strong><div className="hint">Empty uses the first installed model</div></div>
@@ -418,7 +528,7 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
                 {ollamaModels.map(model => <option key={model} value={model}>{model}</option>)}
               </select>
             ) : (
-              <input className="field-input" type="text" value={draft.ollamaModel || ''} placeholder="llama3.2" onChange={e => set('ollamaModel', e.target.value)} />
+              <input className="field-input" aria-label="Ollama model" type="text" value={draft.ollamaModel || ''} placeholder="llama3.2" onChange={e => set('ollamaModel', e.target.value)} />
             )}
           </div>
         </>
@@ -427,7 +537,7 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
       {configProvider === 'phi_silica' && (
         <div className="form-row">
           <div><strong>LAF token</strong><div className="hint">Optional. Microsoft-issued token; requires the Store version on a Copilot+ PC</div></div>
-          <input className="field-input" type="password" value={draft.phiSilicaLafToken || ''} placeholder="Leave empty for built-in" onChange={e => set('phiSilicaLafToken', e.target.value)} />
+          <input className="field-input" aria-label="Phi Silica LAF token" type="password" value={draft.phiSilicaLafToken || ''} placeholder="Leave empty for built-in" onChange={e => set('phiSilicaLafToken', e.target.value)} />
         </div>
       )}
 
@@ -435,7 +545,7 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
         <>
           <div className="form-row">
             <div><strong>Endpoint URL</strong><div className="hint">OpenRouter, Groq, or any /v1/chat/completions server</div></div>
-            <input className="field-input" type="text" value={draft.customEndpoint || ''} placeholder="https://openrouter.ai/api" onChange={e => set('customEndpoint', e.target.value)} />
+            <input className="field-input" aria-label="Custom endpoint URL" type="text" value={draft.customEndpoint || ''} placeholder="https://openrouter.ai/api" onChange={e => set('customEndpoint', e.target.value)} />
           </div>
           <div className="form-row">
             <div><strong>Model</strong><div className="hint">Required. The model id your provider documents</div></div>
@@ -453,12 +563,12 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
                 ).map(model => <option key={model} value={model}>{model}</option>)}
               </select>
             ) : (
-              <input className="field-input" type="text" value={draft.customModel || ''} placeholder="anthropic/claude-haiku-4-5" onChange={e => set('customModel', e.target.value)} />
+              <input className="field-input" aria-label="Custom endpoint model" type="text" value={draft.customModel || ''} placeholder="anthropic/claude-haiku-4-5" onChange={e => set('customModel', e.target.value)} />
             )}
           </div>
           <div className="form-row">
             <div><strong>API key</strong><div className="hint">Optional for local proxies</div></div>
-            <input className="field-input" type="password" value={draft.customApiKey || ''} placeholder="" onChange={e => set('customApiKey', e.target.value)} />
+            <SecretInput label="Custom endpoint API key" value={draft.customApiKey} configured={draft.customApiKeySet} placeholder="Optional" onChange={value => setSecret('customApiKey', 'customApiKeySet', value)} />
           </div>
         </>
       )}
@@ -474,7 +584,7 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
           />
           <div className="form-row">
             <div><strong>CLI path</strong><div className="hint">Optional. Empty auto-detects codex on PATH (npm install -g @openai/codex)</div></div>
-            <input className="field-input" type="text" value={draft.codexCliPath || ''} placeholder="Auto-detected" onChange={e => set('codexCliPath', e.target.value)} />
+            <input className="field-input" aria-label="Codex CLI path" type="text" value={draft.codexCliPath || ''} placeholder="Auto-detected" onChange={e => set('codexCliPath', e.target.value)} />
           </div>
           <div className="form-row">
             <div><strong>Model</strong><div className="hint">Optional. Empty uses the CLI&apos;s default model</div></div>
@@ -503,7 +613,7 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
           />
           <div className="form-row">
             <div><strong>CLI path</strong><div className="hint">Optional. Empty auto-detects claude on PATH (npm install -g @anthropic-ai/claude-code)</div></div>
-            <input className="field-input" type="text" value={draft.claudeCliPath || ''} placeholder="Auto-detected" onChange={e => set('claudeCliPath', e.target.value)} />
+            <input className="field-input" aria-label="Claude Code CLI path" type="text" value={draft.claudeCliPath || ''} placeholder="Auto-detected" onChange={e => set('claudeCliPath', e.target.value)} />
           </div>
           <div className="form-row">
             <div><strong>Model</strong><div className="hint">Optional. Empty uses the CLI&apos;s default model</div></div>
@@ -524,7 +634,7 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
       <SectionTitle>General</SectionTitle>
       <div className="form-row">
         <div><strong>Theme</strong></div>
-        <select className="field-input" value={draft.theme || 'dark'} onChange={e => set('theme', e.target.value as SettingsData['theme'])}>
+        <select className="field-input" aria-label="Theme" value={draft.theme || 'dark'} onChange={e => set('theme', e.target.value as SettingsData['theme'])}>
           <option value="dark">Dark</option>
           <option value="light">Light</option>
           <option value="auto">Auto (system)</option>
@@ -532,7 +642,7 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
       </div>
       <div className="form-row">
         <div><strong>Export format</strong></div>
-        <select className="field-input" value={draft.exportFormat || 'text'} onChange={e => set('exportFormat', e.target.value as SettingsData['exportFormat'])}>
+        <select className="field-input" aria-label="Export format" value={draft.exportFormat || 'text'} onChange={e => set('exportFormat', e.target.value as SettingsData['exportFormat'])}>
           <option value="text">Text</option>
           <option value="json">JSON</option>
           <option value="html">HTML</option>
@@ -540,23 +650,23 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
       </div>
       <div className="form-row">
         <div><strong>Auto-save scans</strong></div>
-        <input type="checkbox" checked={draft.autoSave ?? true} onChange={e => set('autoSave', e.target.checked)} />
+        <input aria-label="Auto-save scans" type="checkbox" checked={draft.autoSave ?? true} onChange={e => set('autoSave', e.target.checked)} />
       </div>
       <div className="form-row">
         <div><strong>Desktop notifications</strong><div className="hint">Notify when a scan finishes in the background</div></div>
-        <input type="checkbox" checked={draft.showNotifications ?? true} onChange={e => set('showNotifications', e.target.checked)} />
+        <input aria-label="Desktop notifications" type="checkbox" checked={draft.showNotifications ?? true} onChange={e => set('showNotifications', e.target.checked)} />
       </div>
       <div className="form-row">
         <div><strong>Scan on startup</strong></div>
-        <input type="checkbox" checked={draft.scanOnStartup ?? false} onChange={e => set('scanOnStartup', e.target.checked)} />
+        <input aria-label="Scan on startup" type="checkbox" checked={draft.scanOnStartup ?? false} onChange={e => set('scanOnStartup', e.target.checked)} />
       </div>
       <div className="form-row">
         <div><strong>Close to tray</strong><div className="hint">Closing the window keeps the app running in the system tray</div></div>
-        <input type="checkbox" checked={draft.closeToTray ?? false} onChange={e => set('closeToTray', e.target.checked)} />
+        <input aria-label="Close to tray" type="checkbox" checked={draft.closeToTray ?? false} onChange={e => set('closeToTray', e.target.checked)} />
       </div>
       <div className="form-row">
         <div><strong>Max concurrent tasks</strong></div>
-        <input className="field-input" type="number" min={1} max={16} value={draft.maxConcurrentTasks ?? 5} onChange={e => set('maxConcurrentTasks', Number(e.target.value))} />
+        <input className="field-input" aria-label="Max concurrent tasks" type="number" min={1} max={16} value={draft.maxConcurrentTasks ?? 5} onChange={e => set('maxConcurrentTasks', Number(e.target.value))} />
       </div>
     </Modal>
   )

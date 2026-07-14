@@ -1,21 +1,15 @@
 //! Foundry Local client.
 //!
-//! One-shot analysis keeps the proven `/v1/responses` path (Foundry Local
-//! serves it and this is what shipped in 2.3.0). Chat goes through the shared
-//! chat-completions client — flagged for verification on a real install; the
-//! capability table keeps Foundry tool-less until then.
+//! Both one-shot analysis and chat use Foundry Local's documented
+//! `/v1/chat/completions` endpoint. Discovery validates the service through
+//! `/openai/status`; a listening TCP port alone is not sufficient evidence.
 //!
 //! The endpoint is resolved dynamically (settings override, then the foundry
 //! CLI) — its port is dynamic by design and must never be hardcoded.
 
 use super::ResolvedProviderConfig;
-use super::discovery::{extract_http_base, normalize_base_url, probe_endpoint_async};
-use crate::error::DiagError;
-use async_openai::{
-    Client,
-    config::OpenAIConfig,
-    types::responses::{CreateResponseArgs, InputParam},
-};
+use super::discovery::{extract_http_base, normalize_base_url};
+use serde_json::Value;
 
 /// Default model alias requested from Foundry Local. Phi Silica itself is NOT
 /// served by Foundry Local (it is only reachable through the Windows AI APIs,
@@ -55,52 +49,111 @@ async fn discover_foundry_endpoint() -> Option<String> {
 /// URL (append `/v1` for the OpenAI-compatible API root).
 pub(crate) async fn local_ai_endpoint() -> Option<String> {
     if let Some(endpoint) = configured_local_endpoint()
-        && probe_endpoint_async(&endpoint).await
+        && service_is_healthy(&endpoint).await
     {
         return Some(endpoint);
     }
     let endpoint = discover_foundry_endpoint().await?;
-    if probe_endpoint_async(&endpoint).await {
+    if service_is_healthy(&endpoint).await {
         Some(endpoint)
     } else {
         None
     }
 }
 
-/// One-shot analysis against the local `/v1/responses` endpoint.
+pub(crate) fn valid_status_body(body: &Value) -> bool {
+    body.get("Endpoints")
+        .or_else(|| body.get("endpoints"))
+        .and_then(Value::as_array)
+        .is_some_and(|endpoints| endpoints.iter().any(Value::is_string))
+}
+
+async fn service_is_healthy(base: &str) -> bool {
+    let Ok(response) = reqwest::Client::new()
+        .get(format!("{base}/openai/status"))
+        .timeout(std::time::Duration::from_secs(4))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    if !response.status().is_success() {
+        return false;
+    }
+    response
+        .json::<Value>()
+        .await
+        .is_ok_and(|body| valid_status_body(&body))
+}
+
+fn parse_model_names(body: &Value) -> Result<Vec<String>, String> {
+    body.as_array()
+        .ok_or_else(|| "Foundry Local model response was not an array".to_string())?
+        .iter()
+        .map(|model| {
+            model
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "Foundry Local returned a non-string model name".to_string())
+        })
+        .collect()
+}
+
+pub async fn list_models(base: &str) -> Result<Vec<String>, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{base}/openai/models"))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|error| format!("Foundry Local model request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("Foundry Local model request failed: HTTP {status}"));
+    }
+    let body = response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("Foundry Local model response was not JSON: {error}"))?;
+    parse_model_names(&body)
+}
+
+/// One-shot analysis against the documented chat-completions endpoint.
 pub async fn one_shot(
     cfg: &ResolvedProviderConfig,
     system: &str,
     prompt: &str,
 ) -> Result<String, String> {
-    let endpoint = cfg.endpoint_or_err(crate::ai_service::AIProvider::FoundryLocal)?;
-    let model = cfg.model.as_deref().unwrap_or(FOUNDRY_LOCAL_MODEL);
+    super::openai_compat::one_shot(
+        crate::ai_service::AIProvider::FoundryLocal,
+        cfg,
+        system,
+        prompt,
+    )
+    .await
+}
 
-    let config = OpenAIConfig::new()
-        .with_api_base(format!("{}/v1", endpoint))
-        .with_api_key("not-needed");
-    let client = Client::with_config(config);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
 
-    let full_prompt = format!("{}\n\n{}", system, prompt);
+    #[test]
+    fn status_requires_a_real_foundry_endpoint_list() {
+        assert!(valid_status_body(&json!({
+            "Endpoints": ["http://localhost:5272"],
+            "ModelDirPath": "C:/models"
+        })));
+        assert!(!valid_status_body(&json!({})));
+        assert!(!valid_status_body(&json!({"Endpoints": []})));
+    }
 
-    let request = CreateResponseArgs::default()
-        .model(model)
-        .input(InputParam::Text(full_prompt))
-        .build()
-        .map_err(|e| DiagError::AiAnalysisFailed {
-            reason: format!("Failed to build request: {}", e),
-        })?;
-
-    let response = client.responses().create(request).await.map_err(|e| {
-        eprintln!("Foundry Local API error in ai_providers: {:?}", e);
-        DiagError::AiAnalysisFailed {
-            reason: format!(
-                "Foundry Local error: {}. Ensure the service is running and the model '{}' \
-                 is loaded (foundry model run {}).",
-                e, model, model
-            ),
-        }
-    })?;
-
-    Ok(response.output_text().unwrap_or_default())
+    #[test]
+    fn documented_model_array_is_parsed_strictly() {
+        assert_eq!(
+            parse_model_names(&json!(["phi-4-mini", "model-2"])).unwrap(),
+            vec!["phi-4-mini", "model-2"]
+        );
+        assert!(parse_model_names(&json!({"data": []})).is_err());
+        assert!(parse_model_names(&json!(["valid", 42])).is_err());
+    }
 }

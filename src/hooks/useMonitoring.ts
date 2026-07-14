@@ -29,6 +29,8 @@ export interface UseMonitoringResult {
   processes: ProcessInfo[]
   /** Whether the hook is loading/initializing */
   isLoading: boolean
+  /** Actionable startup/refresh failure; null when monitoring is healthy. */
+  error: string | null
   /** Start monitoring */
   start: () => Promise<void>
   /** Stop monitoring */
@@ -50,13 +52,13 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
   const [isActive, setIsActive] = useState(false)
   const [stats, setStats] = useState<SystemStats | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   // Refs for cleanup and preventing double-initialization
   const unlistenRef = useRef<UnlistenFn | null>(null)
   const leaseRef = useRef<number | null>(null)
   const startInFlightRef = useRef<number | null>(null)
   const startRequestRef = useRef(0)
-  const hasAutoStarted = useRef(false)
   const isMountedRef = useRef(true)
 
   const invalidatePendingStart = useCallback(() => {
@@ -66,13 +68,16 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
 
   // Start monitoring
   const start = useCallback(async () => {
-    if (isActive || leaseRef.current !== null || startInFlightRef.current !== null) return
+    if (leaseRef.current !== null || startInFlightRef.current !== null) return
 
     const requestId = ++startRequestRef.current
+    let acquiredLeaseId: number | null = null
     try {
       startInFlightRef.current = requestId
       setIsLoading(true)
+      setError(null)
       const leaseId = await invoke<number>('start_monitoring', { includeProcessAdapterStats })
+      acquiredLeaseId = leaseId
 
       if (!isMountedRef.current || requestId !== startRequestRef.current) {
         await invoke('stop_monitoring', { leaseId }).catch(err =>
@@ -96,17 +101,18 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
 
       // Set up event listener
       const unlisten = await listen<SystemStats>('system-stats', (event) => {
-        if (!isMountedRef.current) return
+        if (!isMountedRef.current || requestId !== startRequestRef.current) return
 
         const newStats = event.payload
         setStats(newStats)
+        setError(null)
         onStats?.(newStats)
       })
 
       // The component may have unmounted while listen() was in flight. If so, cleanup
       // already ran and saw a null ref — tear the listener down here so it doesn't leak
       // and keep firing on an unmounted view.
-      if (!isMountedRef.current) {
+      if (!isMountedRef.current || requestId !== startRequestRef.current) {
         unlisten()
         return
       }
@@ -117,14 +123,16 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
       unlistenRef.current = unlisten
       setIsActive(true)
     } catch (error) {
-      const leaseId = leaseRef.current
-      if (leaseId !== null) {
+      if (acquiredLeaseId !== null && leaseRef.current === acquiredLeaseId) {
         leaseRef.current = null
-        await invoke('stop_monitoring', { leaseId }).catch(err =>
+        await invoke('stop_monitoring', { leaseId: acquiredLeaseId }).catch(err =>
           logger.error(componentName, 'Failed to stop monitoring after start error', err)
         )
       }
       logger.error(componentName, 'Failed to start monitoring', error)
+      if (isMountedRef.current && requestId === startRequestRef.current) {
+        setError(error instanceof Error ? error.message : String(error))
+      }
     } finally {
       const isCurrentStart = startInFlightRef.current === requestId
       if (isCurrentStart) {
@@ -134,11 +142,11 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
         setIsLoading(false)
       }
     }
-  }, [isActive, onStats, componentName, includeProcessAdapterStats])
+  }, [onStats, componentName, includeProcessAdapterStats])
 
   // Stop monitoring
   const stop = useCallback(async () => {
-    if (startInFlightRef.current !== null && leaseRef.current === null) {
+    if (startInFlightRef.current !== null) {
       invalidatePendingStart()
       if (isMountedRef.current) {
         setIsLoading(false)
@@ -152,16 +160,21 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
       unlistenRef.current = null
     }
 
-    try {
-      const leaseId = leaseRef.current
-      leaseRef.current = null
-      await invoke('stop_monitoring', leaseId !== null ? { leaseId } : {})
-    } catch (error) {
-      logger.error(componentName, 'Failed to stop monitoring', error)
-    }
-
+    const leaseId = leaseRef.current
+    leaseRef.current = null
     if (isMountedRef.current) {
       setIsActive(false)
+    }
+    // This hook owns only scoped leases. A second overlapping stop may still
+    // see stale React state after the first call cleared the ref; never turn
+    // that into an unscoped backend stop that could terminate another view's
+    // newer monitoring stream.
+    if (leaseId === null) return
+
+    try {
+      await invoke('stop_monitoring', { leaseId })
+    } catch (error) {
+      logger.error(componentName, 'Failed to stop monitoring', error)
     }
   }, [isActive, componentName, invalidatePendingStart])
 
@@ -181,20 +194,16 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
       const currentStats = await invoke<SystemStats>('get_current_stats')
       if (currentStats && isMountedRef.current) {
         setStats(currentStats)
+        setError(null)
         onStats?.(currentStats)
       }
     } catch (error) {
-      logger.debug(componentName, 'Could not fetch stats', error)
+      logger.error(componentName, 'Could not fetch stats', error)
+      if (isMountedRef.current) {
+        setError(error instanceof Error ? error.message : String(error))
+      }
     }
   }, [onStats, componentName])
-
-  // Auto-start on mount if requested
-  useEffect(() => {
-    if (autoStart && !hasAutoStarted.current) {
-      hasAutoStarted.current = true
-      start()
-    }
-  }, [autoStart, start])
 
   // Stop monitoring when the window/app is hidden (minimized, closed to
   // tray, or the OS switches away) — tab switches within the app already
@@ -237,6 +246,16 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
     }
   }, [componentName, invalidatePendingStart])
 
+  // Keep this after the lifecycle effect. The zero-delay timer is cancelled
+  // during React StrictMode's development setup→cleanup→setup replay, so only
+  // the surviving mount starts a lease. `start` is stable across pause/resume
+  // state changes, preventing auto-start from undoing a user-requested pause.
+  useEffect(() => {
+    if (!autoStart) return
+    const timer = window.setTimeout(() => { void start() }, 0)
+    return () => window.clearTimeout(timer)
+  }, [autoStart, start])
+
   // Extract processes from stats
   const processes = stats?.top_processes ?? []
 
@@ -245,6 +264,7 @@ export function useMonitoring(options: UseMonitoringOptions = {}): UseMonitoring
     stats,
     processes,
     isLoading,
+    error,
     start,
     stop,
     toggle,

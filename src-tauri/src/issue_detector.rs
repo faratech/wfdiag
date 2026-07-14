@@ -8,9 +8,7 @@
 //! count) is injected by the caller.
 
 use crate::issue_catalog::{DetectCtx, Detection, IssueSeverity};
-use crate::timestamp::Timestamp;
 use serde_json::Value;
-use std::time::Duration;
 
 /// Parse the diagnostic output for `task_id` as a JSON array, if the task
 /// succeeded. The common shape for WMI-backed tasks.
@@ -61,7 +59,7 @@ pub fn detect_low_disk_space(ctx: &DetectCtx) -> Option<Detection> {
 
 pub fn detect_disk_fragmentation(ctx: &DetectCtx) -> Option<Detection> {
     for disk in task_array(ctx, "disk_fragmentation")? {
-        if let Some(fragmentation) = disk["fragmentation_percent"].as_u64()
+        if let Some(fragmentation) = json_u64(&disk["fragmentation_percent"])
             && fragmentation > 20
         {
             return Some(Detection::new(format!(
@@ -131,7 +129,7 @@ fn is_supported_core_service(name: &str) -> bool {
 /// not `PercentProcessorTime` — the old detector never fired on real data.
 pub fn detect_high_cpu_usage(ctx: &DetectCtx) -> Option<Detection> {
     let performance = task_object(ctx, "performance")?;
-    let cpu_usage = performance["cpu_performance"]["LoadPercentage"].as_u64()?;
+    let cpu_usage = json_u64(&performance["cpu_performance"]["LoadPercentage"])?;
     if cpu_usage > 90 {
         return Some(Detection::new(format!("CPU usage is at {}%.", cpu_usage)));
     }
@@ -144,7 +142,7 @@ pub fn detect_high_cpu_usage(ctx: &DetectCtx) -> Option<Detection> {
 /// fired on real data.
 pub fn detect_high_memory_usage(ctx: &DetectCtx) -> Option<Detection> {
     let performance = task_object(ctx, "performance")?;
-    let used_percent = performance["memory_performance"]["UsedPercent"].as_u64()?;
+    let used_percent = json_u64(&performance["memory_performance"]["UsedPercent"])?;
     if used_percent > 90 {
         return Some(Detection::new(format!(
             "Memory usage is at {}%.",
@@ -156,28 +154,22 @@ pub fn detect_high_memory_usage(ctx: &DetectCtx) -> Option<Detection> {
 
 pub fn detect_pending_windows_updates(ctx: &DetectCtx) -> Option<Detection> {
     let update_info = task_object(ctx, "windows_update")?;
-    let updates = update_info["installed_updates"].as_array()?;
-
-    let mut most_recent_update: Option<Timestamp> = None;
-    for update in updates {
-        if let Some(installed_on_str) = update["InstalledOn"].as_str()
-            && let Some(ts) = parse_windows_date(installed_on_str)
-            && most_recent_update.is_none_or(|t| ts > t)
-        {
-            most_recent_update = Some(ts);
-        }
-    }
-
-    let last_update_date = most_recent_update?;
-    let thirty_days = Duration::from_secs(30 * 24 * 60 * 60);
-    if last_update_date.is_before(&ctx.now, thirty_days) {
+    // Installed-update history cannot prove that updates are pending. Only
+    // flag an issue if a source explicitly reports pending updates; the
+    // current Win32_QuickFixEngineering source intentionally produces no
+    // detection and the UI directs users to Windows Update for live status.
+    let pending_count = update_info["pending_update_count"]
+        .as_u64()
+        .or_else(|| {
+            update_info["pending_updates"]
+                .as_array()
+                .map(|updates| updates.len() as u64)
+        })
+        .unwrap_or(0);
+    if pending_count > 0 {
         return Some(Detection::new(format!(
-            "Last update was {}.",
-            last_update_date
-                .to_iso_string()
-                .split('T')
-                .next()
-                .unwrap_or("unknown")
+            "Windows reports {} pending update(s).",
+            pending_count
         )));
     }
     None
@@ -190,7 +182,7 @@ pub fn detect_firewall_disabled(ctx: &DetectCtx) -> Option<Detection> {
         // Windows Security Center productState is a packed bitfield, NOT a
         // single enum value. The enabled/disabled state is the second byte
         // (bits 8-15): the 0x10 bit set => ON; 0x00/0x01 => OFF.
-        if let Some(product_state) = firewall["productState"].as_u64() {
+        if let Some(product_state) = json_u64(&firewall["productState"]) {
             let enabled_byte = (product_state >> 8) & 0xFF;
             let firewall_on = (enabled_byte & 0x10) != 0;
             if firewall_on {
@@ -398,6 +390,7 @@ pub fn detect_bsod_recent(ctx: &DetectCtx) -> Option<Detection> {
         .filter(|d| {
             d["created"]
                 .as_i64()
+                .or_else(|| json_u64(&d["created"]).and_then(|created| i64::try_from(created).ok()))
                 .is_some_and(|created| created >= thirty_days_ago)
         })
         .count();
@@ -424,11 +417,11 @@ fn event_code_count(ctx: &DetectCtx, source: &str, codes: &[u64]) -> Option<(u64
         if event["source"].as_str() != Some(source) {
             continue;
         }
-        let code = event["code"].as_u64().unwrap_or(0);
+        let code = json_u64(&event["code"]).unwrap_or(0);
         if !codes.is_empty() && !codes.contains(&code) {
             continue;
         }
-        total += event["count"].as_u64().unwrap_or(0);
+        total += json_u64(&event["count"]).unwrap_or(0);
         if sample.is_empty()
             && let Some(message) = event["sample_message"].as_str()
         {
@@ -518,7 +511,7 @@ pub fn detect_device_manager_errors(ctx: &DetectCtx) -> Option<Detection> {
     // ConfigManagerErrorCode 22 = device disabled by the user - informational
     let all_disabled = devices
         .iter()
-        .all(|d| d["ConfigManagerErrorCode"].as_u64() == Some(22));
+        .all(|d| json_u64(&d["ConfigManagerErrorCode"]) == Some(22));
     let names: Vec<&str> = devices
         .iter()
         .filter_map(|d| d["Name"].as_str())
@@ -546,11 +539,9 @@ pub fn detect_defender_disabled(ctx: &DetectCtx) -> Option<Detection> {
         return None; // unknown, not "disabled"
     }
     // Any single enabled AV protects the machine; flag only when ALL are off.
-    let any_enabled = products.iter().any(|p| {
-        p["productState"]
-            .as_u64()
-            .is_some_and(|state| ((state >> 8) & 0x10) != 0)
-    });
+    let any_enabled = products
+        .iter()
+        .any(|p| json_u64(&p["productState"]).is_some_and(|state| ((state >> 8) & 0x10) != 0));
     if any_enabled {
         return None;
     }
@@ -571,35 +562,43 @@ pub fn detect_defender_disabled(ctx: &DetectCtx) -> Option<Detection> {
 
 pub fn detect_pending_reboot(ctx: &DetectCtx) -> Option<Detection> {
     let reboot = task_object(ctx, "pending_reboot")?;
-    if reboot["pending"].as_bool() != Some(true) {
+    let restart_required = reboot
+        .get("restart_required")
+        .and_then(serde_json::Value::as_bool)
+        .or_else(|| reboot.get("pending").and_then(serde_json::Value::as_bool));
+    if restart_required != Some(true) {
         return None;
     }
     let reasons: Vec<&str> = reboot["reasons"]
         .as_array()
         .map(|r| r.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-    // PendingFileRenameOperations alone is a noisy marker (installers leave
-    // it behind constantly) - informational only.
-    let pfro_only = reasons == ["pending_file_rename"];
-    let description = format!(
-        "Windows is waiting for a restart ({}).",
-        if reasons.is_empty() {
-            "unspecified".to_string()
-        } else {
-            reasons.join(", ")
-        }
-    );
-    if pfro_only {
-        Some(Detection::with_severity(description, IssueSeverity::Info))
-    } else {
-        Some(Detection::new(description))
+    let explanations: Vec<&str> = reasons
+        .iter()
+        .filter_map(|reason| match *reason {
+            "windows_update" => {
+                Some("Windows Update reports that installed update work still needs a restart")
+            }
+            "component_based_servicing" => Some(
+                "Windows component servicing reports that component changes still need a restart",
+            ),
+            // Legacy scans may contain this low-confidence signal. Apps use
+            // it for deferred cleanup, so it must never create the actionable
+            // restart issue by itself.
+            "pending_file_rename" | "pending_file_operations" => None,
+            _ => None,
+        })
+        .collect();
+    if explanations.is_empty() {
+        return None;
     }
+    Some(Detection::new(format!("{}.", explanations.join("; "))))
 }
 
 pub fn detect_page_file_pressure(ctx: &DetectCtx) -> Option<Detection> {
     let performance = task_object(ctx, "performance")?;
-    let total = performance["memory_performance"]["TotalPageFileMBytes"].as_u64()?;
-    let available = performance["memory_performance"]["AvailablePageFileMBytes"].as_u64()?;
+    let total = json_u64(&performance["memory_performance"]["TotalPageFileMBytes"])?;
+    let available = json_u64(&performance["memory_performance"]["AvailablePageFileMBytes"])?;
     if total == 0 {
         return None;
     }
@@ -701,37 +700,18 @@ pub fn detect_hosts_file_hijack(ctx: &DetectCtx) -> Option<Detection> {
         let (Some(ip), Some(hostname)) = (entry["ip"].as_str(), entry["hostname"].as_str()) else {
             continue;
         };
-        let loopback = matches!(ip, "127.0.0.1" | "::1" | "0.0.0.0");
-        if loopback {
-            continue;
-        }
         let hostname_lower = hostname.to_ascii_lowercase();
         let watched = HIJACK_WATCHED_DOMAINS.iter().any(|domain| {
             hostname_lower == *domain || hostname_lower.ends_with(&format!(".{}", domain))
         });
         if watched {
             return Some(Detection::new(format!(
-                "hosts file redirects '{}' to {} - a common malware hijack. Review the hosts file before trusting any login page.",
+                "hosts file redirects '{}' to {}. Security-sensitive domains should normally resolve through DNS; review this entry before trusting any login page.",
                 hostname, ip
             )));
         }
     }
     None
-}
-
-/// Parse a Windows date format (MM/DD/YYYY) to a Timestamp
-pub(crate) fn parse_windows_date(date_str: &str) -> Option<Timestamp> {
-    let parts: Vec<&str> = date_str.split('/').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let month: u32 = parts[0].parse().ok()?;
-    let day: u32 = parts[1].parse().ok()?;
-    let year: i32 = parts[2].parse().ok()?;
-
-    // Create ISO format and parse
-    let iso = format!("{:04}-{:02}-{:02}T00:00:00Z", year, month, day);
-    Timestamp::from_iso_string(&iso).ok()
 }
 
 #[cfg(test)]
@@ -938,17 +918,16 @@ mod tests {
     }
 
     #[test]
-    fn pending_updates_uses_injected_clock() {
-        // ctx.now is fixed at 2026-06-12; an update from 2026-06-01 is fresh
+    fn installed_update_age_is_not_treated_as_pending() {
         let results = results_with(
             "windows_update",
-            r#"{"installed_updates": [{"HotFixID": "KB1", "InstalledOn": "6/1/2026"}]}"#,
+            r#"{"installed_updates": [{"HotFixID": "KB1", "InstalledOn": "1/10/2020"}]}"#,
         );
         assert!(detect_pending_windows_updates(&ctx(&results)).is_none());
-        // An update from January is >30 days before the fixed clock
+
         let results = results_with(
             "windows_update",
-            r#"{"installed_updates": [{"HotFixID": "KB1", "InstalledOn": "1/10/2026"}]}"#,
+            r#"{"installed_updates": [], "pending_update_count": 3}"#,
         );
         assert!(detect_pending_windows_updates(&ctx(&results)).is_some());
     }
@@ -1150,25 +1129,41 @@ mod tests {
     }
 
     #[test]
-    fn pending_reboot_pfro_only_is_info() {
+    fn pending_reboot_requires_a_high_confidence_source_and_explains_it() {
         let results = results_with(
             "pending_reboot",
             r#"{"pending": true, "reasons": ["pending_file_rename"]}"#,
         );
-        let d = detect_pending_reboot(&ctx(&results)).unwrap();
-        assert_eq!(d.severity, Some(IssueSeverity::Info));
-        // CBS/WU reasons keep the default Warning severity
+        assert!(detect_pending_reboot(&ctx(&results)).is_none());
+
+        let results = results_with("pending_reboot", r#"{"pending": true, "reasons": []}"#);
+        assert!(detect_pending_reboot(&ctx(&results)).is_none());
+
         let results = results_with(
             "pending_reboot",
             r#"{"pending": true, "reasons": ["windows_update", "pending_file_rename"]}"#,
         );
-        assert!(
-            detect_pending_reboot(&ctx(&results))
-                .unwrap()
-                .severity
-                .is_none()
+        let update = detect_pending_reboot(&ctx(&results)).unwrap();
+        assert!(update.severity.is_none());
+        assert!(update.description.contains("Windows Update"));
+        assert!(!update.description.contains("pending_file_rename"));
+
+        let results = results_with(
+            "pending_reboot",
+            r#"{"pending": true, "reasons": ["component_based_servicing", "windows_update"]}"#,
         );
+        let combined = detect_pending_reboot(&ctx(&results)).unwrap();
+        assert!(combined.description.contains("Windows component servicing"));
+        assert!(combined.description.contains("Windows Update"));
+        assert!(!combined.description.contains('_'));
+
         let results = results_with("pending_reboot", r#"{"pending": false, "reasons": []}"#);
+        assert!(detect_pending_reboot(&ctx(&results)).is_none());
+
+        let results = results_with(
+            "pending_reboot",
+            r#"{"restart_required": false, "pending": true, "reasons": ["windows_update"]}"#,
+        );
         assert!(detect_pending_reboot(&ctx(&results)).is_none());
     }
 
@@ -1242,14 +1237,19 @@ mod tests {
     }
 
     #[test]
-    fn hosts_hijack_loopback_is_fine() {
-        // Ad-blocking style 0.0.0.0 entries must not flag
+    fn hosts_hijack_includes_loopback_for_watched_domains() {
+        // Unwatched ad-block entries are fine, but loopback redirection of a
+        // security-sensitive domain is still important evidence.
         let results = results_with(
             "hosts_file",
-            r#"{"entries": [{"ip": "0.0.0.0", "hostname": "ads.example.com"},
-                            {"ip": "127.0.0.1", "hostname": "telemetry.microsoft.com"}]}"#,
+            r#"{"entries": [{"ip": "0.0.0.0", "hostname": "ads.example.com"}]}"#,
         );
         assert!(detect_hosts_file_hijack(&ctx(&results)).is_none());
+        let results = results_with(
+            "hosts_file",
+            r#"{"entries": [{"ip": "127.0.0.1", "hostname": "microsoft.com"}]}"#,
+        );
+        assert!(detect_hosts_file_hijack(&ctx(&results)).is_some());
         // A watched domain pointed at a real IP is the hijack signature
         let results = results_with(
             "hosts_file",
@@ -1263,14 +1263,5 @@ mod tests {
             r#"{"entries": [{"ip": "10.0.0.5", "hostname": "nas.local"}]}"#,
         );
         assert!(detect_hosts_file_hijack(&ctx(&results)).is_none());
-    }
-
-    #[test]
-    fn parse_windows_date_formats() {
-        assert!(parse_windows_date("6/12/2026").is_some());
-        assert!(parse_windows_date("12/31/2025").is_some());
-        assert!(parse_windows_date("2026-06-12").is_none());
-        assert!(parse_windows_date("garbage").is_none());
-        assert!(parse_windows_date("6/12").is_none());
     }
 }
