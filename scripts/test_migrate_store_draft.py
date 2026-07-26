@@ -29,9 +29,8 @@ def make_snapshot(**kwargs):
     return _make_snapshot(**kwargs)
 
 
-def screenshot_provenance(source):
+def screenshot_provenance(_source):
     return {
-        "screenshot_provenance_media": media_manifest(source),
         "screenshot_provenance": {
             "repository": "faratech/wfdiag",
             "workflowRunId": "29125510899",
@@ -40,6 +39,7 @@ def screenshot_provenance(source):
             "releaseTag": "v2.5.6",
             "snapshotCommitSha": "e0b72838bff7d5dabfda8b82756513154481b614",
         },
+        "allow_pinned_screenshot_replacement": True,
     }
 
 
@@ -202,17 +202,13 @@ class SnapshotTests(unittest.TestCase):
             PNG_BYTES,
         )
 
-    def test_snapshot_rejects_media_that_only_matches_by_filename(self):
+    def test_snapshot_requires_explicit_canonical_screenshot_replacement(self):
         published = submission("published")
         source = copy.deepcopy(published)
         source["id"] = "portal-draft"
         source_image = source["listings"]["en-us"]["baseListing"]["images"][0]
         source_image["id"] = "portal-image"
         source_image["fileName"] = "01-current.png"
-        provenance_submission = copy.deepcopy(source)
-        provenance_submission["listings"]["en-us"]["baseListing"]["images"][0][
-            "id"
-        ] = "different-store-asset"
         with tempfile.TemporaryDirectory() as directory:
             screenshot_dir = Path(directory)
             (screenshot_dir / "01-current.png").write_bytes(PNG_BYTES)
@@ -222,9 +218,6 @@ class SnapshotTests(unittest.TestCase):
                     source=source,
                     published=published,
                     screenshots_dir=screenshot_dir,
-                    screenshot_provenance_media=media_manifest(
-                        provenance_submission
-                    ),
                     screenshot_provenance=screenshot_provenance(source)[
                         "screenshot_provenance"
                     ],

@@ -121,6 +121,7 @@ jobs:
           grep -Fq \
             "Submission $SCREENSHOT_PROVENANCE_SUBMISSION_ID status: PendingCommit" \
             "$run_log"
+          grep -Fq "Zip uploaded (HTTP 201)." "$run_log"
           grep -Fq \
             "Submission moved to 'Certification'" \
             "$run_log"
@@ -156,6 +157,7 @@ jobs:
             --screenshot-provenance-repository "$GITHUB_REPOSITORY" \
             --screenshot-release-tag "v${VERSION}" \
             --snapshot-commit-sha "$GITHUB_SHA" \
+            --allow-pinned-screenshot-replacement \
             --output "${RUNNER_TEMP}/store-migration/draft-snapshot.json"
 
       - name: Recover encrypted snapshot from a prior run
