@@ -471,24 +471,42 @@ def _media_preservation_plan(
             "The Partner Center draft removes every screenshot. Nothing was deleted."
         )
     names = [str(image.get("fileName", "")) for image in source_screenshots]
-    if (
-        any(
+    invalid_names = [
+        name
+        for name in names
+        if (
             not name
             or not SAFE_SCREENSHOT_NAME.fullmatch(name)
             or "/" in name
             or "\\" in name
             or name.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES
-            for name in names
         )
-        or len(names) != len(set(names))
+    ]
+    if invalid_names:
+        raise MigrationError(
+            "The draft contains unsafe screenshot filenames: "
+            f"{json.dumps(invalid_names, ensure_ascii=True)}. Nothing was deleted."
+        )
+    if (
+        len(names) != len(set(names))
         or len({name.casefold() for name in names}) != len(names)
-        or any(
-            image.get("fileStatus") not in {"Uploaded", "PendingUpload"}
-            for image in source_screenshots
-        )
     ):
         raise MigrationError(
-            "The draft screenshot references are not safe to reconstruct. "
+            "The draft contains duplicate screenshot filenames. Nothing was deleted."
+        )
+    invalid_statuses = [
+        {
+            "fileName": image.get("fileName"),
+            "fileStatus": image.get("fileStatus"),
+        }
+        for image in source_screenshots
+        if image.get("fileStatus")
+        not in {"None", "Uploaded", "PendingUpload"}
+    ]
+    if invalid_statuses:
+        raise MigrationError(
+            "The draft contains screenshot states that cannot be reconstructed: "
+            f"{json.dumps(invalid_statuses, ensure_ascii=True)}. "
             "Nothing was deleted."
         )
 
