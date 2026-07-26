@@ -406,8 +406,8 @@ def _media_preservation_plan(
     source_media: dict[str, Any],
     published_media: dict[str, Any],
     screenshots_dir: Path | None,
-    screenshot_provenance_media: dict[str, Any] | None,
     screenshot_provenance: dict[str, str] | None,
+    allow_pinned_screenshot_replacement: bool,
     target_version: str,
 ) -> tuple[str, dict[str, dict[str, Any]], dict[str, str] | None]:
     if source_media == published_media:
@@ -447,11 +447,10 @@ def _media_preservation_plan(
             "The Partner Center draft changes non-screenshot listing media. "
             "Nothing was deleted; migrate this draft manually."
         )
-    if screenshot_provenance_media != source_media:
+    if not allow_pinned_screenshot_replacement:
         raise MigrationError(
-            "The draft media does not exactly match the Store submission that "
-            "the successful screenshot workflow created. Filename equality is "
-            "not sufficient, so nothing was deleted."
+            "The draft changes screenshot binaries. Replacing them with pinned "
+            "canonical assets was not explicitly enabled, so nothing was deleted."
         )
     verified_provenance = _validate_screenshot_provenance(
         screenshot_provenance
@@ -674,8 +673,8 @@ def make_snapshot(
     published: dict[str, Any],
     target_version: str,
     screenshots_dir: Path | None = None,
-    screenshot_provenance_media: dict[str, Any] | None = None,
     screenshot_provenance: dict[str, str] | None = None,
+    allow_pinned_screenshot_replacement: bool = False,
 ) -> dict[str, Any]:
     if not re.fullmatch(r"\d+\.\d+\.\d+", target_version):
         raise MigrationError("Snapshot target version must use the form X.Y.Z.")
@@ -697,8 +696,10 @@ def make_snapshot(
         source_media=source_media,
         published_media=published_media,
         screenshots_dir=screenshots_dir,
-        screenshot_provenance_media=screenshot_provenance_media,
         screenshot_provenance=screenshot_provenance,
+        allow_pinned_screenshot_replacement=(
+            allow_pinned_screenshot_replacement
+        ),
         target_version=target_version,
     )
 
@@ -1358,15 +1359,11 @@ def command_snapshot(args: argparse.Namespace) -> None:
 
     source = api.get_submission(args.source_submission_id)
     published = api.get_submission(published_id)
-    provenance_submission = None
     provenance = None
     if args.screenshot_provenance_submission_id:
         validate_submission_id(
             args.screenshot_provenance_submission_id,
             "screenshot provenance submission ID",
-        )
-        provenance_submission = api.get_submission(
-            args.screenshot_provenance_submission_id
         )
         provenance = {
             "repository": args.screenshot_provenance_repository or "",
@@ -1383,12 +1380,10 @@ def command_snapshot(args: argparse.Namespace) -> None:
         screenshots_dir=(
             Path(args.screenshots_dir) if args.screenshots_dir else None
         ),
-        screenshot_provenance_media=(
-            media_manifest(provenance_submission)
-            if provenance_submission is not None
-            else None
-        ),
         screenshot_provenance=provenance,
+        allow_pinned_screenshot_replacement=(
+            args.allow_pinned_screenshot_replacement
+        ),
         target_version=args.target_version,
     )
     output = Path(args.output)
@@ -1412,10 +1407,11 @@ def command_snapshot(args: argparse.Namespace) -> None:
         names = ", ".join(snapshot["recoverableScreenshotFiles"])
         provenance = snapshot["screenshotProvenance"]
         print(
-            "The Store API media identities exactly match submission "
-            f"{provenance['submissionId']}, which successful workflow run "
-            f"{provenance['workflowRunId']} uploaded from "
-            f"{provenance['workflowRunHeadSha']}. Embedded canonical "
+            "Microsoft does not expose the draft screenshot bytes for download. "
+            "The filenames match the canonical assets that successful workflow "
+            f"run {provenance['workflowRunId']} uploaded in submission "
+            f"{provenance['submissionId']} from "
+            f"{provenance['workflowRunHeadSha']}. Embedded and pinned canonical "
             f"replacement screenshots: {names}",
             flush=True,
         )
@@ -2110,6 +2106,14 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--screenshot-provenance-repository")
     snapshot.add_argument("--screenshot-release-tag")
     snapshot.add_argument("--snapshot-commit-sha")
+    snapshot.add_argument(
+        "--allow-pinned-screenshot-replacement",
+        action="store_true",
+        help=(
+            "Replace changed draft screenshots with the pinned, embedded "
+            "canonical Store assets."
+        ),
+    )
     snapshot.set_defaults(func=command_snapshot)
 
     migrate = subparsers.add_parser(
