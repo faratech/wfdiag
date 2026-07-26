@@ -89,6 +89,24 @@ describe('AIScreen workspace', () => {
     expect(document.querySelectorAll('.chat-msgs')).toHaveLength(1)
   })
 
+  it('shows the concrete runtime model when the provider reports it', () => {
+    workspace = {
+      ...workspace,
+      chat: chatState({
+        isStreaming: true,
+        lastProviderUse: {
+          providerId: 'openai',
+          executionClass: 'api_cloud',
+          requestedModel: 'gpt-5.6',
+          actualModels: ['gpt-5.6-sol'],
+        },
+      }),
+    }
+    render(<AIScreen />)
+    expect(screen.getByRole('status', { name: /gpt-5\.6-sol/ })).toBeInTheDocument()
+    expect(screen.getByText('gpt-5.6-sol')).toBeInTheDocument()
+  })
+
   it('shows a useful configuration state when no provider is available', () => {
     aiContext = { aiStatus: { providers: [] }, activeProvider: 'none', isAIAvailable: false, isLoading: false }
     workspace = { chat: chatState({ lastProviderUse: null }), scanReport: scanReportState() }

@@ -1,7 +1,7 @@
-# WF Diagnostics v2.5.5 - WindowsForum Diagnostic Tool
+# WF Diagnostics v2.5.6 - WindowsForum Diagnostic Tool
 
 [![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC_BY--NC--ND_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
-[![Version](https://img.shields.io/badge/version-2.5.5-blue.svg)](https://github.com/faratech/wfdiag/releases)
+[![Version](https://img.shields.io/badge/version-2.5.6-blue.svg)](https://github.com/faratech/wfdiag/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightblue.svg)](https://github.com/faratech/wfdiag)
 [![Security](https://img.shields.io/badge/security-hardened-green.svg)](https://github.com/faratech/wfdiag)
 [![AI](https://img.shields.io/badge/AI-Hybrid-purple.svg)](https://github.com/faratech/wfdiag)
@@ -119,7 +119,15 @@ Auto routing is local-first: Phi Silica → Foundry Local → Ollama → custom 
 
 ## 🔄 Version History
 
-### **v2.5.5 (Current) - Performance & Accuracy Improvements**
+### **v2.5.6 (Current) - Live AI Model Discovery**
+- ✅ **Always-current model catalogs**: Loads available models directly from provider APIs and the Codex/Claude CLI metadata instead of shipping static lists.
+- ✅ **Claude model clarity**: Shows Opus, Sonnet, Haiku, and Fable versions, exact IDs, and provider descriptions in an accessible searchable picker.
+- ✅ **Gemini freshness**: Ranks live compatible models semantically and dynamically selects the newest stable general-purpose model when no override is saved.
+- ✅ **GPT-5.6 compatibility**: Supports Sol, Terra, Luna, and future provider-reported OpenAI models, including the required tool-calling reasoning configuration.
+- ✅ **Provider attribution**: Displays the requested and provider-reported model for AI responses when available.
+- ✅ **Simpler settings**: Consolidates redundant provider controls while preserving Auto multi-provider setup.
+
+### **v2.5.5 - Performance & Accuracy Improvements**
 - ✅ **Non-blocking System Monitor**: Decoupled slow polling operations (Disk, NPU) for instant UI responsiveness.
 - ✅ **Network Rate Fix**: Corrected transfer rate calculation to eliminate spikes during startup.
 - ✅ ✅ **Accurate Swap Metrics**: Switched to native PDH counters for true paging file utilization.

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import type { AIProviderId, SettingsData } from './types'
 import type { AIProviderStatus } from '../contexts/AIContext'
@@ -172,23 +172,340 @@ const BridgeAuthRow: React.FC<{
   )
 }
 
-/** Model picker: curated options + "default" + whatever custom value is set */
-const ModelSelect: React.FC<{
+interface ModelCatalogEntry {
+  id: string
+  label?: string
+  description?: string
+}
+
+interface ModelCatalogResponse {
+  models: ModelCatalogEntry[]
+  defaultModel?: string
+}
+
+interface ModelCatalogState {
+  catalog?: ModelCatalogResponse
+  loading: boolean
+  error?: string
+  blocked?: string
+  stale: boolean
+}
+
+interface ModelCatalogRequest extends Record<string, unknown> {
+  provider: AIProviderId
+  apiKey?: string
+  endpoint?: string
+  cliPath?: string
+}
+
+/** Editable model picker backed by the provider's live catalog. */
+const ModelPicker: React.FC<{
   value: string | undefined
-  defaultModel: string
-  options: string[]
+  state?: ModelCatalogState
   ariaLabel: string
+  emptyPlaceholder: string
   onChange: (value: string) => void
-}> = ({ value, defaultModel, options, ariaLabel, onChange }) => {
-  const items = value && value.trim() !== '' && !options.includes(value)
-    ? [value, ...options]
-    : options
+  onRefresh: () => void
+}> = ({ value, state, ariaLabel, emptyPlaceholder, onChange, onRefresh }) => {
+  const generatedId = useId().replace(/:/g, '')
+  const listId = `model-catalog-list-${generatedId}`
+  const statusId = `model-catalog-status-${generatedId}`
+  const selectionId = `model-catalog-selection-${generatedId}`
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [open, setOpen] = useState(false)
+  const [queryDirty, setQueryDirty] = useState(false)
+  const [activeIndex, setActiveIndex] = useState(-1)
+  const catalog = state?.catalog
+  const models: ModelCatalogEntry[] = []
+  const modelIndexes = new Map<string, number>()
+  for (const candidate of catalog?.models ?? []) {
+    const id = typeof candidate.id === 'string' ? candidate.id.trim() : ''
+    if (!id) continue
+    const existingIndex = modelIndexes.get(id)
+    if (existingIndex === undefined) {
+      modelIndexes.set(id, models.length)
+      models.push({ ...candidate, id })
+    } else {
+      const existing = models[existingIndex]
+      models[existingIndex] = {
+        id,
+        label: existing.label || candidate.label,
+        description: existing.description || candidate.description,
+      }
+    }
+  }
+  const normalizedQuery = (value || '').trim().toLocaleLowerCase()
+  const visibleModels = queryDirty && normalizedQuery
+    ? models.filter(model =>
+        [model.id, model.label, model.description]
+          .filter(Boolean)
+          .some(text => text!.toLocaleLowerCase().includes(normalizedQuery))
+      )
+    : models
+  const selectedModel = value
+    ? models.find(model => model.id === value.trim())
+    : undefined
+  const placeholder = catalog?.defaultModel
+    ? `Default (${catalog.defaultModel})`
+    : emptyPlaceholder
+  const status = state?.error
+    ? `${state.stale ? 'Could not refresh' : 'Could not load'} models: ${state.error}. ${state.stale ? 'Showing previously loaded results.' : 'Enter a model ID manually.'}`
+    : state?.blocked
+      ? `${state.blocked} You can still enter a model ID manually.`
+      : state?.loading
+        ? `${catalog ? 'Refreshing' : 'Loading'} models…`
+        : state?.stale
+          ? 'Showing previously loaded model results.'
+          : catalog && catalog.models.length === 0
+            ? 'No models were reported. Enter a model ID manually.'
+            : catalog?.defaultModel
+              ? `Provider default: ${catalog.defaultModel}`
+              : ''
+  const selectedDescription = value?.trim()
+    ? selectedModel
+      ? {
+          label: selectedModel.label && selectedModel.label !== selectedModel.id
+            ? selectedModel.label
+            : 'Selected model',
+          id: selectedModel.id,
+          description: selectedModel.description,
+          custom: false,
+        }
+      : {
+          label: 'Custom or unavailable model',
+          id: value.trim(),
+          description: undefined,
+          custom: true,
+        }
+    : undefined
+  const describedBy = [
+    status ? statusId : undefined,
+    selectedDescription ? selectionId : undefined,
+  ].filter(Boolean).join(' ') || undefined
+  const activeModel = visibleModels[activeIndex]
+  const activeOptionId = activeModel
+    ? `${listId}-option-${activeIndex}`
+    : undefined
+
+  const openList = () => {
+    setQueryDirty(false)
+    setOpen(true)
+    const selectedIndex = models.findIndex(model => model.id === value?.trim())
+    setActiveIndex(selectedIndex >= 0 ? selectedIndex : models.length > 0 ? 0 : -1)
+  }
+
+  const selectModel = (model: ModelCatalogEntry) => {
+    onChange(model.id)
+    setQueryDirty(false)
+    setOpen(false)
+    setActiveIndex(-1)
+    inputRef.current?.focus()
+  }
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape' && open) {
+      event.preventDefault()
+      setOpen(false)
+      setActiveIndex(-1)
+      return
+    }
+    if (event.key === 'Enter' && open && activeModel) {
+      event.preventDefault()
+      selectModel(activeModel)
+      return
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      if (!open) {
+        openList()
+        return
+      }
+      if (visibleModels.length === 0) return
+      setActiveIndex(current => {
+        if (event.key === 'ArrowDown') return Math.min(current + 1, visibleModels.length - 1)
+        return current <= 0 ? 0 : current - 1
+      })
+      return
+    }
+    if (event.key === 'Home' && open && visibleModels.length > 0) {
+      event.preventDefault()
+      setActiveIndex(0)
+      return
+    }
+    if (event.key === 'End' && open && visibleModels.length > 0) {
+      event.preventDefault()
+      setActiveIndex(visibleModels.length - 1)
+    }
+  }
+
+  useEffect(() => {
+    if (!open || !activeOptionId) return
+    const option = document.getElementById(activeOptionId)
+    if (option && 'scrollIntoView' in option) {
+      option.scrollIntoView({ block: 'nearest' })
+    }
+  }, [activeOptionId, open])
+
   return (
-    <select className="field-input" aria-label={ariaLabel} value={value || ''} onChange={e => onChange(e.target.value)}>
-      <option value="">Default ({defaultModel})</option>
-      {items.map(model => <option key={model} value={model}>{model}</option>)}
-    </select>
+    <div
+      className="model-picker"
+      onBlur={event => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setOpen(false)
+          setActiveIndex(-1)
+        }
+      }}
+    >
+      <div className="model-picker-controls">
+        <input
+          ref={inputRef}
+          className="field-input"
+          aria-label={ariaLabel}
+          aria-describedby={describedBy}
+          aria-autocomplete="list"
+          aria-controls={listId}
+          aria-expanded={open}
+          aria-activedescendant={open ? activeOptionId : undefined}
+          role="combobox"
+          type="text"
+          value={value || ''}
+          placeholder={placeholder}
+          autoComplete="off"
+          onFocus={() => {
+            if (!open) openList()
+          }}
+          onChange={event => {
+            onChange(event.target.value)
+            setQueryDirty(true)
+            setOpen(true)
+            setActiveIndex(0)
+          }}
+          onKeyDown={handleKeyDown}
+        />
+        <Button
+          type="button"
+          variant="ghost"
+          className="model-picker-toggle"
+          icon={open ? 'fa-chevron-up' : 'fa-chevron-down'}
+          aria-label={`${open ? 'Hide' : 'Show'} ${ariaLabel} options`}
+          aria-expanded={open}
+          aria-controls={listId}
+          onClick={() => {
+            if (open) {
+              setOpen(false)
+              setActiveIndex(-1)
+            } else {
+              openList()
+              inputRef.current?.focus()
+            }
+          }}
+        />
+        <Button
+          type="button"
+          variant="ghost"
+          className="model-picker-refresh"
+          icon="fa-rotate"
+          aria-label={`Refresh ${ariaLabel} list`}
+          title={`Refresh ${ariaLabel} list`}
+          loading={state?.loading}
+          onClick={onRefresh}
+        >
+          Refresh
+        </Button>
+      </div>
+      {open && (
+        <div className="model-picker-listbox" id={listId} role="listbox" aria-label={`${ariaLabel} options`}>
+          {visibleModels.map((model, index) => {
+            const label = model.label && model.label !== model.id ? model.label : model.id
+            return (
+              <div
+                key={model.id}
+                id={`${listId}-option-${index}`}
+                className={`model-picker-option${activeIndex === index ? ' active' : ''}${value?.trim() === model.id ? ' selected' : ''}`}
+                role="option"
+                aria-selected={value?.trim() === model.id}
+                data-model-id={model.id}
+                onMouseDown={event => event.preventDefault()}
+                onMouseEnter={() => setActiveIndex(index)}
+                onClick={() => selectModel(model)}
+              >
+                <div className="model-picker-option-heading">
+                  <span>{label}</span>
+                  <code>{model.id}</code>
+                </div>
+                {model.description && <div className="model-picker-option-description">{model.description}</div>}
+              </div>
+            )
+          })}
+          {visibleModels.length === 0 && (
+            <div className="model-picker-empty" role="status">
+              No catalog matches. The model ID you type will still be saved.
+            </div>
+          )}
+        </div>
+      )}
+      {selectedDescription && (
+        <div
+          id={selectionId}
+          className={`model-picker-selection${selectedDescription.custom ? ' custom' : ''}`}
+        >
+          <span>{selectedDescription.label}</span>
+          <code>{selectedDescription.id}</code>
+          {selectedDescription.description && <small>{selectedDescription.description}</small>}
+        </div>
+      )}
+      {status && (
+        <div
+          id={statusId}
+          className={`model-picker-status${state?.error ? ' error' : ''}${state?.stale ? ' stale' : ''}`}
+          role={state?.error ? 'alert' : 'status'}
+        >
+          {status}
+        </div>
+      )}
+    </div>
   )
+}
+
+function modelCatalogRequest(provider: AIProviderId, draft: SettingsData): {
+  args: ModelCatalogRequest
+  blocked?: string
+} {
+  const apiKey =
+    provider === 'openai' ? draft.openAiApiKey
+    : provider === 'anthropic' ? draft.anthropicApiKey
+    : provider === 'gemini' ? draft.geminiApiKey
+    : provider === 'deepseek' ? draft.deepseekApiKey
+    : provider === 'custom_openai' ? draft.customApiKey
+    : undefined
+  const apiKeyConfigured =
+    provider === 'openai' ? draft.openAiApiKeySet
+    : provider === 'anthropic' ? draft.anthropicApiKeySet
+    : provider === 'gemini' ? draft.geminiApiKeySet
+    : provider === 'deepseek' ? draft.deepseekApiKeySet
+    : provider === 'custom_openai' ? draft.customApiKeySet
+    : false
+  const endpoint =
+    provider === 'custom_openai' ? draft.customEndpoint
+    : provider === 'foundry_local' ? draft.localAiEndpoint
+    : provider === 'ollama' ? draft.ollamaEndpoint
+    : undefined
+  const cliPath =
+    provider === 'codex_cli' ? draft.codexCliPath
+    : provider === 'claude_code' ? draft.claudeCliPath
+    : undefined
+  const needsApiKey = ['openai', 'anthropic', 'gemini', 'deepseek'].includes(provider)
+  const blocked =
+    needsApiKey && !apiKey && !apiKeyConfigured
+      ? 'Enter an API key to load the available models.'
+      : provider === 'custom_openai' && !endpoint
+        ? 'Enter an endpoint URL to load the available models.'
+        : undefined
+
+  return {
+    args: { provider, apiKey, endpoint, cliPath },
+    blocked,
+  }
 }
 
 export const SettingsDialog: React.FC<SettingsDialogProps> = (props) =>
@@ -202,11 +519,12 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   // Which provider's fields are shown in "Provider setup" — presentation only,
-  // not persisted. With Active AI = Auto, seed from configured provider data
+  // not persisted. With AI provider = Auto, seed from configured provider data
   // so saved non-OpenAI settings are visible when the dialog reopens.
   const [configProvider, setConfigProvider] = useState<AIProviderId>(() =>
     configuredProviderFromSettings(settings)
   )
+  const autoProvider = !draft.preferredAIProvider || draft.preferredAIProvider === 'auto'
   const phiUnavailable = !!aiStatus
     && (!aiStatus.phi_silica_available || !aiStatus.phi_silica_ready)
   const phiStatusPending = aiStatusLoading === true || aiStatus === null
@@ -217,47 +535,110 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
     ? 'Checking whether Phi Silica is available on this PC. Wait for the check to finish before selecting it.'
     : phiUnavailableReason
 
-  // Live model list per provider, fetched from the provider's own list API
-  // when its pane opens. Draft credentials are passed so an unsaved key or
-  // endpoint works immediately; a failed fetch leaves the pane on its
-  // hardcoded fallback options (Codex has no list API — the backend returns
-  // its hardcoded catalog).
-  const [providerModels, setProviderModels] = useState<Record<string, string[]>>({})
+  // Catalogs are session-only. A failed refresh retains the most recent
+  // successful list, marks it stale, and always leaves manual entry available.
+  const [modelCatalogs, setModelCatalogs] = useState<Partial<Record<AIProviderId, ModelCatalogState>>>({})
+  const requestVersions = useRef<Partial<Record<AIProviderId, number>>>({})
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mounted = useRef(true)
+  const draftForCatalog = useRef(draft)
+
   useEffect(() => {
-    const provider = configProvider
+    draftForCatalog.current = draft
+  }, [draft])
+
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      if (refreshTimer.current) clearTimeout(refreshTimer.current)
+    }
+  }, [])
+
+  const loadModels = useCallback(async (provider: AIProviderId) => {
     if (provider === 'phi_silica') return
-    const apiKey =
-      provider === 'openai' ? draft.openAiApiKey
-      : provider === 'anthropic' ? draft.anthropicApiKey
-      : provider === 'gemini' ? draft.geminiApiKey
-      : provider === 'deepseek' ? draft.deepseekApiKey
-      : provider === 'custom_openai' ? draft.customApiKey
-      : undefined
-    const apiKeyConfigured =
-      provider === 'openai' ? draft.openAiApiKeySet
-      : provider === 'anthropic' ? draft.anthropicApiKeySet
-      : provider === 'gemini' ? draft.geminiApiKeySet
-      : provider === 'deepseek' ? draft.deepseekApiKeySet
-      : provider === 'custom_openai' ? draft.customApiKeySet
-      : false
-    const endpoint =
-      provider === 'custom_openai' ? draft.customEndpoint
-      : provider === 'foundry_local' ? draft.localAiEndpoint
-      : provider === 'ollama' ? draft.ollamaEndpoint
-      : undefined
-    // Cloud listings need a key; don't fire requests while the field is empty
-    if (['openai', 'anthropic', 'gemini', 'deepseek'].includes(provider) && !apiKey && !apiKeyConfigured) return
-    if (provider === 'custom_openai' && !endpoint) return
-    let cancelled = false
-    // Debounced: the key/endpoint fields retrigger this as the user types
-    const timer = setTimeout(() => {
-      invoke<string[]>('ai_list_models', { provider, apiKey, endpoint })
-        .then(models => { if (!cancelled) setProviderModels(m => ({ ...m, [provider]: models })) })
-        .catch(() => { if (!cancelled) setProviderModels(m => ({ ...m, [provider]: [] })) })
+    const { args, blocked } = modelCatalogRequest(provider, draftForCatalog.current)
+    const version = (requestVersions.current[provider] ?? 0) + 1
+    requestVersions.current[provider] = version
+
+    if (blocked) {
+      setModelCatalogs(current => {
+        const previous = current[provider]
+        return {
+          ...current,
+          [provider]: {
+            catalog: previous?.catalog,
+            loading: false,
+            blocked,
+            stale: !!previous?.catalog,
+          },
+        }
+      })
+      return
+    }
+
+    setModelCatalogs(current => {
+      const previous = current[provider]
+      return {
+        ...current,
+        [provider]: {
+          catalog: previous?.catalog,
+          loading: true,
+          stale: previous?.stale ?? false,
+        },
+      }
+    })
+
+    try {
+      const catalog = await invoke<ModelCatalogResponse>('ai_list_models', args)
+      if (!mounted.current || requestVersions.current[provider] !== version) return
+      setModelCatalogs(current => ({
+        ...current,
+        [provider]: {
+          catalog: {
+            models: Array.isArray(catalog.models) ? catalog.models : [],
+            defaultModel: catalog.defaultModel,
+          },
+          loading: false,
+          stale: false,
+        },
+      }))
+    } catch (error) {
+      if (!mounted.current || requestVersions.current[provider] !== version) return
+      const message = error instanceof Error ? error.message : String(error)
+      setModelCatalogs(current => {
+        const previous = current[provider]
+        return {
+          ...current,
+          [provider]: {
+            catalog: previous?.catalog,
+            loading: false,
+            error: message,
+            stale: !!previous?.catalog,
+          },
+        }
+      })
+    }
+  }, [])
+
+  // Refresh once when a pane opens and when its unsaved connection details
+  // change. There is intentionally no polling.
+  useEffect(() => {
+    if (refreshTimer.current) clearTimeout(refreshTimer.current)
+    if (configProvider === 'phi_silica') return
+    refreshTimer.current = setTimeout(() => {
+      refreshTimer.current = null
+      void loadModels(configProvider)
     }, 400)
-    return () => { cancelled = true; clearTimeout(timer) }
+    return () => {
+      if (refreshTimer.current) {
+        clearTimeout(refreshTimer.current)
+        refreshTimer.current = null
+      }
+    }
   }, [
     configProvider,
+    loadModels,
     draft.openAiApiKey,
     draft.openAiApiKeySet,
     draft.anthropicApiKey,
@@ -271,15 +652,17 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
     draft.customEndpoint,
     draft.localAiEndpoint,
     draft.ollamaEndpoint,
+    draft.codexCliPath,
+    draft.claudeCliPath,
   ])
 
-  /** Fetched list when available, otherwise the pane's hardcoded fallback */
-  const modelsFor = (provider: string, fallback: string[]): string[] => {
-    const fetched = providerModels[provider]
-    return fetched && fetched.length > 0 ? fetched : fallback
+  const refreshModels = () => {
+    if (refreshTimer.current) {
+      clearTimeout(refreshTimer.current)
+      refreshTimer.current = null
+    }
+    void loadModels(configProvider)
   }
-  const ollamaModels = providerModels['ollama'] ?? []
-  const customModels = providerModels['custom_openai'] ?? []
 
   const set = <K extends keyof SettingsData>(k: K, v: SettingsData[K]) => {
     setSaveError(null)
@@ -348,10 +731,10 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
         <input aria-label="Enable AI insights" type="checkbox" checked={draft.aiEnabled ?? true} onChange={e => set('aiEnabled', e.target.checked)} />
       </div>
       <div className="form-row">
-        <div><strong>Active AI</strong><div className="hint">One provider answers at a time; Auto picks local first, then cloud</div></div>
+        <div><strong>AI provider</strong><div className="hint">Auto picks local first, then configured cloud providers</div></div>
         <select
           className="field-input"
-          aria-label="Active AI provider"
+          aria-label="AI provider"
           value={draft.preferredAIProvider || 'auto'}
           onChange={e => {
             const value = e.target.value as SettingsData['preferredAIProvider']
@@ -405,19 +788,23 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
 
       <SectionTitle>Provider setup</SectionTitle>
       <p className="settings-section-intro">
-        Local providers keep prompts on this PC. Subscription and API providers send only the question and selected diagnostic context.
+        {autoProvider
+          ? 'Set up any providers Auto may use. Local providers keep prompts on this PC; subscription and API providers receive only the question and selected diagnostic context.'
+          : 'Configure the active provider. Local providers keep prompts on this PC; subscription and API providers receive only the question and selected diagnostic context.'}
       </p>
-      <div className="form-row">
-        <div><strong>Configure</strong><div className="hint">Keys are stored in the OS secret store, never in the settings file</div></div>
-        <select
-          className="field-input"
-          aria-label="Provider to configure"
-          value={configProvider}
-          onChange={e => setConfigProvider(e.target.value as AIProviderId)}
-        >
-          {PROVIDER_OPTIONS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
-        </select>
-      </div>
+      {autoProvider && (
+        <div className="form-row settings-provider-navigator">
+          <div><strong>Set up provider</strong><div className="hint">Auto can use multiple providers; choose one to edit its settings</div></div>
+          <select
+            className="field-input"
+            aria-label="Provider to set up"
+            value={configProvider}
+            onChange={e => setConfigProvider(e.target.value as AIProviderId)}
+          >
+            {PROVIDER_OPTIONS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+          </select>
+        </div>
+      )}
 
       {configProvider === 'openai' && (
         <>
@@ -427,12 +814,13 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
           </div>
           <div className="form-row">
             <div><strong>Model</strong></div>
-            <ModelSelect
+            <ModelPicker
               ariaLabel="OpenAI model"
               value={draft.openAiModel}
-              defaultModel="gpt-5-nano"
-              options={modelsFor('openai', ['gpt-5-nano', 'gpt-5-mini', 'gpt-5'])}
+              state={modelCatalogs.openai}
+              emptyPlaceholder="Use app default"
               onChange={v => set('openAiModel', v)}
+              onRefresh={refreshModels}
             />
           </div>
         </>
@@ -446,12 +834,13 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
           </div>
           <div className="form-row">
             <div><strong>Model</strong></div>
-            <ModelSelect
+            <ModelPicker
               ariaLabel="Anthropic model"
               value={draft.anthropicModel}
-              defaultModel="claude-sonnet-4-6"
-              options={modelsFor('anthropic', ['claude-sonnet-4-6', 'claude-opus-4-8', 'claude-haiku-4-5'])}
+              state={modelCatalogs.anthropic}
+              emptyPlaceholder="Use app default"
               onChange={v => set('anthropicModel', v)}
+              onRefresh={refreshModels}
             />
           </div>
         </>
@@ -465,12 +854,13 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
           </div>
           <div className="form-row">
             <div><strong>Model</strong></div>
-            <ModelSelect
+            <ModelPicker
               ariaLabel="Gemini model"
               value={draft.geminiModel}
-              defaultModel="gemini-3.5-flash"
-              options={modelsFor('gemini', ['gemini-3.5-flash', 'gemini-3.5-pro'])}
+              state={modelCatalogs.gemini}
+              emptyPlaceholder="Use app default"
               onChange={v => set('geminiModel', v)}
+              onRefresh={refreshModels}
             />
           </div>
         </>
@@ -484,12 +874,13 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
           </div>
           <div className="form-row">
             <div><strong>Model</strong></div>
-            <ModelSelect
+            <ModelPicker
               ariaLabel="DeepSeek model"
               value={draft.deepseekModel}
-              defaultModel="deepseek-v4-flash"
-              options={modelsFor('deepseek', ['deepseek-v4-flash'])}
+              state={modelCatalogs.deepseek}
+              emptyPlaceholder="Use app default"
               onChange={v => set('deepseekModel', v)}
+              onRefresh={refreshModels}
             />
           </div>
         </>
@@ -503,12 +894,13 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
           </div>
           <div className="form-row">
             <div><strong>Model</strong><div className="hint">Models the running service reports; empty uses the default</div></div>
-            <ModelSelect
+            <ModelPicker
               ariaLabel="Foundry Local model"
               value={draft.localAiModel}
-              defaultModel="phi-4-mini"
-              options={modelsFor('foundry_local', [])}
+              state={modelCatalogs.foundry_local}
+              emptyPlaceholder="Use service default"
               onChange={v => set('localAiModel', v)}
+              onRefresh={refreshModels}
             />
           </div>
         </>
@@ -522,14 +914,14 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
           </div>
           <div className="form-row">
             <div><strong>Model</strong><div className="hint">Empty uses the first installed model</div></div>
-            {ollamaModels.length > 0 ? (
-              <select className="field-input" aria-label="Ollama model" value={draft.ollamaModel || ''} onChange={e => set('ollamaModel', e.target.value)}>
-                <option value="">Auto (first installed)</option>
-                {ollamaModels.map(model => <option key={model} value={model}>{model}</option>)}
-              </select>
-            ) : (
-              <input className="field-input" aria-label="Ollama model" type="text" value={draft.ollamaModel || ''} placeholder="llama3.2" onChange={e => set('ollamaModel', e.target.value)} />
-            )}
+            <ModelPicker
+              ariaLabel="Ollama model"
+              value={draft.ollamaModel}
+              state={modelCatalogs.ollama}
+              emptyPlaceholder="Auto (first installed)"
+              onChange={v => set('ollamaModel', v)}
+              onRefresh={refreshModels}
+            />
           </div>
         </>
       )}
@@ -549,22 +941,14 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
           </div>
           <div className="form-row">
             <div><strong>Model</strong><div className="hint">Required. The model id your provider documents</div></div>
-            {customModels.length > 0 ? (
-              <select
-                className="field-input"
-                aria-label="Custom endpoint model"
-                value={draft.customModel || ''}
-                onChange={e => set('customModel', e.target.value)}
-              >
-                <option value="">Choose a model…</option>
-                {(draft.customModel && !customModels.includes(draft.customModel)
-                  ? [draft.customModel, ...customModels]
-                  : customModels
-                ).map(model => <option key={model} value={model}>{model}</option>)}
-              </select>
-            ) : (
-              <input className="field-input" aria-label="Custom endpoint model" type="text" value={draft.customModel || ''} placeholder="anthropic/claude-haiku-4-5" onChange={e => set('customModel', e.target.value)} />
-            )}
+            <ModelPicker
+              ariaLabel="Custom endpoint model"
+              value={draft.customModel}
+              state={modelCatalogs.custom_openai}
+              emptyPlaceholder="Enter model ID"
+              onChange={v => set('customModel', v)}
+              onRefresh={refreshModels}
+            />
           </div>
           <div className="form-row">
             <div><strong>API key</strong><div className="hint">Optional for local proxies</div></div>
@@ -588,12 +972,13 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
           </div>
           <div className="form-row">
             <div><strong>Model</strong><div className="hint">Optional. Empty uses the CLI&apos;s default model</div></div>
-            <ModelSelect
+            <ModelPicker
               ariaLabel="Codex model"
               value={draft.codexModel}
-              defaultModel="chosen by Codex"
-              options={modelsFor('codex_cli', ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.3-codex-spark'])}
+              state={modelCatalogs.codex_cli}
+              emptyPlaceholder="Use Codex CLI default"
               onChange={v => set('codexModel', v)}
+              onRefresh={refreshModels}
             />
           </div>
           <div className="hint" style={{ marginBottom: 12 }}>
@@ -617,12 +1002,13 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
           </div>
           <div className="form-row">
             <div><strong>Model</strong><div className="hint">Optional. Empty uses the CLI&apos;s default model</div></div>
-            <ModelSelect
+            <ModelPicker
               ariaLabel="Claude Code model"
               value={draft.claudeModel}
-              defaultModel="chosen by Claude Code"
-              options={modelsFor('claude_code', ['sonnet', 'opus', 'haiku'])}
+              state={modelCatalogs.claude_code}
+              emptyPlaceholder="Use Claude Code default"
               onChange={v => set('claudeModel', v)}
+              onRefresh={refreshModels}
             />
           </div>
           <div className="hint" style={{ marginBottom: 12 }}>

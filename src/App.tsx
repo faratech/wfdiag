@@ -41,7 +41,7 @@ const PAGE_META: Record<TabValue, { title: string; sub: string }> = {
   history: { title: 'History', sub: 'Past scans — spot drift and regressions over time' },
 }
 
-const APP_VERSION = '2.5.5'
+const APP_VERSION = '2.5.6'
 
 const AppContent: React.FC = () => {
   const {

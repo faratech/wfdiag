@@ -12,7 +12,17 @@ export const ChatMessageBubble: React.FC<{ message: ChatMessageVM }> = React.mem
   const isUser = message.role === 'user'
   const showBubble = isUser || !!message.error || message.text.length > 0 || message.streaming
   const providerMeta = message.providerUse
-    ? `${message.providerUse.providerId.replace(/_/g, ' ')} · ${message.providerUse.executionClass.replace(/_/g, ' ')}`
+    ? [
+        message.providerUse.providerId.replace(/_/g, ' '),
+        message.providerUse.executionClass.replace(/_/g, ' '),
+        message.providerUse.actualModels?.length === 1
+          ? message.providerUse.actualModels[0]
+          : message.providerUse.actualModels && message.providerUse.actualModels.length > 1
+            ? `${message.providerUse.actualModels.length} models: ${message.providerUse.actualModels.join(', ')}`
+            : message.providerUse.requestedModel
+              ? `requested ${message.providerUse.requestedModel}`
+              : null,
+      ].filter(Boolean).join(' · ')
     : null
   return (
     <article className={`chat-msg ${isUser ? 'user' : 'bot'}`} aria-label={`${isUser ? 'Your' : 'Assistant'} message`}>

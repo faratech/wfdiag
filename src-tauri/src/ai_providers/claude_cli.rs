@@ -52,6 +52,8 @@ pub async fn chat_single_shot(
         text,
         tool_calls: Vec::new(),
         finished: FinishReason::Stop,
+        actual_models: Vec::new(),
+        provider_replay: None,
     })
 }
 

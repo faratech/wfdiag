@@ -348,6 +348,11 @@ fn message_chars(message: &ChatMessage) -> usize {
             .iter()
             .map(|c| c.name.len() + c.arguments.to_string().len())
             .sum::<usize>()
+        + message
+            .provider_replay
+            .as_ref()
+            .map(|replay| replay.char_count())
+            .unwrap_or(0)
 }
 
 /// Trim history to a budget. The current turn (everything from the LAST user
@@ -973,36 +978,55 @@ fn prepare_chat_request(
 /// stateful proposal boundary and the non-executing Full Scan request each
 /// permit only one attempt per user turn, even when the model repeats them in
 /// later tool rounds.
+struct RejectedToolCall {
+    call: ToolCall,
+    reason: &'static str,
+}
+
 fn select_tool_calls(
     calls: Vec<ToolCall>,
     remaining_calls: usize,
     staged_remediation: &mut bool,
     requested_full_scan: &mut bool,
-) -> (Vec<ToolCall>, bool) {
-    let requested_count = calls.len();
-    let mut selected = Vec::with_capacity(requested_count.min(remaining_calls));
-    for call in calls.into_iter().take(remaining_calls) {
+) -> (Vec<ToolCall>, Vec<RejectedToolCall>) {
+    let mut selected = Vec::with_capacity(calls.len().min(remaining_calls));
+    let mut rejected = Vec::new();
+    for call in calls {
+        if selected.len() >= remaining_calls {
+            rejected.push(RejectedToolCall {
+                call,
+                reason: "the per-turn tool-call limit was reached",
+            });
+            continue;
+        }
         if call.name == "stage_remediation" {
             if *staged_remediation {
+                rejected.push(RejectedToolCall {
+                    call,
+                    reason: "only one remediation proposal may be staged per turn",
+                });
                 continue;
             }
             *staged_remediation = true;
         }
         if call.name == "request_full_scan" {
             if *requested_full_scan {
+                rejected.push(RejectedToolCall {
+                    call,
+                    reason: "only one Full Scan request may be proposed per turn",
+                });
                 continue;
             }
             *requested_full_scan = true;
         }
         selected.push(call);
     }
-    let dropped = selected.len() < requested_count;
-    (selected, dropped)
+    (selected, rejected)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_chat_turn(
-    provider_use: &ProviderUse,
+    provider_use: &mut ProviderUse,
     caps: ProviderCaps,
     chat: &dyn ChatProvider,
     session_id: &str,
@@ -1024,14 +1048,15 @@ pub async fn run_chat_turn(
     let mut requested_full_scan = false;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(TURN_TIMEOUT_SECS);
 
-    let done = |finish_reason: &str, tool_call_count: usize| DonePayload {
-        session_id: session_id.to_string(),
-        message_id: message_id.to_string(),
-        finish_reason: finish_reason.to_string(),
-        provider: provider_use.provider_id.clone(),
-        provider_use: provider_use.clone(),
-        tool_call_count,
-    };
+    let done =
+        |provider_use: &ProviderUse, finish_reason: &str, tool_call_count: usize| DonePayload {
+            session_id: session_id.to_string(),
+            message_id: message_id.to_string(),
+            finish_reason: finish_reason.to_string(),
+            provider: provider_use.provider_id.clone(),
+            provider_use: provider_use.clone(),
+            tool_call_count,
+        };
 
     for round in 0..=MAX_TOOL_ITERATIONS {
         let final_round = !use_tools
@@ -1050,7 +1075,7 @@ pub async fn run_chat_turn(
                     message_id: message_id.to_string(),
                     message,
                 });
-                emitter.done(&done("error", tool_call_count));
+                emitter.done(&done(provider_use, "error", tool_call_count));
                 return Ok(TurnStatus::Error);
             }
         };
@@ -1071,7 +1096,7 @@ pub async fn run_chat_turn(
                     message_id: message_id.to_string(),
                     message,
                 });
-                emitter.done(&done("error", tool_call_count));
+                emitter.done(&done(provider_use, "error", tool_call_count));
                 return Ok(TurnStatus::Error);
             }
             Ok(outcome) => match outcome {
@@ -1080,7 +1105,7 @@ pub async fn run_chat_turn(
                     if !partial.is_empty() {
                         messages.push(ChatMessage::assistant(partial));
                     }
-                    emitter.done(&done("cancelled", tool_call_count));
+                    emitter.done(&done(provider_use, "cancelled", tool_call_count));
                     return Ok(TurnStatus::Cancelled);
                 }
                 StreamOutcome::Error { message, partial } => {
@@ -1098,11 +1123,12 @@ pub async fn run_chat_turn(
                         message_id: message_id.to_string(),
                         message: message.clone(),
                     });
-                    emitter.done(&done("error", tool_call_count));
+                    emitter.done(&done(provider_use, "error", tool_call_count));
                     return Ok(TurnStatus::Error);
                 }
             },
         };
+        provider_use.merge_actual_models(turn.actual_models.clone());
 
         if turn.tool_calls.is_empty() || final_round {
             let answer = turn.text.trim().to_string();
@@ -1120,7 +1146,7 @@ pub async fn run_chat_turn(
                     message_id: message_id.to_string(),
                     message,
                 });
-                emitter.done(&done("refusal", tool_call_count));
+                emitter.done(&done(provider_use, "refusal", tool_call_count));
                 return Ok(TurnStatus::Error);
             }
             if answer.is_empty()
@@ -1137,16 +1163,20 @@ pub async fn run_chat_turn(
                     message_id: message_id.to_string(),
                     message,
                 });
-                emitter.done(&done("error", tool_call_count));
+                emitter.done(&done(provider_use, "error", tool_call_count));
                 return Ok(TurnStatus::Error);
             }
-            messages.push(ChatMessage::assistant(answer));
+            messages.push(ChatMessage::assistant_with_replay(
+                answer,
+                Vec::new(),
+                turn.provider_replay,
+            ));
             let reason = if forced_final {
                 "tool_budget"
             } else {
                 finish_reason_label(turn.finished)
             };
-            emitter.done(&done(reason, tool_call_count));
+            emitter.done(&done(provider_use, reason, tool_call_count));
             return Ok(TurnStatus::Completed {
                 finish_reason: reason.to_string(),
             });
@@ -1155,13 +1185,16 @@ pub async fn run_chat_turn(
         // Tool round: MAX_TOOL_CALLS_PER_TURN is a whole-turn ceiling, not a
         // per-round allowance.
         let remaining_calls = MAX_TOOL_CALLS_PER_TURN.saturating_sub(tool_call_count);
-        let (calls, dropped_calls) = select_tool_calls(
-            turn.tool_calls,
+        let requested_calls = turn.tool_calls;
+        let preserve_all_calls = turn.provider_replay.is_some();
+        let (calls, rejected_calls) = select_tool_calls(
+            requested_calls.clone(),
             remaining_calls,
             &mut staged_remediation,
             &mut requested_full_scan,
         );
-        if calls.is_empty() {
+        let dropped_calls = !rejected_calls.is_empty();
+        if calls.is_empty() && !preserve_all_calls {
             forced_final = true;
             messages.push(ChatMessage {
                 role: ChatRole::System,
@@ -1170,6 +1203,8 @@ pub async fn run_chat_turn(
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 tool_name: None,
+                tool_result_is_error: false,
+                provider_replay: None,
             });
             continue;
         }
@@ -1178,24 +1213,61 @@ pub async fn run_chat_turn(
         // Do not drop the scheduler on cancellation: active blocking Windows
         // queries may still be completing. Every queued/running chip receives
         // one truthful terminal state before the turn closes.
-        let results = run_tools(
-            &calls,
-            executor,
-            emitter,
-            session_id,
-            message_id,
-            cancel.clone(),
-        )
-        .await;
+        let results = if calls.is_empty() {
+            Vec::new()
+        } else {
+            run_tools(
+                &calls,
+                executor,
+                emitter,
+                session_id,
+                message_id,
+                cancel.clone(),
+            )
+            .await
+        };
         if cancel.is_cancelled() {
-            emitter.done(&done("cancelled", tool_call_count));
+            emitter.done(&done(provider_use, "cancelled", tool_call_count));
             return Ok(TurnStatus::Cancelled);
         }
 
         // Append the assistant tool turn and its results only once both
         // exist, so the history never holds a dangling pair.
-        messages.push(ChatMessage::assistant_with_tools(turn.text, calls.clone()));
-        for (call, result) in calls.iter().zip(results) {
+        let history_calls = if preserve_all_calls {
+            requested_calls
+        } else {
+            calls.clone()
+        };
+        messages.push(ChatMessage::assistant_with_replay(
+            turn.text,
+            history_calls.clone(),
+            turn.provider_replay,
+        ));
+
+        let executed_results: std::collections::HashMap<&str, String> = calls
+            .iter()
+            .map(|call| call.id.as_str())
+            .zip(results)
+            .collect();
+        let rejected_reasons: std::collections::HashMap<&str, &str> = rejected_calls
+            .iter()
+            .map(|rejected| (rejected.call.id.as_str(), rejected.reason))
+            .collect();
+        for call in &history_calls {
+            let (result, is_error) = if let Some(result) = executed_results.get(call.id.as_str()) {
+                (result.clone(), false)
+            } else {
+                let reason = rejected_reasons
+                    .get(call.id.as_str())
+                    .copied()
+                    .unwrap_or("the call was not selected for execution");
+                (
+                    format!(
+                        "Tool call was not executed because {reason}. Continue from the evidence already gathered."
+                    ),
+                    true,
+                )
+            };
             let remaining_data = plan.tool_data_chars.saturating_sub(tool_data_used);
             let result_cap = remaining_data.min(plan.tool_result_chars);
             let bounded_result = if result_cap == 0 {
@@ -1204,11 +1276,11 @@ pub async fn run_chat_turn(
                 crate::ai_prompts::truncate_output(&result, result_cap)
             };
             tool_data_used = tool_data_used.saturating_add(bounded_result.chars().count());
-            messages.push(ChatMessage::tool_result(
-                call.id.clone(),
-                call.name.clone(),
-                bounded_result,
-            ));
+            messages.push(if is_error {
+                ChatMessage::tool_error(call.id.clone(), call.name.clone(), bounded_result)
+            } else {
+                ChatMessage::tool_result(call.id.clone(), call.name.clone(), bounded_result)
+            });
         }
 
         if round + 1 == MAX_TOOL_ITERATIONS
@@ -1224,6 +1296,8 @@ pub async fn run_chat_turn(
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 tool_name: None,
+                tool_result_is_error: false,
+                provider_replay: None,
             });
         }
     }
@@ -1856,10 +1930,11 @@ fn spawn_chat_run(
                 .filter(|tool| grounding_enabled || tool.name != "search_windows_knowledge")
                 .collect();
             let next = crate::ai_service::next_auto_provider(pref, &tried).await;
-            let provider_use = ProviderUse::for_provider(
+            let mut provider_use = ProviderUse::for_provider(
                 cur_provider,
                 (cur_provider != initial_provider).then_some(initial_provider),
-            );
+            )
+            .with_requested_model(cur_cfg.model.as_deref());
             let chat = RealChatProvider {
                 provider: cur_provider,
                 cfg: cur_cfg.clone(),
@@ -1868,7 +1943,7 @@ fn spawn_chat_run(
                 Err(error)
             } else {
                 run_chat_turn(
-                    &provider_use,
+                    &mut provider_use,
                     caps,
                     &chat,
                     &session_id,
@@ -1994,7 +2069,8 @@ fn spawn_chat_run(
                         return;
                     };
 
-                    let next_use = ProviderUse::for_provider(next_provider, Some(initial_provider));
+                    let next_use = ProviderUse::for_provider(next_provider, Some(initial_provider))
+                        .with_requested_model(next_cfg.model.as_deref());
                     let crosses_to_cloud = !provider_use.execution_class.is_cloud()
                         && next_use.execution_class.is_cloud();
                     if crosses_to_cloud {
@@ -2159,6 +2235,8 @@ pub async fn ai_chat_send(
         );
     }
     let cfg = crate::ai_providers::resolve_config(provider).await?;
+    let provider_use =
+        ProviderUse::for_provider(provider, None).with_requested_model(cfg.model.as_deref());
 
     let session_id = session_id
         .filter(|s| !s.is_empty())
@@ -2197,7 +2275,7 @@ pub async fn ai_chat_send(
             user_message_index,
             display_text,
             query: query.clone(),
-            provider_use: Some(ProviderUse::for_provider(provider, None)),
+            provider_use: Some(provider_use.clone()),
             finish_reason: None,
             terminal_message: None,
             tool_activities: Vec::new(),
@@ -2206,7 +2284,6 @@ pub async fn ai_chat_send(
         session.messages.clone()
     };
 
-    let provider_use = ProviderUse::for_provider(provider, None);
     let ack = ChatSendAck {
         session_id: session_id.clone(),
         message_id: message_id.clone(),
@@ -2502,6 +2579,8 @@ mod tests {
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
+            tool_result_is_error: false,
+            provider_replay: None,
         }
     }
 
@@ -2670,6 +2749,8 @@ mod tests {
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 tool_name: None,
+                tool_result_is_error: false,
+                provider_replay: None,
             },
         ];
         let views = project_history(&messages);
@@ -2963,6 +3044,8 @@ mod tests {
                         text: "Final answer.".into(),
                         tool_calls: Vec::new(),
                         finished: FinishReason::Stop,
+                        actual_models: Vec::new(),
+                        provider_replay: None,
                     })
                 } else {
                     Ok(ChatTurn {
@@ -2973,6 +3056,8 @@ mod tests {
                             arguments: json!({}),
                         }],
                         finished: FinishReason::ToolUse,
+                        actual_models: Vec::new(),
+                        provider_replay: None,
                     })
                 }
             })
@@ -2988,6 +3073,84 @@ mod tests {
             _cancel: CancellationToken,
         ) -> crate::ai_tools::ToolFuture<'a> {
             Box::pin(async move { Ok(format!("result of {}", call.name)) })
+        }
+    }
+
+    struct AnthropicReplayProvider {
+        round: std::sync::atomic::AtomicUsize,
+        requests: Mutex<Vec<Vec<ChatMessage>>>,
+    }
+
+    impl AnthropicReplayProvider {
+        fn new() -> Self {
+            Self {
+                round: std::sync::atomic::AtomicUsize::new(0),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ChatProvider for AnthropicReplayProvider {
+        fn stream<'a>(
+            &'a self,
+            request: &'a ChatRequest,
+            tx: mpsc::Sender<String>,
+        ) -> Pin<Box<dyn Future<Output = Result<ChatTurn, String>> + Send + 'a>> {
+            Box::pin(async move {
+                self.requests.lock().unwrap().push(request.messages.clone());
+                let round = self.round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if round == 0 {
+                    let calls = vec![
+                        ToolCall {
+                            id: "toolu_1".into(),
+                            name: "stage_remediation".into(),
+                            arguments: json!({}),
+                        },
+                        ToolCall {
+                            id: "toolu_2".into(),
+                            name: "stage_remediation".into(),
+                            arguments: json!({}),
+                        },
+                    ];
+                    Ok(ChatTurn {
+                        text: String::new(),
+                        tool_calls: calls.clone(),
+                        finished: FinishReason::ToolUse,
+                        actual_models: Vec::new(),
+                        provider_replay: Some(crate::ai_providers::ProviderReplay::Anthropic {
+                            requested_model: "claude-opus-5".into(),
+                            content_blocks: vec![
+                                json!({
+                                    "type": "thinking",
+                                    "thinking": "",
+                                    "signature": "private-signature"
+                                }),
+                                json!({
+                                    "type": "tool_use",
+                                    "id": calls[0].id,
+                                    "name": calls[0].name,
+                                    "input": calls[0].arguments,
+                                }),
+                                json!({
+                                    "type": "tool_use",
+                                    "id": calls[1].id,
+                                    "name": calls[1].name,
+                                    "input": calls[1].arguments,
+                                }),
+                            ],
+                        }),
+                    })
+                } else {
+                    let _ = tx.send("Final answer.".to_string()).await;
+                    Ok(ChatTurn {
+                        text: "Final answer.".into(),
+                        tool_calls: Vec::new(),
+                        finished: FinishReason::Stop,
+                        actual_models: Vec::new(),
+                        provider_replay: None,
+                    })
+                }
+            })
         }
     }
 
@@ -3086,7 +3249,7 @@ mod tests {
         };
         let mut staged_remediation = false;
         let mut requested_full_scan = false;
-        let (first_round, first_dropped) = select_tool_calls(
+        let (first_round, first_rejected) = select_tool_calls(
             vec![
                 call("s1", "stage_remediation"),
                 call("r1", "get_scan_summary"),
@@ -3096,7 +3259,8 @@ mod tests {
             &mut staged_remediation,
             &mut requested_full_scan,
         );
-        assert!(first_dropped);
+        assert_eq!(first_rejected.len(), 1);
+        assert_eq!(first_rejected[0].call.id, "s2");
         assert!(staged_remediation);
         assert_eq!(
             first_round
@@ -3106,7 +3270,7 @@ mod tests {
             vec!["s1", "r1"]
         );
 
-        let (second_round, second_dropped) = select_tool_calls(
+        let (second_round, second_rejected) = select_tool_calls(
             vec![
                 call("s3", "stage_remediation"),
                 call("r2", "get_scan_summary"),
@@ -3115,7 +3279,8 @@ mod tests {
             &mut staged_remediation,
             &mut requested_full_scan,
         );
-        assert!(second_dropped);
+        assert_eq!(second_rejected.len(), 1);
+        assert_eq!(second_rejected[0].call.id, "s3");
         assert_eq!(second_round.len(), 1);
         assert_eq!(second_round[0].id, "r2");
     }
@@ -3129,22 +3294,23 @@ mod tests {
         };
         let mut staged_remediation = false;
         let mut requested_full_scan = false;
-        let (first, first_dropped) = select_tool_calls(
+        let (first, first_rejected) = select_tool_calls(
             vec![call("f1"), call("f2")],
             MAX_TOOL_CALLS_PER_TURN,
             &mut staged_remediation,
             &mut requested_full_scan,
         );
-        assert!(first_dropped);
+        assert_eq!(first_rejected.len(), 1);
+        assert_eq!(first_rejected[0].call.id, "f2");
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].id, "f1");
-        let (second, second_dropped) = select_tool_calls(
+        let (second, second_rejected) = select_tool_calls(
             vec![call("f3")],
             MAX_TOOL_CALLS_PER_TURN - first.len(),
             &mut staged_remediation,
             &mut requested_full_scan,
         );
-        assert!(second_dropped);
+        assert_eq!(second_rejected.len(), 1);
         assert!(second.is_empty());
     }
 
@@ -3152,8 +3318,9 @@ mod tests {
     async fn tool_loop_stops_at_the_iteration_cap_with_a_forced_answer() {
         let emitter = RecordingEmitter::default();
         let mut messages = vec![ChatMessage::user("what's wrong with my pc?")];
+        let mut provider_use = ProviderUse::for_provider(AIProvider::OpenAI, None);
         run_chat_turn(
-            &ProviderUse::for_provider(AIProvider::OpenAI, None),
+            &mut provider_use,
             tool_caps(),
             &ToolHungryProvider,
             "s1",
@@ -3190,6 +3357,59 @@ mod tests {
         assert_eq!(messages.last().unwrap().content, "Final answer.");
     }
 
+    #[tokio::test]
+    async fn anthropic_replay_returns_a_result_for_every_requested_tool() {
+        let emitter = RecordingEmitter::default();
+        let provider = AnthropicReplayProvider::new();
+        let mut messages = vec![ChatMessage::user("propose a repair")];
+        let mut provider_use = ProviderUse::for_provider(AIProvider::Anthropic, None);
+        run_chat_turn(
+            &mut provider_use,
+            tool_caps(),
+            &provider,
+            "s1",
+            "m1",
+            &mut messages,
+            "test system prompt",
+            &specs(),
+            &EchoExecutor,
+            &emitter,
+            CancellationToken::new(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let queued = emitter
+            .log()
+            .iter()
+            .filter(|event| event.ends_with(":queued"))
+            .count();
+        assert_eq!(queued, 1, "the duplicate call must not execute");
+        assert_eq!(messages[1].tool_calls.len(), 2);
+        assert!(messages[1].provider_replay.is_some());
+        assert!(matches!(messages[2].role, ChatRole::Tool));
+        assert!(matches!(messages[3].role, ChatRole::Tool));
+        assert!(messages[3].tool_result_is_error);
+        assert!(messages[3].content.contains("only one remediation"));
+        assert_eq!(messages.last().unwrap().content, "Final answer.");
+
+        let requests = provider.requests.lock().unwrap();
+        let second_request = &requests[1];
+        let tool_results = second_request
+            .iter()
+            .filter(|message| matches!(message.role, ChatRole::Tool))
+            .collect::<Vec<_>>();
+        assert_eq!(tool_results.len(), 2);
+        assert!(tool_results[1].content.contains("was not executed"));
+        assert!(
+            !serde_json::to_string(&messages)
+                .unwrap()
+                .contains("private-signature"),
+            "private replay state must be skipped by serialization"
+        );
+    }
+
     /// Answers in plain text right away.
     struct PlainAnswerProvider;
 
@@ -3205,6 +3425,8 @@ mod tests {
                     text: "All good.".into(),
                     tool_calls: Vec::new(),
                     finished: FinishReason::Stop,
+                    actual_models: vec!["claude-opus-5".to_string()],
+                    provider_replay: None,
                 })
             })
         }
@@ -3214,8 +3436,9 @@ mod tests {
     async fn plain_answer_finishes_in_one_round() {
         let emitter = RecordingEmitter::default();
         let mut messages = vec![ChatMessage::user("hello")];
+        let mut provider_use = ProviderUse::for_provider(AIProvider::Anthropic, None);
         run_chat_turn(
-            &ProviderUse::for_provider(AIProvider::Anthropic, None),
+            &mut provider_use,
             tool_caps(),
             &PlainAnswerProvider,
             "s1",
@@ -3233,6 +3456,7 @@ mod tests {
         let log = emitter.log();
         assert_eq!(log, vec!["delta:All good.", "done:stop"]);
         assert_eq!(messages.len(), 2);
+        assert_eq!(provider_use.actual_models, vec!["claude-opus-5"]);
     }
 
     #[tokio::test]
@@ -3241,8 +3465,9 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         let mut messages = vec![ChatMessage::user("hello")];
+        let mut provider_use = ProviderUse::for_provider(AIProvider::OpenAI, None);
         run_chat_turn(
-            &ProviderUse::for_provider(AIProvider::OpenAI, None),
+            &mut provider_use,
             tool_caps(),
             &PlainAnswerProvider,
             "s1",
@@ -3277,8 +3502,9 @@ mod tests {
     async fn provider_error_surfaces_as_error_then_done_when_no_fallback() {
         let emitter = RecordingEmitter::default();
         let mut messages = vec![ChatMessage::user("hello")];
+        let mut provider_use = ProviderUse::for_provider(AIProvider::Gemini, None);
         run_chat_turn(
-            &ProviderUse::for_provider(AIProvider::Gemini, None),
+            &mut provider_use,
             tool_caps(),
             &FailingProvider,
             "s1",
@@ -3314,8 +3540,9 @@ mod tests {
     async fn provider_error_persists_text_that_streamed_before_failure() {
         let emitter = RecordingEmitter::default();
         let mut messages = vec![ChatMessage::user("hello")];
+        let mut provider_use = ProviderUse::for_provider(AIProvider::CodexCli, None);
         let outcome = run_chat_turn(
-            &ProviderUse::for_provider(AIProvider::CodexCli, None),
+            &mut provider_use,
             tool_caps(),
             &PartialFailingProvider,
             "s1",
@@ -3351,8 +3578,9 @@ mod tests {
         // user never sees a false error. History stays clean for the retry.
         let emitter = RecordingEmitter::default();
         let mut messages = vec![ChatMessage::user("hello")];
+        let mut provider_use = ProviderUse::for_provider(AIProvider::CodexCli, None);
         let outcome = run_chat_turn(
-            &ProviderUse::for_provider(AIProvider::CodexCli, None),
+            &mut provider_use,
             tool_caps(),
             &FailingProvider,
             "s1",

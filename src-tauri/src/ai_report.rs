@@ -334,7 +334,8 @@ pub async fn ai_generate_report(
     let provider_use = ProviderUse::for_provider(
         provider,
         (provider != initial_provider).then_some(initial_provider),
-    );
+    )
+    .with_requested_model(cfg.model.as_deref());
     let cache_key = format!("report:{}:{}", provider, cache_hash);
     if !force_refresh.unwrap_or(false)
         && let Some(cached) = crate::ai_service::cached_value(&cache_key)
@@ -384,6 +385,7 @@ pub async fn ai_generate_report(
     tauri::async_runtime::spawn(async move {
         let chat = RealChatProvider { provider, cfg };
         let emitter = ReportEmitter(app);
+        let mut provider_use = provider_use;
         // The report is a single completion: no tools, whatever the provider
         // supports in chat.
         let report_caps = ProviderCaps {
@@ -392,7 +394,7 @@ pub async fn ai_generate_report(
         };
         let mut messages = vec![ChatMessage::user(prompt)];
         let outcome = run_chat_turn(
-            &provider_use,
+            &mut provider_use,
             report_caps,
             &chat,
             "report",

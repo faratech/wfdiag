@@ -17,7 +17,7 @@ export const AboutDialog: React.FC<AboutDialogProps> = ({ open, onOpenChange, up
         <img src="/wf-ds/icon-only.png" alt="" style={{ width: 36, height: 36 }} />
       </div>
       <h2 style={{ margin: '0 0 4px' }}>WindowsForum Diagnostics</h2>
-      <p style={{ color: 'var(--wf-text-muted)', margin: '0 0 16px' }}>Version 2.5.5</p>
+      <p style={{ color: 'var(--wf-text-muted)', margin: '0 0 16px' }}>Version 2.5.6</p>
       <p style={{ fontSize: 13, color: 'var(--wf-text-muted)', lineHeight: 1.6 }}>
         A native Windows diagnostics tool by WindowsForum.com. Runs hardware, driver, storage,
         network, security and log diagnostics locally — with optional on-device or cloud AI analysis.

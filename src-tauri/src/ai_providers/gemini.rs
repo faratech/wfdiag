@@ -19,12 +19,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::mpsc;
 
-/// Default model when the `geminiModel` setting is empty.
-pub const GEMINI_DEFAULT_MODEL: &str = "gemini-3.5-flash";
+/// Last-known GA model used only when live model discovery is unavailable.
+///
+/// An explicit `geminiModel` setting always wins. Empty settings are resolved
+/// from Google's live Models API and cached by `model_catalog`; keeping this
+/// constant current merely gives requests a safe outage fallback.
+pub const GEMINI_DEFAULT_MODEL: &str = "gemini-3.6-flash";
 pub(crate) const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 const MAX_CALL_METADATA: usize = 2_048;
 const LEGACY_CALL_PREFIX: &str = "wfdiag-gemini-legacy-";
+
+/// Resolve an explicit model or discover Google's best current general chat
+/// model. The early return is intentional: saved user choices never perform
+/// discovery and are never replaced by a provider-side catalog change.
+pub(crate) async fn resolve_model(configured: Option<String>, api_key: &str) -> String {
+    if let Some(model) = configured
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+    {
+        return model;
+    }
+    super::model_catalog::resolve_gemini_default_model(api_key).await
+}
 
 #[derive(Debug, Clone)]
 struct GeminiCallMetadata {
@@ -291,6 +308,13 @@ pub(crate) fn parse_generate_response(v: &Value) -> Result<ChatTurn, String> {
         text,
         tool_calls: tool_calls.clone(),
         finished: map_finish_reason(finish, !tool_calls.is_empty())?,
+        actual_models: v
+            .get("modelVersion")
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            .map(|model| vec![model.to_string()])
+            .unwrap_or_default(),
+        provider_replay: None,
     })
 }
 
@@ -389,6 +413,7 @@ pub async fn chat_stream(
     let mut text = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut finish: Option<String> = None;
+    let mut actual_models = Vec::new();
 
     sse::for_each_event(response, |_event, data| {
         let v: Value = serde_json::from_str(data)
@@ -399,6 +424,14 @@ pub async fn chat_stream(
                 .and_then(Value::as_str)
                 .unwrap_or("unknown stream error");
             return Err(format!("Gemini stream error: {}", message));
+        }
+        if let Some(model) = v
+            .get("modelVersion")
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            && !actual_models.iter().any(|seen| seen == model)
+        {
+            actual_models.push(model.to_string());
         }
         let candidate = v
             .pointer("/candidates/0")
@@ -432,6 +465,8 @@ pub async fn chat_stream(
         text,
         tool_calls,
         finished,
+        actual_models,
+        provider_replay: None,
     })
 }
 
@@ -441,7 +476,15 @@ mod tests {
 
     #[test]
     fn default_tracks_the_current_flash_generation() {
-        assert_eq!(GEMINI_DEFAULT_MODEL, "gemini-3.5-flash");
+        assert_eq!(GEMINI_DEFAULT_MODEL, "gemini-3.6-flash");
+    }
+
+    #[tokio::test]
+    async fn explicit_model_wins_without_live_discovery() {
+        assert_eq!(
+            resolve_model(Some("  gemini-user-choice  ".into()), "not-a-real-key").await,
+            "gemini-user-choice"
+        );
     }
 
     #[test]

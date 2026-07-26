@@ -67,6 +67,15 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    /// Provider-facing error marker for a tool result. Kept backend-private;
+    /// Anthropic maps it to `tool_result.is_error`.
+    #[serde(skip)]
+    pub tool_result_is_error: bool,
+    /// Provider-private state needed to faithfully continue a turn. This is
+    /// deliberately excluded from every serialized form so hidden reasoning
+    /// and provider signatures never cross IPC or enter persisted history.
+    #[serde(skip)]
+    pub provider_replay: Option<ProviderReplay>,
 }
 
 impl ChatMessage {
@@ -77,6 +86,8 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
+            tool_result_is_error: false,
+            provider_replay: None,
         }
     }
 
@@ -87,6 +98,8 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
+            tool_result_is_error: false,
+            provider_replay: None,
         }
     }
 
@@ -97,6 +110,24 @@ impl ChatMessage {
             tool_calls,
             tool_call_id: None,
             tool_name: None,
+            tool_result_is_error: false,
+            provider_replay: None,
+        }
+    }
+
+    pub fn assistant_with_replay(
+        content: impl Into<String>,
+        tool_calls: Vec<ToolCall>,
+        provider_replay: Option<ProviderReplay>,
+    ) -> Self {
+        Self {
+            role: ChatRole::Assistant,
+            content: content.into(),
+            tool_calls,
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            provider_replay,
         }
     }
 
@@ -111,6 +142,63 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
             tool_name: Some(tool_name.into()),
+            tool_result_is_error: false,
+            provider_replay: None,
+        }
+    }
+
+    pub fn tool_error(
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: ChatRole::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(call_id.into()),
+            tool_name: Some(tool_name.into()),
+            tool_result_is_error: true,
+            provider_replay: None,
+        }
+    }
+}
+
+/// Opaque provider state that must survive only in the in-memory backend
+/// conversation. The custom Debug implementation intentionally redacts the
+/// blocks because Anthropic replay data can contain hidden thinking.
+#[derive(Clone)]
+pub enum ProviderReplay {
+    Anthropic {
+        requested_model: String,
+        content_blocks: Vec<serde_json::Value>,
+    },
+}
+
+impl ProviderReplay {
+    pub fn char_count(&self) -> usize {
+        match self {
+            Self::Anthropic { content_blocks, .. } => serde_json::to_string(content_blocks)
+                .map(|json| json.chars().count())
+                .unwrap_or(0),
+        }
+    }
+}
+
+impl std::fmt::Debug for ProviderReplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Anthropic {
+                requested_model,
+                content_blocks,
+            } => f
+                .debug_struct("AnthropicReplay")
+                .field("requested_model", requested_model)
+                .field(
+                    "content_blocks",
+                    &format_args!("<redacted:{}>", content_blocks.len()),
+                )
+                .finish(),
         }
     }
 }
@@ -158,6 +246,11 @@ pub struct ChatTurn {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
     pub finished: FinishReason,
+    /// Concrete model ids reported by the provider for this request.
+    pub actual_models: Vec<String>,
+    /// Private provider continuation data. Consumers must copy this onto the
+    /// corresponding assistant `ChatMessage`; it is never sent to the UI.
+    pub provider_replay: Option<ProviderReplay>,
 }
 
 /// Everything a provider call needs, resolved once per request: API key from
@@ -387,10 +480,7 @@ pub async fn resolve_config(provider: AIProvider) -> Result<ResolvedProviderConf
                         "Gemini API key not configured. Please enter your API key in Settings.",
                     ))
                 })?;
-            let model = settings
-                .gemini_model
-                .filter(|m| !m.trim().is_empty())
-                .unwrap_or_else(|| gemini::GEMINI_DEFAULT_MODEL.to_string());
+            let model = gemini::resolve_model(settings.gemini_model, &api_key).await;
             Ok(ResolvedProviderConfig {
                 api_key: Some(api_key),
                 endpoint: None,

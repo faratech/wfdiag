@@ -217,6 +217,13 @@ pub(crate) fn parse_chat_response(value: &Value) -> Result<ChatTurn, String> {
         text,
         tool_calls,
         finished,
+        actual_models: value
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            .map(|model| vec![model.to_string()])
+            .unwrap_or_default(),
+        provider_replay: None,
     })
 }
 
@@ -300,6 +307,7 @@ fn finish_stream(
     pending: BTreeMap<u64, PendingCall>,
     finish: Option<String>,
     saw_done: bool,
+    actual_models: Vec<String>,
 ) -> Result<ChatTurn, String> {
     if !saw_done {
         return Err("DeepSeek stream ended before data: [DONE]".into());
@@ -342,6 +350,8 @@ fn finish_stream(
         text,
         tool_calls: calls,
         finished,
+        actual_models,
+        provider_replay: None,
     })
 }
 
@@ -364,6 +374,7 @@ pub async fn chat_stream(
     let mut pending = BTreeMap::new();
     let mut finish = None;
     let mut saw_done = false;
+    let mut actual_models = Vec::new();
     sse::for_each_event(response, |_event, data| {
         if data == "[DONE]" {
             saw_done = true;
@@ -373,6 +384,14 @@ pub async fn chat_stream(
             .map_err(|error| format!("Malformed DeepSeek stream event: {error}"))?;
         if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
             return Err(format!("DeepSeek stream error: {error}"));
+        }
+        if let Some(model) = value
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            && !actual_models.iter().any(|seen| seen == model)
+        {
+            actual_models.push(model.to_string());
         }
         let Some(choices) = value.get("choices").and_then(Value::as_array) else {
             return Err("DeepSeek stream event omitted choices".into());
@@ -385,7 +404,7 @@ pub async fn chat_stream(
         Ok(true)
     })
     .await?;
-    finish_stream(text, pending, finish, saw_done)
+    finish_stream(text, pending, finish, saw_done, actual_models)
 }
 
 #[cfg(test)]

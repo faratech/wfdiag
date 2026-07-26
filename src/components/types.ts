@@ -25,6 +25,10 @@ export interface AIProviderUse {
   providerId: AIProviderId
   executionClass: AIExecutionClass
   fallbackFrom?: AIProviderId
+  /** Configured model id or alias sent to the provider. */
+  requestedModel?: string
+  /** Concrete model ids reported by the provider for this operation. */
+  actualModels?: string[]
 }
 
 export interface ChatContextRef {

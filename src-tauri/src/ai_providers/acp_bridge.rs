@@ -16,9 +16,10 @@
 
 use agent_client_protocol as acp;
 use agent_client_protocol::schema::v1;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -29,6 +30,9 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// The adapter spawns the agent CLI underneath during session/new.
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(180);
+const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+const MODEL_LIST_STDOUT_LIMIT: u64 = 2 * 1024 * 1024;
+const MODEL_LIST_STDERR_LIMIT: u64 = 32 * 1024;
 
 /// Adapter package for Claude Code (renamed from the deprecated
 /// `@zed-industries/claude-code-acp` — same registry entry Intelligent
@@ -44,6 +48,211 @@ pub enum AdapterOutcome {
     /// npx isn't available (e.g. native CLI install without Node) — the
     /// caller should fall back to the CLI's own headless mode.
     NoNpx,
+}
+
+/// Start an ACP session without sending a prompt and read the model selector
+/// that the current Claude Agent SDK reports. This is live/account-aware and
+/// does not spend tokens: `session/new` initializes metadata only.
+pub async fn list_claude_models(
+    claude_path: &Path,
+) -> Result<cli_bridge::BridgeModelCatalog, String> {
+    tokio::time::timeout(MODEL_LIST_TIMEOUT, list_claude_models_inner(claude_path))
+        .await
+        .map_err(|_| {
+            format!(
+                "Claude Code model discovery did not finish within {} seconds",
+                MODEL_LIST_TIMEOUT.as_secs()
+            )
+        })?
+}
+
+async fn list_claude_models_inner(
+    claude_path: &Path,
+) -> Result<cli_bridge::BridgeModelCatalog, String> {
+    let npx = cli_bridge::resolve_cli("npx", None).await.map_err(|_| {
+        "Claude Code model discovery requires Node.js/npm (npx was not found).".to_string()
+    })?;
+    let workdir = cli_bridge::bridge_workdir()?;
+
+    let mut cmd = tokio::process::Command::new(&npx);
+    cmd.args(["-y", CLAUDE_ADAPTER_PACKAGE]);
+    cmd.current_dir(&workdir);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.env_remove("CLAUDECODE");
+    for var in cli_bridge::SUBSCRIPTION_OVERRIDE_ENV_VARS {
+        cmd.env_remove(var);
+    }
+    // The adapter officially supports this path override. It makes an
+    // unsaved Settings draft effective for discovery too.
+    cmd.env("CLAUDE_CODE_EXECUTABLE", claude_path);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|error| format!("Could not start the Claude ACP adapter: {error}"))?;
+    let outgoing = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Could not open the Claude ACP adapter stdin".to_string())?
+        .compat_write();
+    let incoming = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Could not open the Claude ACP adapter stdout".to_string())?
+        .take(MODEL_LIST_STDOUT_LIMIT)
+        .compat();
+    let stderr_task = child.stderr.take().map(|stderr| {
+        tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            let _ = stderr
+                .take(MODEL_LIST_STDERR_LIMIT)
+                .read_to_end(&mut bytes)
+                .await;
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+    });
+
+    let builder = acp::Client
+        .builder()
+        .name("wfdiag-model-discovery")
+        .on_receive_request(
+            move |req: v1::AgentRequest,
+                  responder: acp::Responder<serde_json::Value>,
+                  _cx| async move {
+                match req {
+                    v1::AgentRequest::RequestPermissionRequest(request) => {
+                        let response = v1::ClientResponse::RequestPermissionResponse(
+                            v1::RequestPermissionResponse::new(reject_outcome(&request.options)),
+                        );
+                        match serde_json::to_value(response) {
+                            Ok(value) => responder.respond(value),
+                            Err(error) => responder
+                                .respond_with_error(acp::Error::into_internal_error(error)),
+                        }
+                    }
+                    _ => responder.respond_with_error(acp::Error::method_not_found()),
+                }
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_notification(
+            |_notification: v1::AgentNotification, _cx| async move { Ok(()) },
+            acp::on_receive_notification!(),
+        );
+
+    let workdir_for_session = workdir.clone();
+    let response = builder
+        .connect_with(acp::ByteStreams::new(outgoing, incoming), async move |cx| {
+            tokio::time::timeout(
+                INIT_TIMEOUT,
+                cx.send_request(
+                    v1::InitializeRequest::new(acp::schema::ProtocolVersion::V1)
+                        .client_info(v1::Implementation::new("wfdiag", env!("CARGO_PKG_VERSION"))),
+                )
+                .block_task(),
+            )
+            .await
+            .map_err(|_| acp::Error::internal_error().data("initialize timed out"))??;
+
+            tokio::time::timeout(
+                SESSION_TIMEOUT,
+                cx.send_request(v1::NewSessionRequest::new(workdir_for_session))
+                    .block_task(),
+            )
+            .await
+            .map_err(|_| acp::Error::internal_error().data("session/new timed out"))?
+        })
+        .await;
+
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+    let stderr = match stderr_task {
+        Some(task) => tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+
+    match response {
+        Ok(session) => catalog_from_config_options(session.config_options.as_deref()),
+        Err(error) => {
+            let detail = cli_bridge::tail(stderr.trim(), 300);
+            Err(if detail.is_empty() {
+                format!("Claude Code model discovery failed: {error}")
+            } else {
+                format!("Claude Code model discovery failed: {error} — {detail}")
+            })
+        }
+    }
+}
+
+fn catalog_from_config_options(
+    options: Option<&[v1::SessionConfigOption]>,
+) -> Result<cli_bridge::BridgeModelCatalog, String> {
+    let option = options
+        .unwrap_or_default()
+        .iter()
+        .find(|option| {
+            matches!(
+                option.category,
+                Some(v1::SessionConfigOptionCategory::Model)
+            ) || option.id.0.as_ref() == "model"
+        })
+        .ok_or_else(|| "Claude Code did not report a model selector.".to_string())?;
+    let v1::SessionConfigKind::Select(select) = &option.kind else {
+        return Err("Claude Code reported an unsupported model selector.".to_string());
+    };
+
+    let source: Vec<&v1::SessionConfigSelectOption> = match &select.options {
+        v1::SessionConfigSelectOptions::Ungrouped(options) => options.iter().collect(),
+        v1::SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter())
+            .collect(),
+        _ => Vec::new(),
+    };
+    let models = source
+        .into_iter()
+        .filter_map(|option| {
+            let id = option.value.0.trim().to_string();
+            if id.is_empty() {
+                return None;
+            }
+            Some(cli_bridge::BridgeModel {
+                label: non_empty_distinct(&option.name, &id),
+                description: option
+                    .description
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+                id,
+            })
+        })
+        .collect();
+    let models = cli_bridge::stable_dedupe_bridge_models(models);
+    if models.is_empty() {
+        return Err("Claude Code reported an empty model selector.".to_string());
+    }
+    let current = select.current_value.0.trim().to_string();
+    Ok(cli_bridge::BridgeModelCatalog {
+        models,
+        default_model: (!current.is_empty()).then_some(current),
+    })
+}
+
+fn non_empty_distinct(value: &str, id: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value != id).then(|| value.to_string())
 }
 
 /// Run one prompt through the Claude Code ACP adapter. `model` must already
@@ -308,5 +517,111 @@ mod tests {
             finish_adapter_turn(v1::StopReason::EndTurn, "  ".into()),
             AdapterOutcome::Failed(_)
         ));
+    }
+
+    #[test]
+    fn extracts_the_current_claude_acp_catalog_without_losing_versions() {
+        // Exact model config reported by claude-agent-acp 0.62.0 with
+        // Claude Code 2.1.220. The option values are selectors (some aliases),
+        // while the live descriptions carry their resolved marketing versions.
+        let options: Vec<v1::SessionConfigOption> =
+            serde_json::from_value(serde_json::json!([{
+                "id": "model",
+                "name": "Model",
+                "description": "AI model to use",
+                "category": "model",
+                "type": "select",
+                "currentValue": "opus",
+                "options": [
+                    {
+                        "value": "default",
+                        "name": "Default (recommended)",
+                        "description": "Opus 5 with 1M context · Best for everyday, complex tasks"
+                    },
+                    {
+                        "value": "opus[1m]",
+                        "name": "Opus (1M context)",
+                        "description": "Opus 5 with 1M context · Best for everyday, complex tasks"
+                    },
+                    {
+                        "value": "claude-fable-5[1m]",
+                        "name": "Fable",
+                        "description": "Fable 5 · Most capable for your hardest and longest-running tasks"
+                    },
+                    {
+                        "value": "sonnet",
+                        "name": "Sonnet",
+                        "description": "Sonnet 5 · Efficient for routine tasks"
+                    },
+                    {
+                        "value": "haiku",
+                        "name": "Haiku",
+                        "description": "Haiku 4.5 · Fastest for quick answers"
+                    },
+                    {
+                        "value": "opus",
+                        "name": "Opus",
+                        "description": "Opus 5 · Best for everyday, complex tasks"
+                    }
+                ]
+            }]))
+            .unwrap();
+        let catalog = catalog_from_config_options(Some(&options)).unwrap();
+        assert_eq!(catalog.default_model.as_deref(), Some("opus"));
+        assert_eq!(
+            catalog.models,
+            vec![
+                cli_bridge::BridgeModel {
+                    id: "default".into(),
+                    label: Some("Default (recommended)".into()),
+                    description: Some(
+                        "Opus 5 with 1M context · Best for everyday, complex tasks".into()
+                    ),
+                },
+                cli_bridge::BridgeModel {
+                    id: "opus[1m]".into(),
+                    label: Some("Opus (1M context)".into()),
+                    description: Some(
+                        "Opus 5 with 1M context · Best for everyday, complex tasks".into()
+                    ),
+                },
+                cli_bridge::BridgeModel {
+                    id: "claude-fable-5[1m]".into(),
+                    label: Some("Fable".into()),
+                    description: Some(
+                        "Fable 5 · Most capable for your hardest and longest-running tasks".into()
+                    ),
+                },
+                cli_bridge::BridgeModel {
+                    id: "sonnet".into(),
+                    label: Some("Sonnet".into()),
+                    description: Some("Sonnet 5 · Efficient for routine tasks".into()),
+                },
+                cli_bridge::BridgeModel {
+                    id: "haiku".into(),
+                    label: Some("Haiku".into()),
+                    description: Some("Haiku 4.5 · Fastest for quick answers".into()),
+                },
+                cli_bridge::BridgeModel {
+                    id: "opus".into(),
+                    label: Some("Opus".into()),
+                    description: Some("Opus 5 · Best for everyday, complex tasks".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn model_option_id_is_a_backward_compatible_category_fallback() {
+        let options = vec![v1::SessionConfigOption::select(
+            "model",
+            "Model",
+            "sonnet",
+            vec![v1::SessionConfigSelectOption::new("sonnet", "Sonnet")],
+        )];
+        let catalog = catalog_from_config_options(Some(&options)).unwrap();
+        assert_eq!(catalog.models[0].id, "sonnet");
+        assert_eq!(catalog.default_model.as_deref(), Some("sonnet"));
+        assert!(catalog_from_config_options(None).is_err());
     }
 }

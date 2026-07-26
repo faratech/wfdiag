@@ -211,6 +211,7 @@ pub struct AIRequest {
 pub struct AIResponse {
     pub interpretation: String,
     pub provider_used: AIProvider,
+    pub provider_use: crate::state::ProviderUse,
     pub cached: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grounding: Option<crate::ai_grounding::GroundingTrace>,
@@ -867,6 +868,14 @@ pub async fn analyze(
         let attempt = match crate::ai_providers::resolve_config(provider).await {
             Err(error) => Err(error),
             Ok(cfg) => {
+                let provider_use = crate::state::ProviderUse::for_provider(
+                    provider,
+                    tried
+                        .first()
+                        .copied()
+                        .filter(|initial| *initial != provider),
+                )
+                .with_requested_model(cfg.model.as_deref());
                 let config_fingerprint = provider_config_fingerprint(provider, &cfg);
                 let base_data_budget = one_shot_data_budget(provider);
                 if !grounding_resolved {
@@ -905,6 +914,7 @@ pub async fn analyze(
                     return Ok(AIResponse {
                         interpretation,
                         provider_used: provider,
+                        provider_use,
                         cached: true,
                         grounding: grounding_trace,
                         error: None,
@@ -944,6 +954,7 @@ pub async fn analyze(
                         Ok(AIResponse {
                             interpretation,
                             provider_used: provider,
+                            provider_use,
                             cached: false,
                             grounding: grounding_trace,
                             error: None,

@@ -967,6 +967,13 @@ html.dk select.field-input { color-scheme: dark; }
 .ai-runtime-provider { color: var(--wf-text); font-weight: 600; white-space: nowrap; }
 .ai-runtime-class { white-space: nowrap; }
 .ai-runtime-class::before { content: '·'; margin-right: 7px; color: var(--wf-text-muted); }
+.ai-runtime-model {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-runtime-model::before { content: '·'; margin-right: 7px; color: var(--wf-text-muted); }
 .privacy-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--wf-text-muted); }
 .privacy-dot.private { background: var(--app-ok); }
 .privacy-dot.cloud { background: var(--app-warn); }
@@ -1264,6 +1271,93 @@ html.dk select.field-input { color-scheme: dark; }
 .credential-control .field-input { width: 100%; margin-left: 0; }
 .credential-state { display: inline-flex; align-items: center; gap: 5px; color: var(--app-ok); font-size: 11px; }
 .credential-remove { height: 26px; padding: 0 8px; font-size: 11px; }
+.model-picker { width: clamp(260px, 60%, 390px); margin-left: auto; min-width: 0; }
+.model-picker-controls { display: flex; align-items: center; gap: 6px; }
+.form-row .model-picker .field-input { flex: 1 1 auto; width: auto; min-width: 0; margin-left: 0; }
+.model-picker-toggle {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+.model-picker-refresh { flex: none; height: 32px; padding: 0 9px; font-size: 11.5px; }
+.model-picker-listbox {
+  max-height: 260px;
+  margin-top: 6px;
+  overflow-y: auto;
+  border: 1px solid var(--app-border);
+  border-radius: 7px;
+  background: var(--app-card-solid);
+  box-shadow: var(--wf-shadow-menu);
+  color: var(--wf-text);
+}
+.model-picker-option {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--app-border);
+  cursor: pointer;
+}
+.model-picker-option:last-child { border-bottom: none; }
+.model-picker-option:hover,
+.model-picker-option.active { background: var(--app-hover); }
+.model-picker-option.selected {
+  background: var(--app-info-bg);
+  box-shadow: inset 3px 0 0 var(--app-accent);
+}
+.model-picker-option-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.model-picker-option-heading code,
+.model-picker-selection code {
+  overflow-wrap: anywhere;
+  color: var(--wf-text-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10.5px;
+  font-weight: 400;
+}
+.model-picker-option-description {
+  margin-top: 3px;
+  color: var(--wf-text-muted);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+.model-picker-empty {
+  padding: 10px;
+  color: var(--wf-text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.model-picker-selection {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  margin-top: 5px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: var(--app-info-bg);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+.model-picker-selection > span { color: var(--wf-text); font-weight: 600; }
+.model-picker-selection > small {
+  grid-column: 1 / -1;
+  color: var(--wf-text-muted);
+  font-size: inherit;
+}
+.model-picker-selection.custom { background: var(--app-hover); }
+.model-picker-status {
+  margin-top: 5px;
+  color: var(--wf-text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: right;
+}
+.model-picker-status.error { color: var(--app-err); }
+.model-picker-status.stale:not(.error) { color: var(--app-warn); }
 .settings-section-title {
   font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
   color: var(--wf-text-muted);
@@ -1271,6 +1365,9 @@ html.dk select.field-input { color-scheme: dark; }
   border-bottom: 1px solid var(--app-border);
 }
 .settings-section-title:first-child { padding-top: 0; }
+@media (max-width: 520px) {
+  .model-picker { width: 100%; }
+}
 
 /* ============================================================================
    Command palette
@@ -1557,7 +1654,8 @@ textarea:focus-visible,
 }
 @container content (max-width: 680px) {
   .ai-workspace { padding-left: 16px; padding-right: 16px; }
-  .ai-runtime-class { display: none; }
+  .ai-runtime-class,
+  .ai-runtime-model { display: none; }
   .ai-runtime-provider { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
 }
 @container content (max-width: 760px) {

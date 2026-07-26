@@ -62,6 +62,9 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
   }
 
   const providerLabel = providerLabelFor(aiMeta?.provider_used ?? activeProvider)
+  const modelLabel = aiMeta?.provider_use?.actualModels?.length === 1
+    ? aiMeta.provider_use.actualModels[0]
+    : aiMeta?.provider_use?.requestedModel
 
   return (
     <div className="diag-detail">
@@ -128,7 +131,7 @@ export const DiagnosticDetail: React.FC<{ item: DiagItem }> = ({ item }) => {
             <div className="ai-panel">
               <div className="ai-panel-head">
                 <img src="/wf-ds/chatgpt-bot-avatar.webp" alt="" />
-                <span>AI Analysis · {providerLabel}</span>
+                <span>AI Analysis · {providerLabel}{modelLabel ? ` · ${modelLabel}` : ''}</span>
                 <div className="ai-panel-actions" style={{ marginLeft: 'auto' }}>
                   {aiText && (
                     <>

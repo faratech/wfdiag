@@ -24,7 +24,7 @@ use async_openai::{
         ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, ChatCompletionTool, ChatCompletionTools,
         CreateChatCompletionRequestArgs, FinishReason as OpenAIFinishReason, FunctionCall,
-        FunctionObject,
+        FunctionObject, ReasoningEffort,
     },
 };
 use futures::StreamExt;
@@ -125,6 +125,13 @@ pub(crate) fn to_openai_tools(tools: &[ToolSpec], strict: bool) -> Vec<ChatCompl
         .collect()
 }
 
+/// GPT-5.6 function tools on Chat Completions require effective reasoning
+/// `none`. Keep this scoped to OpenAI: compatibility servers may reject the
+/// field even when a user-defined model happens to share the same prefix.
+fn requires_none_reasoning(provider: AIProvider, model: &str, has_tools: bool) -> bool {
+    provider == AIProvider::OpenAI && has_tools && model.starts_with("gpt-5.6")
+}
+
 fn client_for(provider: AIProvider, cfg: &ResolvedProviderConfig) -> Client<OpenAIConfig> {
     let mut config = OpenAIConfig::new();
     match cfg.api_key.as_deref().filter(|k| !k.is_empty()) {
@@ -181,6 +188,7 @@ fn finish_streamed_turn(
     refusal: String,
     finish: Option<OpenAIFinishReason>,
     pending: BTreeMap<u32, (Option<String>, String, String)>,
+    actual_models: Vec<String>,
 ) -> Result<ChatTurn, String> {
     let finish = finish
         .ok_or_else(|| format!("{provider} stream ended without a terminal finish reason"))?;
@@ -232,6 +240,8 @@ fn finish_streamed_turn(
         },
         tool_calls,
         finished,
+        actual_models,
+        provider_replay: None,
     })
 }
 
@@ -300,7 +310,8 @@ pub async fn chat_stream(
 ) -> Result<ChatTurn, String> {
     let client = client_for(provider, cfg);
     let mut args = CreateChatCompletionRequestArgs::default();
-    args.model(cfg.model_or_err(provider)?)
+    let model = cfg.model_or_err(provider)?;
+    args.model(model)
         .messages(to_openai_messages(req.system.as_deref(), &req.messages));
     let include_tools = if provider == AIProvider::Ollama && !req.tools.is_empty() {
         let endpoint = cfg.endpoint_or_err(provider)?;
@@ -311,6 +322,9 @@ pub async fn chat_stream(
     };
     if !req.tools.is_empty() && include_tools {
         args.tools(to_openai_tools(&req.tools, provider == AIProvider::OpenAI));
+        if requires_none_reasoning(provider, model, true) {
+            args.reasoning_effort(ReasoningEffort::None);
+        }
     }
     let chat_request = args
         .build()
@@ -325,11 +339,17 @@ pub async fn chat_stream(
     let mut text = String::new();
     let mut finish: Option<OpenAIFinishReason> = None;
     let mut refusal = String::new();
+    let mut actual_models = Vec::new();
     // index -> (id, name, accumulated argument JSON fragments)
     let mut pending: BTreeMap<u32, (Option<String>, String, String)> = BTreeMap::new();
 
     while let Some(item) = stream.next().await {
         let chunk = item.map_err(|e| friendly_error(provider, e))?;
+        if !chunk.model.trim().is_empty()
+            && !actual_models.iter().any(|model| model == &chunk.model)
+        {
+            actual_models.push(chunk.model.clone());
+        }
         let Some(choice) = chunk.choices.into_iter().next() else {
             continue;
         };
@@ -366,7 +386,7 @@ pub async fn chat_stream(
         }
     }
 
-    finish_streamed_turn(provider, text, refusal, finish, pending)
+    finish_streamed_turn(provider, text, refusal, finish, pending, actual_models)
 }
 
 #[cfg(test)]
@@ -380,6 +400,30 @@ mod tests {
             description: "Run a diagnostic".into(),
             parameters: json!({"type": "object", "properties": {"task_id": {"type": "string"}}}),
         }
+    }
+
+    #[test]
+    fn gpt_5_6_openai_tools_require_none_reasoning() {
+        assert!(requires_none_reasoning(
+            AIProvider::OpenAI,
+            "gpt-5.6-sol",
+            true
+        ));
+        assert!(requires_none_reasoning(
+            AIProvider::OpenAI,
+            "gpt-5.6-terra",
+            true
+        ));
+        assert!(!requires_none_reasoning(
+            AIProvider::OpenAI,
+            "gpt-5.6-luna",
+            false
+        ));
+        assert!(!requires_none_reasoning(
+            AIProvider::CustomOpenAI,
+            "gpt-5.6-sol",
+            true
+        ));
     }
 
     #[test]
@@ -467,6 +511,7 @@ mod tests {
                 String::new(),
                 Some(OpenAIFinishReason::ToolCalls),
                 pending,
+                Vec::new(),
             )
             .unwrap_err()
             .contains("invalid JSON")
@@ -478,6 +523,7 @@ mod tests {
                 String::new(),
                 None,
                 BTreeMap::new(),
+                Vec::new(),
             )
             .unwrap_err()
             .contains("terminal finish reason")
@@ -492,9 +538,11 @@ mod tests {
             "I cannot help with that.".into(),
             Some(OpenAIFinishReason::Stop),
             BTreeMap::new(),
+            vec!["gpt-5.6-sol".into()],
         )
         .unwrap();
         assert_eq!(turn.finished, FinishReason::Refusal);
         assert_eq!(turn.text, "I cannot help with that.");
+        assert_eq!(turn.actual_models, vec!["gpt-5.6-sol"]);
     }
 }

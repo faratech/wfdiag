@@ -35,6 +35,16 @@ pub struct ProviderUse {
     pub execution_class: ProviderExecutionClass,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_from: Option<String>,
+    /// Model id or alias selected before dispatch. This is intentionally
+    /// distinct from `actual_models`: subscription CLIs may accept an alias
+    /// such as `opus` without revealing the concrete model until the turn
+    /// starts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    /// Concrete model ids reported by the provider while handling the turn.
+    /// Most providers return one; subscription agents may report several.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actual_models: Vec<String>,
 }
 
 impl ProviderUse {
@@ -60,6 +70,30 @@ impl ProviderUse {
             provider_id: provider.to_string(),
             execution_class,
             fallback_from: fallback_from.map(|from| from.to_string()),
+            requested_model: None,
+            actual_models: Vec::new(),
+        }
+    }
+
+    pub fn with_requested_model(mut self, model: Option<&str>) -> Self {
+        self.requested_model = model
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_string);
+        self
+    }
+
+    pub fn set_actual_models(&mut self, models: impl IntoIterator<Item = String>) {
+        self.actual_models.clear();
+        self.merge_actual_models(models);
+    }
+
+    pub fn merge_actual_models(&mut self, models: impl IntoIterator<Item = String>) {
+        for model in models {
+            let model = model.trim();
+            if !model.is_empty() && !self.actual_models.iter().any(|seen| seen == model) {
+                self.actual_models.push(model.to_string());
+            }
         }
     }
 }

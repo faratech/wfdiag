@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useAppContext } from './AppContext'
+import type { AIProviderUse } from '../components/types'
 import * as logger from '../utils/logger'
 
 // Stable, fast (djb2) hash of the analyzed content. Folded into AI cache keys so that a
@@ -78,6 +79,7 @@ export interface GroundingTrace {
 
 export interface AIAnalysisMeta {
   provider_used: AIProvider
+  provider_use?: AIProviderUse
   cached: boolean
   grounding?: GroundingTrace
 }
@@ -85,6 +87,7 @@ export interface AIAnalysisMeta {
 export interface AIResponse {
   interpretation: string
   provider_used: AIProvider
+  provider_use?: AIProviderUse
   cached: boolean
   grounding?: GroundingTrace
   error?: string
@@ -413,6 +416,7 @@ export const AIProvider: React.FC<AIProviderProps> = ({ children }) => {
           ...prev,
           [cacheKey]: {
             provider_used: response.provider_used,
+            provider_use: response.provider_use,
             cached: response.cached,
             grounding: response.grounding,
           },

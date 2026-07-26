@@ -145,6 +145,13 @@ export const AIScreen: React.FC = () => {
   const executionLabel = isLoading && !operationRunning
     ? 'Please wait'
     : providerUse ? EXECUTION_LABELS[providerUse.executionClass] : 'Not connected'
+  const modelLabel = providerUse?.actualModels?.length === 1
+    ? providerUse.actualModels[0]
+    : providerUse?.actualModels && providerUse.actualModels.length > 1
+      ? `${providerUse.actualModels.length} models`
+      : providerUse?.requestedModel
+        ? `${providerUse.requestedModel} requested`
+        : null
   const cloudExecution = providerUse?.executionClass === 'api_cloud' || providerUse?.executionClass === 'subscription_cloud'
   const supportsTools = aiStatus?.providers?.find(provider => provider.id === activeProvider)?.supports_tools ?? false
   const suggestions = useMemo(() => [
@@ -187,10 +194,11 @@ export const AIScreen: React.FC = () => {
             <i className="fa-solid fa-file-lines" aria-hidden="true" /> Scan Report
           </button>
         </div>
-        <div className="ai-runtime-summary" role="status" aria-label={`${providerLabel}, ${executionLabel}`}>
+        <div className="ai-runtime-summary" role="status" aria-label={[providerLabel, executionLabel, modelLabel].filter(Boolean).join(', ')}>
           <span className={`privacy-dot ${cloudExecution ? 'cloud' : providerUse ? 'private' : 'off'}`} aria-hidden="true" />
           <span className="ai-runtime-provider">{providerLabel}</span>
           <span className="ai-runtime-class">{executionLabel}</span>
+          {modelLabel && <span className="ai-runtime-model" title={providerUse?.actualModels?.join(', ') || providerUse?.requestedModel}>{modelLabel}</span>}
           <button type="button" className="btn-icon" onClick={() => setShowSettings(true)} aria-label="Open AI settings" title="AI settings">
             <i className="fa-solid fa-gear" aria-hidden="true" />
           </button>

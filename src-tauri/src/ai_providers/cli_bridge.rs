@@ -20,12 +20,13 @@
 
 use crate::ai_service::AIProvider;
 use serde::Serialize;
-use std::collections::HashMap;
+use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 /// How long a cached availability probe stays fresh.
@@ -36,6 +37,12 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The login command waits for the user to finish a browser flow.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(180);
 const SIGN_OUT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Model discovery must remain a lightweight Settings operation.
+const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+const MODEL_LIST_MAX_PAGES: usize = 50;
+/// Bound stdout/stderr retained from a local helper process.
+const MODEL_LIST_STDOUT_LIMIT: u64 = 2 * 1024 * 1024;
+const MODEL_LIST_STDERR_LIMIT: u64 = 32 * 1024;
 
 /// Environment credentials that would override a CLI's subscription login.
 /// Keep this closed list shared by every bridge invocation, including probes.
@@ -259,7 +266,9 @@ fn pick_lookup_candidate(stdout: &str) -> Option<PathBuf> {
 // ============================================================================
 
 /// Model names go on the command line, so they are allowlist-sanitized:
-/// letters, digits and `. _ : / -` only (covers every published model id).
+/// letters, digits and `. _ : / - [ ]` only. Brackets are required for
+/// provider-returned Claude selectors such as `opus[1m]`; no shell
+/// metacharacters or whitespace are accepted.
 pub fn sanitize_model(model: &str) -> Result<String, String> {
     let model = model.trim();
     if model.is_empty() {
@@ -267,12 +276,12 @@ pub fn sanitize_model(model: &str) -> Result<String, String> {
     }
     if model
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'))
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-' | '[' | ']'))
     {
         Ok(model.to_string())
     } else {
         Err(format!(
-            "Invalid model name '{model}': only letters, digits and . _ : / - are allowed"
+            "Invalid model name '{model}': only letters, digits and . _ : / - [ ] are allowed"
         ))
     }
 }
@@ -287,6 +296,278 @@ pub fn bridge_workdir() -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Could not create {}: {}", dir.display(), e))?;
     Ok(dir)
+}
+
+/// Provider-neutral model metadata reported by a subscription CLI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeModel {
+    pub id: String,
+    pub label: Option<String>,
+    pub description: Option<String>,
+}
+
+/// A live CLI model catalog. `default_model` is the CLI's current default,
+/// not an application-maintained guess.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BridgeModelCatalog {
+    pub models: Vec<BridgeModel>,
+    pub default_model: Option<String>,
+}
+
+/// Ask the installed Codex CLI's app-server for its live, account-aware model
+/// catalog. The protocol is JSON-RPC over JSONL:
+/// `initialize` followed by every page of `model/list`.
+pub async fn list_codex_models(override_path: Option<&str>) -> Result<BridgeModelCatalog, String> {
+    let path = resolve_cli(CODEX_SPEC.binary, override_path).await?;
+    tokio::time::timeout(MODEL_LIST_TIMEOUT, list_codex_models_inner(path))
+        .await
+        .map_err(|_| {
+            format!(
+                "Codex model discovery did not finish within {} seconds",
+                MODEL_LIST_TIMEOUT.as_secs()
+            )
+        })?
+}
+
+async fn list_codex_models_inner(path: PathBuf) -> Result<BridgeModelCatalog, String> {
+    let workdir = bridge_workdir()?;
+    let mut cmd = tokio::process::Command::new(path);
+    cmd.args(["app-server", "--stdio"]);
+    cmd.current_dir(workdir);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    for var in SUBSCRIPTION_OVERRIDE_ENV_VARS {
+        cmd.env_remove(var);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|error| format!("Could not start Codex app-server: {error}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Could not open Codex app-server stdin".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Could not open Codex app-server stdout".to_string())?
+        .take(MODEL_LIST_STDOUT_LIMIT);
+    let mut stdout = tokio::io::BufReader::new(stdout);
+    let stderr_task = child.stderr.take().map(|stderr| {
+        tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            let _ = stderr
+                .take(MODEL_LIST_STDERR_LIMIT)
+                .read_to_end(&mut bytes)
+                .await;
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+    });
+
+    let result = async {
+        send_json_line(
+            &mut stdin,
+            &json!({
+                "jsonrpc":"2.0",
+                "id":1,
+                "method":"initialize",
+                "params":{
+                    "clientInfo":{
+                        "name":"wfdiag",
+                        "version":env!("CARGO_PKG_VERSION")
+                    },
+                    "capabilities":{"experimentalApi":true}
+                }
+            }),
+        )
+        .await?;
+        let _ = read_jsonrpc_result(&mut stdout, 1).await?;
+
+        let mut catalog = BridgeModelCatalog::default();
+        let mut cursor: Option<String> = None;
+        let mut seen_cursors = HashSet::new();
+
+        for page_index in 0..MODEL_LIST_MAX_PAGES {
+            let request_id = page_index as u64 + 2;
+            send_json_line(
+                &mut stdin,
+                &json!({
+                    "jsonrpc":"2.0",
+                    "id":request_id,
+                    "method":"model/list",
+                    "params":{
+                        "cursor":cursor,
+                        "limit":100,
+                        "includeHidden":false
+                    }
+                }),
+            )
+            .await?;
+            let response = read_jsonrpc_result(&mut stdout, request_id).await?;
+            let page = parse_codex_model_page(&response)?;
+            if catalog.default_model.is_none() {
+                catalog.default_model = page.default_model;
+            }
+            catalog.models.extend(page.models);
+
+            let Some(next) = page.next_cursor else {
+                catalog.models = stable_dedupe_bridge_models(catalog.models);
+                return Ok(catalog);
+            };
+            if !seen_cursors.insert(next.clone()) {
+                return Err("Codex app-server repeated a model-list cursor".to_string());
+            }
+            cursor = Some(next);
+        }
+
+        Err("Codex app-server model list exceeded the pagination limit".to_string())
+    }
+    .await;
+
+    // The app-server exists only for this discovery call. It has no shutdown
+    // RPC, so terminate it after receiving the final page.
+    drop(stdin);
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+    let stderr = match stderr_task {
+        Some(task) => tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+
+    result.map_err(|error| {
+        let detail = tail(stderr.trim(), 300);
+        if detail.is_empty() {
+            error
+        } else {
+            format!("{error} — {detail}")
+        }
+    })
+}
+
+async fn send_json_line(
+    stdin: &mut tokio::process::ChildStdin,
+    value: &Value,
+) -> Result<(), String> {
+    let mut bytes = serde_json::to_vec(value)
+        .map_err(|error| format!("Could not encode CLI model request: {error}"))?;
+    bytes.push(b'\n');
+    stdin
+        .write_all(&bytes)
+        .await
+        .map_err(|error| format!("Could not send CLI model request: {error}"))?;
+    stdin
+        .flush()
+        .await
+        .map_err(|error| format!("Could not flush CLI model request: {error}"))
+}
+
+async fn read_jsonrpc_result<R>(reader: &mut R, wanted_id: u64) -> Result<Value, String>
+where
+    R: AsyncBufRead + Unpin,
+{
+    loop {
+        let mut line = String::new();
+        let count = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|error| format!("Could not read CLI model response: {error}"))?;
+        if count == 0 {
+            return Err(format!(
+                "CLI model server closed before response {wanted_id}"
+            ));
+        }
+        let value: Value = serde_json::from_str(line.trim())
+            .map_err(|error| format!("CLI model server returned malformed JSON: {error}"))?;
+        // Notifications have no id and are deliberately ignored.
+        if value.get("id").and_then(Value::as_u64) != Some(wanted_id) {
+            continue;
+        }
+        if let Some(error) = value.get("error") {
+            let detail = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown JSON-RPC error");
+            return Err(format!("CLI model server rejected the request: {detail}"));
+        }
+        return value
+            .get("result")
+            .cloned()
+            .ok_or_else(|| "CLI model server returned no result".to_string());
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CodexModelPage {
+    models: Vec<BridgeModel>,
+    default_model: Option<String>,
+    next_cursor: Option<String>,
+}
+
+fn parse_codex_model_page(result: &Value) -> Result<CodexModelPage, String> {
+    let data = result
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Codex model list returned no data array".to_string())?;
+    let mut page = CodexModelPage {
+        next_cursor: result
+            .get("nextCursor")
+            .and_then(Value::as_str)
+            .filter(|cursor| !cursor.is_empty())
+            .map(str::to_string),
+        ..CodexModelPage::default()
+    };
+    for raw in data {
+        let Some(id) = raw
+            .get("model")
+            .or_else(|| raw.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if raw.get("isDefault").and_then(Value::as_bool) == Some(true)
+            && page.default_model.is_none()
+        {
+            page.default_model = Some(id.clone());
+        }
+        page.models.push(BridgeModel {
+            label: optional_distinct(raw.get("displayName").and_then(Value::as_str), &id),
+            description: non_empty_owned(raw.get("description").and_then(Value::as_str)),
+            id,
+        });
+    }
+    Ok(page)
+}
+
+fn optional_distinct(value: Option<&str>, id: &str) -> Option<String> {
+    non_empty_owned(value).filter(|value| value != id)
+}
+
+fn non_empty_owned(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+pub(super) fn stable_dedupe_bridge_models(models: Vec<BridgeModel>) -> Vec<BridgeModel> {
+    let mut seen = HashSet::new();
+    models
+        .into_iter()
+        .filter(|model| seen.insert(model.id.clone()))
+        .collect()
 }
 
 /// Run a prepared command hidden and bounded: no console window, optional
@@ -499,10 +780,27 @@ mod tests {
 
     #[test]
     fn model_sanitizer_accepts_published_ids_and_rejects_injection() {
-        for ok in ["gpt-5.5-codex", "o4-mini", "org/model:tag", "a_b.c-d"] {
+        for ok in [
+            "gpt-5.5-codex",
+            "o4-mini",
+            "org/model:tag",
+            "a_b.c-d",
+            "opus[1m]",
+            "claude-fable-5[1m]",
+        ] {
             assert_eq!(sanitize_model(ok).unwrap(), ok);
         }
-        for bad in ["", "  ", "model name", "m;rm -rf", "m\"x", "m&y", "m|z"] {
+        for bad in [
+            "",
+            "  ",
+            "model name",
+            "opus[1m];rm",
+            "claude-fable-5[1m] && whoami",
+            "m\"x",
+            "m&y",
+            "m|z",
+            "m$(whoami)",
+        ] {
             assert!(sanitize_model(bad).is_err(), "accepted {bad:?}");
         }
     }
@@ -548,5 +846,82 @@ mod tests {
                 "bridge forgot to scrub {key}"
             );
         }
+    }
+
+    #[test]
+    fn codex_model_page_uses_wire_model_and_provider_metadata() {
+        let page = parse_codex_model_page(&json!({
+            "data":[
+                {
+                    "id":"picker-sol",
+                    "model":"gpt-5.6-sol",
+                    "displayName":"GPT-5.6-Sol",
+                    "description":"Latest frontier agentic coding model.",
+                    "isDefault":true
+                },
+                {
+                    "id":"picker-terra",
+                    "model":"gpt-5.6-terra",
+                    "displayName":"GPT-5.6-Terra",
+                    "description":"Balanced model.",
+                    "isDefault":false
+                }
+            ],
+            "nextCursor":"page-2"
+        }))
+        .unwrap();
+        assert_eq!(page.default_model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(page.next_cursor.as_deref(), Some("page-2"));
+        assert_eq!(
+            page.models[0],
+            BridgeModel {
+                id: "gpt-5.6-sol".into(),
+                label: Some("GPT-5.6-Sol".into()),
+                description: Some("Latest frontier agentic coding model.".into()),
+            }
+        );
+        assert_eq!(page.models[1].id, "gpt-5.6-terra");
+    }
+
+    #[test]
+    fn codex_model_page_tolerates_new_fields_and_skips_invalid_rows() {
+        let page = parse_codex_model_page(&json!({
+            "data":[
+                {"id":"gpt-future","displayName":"GPT Future","isDefault":false,"newField":42},
+                {"displayName":"Missing id"}
+            ],
+            "nextCursor":null,
+            "futureTopLevelField":true
+        }))
+        .unwrap();
+        assert_eq!(page.models.len(), 1);
+        assert_eq!(page.models[0].id, "gpt-future");
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn bridge_model_dedupe_preserves_first_seen_order_and_metadata() {
+        let models = vec![
+            BridgeModel {
+                id: "gpt-5.6-sol".into(),
+                label: Some("First".into()),
+                description: None,
+            },
+            BridgeModel {
+                id: "gpt-5.6-terra".into(),
+                label: None,
+                description: None,
+            },
+            BridgeModel {
+                id: "gpt-5.6-sol".into(),
+                label: Some("Duplicate".into()),
+                description: Some("Later".into()),
+            },
+        ];
+        let deduped = stable_dedupe_bridge_models(models);
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].id, "gpt-5.6-sol");
+        assert_eq!(deduped[0].label.as_deref(), Some("First"));
+        assert_eq!(deduped[1].id, "gpt-5.6-terra");
     }
 }
