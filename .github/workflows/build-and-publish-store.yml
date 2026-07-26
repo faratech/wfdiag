@@ -1,0 +1,601 @@
+name: Build and Publish to Microsoft Store
+
+# Trigger on version tags (e.g., v2.1.6)
+# All version tags will build, create release, AND publish to Microsoft Store
+#
+# Manual dispatch is available for testing without creating tags
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'  # e.g., v2.1.6
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., 2.1.5)'
+        required: true
+      publish_to_store:
+        description: 'Publish to Microsoft Store'
+        type: boolean
+        default: true
+      create_release:
+        description: 'Create GitHub Release'
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  PROJECT_NAME: WindowsForum_Diagnostics
+  PUBLISHER: CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4
+
+# Default to minimal permissions
+permissions:
+  contents: read
+
+jobs:
+  # =============================================================================
+  # Build x64 executable
+  # =============================================================================
+  build-x64:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish_to_store: ${{ steps.version.outputs.publish_to_store }}
+      create_release: ${{ steps.version.outputs.create_release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version and release type
+        id: version
+        shell: pwsh
+        run: |
+          $publishToStore = "false"
+          $createRelease = "false"
+
+          if ("${{ github.event.inputs.version }}" -ne "") {
+            # Manual dispatch
+            $version = "${{ github.event.inputs.version }}"
+            $publishToStore = "${{ github.event.inputs.publish_to_store }}"
+            $createRelease = "${{ github.event.inputs.create_release }}"
+          } elseif ("${{ github.ref_type }}" -eq "tag") {
+            # Tag push - always create release and publish to store
+            $tagName = "${{ github.ref_name }}"
+            $version = $tagName.TrimStart('v')
+            $createRelease = "true"
+            $publishToStore = "true"
+            Write-Host "Tag release detected: $tagName"
+          } else {
+            $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          }
+
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Host "::error::Version must be X.Y.Z without a leading v; got '$version'."
+            exit 1
+          }
+
+          # The publish-to-store job depends on create-release succeeding —
+          # requesting a store publish without a release silently no-ops
+          # both downstream jobs (create-release is skipped, which is not
+          # "success", so publish-to-store's condition never passes either)
+          # while the rest of the run still shows green. Fail loudly instead.
+          if ($publishToStore -eq "true" -and $createRelease -ne "true") {
+            Write-Host "::error::publish_to_store=true requires create_release=true (Store publish runs only after the GitHub Release is created)."
+            exit 1
+          }
+
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "publish_to_store=$publishToStore" >> $env:GITHUB_OUTPUT
+          echo "create_release=$createRelease" >> $env:GITHUB_OUTPUT
+          Write-Host "Building version: $version"
+          Write-Host "Publish to store: $publishToStore"
+          Write-Host "Create release: $createRelease"
+
+      - name: Verify source and requested versions match
+        run: python scripts/check-version-sync.py --expected "${{ steps.version.outputs.version }}"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: x64
+
+      - name: Install dependencies
+        shell: pwsh
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build x64 executable
+        working-directory: src-tauri
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+        env:
+          # Match the ARM64 job: statically link the VC++ runtime so the
+          # portable exe doesn't need the redistributable on a clean machine.
+          RUSTFLAGS: -C target-feature=+crt-static
+
+      - name: Upload x64 executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: exe-x64
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/wfdiag-tauri.exe
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist/
+
+  # =============================================================================
+  # Build ARM64 executable
+  # =============================================================================
+  build-arm64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: arm64
+
+      - name: Check ARM64 build tools
+        shell: pwsh
+        run: |
+          # GitHub-hosted runners should have ARM64 tools pre-installed
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Write-Host "VS Path: $vsPath"
+
+          # Find ARM64 tools
+          $arm64Paths = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC\*\bin\Hostx64\arm64" -ErrorAction SilentlyContinue
+          if ($arm64Paths) {
+            Write-Host "ARM64 build tools found:"
+            $arm64Paths | ForEach-Object { Write-Host "  $_" }
+          } else {
+            Write-Host "::warning::ARM64 build tools not found in default location"
+            # List what's available
+            Write-Host "Available MSVC tools:"
+            Get-ChildItem "$vsPath\VC\Tools\MSVC\*\bin\Hostx64" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+          }
+
+      - name: Install dependencies
+        shell: pwsh
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build ARM64 executable
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          # Set up environment for ARM64 cross-compilation
+          cargo build --locked --release --target aarch64-pc-windows-msvc
+        env:
+          # Ensure linker can find ARM64 libs
+          RUSTFLAGS: -C target-feature=+crt-static
+
+      - name: Upload ARM64 executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: exe-arm64
+          path: src-tauri/target/aarch64-pc-windows-msvc/release/wfdiag-tauri.exe
+
+  # =============================================================================
+  # Create MSIX Bundle with AI DLLs
+  # =============================================================================
+  create-msix-bundle:
+    needs: [build-x64, build-arm64]
+    runs-on: windows-latest
+    outputs:
+      bundle_path: ${{ steps.bundle.outputs.bundle_path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download x64 executable
+        uses: actions/download-artifact@v4
+        with:
+          name: exe-x64
+          path: artifacts/x64
+
+      - name: Download ARM64 executable
+        uses: actions/download-artifact@v4
+        with:
+          name: exe-arm64
+          path: artifacts/arm64
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: artifacts/dist
+
+      - name: Prepare MSIX package directories
+        id: bundle
+        shell: pwsh
+        run: |
+          $version = "${{ needs.build-x64.outputs.version }}"
+          $projectName = "${{ env.PROJECT_NAME }}"
+          $publisher = "${{ env.PUBLISHER }}"
+
+          Write-Host "Creating MSIX bundle v$version"
+
+          # Create directories
+          $msixDir = "msix-build"
+          $x64Dir = "$msixDir/x64"
+          $arm64Dir = "$msixDir/arm64"
+          $bundleDir = "$msixDir/bundle"
+
+          New-Item -ItemType Directory -Force -Path $x64Dir, $arm64Dir, $bundleDir
+
+          # Process each architecture
+          foreach ($arch in @("x64", "arm64")) {
+            $targetDir = "$msixDir/$arch"
+            $exeSource = "artifacts/$arch/wfdiag-tauri.exe"
+
+            Write-Host "`nPreparing $arch package..."
+
+            # Copy executable
+            Copy-Item $exeSource "$targetDir/$projectName.exe"
+
+            # Copy frontend dist
+            Copy-Item -Recurse "artifacts/dist" "$targetDir/dist"
+
+            # Copy icons (use PNG versions)
+            Copy-Item "src-tauri/icons/icon.png" "$targetDir/Logo.png"
+            Copy-Item "src-tauri/icons/192x192.png" "$targetDir/Square150x150Logo.png"
+            Copy-Item "src-tauri/icons/44x44.png" "$targetDir/Square44x44Logo.png"
+            Copy-Item "src-tauri/icons/Wide310x150Logo.png" "$targetDir/Wide310x150Logo.png"
+
+            # Copy Windows App SDK AI DLLs if they exist
+            $aiSdkDir = "src-tauri/resources/ai-sdk/$arch"
+            if (Test-Path $aiSdkDir) {
+              Write-Host "  Copying AI SDK DLLs for $arch..."
+              Get-ChildItem "$aiSdkDir/*.dll" | ForEach-Object {
+                Copy-Item $_.FullName "$targetDir/$($_.Name)"
+                Write-Host "    - $($_.Name)"
+              }
+            } else {
+              Write-Host "  Note: No AI SDK DLLs found at $aiSdkDir"
+            }
+
+            # Create AppxManifest.xml
+            $manifest = @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+                   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+                   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+                   xmlns:systemai="http://schemas.microsoft.com/appx/manifest/systemai/windows10"
+                   IgnorableNamespaces="uap rescap systemai">
+            <Identity Name="32827MikeFara.WindowsForumDiagnostics"
+                      Publisher="$publisher"
+                      Version="$version.0"
+                      ProcessorArchitecture="$arch" />
+            <Properties>
+              <DisplayName>WindowsForum Diagnostics</DisplayName>
+              <PublisherDisplayName>WindowsForum.com</PublisherDisplayName>
+              <Logo>Logo.png</Logo>
+            </Properties>
+            <Dependencies>
+              <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.26100.0" MaxVersionTested="10.0.26226.0" />
+              <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26226.0" />
+              <PackageDependency Name="Microsoft.WindowsAppRuntime.1.8"
+                                 MinVersion="8000.675.1142.0"
+                                 Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
+            </Dependencies>
+            <Resources>
+              <Resource Language="en-us" />
+            </Resources>
+            <Applications>
+              <Application Id="App" Executable="$projectName.exe" EntryPoint="Windows.FullTrustApplication">
+                <uap:VisualElements DisplayName="WindowsForum Diagnostics"
+                                    Description="System diagnostics tool for Windows"
+                                    BackgroundColor="transparent"
+                                    Square150x150Logo="Square150x150Logo.png"
+                                    Square44x44Logo="Square44x44Logo.png">
+                  <uap:DefaultTile Wide310x150Logo="Wide310x150Logo.png" />
+                </uap:VisualElements>
+              </Application>
+            </Applications>
+            <Capabilities>
+              <rescap:Capability Name="runFullTrust" />
+              <systemai:Capability Name="systemAIModels"/>
+            </Capabilities>
+          </Package>
+          "@
+            $manifest = $manifest.TrimStart()
+            Set-Content -Path "$targetDir/AppxManifest.xml" -Value $manifest -Encoding utf8
+            $manifestText = Get-Content -Raw "$targetDir/AppxManifest.xml"
+            if (-not $manifestText.StartsWith('<?xml')) {
+              throw "Generated AppxManifest.xml must start with an XML declaration"
+            }
+            [xml]$manifestText | Out-Null
+          }
+
+          # Find Windows SDK
+          $sdkPath = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*" -Directory |
+                     Sort-Object Name -Descending |
+                     Select-Object -First 1
+          $makeAppx = Join-Path $sdkPath.FullName "x64\MakeAppx.exe"
+
+          Write-Host "`nUsing MakeAppx from: $makeAppx"
+
+          # Create individual MSIX packages
+          foreach ($arch in @("x64", "arm64")) {
+            $msixPath = "$bundleDir/${projectName}_${version}_$arch.msix"
+            Write-Host "`nCreating $arch MSIX..."
+            & $makeAppx pack /d "$msixDir/$arch" /p $msixPath /o
+            if ($LASTEXITCODE -ne 0) { throw "Failed to create $arch MSIX" }
+          }
+
+          # Create MSIX bundle
+          $bundlePath = "$msixDir/${projectName}_${version}.msixbundle"
+          Write-Host "`nCreating MSIX bundle..."
+          & $makeAppx bundle /d $bundleDir /p $bundlePath /o
+          if ($LASTEXITCODE -ne 0) { throw "Failed to create MSIX bundle" }
+
+          Write-Host "`nBundle created: $bundlePath"
+          echo "bundle_path=$bundlePath" >> $env:GITHUB_OUTPUT
+
+      - name: Validate Store bundle contents
+        shell: pwsh
+        run: |
+          $version = "${{ needs.build-x64.outputs.version }}"
+          $bundle = "msix-build/${{ env.PROJECT_NAME }}_${version}.msixbundle"
+          if (-not (Test-Path $bundle)) { throw "Bundle not found: $bundle" }
+
+          $sdkPath = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*" -Directory |
+                     Sort-Object Name -Descending |
+                     Select-Object -First 1
+          $makeAppx = Join-Path $sdkPath.FullName "x64\MakeAppx.exe"
+          $inspectRoot = "msix-build/inspect"
+          Remove-Item $inspectRoot -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "$inspectRoot/bundle" | Out-Null
+
+          & $makeAppx unbundle /p $bundle /d "$inspectRoot/bundle" /o
+          if ($LASTEXITCODE -ne 0) { throw "MakeAppx could not unpack the bundle" }
+
+          $packages = @(Get-ChildItem "$inspectRoot/bundle" -Filter "*.msix")
+          if ($packages.Count -ne 2) {
+            throw "Expected two architecture packages; found $($packages.Count)"
+          }
+
+          $requiredFiles = @(
+            "dist/index.html",
+            "Logo.png",
+            "Square150x150Logo.png",
+            "Square44x44Logo.png",
+            "Wide310x150Logo.png",
+            "Microsoft.Windows.AI.Text.dll",
+            "Microsoft.Windows.AI.Text.Projection.dll",
+            "Microsoft.WindowsAppRuntime.dll",
+            "Microsoft.WindowsAppRuntime.Bootstrap.dll",
+            "WinRT.Runtime.dll"
+          )
+          $foundArchitectures = @()
+
+          foreach ($package in $packages) {
+            $unpacked = Join-Path $inspectRoot $package.BaseName
+            New-Item -ItemType Directory -Force -Path $unpacked | Out-Null
+            & $makeAppx unpack /p $package.FullName /d $unpacked /o
+            if ($LASTEXITCODE -ne 0) { throw "Could not unpack $($package.Name)" }
+
+            [xml]$manifest = Get-Content -Raw (Join-Path $unpacked "AppxManifest.xml")
+            $identity = $manifest.SelectSingleNode("/*[local-name()='Package']/*[local-name()='Identity']")
+            $identityName = $identity.GetAttribute("Name")
+            $publisher = $identity.GetAttribute("Publisher")
+            $packageVersion = $identity.GetAttribute("Version")
+            $architecture = $identity.GetAttribute("ProcessorArchitecture")
+            if ($identityName -ne "32827MikeFara.WindowsForumDiagnostics") {
+              throw "$($package.Name): wrong package identity '$identityName'"
+            }
+            if ($publisher -ne "${{ env.PUBLISHER }}") {
+              throw "$($package.Name): wrong publisher '$publisher'"
+            }
+            if ($packageVersion -ne "$version.0") {
+              throw "$($package.Name): version '$packageVersion' does not match '$version.0'"
+            }
+            if ($architecture -notin @("x64", "arm64")) {
+              throw "$($package.Name): unexpected architecture '$architecture'"
+            }
+            $foundArchitectures += $architecture
+
+            $capabilities = @($manifest.SelectNodes("//*[local-name()='Capability']") | ForEach-Object { $_.GetAttribute("Name") })
+            foreach ($requiredCapability in @("runFullTrust", "systemAIModels")) {
+              if ($requiredCapability -notin $capabilities) {
+                throw "$($package.Name): missing $requiredCapability capability"
+              }
+            }
+
+            $framework = $manifest.SelectSingleNode("//*[local-name()='PackageDependency' and @Name='Microsoft.WindowsAppRuntime.1.8']")
+            if (-not $framework) { throw "$($package.Name): missing Windows App Runtime 1.8 dependency" }
+
+            @($requiredFiles + "${{ env.PROJECT_NAME }}.exe") | ForEach-Object {
+              if (-not (Test-Path (Join-Path $unpacked $_))) {
+                throw "$($package.Name): missing required file $_"
+              }
+            }
+          }
+
+          $architectureSet = @($foundArchitectures | Sort-Object -Unique) -join ','
+          if ($architectureSet -ne 'arm64,x64') {
+            throw "Bundle architectures are '$($foundArchitectures -join ',')', expected x64 and arm64"
+          }
+          Write-Host "Validated Store identity, capabilities, framework, assets, AI DLLs, and both architectures."
+
+      - name: Upload unsigned bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: msixbundle-unsigned
+          path: msix-build/*.msixbundle
+
+  # =============================================================================
+  # Publish to Microsoft Store (triggers separate workflow after release)
+  # =============================================================================
+  publish-to-store:
+    needs: [build-x64, create-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    if: needs.build-x64.outputs.publish_to_store == 'true' && needs.create-release.result == 'success'
+    steps:
+      - name: Trigger Store publish workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.build-x64.outputs.version }}"
+          echo "Triggering publish-existing-to-store workflow for v$VERSION..."
+          gh workflow run publish-existing-to-store.yml \
+            --repo ${{ github.repository }} \
+            -f version="$VERSION"
+          echo "Store publish workflow triggered successfully"
+
+  # =============================================================================
+  # Generate Attestations for all artifacts
+  # =============================================================================
+  attest-artifacts:
+    needs: [build-x64, build-arm64, create-msix-bundle]
+    if: needs.build-x64.result == 'success' && needs.build-arm64.result == 'success' && needs.create-msix-bundle.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f -name "*.exe" -o -name "*.msixbundle" | head -20
+
+      - name: Attest x64 executable
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/exe-x64/wfdiag-tauri.exe
+
+      - name: Attest ARM64 executable
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/exe-arm64/wfdiag-tauri.exe
+
+      - name: Attest MSIX bundle
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/msixbundle-unsigned/*.msixbundle
+
+  # =============================================================================
+  # Create GitHub Release
+  # =============================================================================
+  create-release:
+    needs: [build-x64, create-msix-bundle, attest-artifacts]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: needs.build-x64.result == 'success' && needs.create-msix-bundle.result == 'success' && needs.build-x64.outputs.create_release == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download MSIX bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: msixbundle-unsigned
+          path: release
+
+      - name: Download x64 executable
+        uses: actions/download-artifact@v4
+        with:
+          name: exe-x64
+          path: release/exe-x64
+
+      - name: Download ARM64 executable
+        uses: actions/download-artifact@v4
+        with:
+          name: exe-arm64
+          path: release/exe-arm64
+
+      - name: Prepare release files
+        run: |
+          cd release
+          VERSION="${{ needs.build-x64.outputs.version }}"
+
+          # Rename executables for clarity
+          if [ -f "exe-x64/wfdiag-tauri.exe" ]; then
+            mv exe-x64/wfdiag-tauri.exe "WindowsForum_Diagnostics_${VERSION}_x64.exe"
+          fi
+          if [ -f "exe-arm64/wfdiag-tauri.exe" ]; then
+            mv exe-arm64/wfdiag-tauri.exe "WindowsForum_Diagnostics_${VERSION}_arm64.exe"
+          fi
+
+          # Clean up empty directories
+          rmdir exe-x64 exe-arm64 2>/dev/null || true
+
+          ls -la
+
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          VERSION="${{ needs.build-x64.outputs.version }}"
+          TAG="v${VERSION}"
+          git fetch --force --tags
+
+          TAG_NOTES="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents:body)')"
+          if [ -z "${TAG_NOTES//[[:space:]]/}" ]; then
+            TAG_NOTES="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents:subject)')"
+          fi
+
+          {
+            echo "## WindowsForum Diagnostics v${VERSION}"
+            echo
+            if [ -n "${TAG_NOTES//[[:space:]]/}" ]; then
+              echo "### Changelog"
+              echo
+              printf '%s\n' "$TAG_NOTES"
+              echo
+            fi
+            echo "### Recommended Installation"
+            echo "**[Get from Microsoft Store](https://apps.microsoft.com/detail/9nj59rh053pv)** - Signed by Microsoft, automatic updates"
+            echo
+            echo "### Alternative Downloads"
+            echo "- **MSIX Bundle**: Unsigned Store-submission artifact; it is not directly installable"
+            echo "- **Portable EXE**: Standalone executables for x64 and ARM64, no installation required"
+          } > release/RELEASE_NOTES.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build-x64.outputs.version }}
+          name: WindowsForum Diagnostics v${{ needs.build-x64.outputs.version }}
+          draft: false
+          prerelease: false
+          files: |
+            release/*.msixbundle
+            release/*.exe
+          body_path: release/RELEASE_NOTES.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

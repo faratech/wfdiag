@@ -1,0 +1,101 @@
+import React, { useState, useCallback } from 'react'
+import { useMonitoring } from '../hooks/useMonitoring'
+import type { SystemStats } from '../types/monitoring'
+import { EmptyState, Skeleton } from '../components/ui'
+import { ChartCard } from './ChartCard'
+import { formatBytesMb } from './util'
+
+const HISTORY = 60
+
+interface Series { cpu: number[]; mem: number[]; disk: number[]; net: number[]; gpu: number[]; npu: number[] }
+
+export const MonitorScreen: React.FC = () => {
+  const [series, setSeries] = useState<Series>({ cpu: [], mem: [], disk: [], net: [], gpu: [], npu: [] })
+  // Last non-null sample, kept so the header/cards don't blank out when the
+  // monitoring hook momentarily reports null stats (e.g. while paused)
+  const [lastStats, setLastStats] = useState<SystemStats | null>(null)
+
+  const onStats = useCallback((s: SystemStats) => {
+    setLastStats(s)
+    const push = (arr: number[], v: number) => {
+      const next = [...arr, v]
+      return next.length > HISTORY ? next.slice(next.length - HISTORY) : next
+    }
+    setSeries(prev => ({
+      cpu: push(prev.cpu, s.cpu_utilization),
+      mem: push(prev.mem, s.memory_utilization),
+      disk: push(prev.disk, s.storage_used_percent ?? s.disk_utilization),
+      net: push(prev.net, (s.network_upload_kb + s.network_download_kb) / 1024),
+      gpu: push(prev.gpu, s.gpu_utilization ?? 0),
+      npu: push(prev.npu, s.npu_utilization ?? 0),
+    }))
+  }, [])
+
+  const { isActive, isLoading, error, stats, start, toggle, refresh } = useMonitoring({ autoStart: true, onStats, componentName: 'MonitorScreen' })
+
+  const last = stats || lastStats
+  const netMax = Math.max(2, ...series.net) * 1.2 || 2
+
+  return (
+    <>
+      <div className="monitor-head screen-toolbar">
+        <span className={`tag ${isActive ? 'success' : 'neutral'}`}>
+          <span className={`mon-dot ${isActive ? 'live' : ''}`} />
+          {isActive ? 'Live · sampling' : 'Paused'}
+        </span>
+        {last && (
+          <span className="hw-line">
+            {last.per_cpu_utilization?.length || 0} threads · {last.memory_total_gb.toFixed(1)} GB RAM
+            {last.gpu_available ? ` · GPU: ${last.gpu_name ?? 'present'}` : ''}
+            {last.npu_available ? ` · NPU: ${last.npu_name ?? 'present'}` : ''}
+          </span>
+        )}
+        <div className="spacer" />
+        <button className="btn" onClick={() => toggle()} disabled={isLoading}>
+          <i className={`fa-solid ${isActive ? 'fa-pause' : 'fa-play'}`} /> {isActive ? 'Pause' : 'Resume'}
+        </button>
+        <button className="btn" onClick={() => refresh()}><i className="fa-solid fa-arrows-rotate" /> Refresh</button>
+      </div>
+
+      <div className="scrollable screen-pad">
+        {error && last && (
+          <div className="inline-error" role="alert">
+            <span><i className="fa-solid fa-triangle-exclamation" /> {error}</span>
+            <button className="btn" onClick={() => void (isActive ? refresh() : start())}>
+              {isActive ? 'Retry refresh' : 'Resume monitoring'}
+            </button>
+          </div>
+        )}
+        {error && !last && (
+          <EmptyState
+            icon="fa-triangle-exclamation"
+            title="Live monitoring could not start"
+            sub={error}
+            actions={<button className="btn primary" onClick={() => void start()}>Try again</button>}
+          />
+        )}
+        {!error && !last && (
+          <div className="charts-grid" aria-hidden="true">
+            {Array.from({ length: 6 }, (_, i) => (
+              <Skeleton key={i} variant="block" height={140} />
+            ))}
+          </div>
+        )}
+        {last && (
+        <div className="charts-grid">
+          <ChartCard title="CPU" value={(last?.cpu_utilization ?? 0).toFixed(1)} sub="%" series={series.cpu} max={100} hint={last?.cpu_frequency ? `${(last.cpu_frequency / 1000).toFixed(2)} GHz` : 'Processor utilization'} />
+          <ChartCard title="Memory" value={(last?.memory_utilization ?? 0).toFixed(1)} sub="%" series={series.mem} max={100} hint={last ? `${last.memory_used_gb.toFixed(1)} / ${last.memory_total_gb.toFixed(1)} GB used` : ''} />
+          <ChartCard title="Storage" value={(last?.storage_used_percent ?? last?.disk_utilization ?? 0).toFixed(1)} sub="%" series={series.disk} max={100} hint="Provisioned storage capacity used" />
+          <ChartCard title="Network" value={(((last?.network_upload_kb ?? 0) + (last?.network_download_kb ?? 0)) / 1024).toFixed(2)} sub="MB/s" series={series.net} max={netMax} hint="Up + down throughput" />
+          {last?.gpu_available && (
+            <ChartCard title="GPU" value={(last?.gpu_utilization ?? 0).toFixed(1)} sub="%" series={series.gpu} max={100} hint={last.gpu_memory_total_mb > 0 ? `${formatBytesMb(last.gpu_memory_used_mb)} / ${formatBytesMb(last.gpu_memory_total_mb)}` : (last.gpu_name ?? 'Graphics adapter')} />
+          )}
+          {last?.npu_available && (
+            <ChartCard title="NPU" value={(last?.npu_utilization ?? 0).toFixed(1)} sub="%" series={series.npu} max={100} hint={last.npu_memory_total_mb > 0 ? `${formatBytesMb(last.npu_memory_used_mb)} / ${formatBytesMb(last.npu_memory_total_mb)}` : (last?.npu_name ?? 'Neural processing unit')} />
+          )}
+        </div>
+        )}
+      </div>
+    </>
+  )
+}

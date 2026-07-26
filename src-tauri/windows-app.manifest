@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+  <!--
+    Associates the loose exe with the sparse identity package registered via
+    Add-AppxPackage -ExternalLocation (see scripts/build-cross.py build-sparse).
+    packageName/publisher must match the sparse manifest <Identity>; without
+    this element Windows cannot attach package identity to a directly-launched
+    process, and the Windows AI APIs (systemAIModels) stay locked.
+    Ignored when the exe runs from inside a real MSIX package.
+  -->
+  <msix xmlns="urn:schemas-microsoft-com:msix.v1"
+        publisher="CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4"
+        packageName="32827MikeFara.WindowsForumDiagnostics"
+        applicationId="App" />
+</assembly>

@@ -1,0 +1,102 @@
+name: Check Microsoft Store Submission
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_id:
+        description: 'Partner Center app ID'
+        default: '9NJ59RH053PV'
+        required: true
+      submission_id:
+        description: 'Submission ID to inspect'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  check-submission:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query Partner Center submission status
+        env:
+          APP_ID: ${{ github.event.inputs.app_id }}
+          SUBMISSION_ID: ${{ github.event.inputs.submission_id }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+
+          token_response="$(curl -sS -X POST \
+            "https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=client_credentials" \
+            -d "client_id=${AZURE_CLIENT_ID}" \
+            -d "client_secret=${AZURE_CLIENT_SECRET}" \
+            -d "resource=https://manage.devcenter.microsoft.com")"
+
+          token="$(echo "$token_response" | jq -r '.access_token // empty')"
+          if [ -z "$token" ]; then
+            echo "::error::Failed to get Partner Center access token"
+            echo "$token_response" | jq '{error, error_description}'
+            exit 1
+          fi
+          echo "::add-mask::$token"
+
+          base_url="https://manage.devcenter.microsoft.com/v1.0/my/applications/${APP_ID}"
+
+          echo "Partner Center app ID: ${APP_ID}"
+          echo "Submission ID: ${SUBMISSION_ID}"
+          echo ""
+
+          app_details="$(curl -sS -X GET "$base_url" \
+            -H "Authorization: Bearer $token")"
+
+          echo "Application submission pointers:"
+          echo "$app_details" | jq '{
+            id,
+            primaryName,
+            lastPublishedApplicationSubmission: (.lastPublishedApplicationSubmission // null | {id, status, updatedDateTime, submittedDateTime}),
+            pendingApplicationSubmission: (.pendingApplicationSubmission // null | {id, status, updatedDateTime, submittedDateTime})
+          }'
+          echo ""
+
+          submission="$(curl -sS -X GET "$base_url/submissions/${SUBMISSION_ID}" \
+            -H "Authorization: Bearer $token")"
+
+          echo "Submission details:"
+          echo "$submission" | jq '{
+            id,
+            status,
+            statusDetails,
+            targetPublishMode,
+            targetPublishDate,
+            visibility,
+            flightId,
+            applicationPackages: [(.applicationPackages // [])[] | {
+              fileName,
+              fileStatus,
+              version,
+              architecture,
+              languages,
+              capabilities,
+              minimumDirectXVersion,
+              minimumSystemRam
+            }]
+          }'
+          echo ""
+
+          status="$(curl -sS -X GET "$base_url/submissions/${SUBMISSION_ID}/status" \
+            -H "Authorization: Bearer $token")"
+
+          echo "Submission status endpoint:"
+          echo "$status" | jq '{
+            status,
+            statusDetails,
+            errors,
+            warnings,
+            certificationReports,
+            hasAdvancedListingPermission,
+            packageValidationResult
+          }'

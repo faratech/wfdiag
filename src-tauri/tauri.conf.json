@@ -1,0 +1,56 @@
+{
+    "build":  {
+                  "beforeDevCommand":  "npm run dev",
+                  "beforeBuildCommand":  "npm run build",
+                  "devUrl":  "http://localhost:3000",
+                  "frontendDist":  "../dist"
+              },
+    "bundle":  {
+                   "active":  true,
+                   "targets":  "all",
+                   "icon":  [
+                                "icons/icon.ico"
+                            ],
+                   "publisher": "CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4",
+                   "windows":  {
+                                   "certificateThumbprint":  null,
+                                   "digestAlgorithm":  "sha256",
+                                   "timestampUrl":  "",
+                                   "webviewInstallMode": {
+                                       "type": "downloadBootstrapper"
+                                   }
+                               }
+               },
+    "productName":  "WindowsForum Diagnostics",
+    "version": "2.5.6",
+    "identifier":  "com.windowsforum.diagnostics",
+    "plugins":  {
+
+                },
+    "app":  {
+                "security":  {
+                                 "csp":  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost https://asset.localhost; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost",
+                                 "dangerousDisableAssetCspModification":  false,
+                                 "assetProtocol":  {
+                                                       "enable":  false
+                                                   }
+                             },
+                "windows":  [
+                                {
+                                    "title":  "WindowsForum Diagnostic Tool",
+                                    "width":  1200,
+                                    "height":  800,
+                                    "minWidth":  720,
+                                    "minHeight":  540,
+                                    "resizable":  true,
+                                    "fullscreen":  false,
+                                    "decorations":  false,
+                                    "transparent":  false,
+                                    "skipTaskbar":  false,
+                                    "alwaysOnTop":  false,
+                                    "visible":  true,
+                                    "center":  true
+                                }
+                            ]
+            }
+}

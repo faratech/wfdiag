@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  # No branch filter on pull_request: stacked PRs (feature -> feature) must
+  # run the same gates as PRs into main — cargo test only ever executes here
+  # (windows-latest), never on the Linux dev box.
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  store-identity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check-version-sync.py
+      - run: python3 scripts/check-store-identity.py
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx eslint .
+      - run: npx vitest run
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  rust:
+    # The crate is cfg(windows) end to end; clippy and tests need a Windows runner
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      # tauri-build embeds ../dist via the default custom-protocol feature and
+      # dist/ is untracked, so the frontend must be built first
+      - run: npm run build
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ci
+      - run: cargo fmt --check
+        working-directory: src-tauri
+      - run: cargo clippy --locked --all-targets -- -D warnings
+        working-directory: src-tauri
+      - run: cargo test --locked
+        working-directory: src-tauri
+
+  rust-arm64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: aarch64-pc-windows-msvc
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ci-arm64
+      - run: cargo check --locked --all-targets --target aarch64-pc-windows-msvc
+        working-directory: src-tauri
+      - run: cargo clippy --locked --all-targets --target aarch64-pc-windows-msvc -- -D warnings
+        working-directory: src-tauri
+
+  cargo-audit:
+    runs-on: ubuntu-latest
+    continue-on-error: true # advisory only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit
+        working-directory: src-tauri

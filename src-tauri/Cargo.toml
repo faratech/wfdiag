@@ -1,0 +1,126 @@
+[package]
+name = "wfdiag-tauri"
+version = "2.5.6"
+description = "WindowsForum Diagnostic Tool"
+authors = ["WindowsForum"]
+edition = "2024"
+rust-version = "1.97"
+
+[lib]
+name = "wfdiag_tauri"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Tauri app binary (runs from lib.rs)
+[[bin]]
+name = "wfdiag-tauri"
+path = "src/main_tauri.rs"
+
+# Debug diagnostics binary
+[[bin]]
+name = "debug_diagnostics"
+path = "src/bin/debug_diagnostics.rs"
+
+[build-dependencies]
+embed-resource = "3"
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+# Tauri framework
+tauri = { version = "2.11", features = ["tray-icon"] }
+
+# Tauri v2 plugins
+tauri-plugin-dialog = "2.7"
+tauri-plugin-clipboard-manager = "2.3"
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2.4.2"
+
+# Async runtime
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+anyhow = "1.0"
+thiserror = "2.0"
+# Already in the tree transitively (async-openai, tauri) — direct use for the
+# GitHub update check, version comparison, and the native Anthropic/Gemini clients
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "stream"] }
+semver = "1"
+# SSE parsing for Anthropic/Gemini streaming (already in the tree via async-openai)
+eventsource-stream = "0.2"
+# CancellationToken for stoppable AI chat turns
+tokio-util = { version = "0.7", features = ["compat"] }
+uuid = { version = "1.20.0", features = ["v4"] }
+url = "2.5"
+dirs = "6.0"
+
+# OpenAI integration — Responses API for cloud OpenAI/Foundry Local one-shot,
+# chat-completion for the generic OpenAI-compatible providers (OpenRouter,
+# Ollama, Groq, …) which do not serve /v1/responses
+async-openai = { version = "0.41", default-features = false, features = ["native-tls", "responses", "chat-completion"] }
+agent-client-protocol = "1"
+# Non-Windows secure storage fallback. Windows builds use DPAPI instead.
+[target.'cfg(not(windows))'.dependencies]
+keyring-core = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", features = ["rt-tokio-crypto-rust"] }
+
+# Windows-specific dependencies
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+encoding_rs = "0.8"
+windows-core = "0.62"
+windows-future = "0.3"
+windows-collections = "0.3"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_System_Threading",
+    "Win32_System_EventLog",
+    "Win32_System_SystemInformation",
+    "Win32_System_Performance",
+    "Win32_System_TaskScheduler",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Wdk_Graphics_Direct3D",
+    "Wdk_System_SystemInformation",
+    "Win32_System_ProcessStatus",
+    "Win32_Graphics_DXCore",
+    "Win32_System_WinRT",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_System_Wmi",
+    "Win32_Storage_Packaging_Appx",
+    "Foundation",
+    "Foundation_Collections",
+    "ApplicationModel",
+    "Management_Deployment",
+] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "z"
+strip = true
+
+[profile.dev]
+opt-level = 1
