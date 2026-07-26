@@ -179,6 +179,7 @@ class SnapshotTests(unittest.TestCase):
         image = source["listings"]["en-us"]["baseListing"]["images"][0]
         image["id"] = "portal-image"
         image["fileName"] = "01-current.png"
+        image["fileStatus"] = "None"
         with tempfile.TemporaryDirectory() as directory:
             screenshot_dir = Path(directory)
             (screenshot_dir / "01-current.png").write_bytes(PNG_BYTES)
