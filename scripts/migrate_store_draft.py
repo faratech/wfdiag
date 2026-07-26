@@ -5,20 +5,22 @@ Microsoft does not allow the Store submission API to update, delete, or commit
 a draft that was created or edited in Partner Center.  This tool therefore
 implements the supported migration:
 
-1. Snapshot the writable metadata and verify that the draft has no portal-only
-   media files.
+1. Snapshot the writable metadata and, when necessary, embed authenticated
+   copies of recoverable Store screenshots.
 2. Wait for a human to delete the original draft in Partner Center.
 3. Create an API-owned clone of the last published submission.
 4. Restore the snapshotted metadata, replace the package, upload, and commit.
 
 The snapshot intentionally excludes fileUploadUrl and every other server-owned
-field.  The workflow that calls this script encrypts the snapshot before
-retaining it as a GitHub Actions artifact.
+field.  The workflow that calls this script encrypts the self-contained
+snapshot before retaining it as a GitHub Actions artifact.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import copy
 import datetime as dt
 import hashlib
@@ -27,6 +29,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import stat
 import sys
 import time
 from typing import Any
@@ -38,8 +41,24 @@ import zipfile
 
 API_ROOT = "https://manage.devcenter.microsoft.com/v1.0/my/applications"
 TOKEN_RESOURCE = "https://manage.devcenter.microsoft.com"
-SNAPSHOT_SCHEMA_VERSION = 1
+SNAPSHOT_SCHEMA_VERSION = 2
 DEFAULT_PORTAL_PRODUCT = "9NJ59RH053PV"
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MAX_SCREENSHOT_COUNT = 50
+MAX_SCREENSHOT_BYTES = 20 * 1024 * 1024
+MAX_SCREENSHOT_TOTAL_BYTES = 100 * 1024 * 1024
+SAFE_SCREENSHOT_NAME = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]{0,118}\.png"
+)
+SAFE_ARCHIVE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}")
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
 
 TOP_LEVEL_METADATA_FIELDS = (
     "applicationCategory",
@@ -238,6 +257,260 @@ def media_manifest(submission: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def recoverable_media_projection(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Compare recoverable screenshots without draft-scoped IDs/status."""
+    images: list[dict[str, Any]] = []
+    for image in manifest.get("listingImages", []):
+        if image.get("imageType") == "Screenshot":
+            images.append(
+                {
+                    key: copy.deepcopy(image.get(key))
+                    for key in ("path", "ordinal", "fileName", "imageType")
+                }
+            )
+        else:
+            images.append(copy.deepcopy(image))
+    return {
+        "listingLanguages": copy.deepcopy(
+            manifest.get("listingLanguages", [])
+        ),
+        "listingImages": images,
+        "trailers": copy.deepcopy(manifest.get("trailers", [])),
+    }
+
+
+def _validate_flat_file_name(
+    name: str, *, screenshot: bool = False
+) -> str:
+    pattern = SAFE_SCREENSHOT_NAME if screenshot else SAFE_ARCHIVE_NAME
+    if (
+        not isinstance(name, str)
+        or not pattern.fullmatch(name)
+        or "/" in name
+        or "\\" in name
+        or any(ord(character) < 32 or ord(character) == 127 for character in name)
+        or name.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES
+    ):
+        label = "screenshot" if screenshot else "archive"
+        raise MigrationError(f"Unsafe {label} file name: {name!r}")
+    return name
+
+
+def _read_regular_file(path: Path, *, label: str) -> bytes:
+    if path.is_symlink():
+        raise MigrationError(f"{label} must not be a symbolic link: {path.name}")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise MigrationError(f"Could not safely open {label}: {path.name}") from error
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise MigrationError(f"{label} is not a regular file: {path.name}")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            return handle.read()
+    finally:
+        os.close(descriptor)
+
+
+def _screenshot_files(directory: Path) -> dict[str, bytes]:
+    if directory.is_symlink():
+        raise MigrationError(
+            f"Screenshot directory must not be a symbolic link: {directory}"
+        )
+    try:
+        root = directory.resolve(strict=True)
+    except OSError as error:
+        raise MigrationError(
+            f"Screenshot directory does not exist: {directory}"
+        ) from error
+    if not root.is_dir():
+        raise MigrationError(f"Screenshot directory does not exist: {directory}")
+
+    files: dict[str, bytes] = {}
+    for path in sorted(root.iterdir(), key=lambda item: item.name):
+        if path.suffix != ".png":
+            continue
+        name = _validate_flat_file_name(path.name, screenshot=True)
+        if path.is_symlink():
+            raise MigrationError(
+                f"Screenshot must not be a symbolic link: {name}"
+            )
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as error:
+            raise MigrationError(f"Could not resolve screenshot: {name}") from error
+        if resolved.parent != root:
+            raise MigrationError(
+                f"Screenshot escapes its configured directory: {name}"
+            )
+        content = _read_regular_file(path, label="Screenshot")
+        if not content:
+            raise MigrationError(f"Screenshot is empty: {name}")
+        if len(content) > MAX_SCREENSHOT_BYTES:
+            raise MigrationError(f"Screenshot is too large: {name}")
+        if not content.startswith(PNG_SIGNATURE):
+            raise MigrationError(f"Screenshot is not a valid PNG file: {name}")
+        files[name] = content
+
+    if not files:
+        raise MigrationError(f"No PNG screenshots found in {directory}.")
+    if len(files) > MAX_SCREENSHOT_COUNT:
+        raise MigrationError("Too many Store screenshots to preserve safely.")
+    if sum(len(content) for content in files.values()) > MAX_SCREENSHOT_TOTAL_BYTES:
+        raise MigrationError("Store screenshots exceed the recovery size limit.")
+    return files
+
+
+def _validate_screenshot_provenance(
+    provenance: dict[str, str] | None,
+) -> dict[str, str]:
+    if provenance is None:
+        raise MigrationError(
+            "Recovering changed screenshots requires pinned Store and GitHub "
+            "provenance. Nothing was deleted."
+        )
+    required = {
+        "repository",
+        "workflowRunId",
+        "workflowRunHeadSha",
+        "submissionId",
+        "releaseTag",
+        "snapshotCommitSha",
+    }
+    if set(provenance) != required:
+        raise MigrationError(
+            "Screenshot provenance is incomplete. Nothing was deleted."
+        )
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", provenance["repository"]):
+        raise MigrationError("Screenshot provenance has an invalid repository.")
+    if not re.fullmatch(r"\d+", provenance["workflowRunId"]):
+        raise MigrationError("Screenshot provenance has an invalid workflow run.")
+    if not re.fullmatch(r"\d+", provenance["submissionId"]):
+        raise MigrationError("Screenshot provenance has an invalid Store submission.")
+    for field in ("workflowRunHeadSha", "snapshotCommitSha"):
+        if not re.fullmatch(r"[0-9a-f]{40}", provenance[field]):
+            raise MigrationError(
+                f"Screenshot provenance has an invalid {field}."
+            )
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", provenance["releaseTag"]):
+        raise MigrationError("Screenshot provenance has an invalid release tag.")
+    return copy.deepcopy(provenance)
+
+
+def _media_preservation_plan(
+    *,
+    source_media: dict[str, Any],
+    published_media: dict[str, Any],
+    screenshots_dir: Path | None,
+    screenshot_provenance_media: dict[str, Any] | None,
+    screenshot_provenance: dict[str, str] | None,
+    target_version: str,
+) -> tuple[str, dict[str, dict[str, Any]], dict[str, str] | None]:
+    if source_media == published_media:
+        return "published-clone", {}, None
+
+    if screenshots_dir is None:
+        raise MigrationError(
+            "The Partner Center draft contains listing media or language changes "
+            "that cannot be recreated from JSON alone. Nothing was deleted."
+        )
+    if (
+        source_media.get("listingLanguages")
+        != published_media.get("listingLanguages")
+    ):
+        raise MigrationError(
+            "The Partner Center draft adds or removes listing languages. "
+            "Nothing was deleted; migrate this draft manually."
+        )
+    if source_media.get("trailers") != published_media.get("trailers"):
+        raise MigrationError(
+            "The Partner Center draft changes trailer binaries or metadata. "
+            "Nothing was deleted; migrate this draft manually."
+        )
+
+    source_non_screenshots = [
+        image
+        for image in source_media.get("listingImages", [])
+        if image.get("imageType") != "Screenshot"
+    ]
+    published_non_screenshots = [
+        image
+        for image in published_media.get("listingImages", [])
+        if image.get("imageType") != "Screenshot"
+    ]
+    if source_non_screenshots != published_non_screenshots:
+        raise MigrationError(
+            "The Partner Center draft changes non-screenshot listing media. "
+            "Nothing was deleted; migrate this draft manually."
+        )
+    if screenshot_provenance_media != source_media:
+        raise MigrationError(
+            "The draft media does not exactly match the Store submission that "
+            "the successful screenshot workflow created. Filename equality is "
+            "not sufficient, so nothing was deleted."
+        )
+    verified_provenance = _validate_screenshot_provenance(
+        screenshot_provenance
+    )
+    if verified_provenance["releaseTag"] != f"v{target_version}":
+        raise MigrationError(
+            "Screenshot provenance is not bound to the target release. "
+            "Nothing was deleted."
+        )
+
+    source_screenshots = [
+        image
+        for image in source_media.get("listingImages", [])
+        if image.get("imageType") == "Screenshot"
+    ]
+    if not source_screenshots:
+        raise MigrationError(
+            "The Partner Center draft removes every screenshot. Nothing was deleted."
+        )
+    names = [str(image.get("fileName", "")) for image in source_screenshots]
+    if (
+        any(
+            not name
+            or not SAFE_SCREENSHOT_NAME.fullmatch(name)
+            or "/" in name
+            or "\\" in name
+            or name.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES
+            for name in names
+        )
+        or len(names) != len(set(names))
+        or len({name.casefold() for name in names}) != len(names)
+        or any(
+            image.get("fileStatus") not in {"Uploaded", "PendingUpload"}
+            for image in source_screenshots
+        )
+    ):
+        raise MigrationError(
+            "The draft screenshot references are not safe to reconstruct. "
+            "Nothing was deleted."
+        )
+
+    repo_files = _screenshot_files(screenshots_dir)
+    if set(names) != set(repo_files):
+        raise MigrationError(
+            "The draft screenshots do not exactly match the checked-in Store "
+            f"assets. Draft: {', '.join(sorted(names))}. Repository: "
+            f"{', '.join(sorted(repo_files))}. Nothing was deleted."
+        )
+    embedded_files = {
+        name: {
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+            "contentBase64": base64.b64encode(content).decode("ascii"),
+        }
+        for name, content in repo_files.items()
+    }
+    return "embedded-provenance-screenshots", embedded_files, verified_provenance
+
+
 def _snapshot_listing(listing: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     base = listing.get("baseListing", {})
@@ -300,20 +573,30 @@ def _unknown_listing_projection(listing: dict[str, Any]) -> dict[str, Any]:
     }
 
     def section_projection(section: dict[str, Any]) -> dict[str, Any]:
+        unknown_images = []
+        for ordinal, image in enumerate(section.get("images", []) or []):
+            unknown = {
+                key: copy.deepcopy(value)
+                for key, value in image.items()
+                if key not in known_image
+            }
+            if unknown:
+                unknown_images.append(
+                    {
+                        "ordinal": ordinal,
+                        "identity": deep_copy_present(
+                            image, ("id", "fileName", "imageType")
+                        ),
+                        "unknown": unknown,
+                    }
+                )
         return {
             "section": {
                 key: copy.deepcopy(value)
                 for key, value in section.items()
                 if key not in known_base
             },
-            "images": [
-                {
-                    key: copy.deepcopy(value)
-                    for key, value in image.items()
-                    if key not in known_image
-                }
-                for image in section.get("images", []) or []
-            ],
+            "images": unknown_images,
         }
 
     result["baseListing"] = section_projection(listing.get("baseListing", {}))
@@ -389,7 +672,13 @@ def make_snapshot(
     app_id: str,
     source: dict[str, Any],
     published: dict[str, Any],
+    target_version: str,
+    screenshots_dir: Path | None = None,
+    screenshot_provenance_media: dict[str, Any] | None = None,
+    screenshot_provenance: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    if not re.fullmatch(r"\d+\.\d+\.\d+", target_version):
+        raise MigrationError("Snapshot target version must use the form X.Y.Z.")
     if (
         source.get("packageDeliveryOptions", {}) or {}
     ).get("isMandatoryUpdate") is True:
@@ -400,15 +689,18 @@ def make_snapshot(
 
     source_media = media_manifest(source)
     published_media = media_manifest(published)
-    if source_media != published_media:
-        source_hash = sha256_json(source_media)
-        published_hash = sha256_json(published_media)
-        raise MigrationError(
-            "The Partner Center draft contains listing media or language changes "
-            "that cannot be recreated from JSON alone. Nothing was deleted. "
-            "Upload 2.5.6 and submit this draft manually in Partner Center instead. "
-            f"Draft media hash: {source_hash}; published media hash: {published_hash}."
-        )
+    (
+        preservation_mode,
+        embedded_screenshots,
+        verified_screenshot_provenance,
+    ) = _media_preservation_plan(
+        source_media=source_media,
+        published_media=published_media,
+        screenshots_dir=screenshots_dir,
+        screenshot_provenance_media=screenshot_provenance_media,
+        screenshot_provenance=screenshot_provenance,
+        target_version=target_version,
+    )
 
     if unhandled_projection(source) != unhandled_projection(published):
         raise MigrationError(
@@ -426,6 +718,7 @@ def make_snapshot(
         "schemaVersion": SNAPSHOT_SCHEMA_VERSION,
         "capturedAtUtc": dt.datetime.now(dt.UTC).isoformat(),
         "appId": app_id,
+        "targetVersion": target_version,
         "sourceSubmissionId": source_id,
         "sourceStatus": source.get("status"),
         "lastPublishedSubmissionId": published_id,
@@ -435,6 +728,11 @@ def make_snapshot(
             source_state_projection(published)
         ),
         "mediaManifestSha256": sha256_json(source_media),
+        "publishedMediaManifestSha256": sha256_json(published_media),
+        "sourceMediaManifest": source_media,
+        "mediaPreservationMode": preservation_mode,
+        "recoverableScreenshotFiles": embedded_screenshots,
+        "screenshotProvenance": verified_screenshot_provenance,
         "mediaPreservationVerified": True,
         "metadata": snapshot_metadata(source),
         "sourcePackages": package_summary(source),
@@ -452,12 +750,41 @@ def _image_identity(image: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def merge_images(
-    new_images: list[dict[str, Any]], source_images: list[dict[str, Any]]
+    new_images: list[dict[str, Any]],
+    source_images: list[dict[str, Any]],
+    *,
+    recover_screenshots: bool = False,
 ) -> list[dict[str, Any]]:
     """Keep clone-owned media IDs and restore only editable descriptions."""
     source_by_identity = {
         _image_identity(image): image for image in source_images or []
     }
+    new_by_identity = {
+        _image_identity(image): image for image in new_images or []
+    }
+    if recover_screenshots:
+        recovered: list[dict[str, Any]] = []
+        for source_image in source_images or []:
+            if source_image.get("imageType") == "Screenshot":
+                image = deep_copy_present(
+                    source_image, ("fileName", "imageType", "description")
+                )
+                image["fileStatus"] = "PendingUpload"
+                recovered.append(image)
+                continue
+            new_image = new_by_identity.get(_image_identity(source_image))
+            if new_image is None:
+                raise MigrationError(
+                    "A non-screenshot listing asset is missing from the API clone."
+                )
+            merged_image = copy.deepcopy(new_image)
+            if "description" in source_image:
+                merged_image["description"] = copy.deepcopy(
+                    source_image["description"]
+                )
+            recovered.append(merged_image)
+        return recovered
+
     merged = copy.deepcopy(new_images or [])
     for image in merged:
         source_image = source_by_identity.get(_image_identity(image))
@@ -467,7 +794,10 @@ def merge_images(
 
 
 def _merge_listing_section(
-    new_section: dict[str, Any], source_section: dict[str, Any]
+    new_section: dict[str, Any],
+    source_section: dict[str, Any],
+    *,
+    recover_screenshots: bool = False,
 ) -> dict[str, Any]:
     merged = copy.deepcopy(new_section)
     for field in BASE_LISTING_TEXT_FIELDS:
@@ -477,6 +807,13 @@ def _merge_listing_section(
         merged["images"] = merge_images(
             new_section.get("images", []) or [],
             source_section.get("images", []) or [],
+            recover_screenshots=recover_screenshots,
+        )
+    elif recover_screenshots and source_section.get("images"):
+        merged["images"] = merge_images(
+            [],
+            source_section.get("images", []) or [],
+            recover_screenshots=True,
         )
     return merged
 
@@ -485,6 +822,8 @@ def merge_listings(
     new_listings: dict[str, Any],
     source_listings: dict[str, Any],
     release_notes: str,
+    *,
+    recover_screenshots: bool = False,
 ) -> dict[str, Any]:
     if set(new_listings) != set(source_listings):
         raise MigrationError(
@@ -499,6 +838,7 @@ def merge_listings(
         result_listing["baseListing"] = _merge_listing_section(
             new_listing.get("baseListing", {}),
             source_listing.get("baseListing", {}),
+            recover_screenshots=recover_screenshots,
         )
         result_listing["baseListing"]["releaseNotes"] = release_notes
 
@@ -512,7 +852,9 @@ def merge_listings(
                 new_listing.get("platformOverrides", {}) or {}
             ).get(platform, {})
             overrides[platform] = _merge_listing_section(
-                new_override, source_override
+                new_override,
+                source_override,
+                recover_screenshots=recover_screenshots,
             )
         result_listing["platformOverrides"] = overrides
         merged[language] = result_listing
@@ -608,6 +950,10 @@ def build_update_payload(
         new_submission.get("listings", {}),
         metadata.get("listings", {}),
         release_notes,
+        recover_screenshots=(
+            snapshot.get("mediaPreservationMode")
+            == "embedded-provenance-screenshots"
+        ),
     )
     payload["packageDeliveryOptions"] = _merge_package_delivery(
         new_submission.get("packageDeliveryOptions", {}) or {},
@@ -641,6 +987,21 @@ def metadata_projection(submission: dict[str, Any]) -> dict[str, Any]:
         language: _snapshot_listing(listing)
         for language, listing in submission.get("listings", {}).items()
     }
+    for listing in projected["listings"].values():
+        sections = [listing.get("baseListing", {})]
+        sections.extend(
+            (listing.get("platformOverrides", {}) or {}).values()
+        )
+        for section in sections:
+            for image in section.get("images", []) or []:
+                if (
+                    image.get("imageType") == "Screenshot"
+                    and image.get("fileStatus") == "PendingUpload"
+                ):
+                    # Partner Center may assign a draft-scoped ID as soon as a
+                    # reconstructed screenshot record is PUT. Existing and
+                    # non-screenshot asset IDs remain integrity checked.
+                    image.pop("id", None)
     # File statuses can be normalized immediately after PUT. Metadata
     # verification deliberately excludes package server state.
     projected["packageDeliveryOptions"] = {
@@ -949,6 +1310,26 @@ def load_snapshot(path: Path, app_id: str, source_id: str) -> dict[str, Any]:
     return snapshot
 
 
+def validate_snapshot_target(snapshot: dict[str, Any], version: str) -> None:
+    if snapshot.get("targetVersion") != version:
+        raise MigrationError(
+            f"The recovery snapshot targets version "
+            f"{snapshot.get('targetVersion') or 'unknown'}, not {version}."
+        )
+    if snapshot.get("mediaPreservationMode") == "embedded-provenance-screenshots":
+        provenance = snapshot.get("screenshotProvenance")
+        release_tag = (
+            provenance.get("releaseTag")
+            if isinstance(provenance, dict)
+            else None
+        )
+        if release_tag != f"v{version}":
+            raise MigrationError(
+                "The embedded screenshot provenance does not match the "
+                f"requested v{version} release."
+            )
+
+
 def _submission_pointer_id(pointer: Any) -> str:
     return str(pointer.get("id", "")) if isinstance(pointer, dict) else ""
 
@@ -977,8 +1358,38 @@ def command_snapshot(args: argparse.Namespace) -> None:
 
     source = api.get_submission(args.source_submission_id)
     published = api.get_submission(published_id)
+    provenance_submission = None
+    provenance = None
+    if args.screenshot_provenance_submission_id:
+        validate_submission_id(
+            args.screenshot_provenance_submission_id,
+            "screenshot provenance submission ID",
+        )
+        provenance_submission = api.get_submission(
+            args.screenshot_provenance_submission_id
+        )
+        provenance = {
+            "repository": args.screenshot_provenance_repository or "",
+            "workflowRunId": args.screenshot_provenance_run_id or "",
+            "workflowRunHeadSha": args.screenshot_provenance_head_sha or "",
+            "submissionId": args.screenshot_provenance_submission_id,
+            "releaseTag": args.screenshot_release_tag or "",
+            "snapshotCommitSha": args.snapshot_commit_sha or "",
+        }
     snapshot = make_snapshot(
-        app_id=args.app_id, source=source, published=published
+        app_id=args.app_id,
+        source=source,
+        published=published,
+        screenshots_dir=(
+            Path(args.screenshots_dir) if args.screenshots_dir else None
+        ),
+        screenshot_provenance_media=(
+            media_manifest(provenance_submission)
+            if provenance_submission is not None
+            else None
+        ),
+        screenshot_provenance=provenance,
+        target_version=args.target_version,
     )
     output = Path(args.output)
     write_private_json(output, snapshot)
@@ -996,10 +1407,24 @@ def command_snapshot(args: argparse.Namespace) -> None:
     print(f"Listing languages: {languages}", flush=True)
     print(f"Source packages: {packages}", flush=True)
     print(f"Snapshot SHA-256: {snapshot['snapshotSha256']}", flush=True)
-    print(
-        "Media matches the published submission; no portal-only binary will be lost.",
-        flush=True,
-    )
+    mode = snapshot["mediaPreservationMode"]
+    if mode == "embedded-provenance-screenshots":
+        names = ", ".join(snapshot["recoverableScreenshotFiles"])
+        provenance = snapshot["screenshotProvenance"]
+        print(
+            "The Store API media identities exactly match submission "
+            f"{provenance['submissionId']}, which successful workflow run "
+            f"{provenance['workflowRunId']} uploaded from "
+            f"{provenance['workflowRunHeadSha']}. Embedded canonical "
+            f"replacement screenshots: {names}",
+            flush=True,
+        )
+    else:
+        print(
+            "Media matches the published submission; no portal-only binary "
+            "will be lost.",
+            flush=True,
+        )
 
 
 def validate_package(path: Path, expected_version: str) -> tuple[str, str]:
@@ -1010,16 +1435,125 @@ def validate_package(path: Path, expected_version: str) -> tuple[str, str]:
         raise MigrationError(
             f"Expected release asset {expected_name}, found {path.name}."
         )
-    if not path.is_file() or path.stat().st_size == 0:
+    _validate_flat_file_name(path.name)
+    if path.is_symlink():
+        raise MigrationError("The release asset must not be a symbolic link.")
+    try:
+        content = _read_regular_file(path, label="Release asset")
+    except (FileNotFoundError, OSError) as error:
+        raise MigrationError(f"Release asset is missing: {path}") from error
+    if not content:
         raise MigrationError(f"Release asset is missing or empty: {path}")
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256(content).hexdigest()
     return expected_name, digest
 
 
-def create_upload_zip(package: Path, destination: Path) -> None:
+def validate_recoverable_screenshots(
+    snapshot: dict[str, Any],
+) -> dict[str, bytes]:
+    expected = snapshot.get("recoverableScreenshotFiles", {}) or {}
+    if not expected:
+        return {}
+    if snapshot.get("mediaPreservationMode") != "embedded-provenance-screenshots":
+        raise MigrationError(
+            "The preserved screenshots do not use the authenticated embedded "
+            "recovery format."
+        )
+    if not isinstance(expected, dict) or len(expected) > MAX_SCREENSHOT_COUNT:
+        raise MigrationError("The embedded screenshot manifest is invalid.")
+    recovered: dict[str, bytes] = {}
+    total_size = 0
+    for name, record in expected.items():
+        _validate_flat_file_name(name, screenshot=True)
+        if not isinstance(record, dict) or set(record) != {
+            "sha256",
+            "size",
+            "contentBase64",
+        }:
+            raise MigrationError(
+                f"Embedded screenshot metadata is invalid: {name}"
+            )
+        if not isinstance(record["size"], int) or not (
+            1 <= record["size"] <= MAX_SCREENSHOT_BYTES
+        ):
+            raise MigrationError(f"Embedded screenshot size is invalid: {name}")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(record["sha256"])):
+            raise MigrationError(
+                f"Embedded screenshot digest is invalid: {name}"
+            )
+        try:
+            content = base64.b64decode(
+                str(record["contentBase64"]).encode("ascii"), validate=True
+            )
+        except (UnicodeEncodeError, binascii.Error, ValueError) as error:
+            raise MigrationError(
+                f"Embedded screenshot encoding is invalid: {name}"
+            ) from error
+        if len(content) != record["size"]:
+            raise MigrationError(f"Embedded screenshot size changed: {name}")
+        actual_digest = hashlib.sha256(content).hexdigest()
+        if not secrets_compare_digest(actual_digest, str(record["sha256"])):
+            raise MigrationError(f"Embedded screenshot digest changed: {name}")
+        if not content.startswith(PNG_SIGNATURE):
+            raise MigrationError(f"Embedded screenshot is not PNG data: {name}")
+        total_size += len(content)
+        if total_size > MAX_SCREENSHOT_TOTAL_BYTES:
+            raise MigrationError("Embedded screenshots exceed the recovery limit.")
+        recovered[name] = content
+
+    source_names = {
+        str(image.get("fileName", ""))
+        for image in snapshot.get("sourceMediaManifest", {}).get(
+            "listingImages", []
+        )
+        if image.get("imageType") == "Screenshot"
+    }
+    if set(recovered) != source_names:
+        raise MigrationError(
+            "The embedded screenshot set does not match the preserved Store "
+            "media manifest."
+        )
+    return recovered
+
+
+def create_upload_zip(
+    package: Path,
+    destination: Path,
+    extra_files: dict[str, bytes] | None = None,
+    *,
+    expected_package_sha256: str | None = None,
+) -> None:
+    package_name = _validate_flat_file_name(package.name)
+    if package.is_symlink():
+        raise MigrationError("The release package must not be a symbolic link.")
+    package_content = _read_regular_file(package, label="Release package")
+    if not package_content:
+        raise MigrationError("The release package is empty.")
+    package_digest = hashlib.sha256(package_content).hexdigest()
+    if expected_package_sha256 and not secrets_compare_digest(
+        package_digest, expected_package_sha256
+    ):
+        raise MigrationError(
+            "The release package changed after provenance validation."
+        )
+
+    archive_names = {package_name.casefold()}
+    validated_extras: list[tuple[str, bytes]] = []
+    for name, content in sorted((extra_files or {}).items()):
+        _validate_flat_file_name(name, screenshot=True)
+        normalized = name.casefold()
+        if normalized in archive_names:
+            raise MigrationError(f"Duplicate upload archive name: {name}")
+        archive_names.add(normalized)
+        if not content or not content.startswith(PNG_SIGNATURE):
+            raise MigrationError(f"Invalid screenshot archive content: {name}")
+        validated_extras.append((name, content))
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_STORED) as archive:
-        archive.write(package, arcname=package.name)
+        archive.writestr(package_name, package_content)
+        for name, content in validated_extras:
+            archive.writestr(name, content)
 
 
 def upload_blob(sas_url: str, archive: Path) -> None:
@@ -1100,13 +1634,23 @@ def _assert_published_baseline(
 def _assert_media_baseline(
     submission: dict[str, Any], snapshot: dict[str, Any]
 ) -> None:
-    actual = sha256_json(media_manifest(submission))
+    actual_manifest = media_manifest(submission)
+    actual = sha256_json(actual_manifest)
     expected = str(snapshot["mediaManifestSha256"])
-    if not secrets_compare_digest(actual, expected):
-        raise MigrationError(
-            "The API-owned clone does not contain the media preserved by the "
-            "snapshot. The draft was left uncommitted."
-        )
+    if secrets_compare_digest(actual, expected):
+        return
+    if snapshot.get("mediaPreservationMode") == "embedded-provenance-screenshots":
+        published = str(snapshot["publishedMediaManifestSha256"])
+        if secrets_compare_digest(actual, published):
+            return
+        if recoverable_media_projection(
+            actual_manifest
+        ) == recoverable_media_projection(snapshot["sourceMediaManifest"]):
+            return
+    raise MigrationError(
+        "The API-owned clone does not contain the media preserved by the "
+        "snapshot. The draft was left uncommitted."
+    )
 
 
 def _migration_draft_ownership(
@@ -1385,8 +1929,10 @@ def command_migrate(args: argparse.Namespace) -> None:
     snapshot = load_snapshot(
         Path(args.snapshot), args.app_id, args.source_submission_id
     )
+    validate_snapshot_target(snapshot, args.version)
     package = Path(args.package)
     package_name, package_digest = validate_package(package, args.version)
+    recoverable_screenshots = validate_recoverable_screenshots(snapshot)
     release_notes = Path(args.release_notes_file).read_text(
         encoding="utf-8"
     ).strip()
@@ -1508,7 +2054,12 @@ def command_migrate(args: argparse.Namespace) -> None:
     print("Draft metadata and package replacement verified.", flush=True)
 
     archive = package.parent / f"{package.stem}-store-upload.zip"
-    create_upload_zip(package, archive)
+    create_upload_zip(
+        package,
+        archive,
+        recoverable_screenshots,
+        expected_package_sha256=package_digest,
+    )
     restored_upload_url = str(restored.get("fileUploadUrl", ""))
     if _sas_expiry(restored_upload_url) <= (
         dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)
@@ -1550,7 +2101,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     snapshot.add_argument("--app-id", default=DEFAULT_PORTAL_PRODUCT)
     snapshot.add_argument("--source-submission-id", required=True)
+    snapshot.add_argument("--target-version", required=True)
     snapshot.add_argument("--output", required=True)
+    snapshot.add_argument("--screenshots-dir")
+    snapshot.add_argument("--screenshot-provenance-submission-id")
+    snapshot.add_argument("--screenshot-provenance-run-id")
+    snapshot.add_argument("--screenshot-provenance-head-sha")
+    snapshot.add_argument("--screenshot-provenance-repository")
+    snapshot.add_argument("--screenshot-release-tag")
+    snapshot.add_argument("--snapshot-commit-sha")
     snapshot.set_defaults(func=command_snapshot)
 
     migrate = subparsers.add_parser(

@@ -36,6 +36,9 @@ concurrency:
 env:
   STORE_APP_ID: 9NJ59RH053PV
   PROJECT_NAME: WindowsForum_Diagnostics
+  SCREENSHOT_PROVENANCE_RUN_ID: '29125510899'
+  SCREENSHOT_PROVENANCE_HEAD_SHA: 620b5a7f2f68415153e0e9fb612a353ab04c377f
+  SCREENSHOT_PROVENANCE_SUBMISSION_ID: '1152921505701400128'
 
 jobs:
   migrate-and-publish:
@@ -87,10 +90,55 @@ jobs:
           set -euo pipefail
           python3 -m unittest scripts/test_migrate_store_draft.py -v
 
+      - name: Verify screenshot recovery provenance
+        if: inputs.snapshot_run_id == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          work_dir="${RUNNER_TEMP}/store-migration"
+          run_json="$work_dir/screenshot-run.json"
+          run_log="$work_dir/screenshot-run.log"
+          gh run view "$SCREENSHOT_PROVENANCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json databaseId,conclusion,workflowName,headSha,event,url \
+            > "$run_json"
+          jq -e \
+            --argjson run_id "$SCREENSHOT_PROVENANCE_RUN_ID" \
+            --arg head_sha "$SCREENSHOT_PROVENANCE_HEAD_SHA" \
+            '.databaseId == $run_id
+             and .conclusion == "success"
+             and .workflowName == "Update Store Screenshots"
+             and .event == "workflow_dispatch"
+             and .headSha == $head_sha' \
+            "$run_json" > /dev/null
+          gh run view "$SCREENSHOT_PROVENANCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" --log > "$run_log"
+          grep -Fq \
+            "Uploading 7 screenshot(s): 01-diagnostics-ready.png 02-diagnostics-results.png 03-live-monitor.png 04-processes.png 05-ai-analysis.png 06-issues.png 07-history.png" \
+            "$run_log"
+          grep -Fq \
+            "Submission $SCREENSHOT_PROVENANCE_SUBMISSION_ID status: PendingCommit" \
+            "$run_log"
+          grep -Fq \
+            "Submission moved to 'Certification'" \
+            "$run_log"
+          git fetch --no-tags --depth=1 origin \
+            "$SCREENSHOT_PROVENANCE_HEAD_SHA"
+          git fetch --no-tags --depth=1 origin \
+            "refs/tags/v${VERSION}:refs/tags/v${VERSION}"
+          git diff --quiet "$SCREENSHOT_PROVENANCE_HEAD_SHA" \
+            -- store-assets/screenshots
+          git diff --quiet "refs/tags/v${VERSION}^{commit}" \
+            -- store-assets/screenshots
+          echo "Screenshot assets are pinned to the successful Store upload and v${VERSION}."
+
       - name: Capture current Partner Center draft
         if: inputs.snapshot_run_id == ''
         env:
           SOURCE_SUBMISSION_ID: ${{ inputs.source_submission_id }}
+          VERSION: ${{ inputs.version }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
@@ -100,6 +148,14 @@ jobs:
           python3 scripts/migrate_store_draft.py snapshot \
             --app-id "$STORE_APP_ID" \
             --source-submission-id "$SOURCE_SUBMISSION_ID" \
+            --target-version "$VERSION" \
+            --screenshots-dir "store-assets/screenshots" \
+            --screenshot-provenance-submission-id "$SCREENSHOT_PROVENANCE_SUBMISSION_ID" \
+            --screenshot-provenance-run-id "$SCREENSHOT_PROVENANCE_RUN_ID" \
+            --screenshot-provenance-head-sha "$SCREENSHOT_PROVENANCE_HEAD_SHA" \
+            --screenshot-provenance-repository "$GITHUB_REPOSITORY" \
+            --screenshot-release-tag "v${VERSION}" \
+            --snapshot-commit-sha "$GITHUB_SHA" \
             --output "${RUNNER_TEMP}/store-migration/draft-snapshot.json"
 
       - name: Recover encrypted snapshot from a prior run
@@ -128,7 +184,7 @@ jobs:
           expected = pathlib.Path(sys.argv[2]).read_text(encoding="ascii").strip()
           actual = hmac.new(
               os.environ["SNAPSHOT_PASSWORD"].encode("utf-8"),
-              b"wfdiag-store-draft-v1\0" + data,
+              b"wfdiag-store-draft-v2\0" + data,
               hashlib.sha256,
           ).hexdigest()
           if not hmac.compare_digest(actual, expected):
@@ -159,7 +215,7 @@ jobs:
           data = pathlib.Path(sys.argv[1]).read_bytes()
           tag = hmac.new(
               os.environ["SNAPSHOT_PASSWORD"].encode("utf-8"),
-              b"wfdiag-store-draft-v1\0" + data,
+              b"wfdiag-store-draft-v2\0" + data,
               hashlib.sha256,
           ).hexdigest()
           pathlib.Path(sys.argv[2]).write_text(tag + "\n", encoding="ascii")
