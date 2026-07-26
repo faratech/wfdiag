@@ -18,6 +18,10 @@ env:
 permissions:
   contents: read
 
+concurrency:
+  group: microsoft-store-submission
+  cancel-in-progress: false
+
 jobs:
   publish-to-store:
     runs-on: windows-latest
@@ -55,12 +59,6 @@ jobs:
             --sellerId ${{ secrets.STORE_SELLER_ID }} `
             --clientId ${{ secrets.AZURE_CLIENT_ID }} `
             --clientSecret ${{ secrets.AZURE_CLIENT_SECRET }}
-
-      - name: List working directory contents
-        shell: pwsh
-        run: |
-          Write-Host "Contents of working directory:"
-          Get-ChildItem -Recurse | ForEach-Object { Write-Host "  $($_.FullName) - $($_.Length) bytes" }
 
       - name: Prepare Store release notes
         shell: pwsh
@@ -140,7 +138,7 @@ jobs:
           $succeeded = $false
           for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
             Write-Host "msstore publish attempt $attempt of $maxAttempts..."
-            msstore publish "$($bundleFile.FullName)" --appId 9NJ59RH053PV --noCommit --verbose
+            msstore publish "$($bundleFile.FullName)" --appId 9NJ59RH053PV --noCommit
             if ($LASTEXITCODE -eq 0) { $succeeded = $true; break }
             Write-Warning "msstore publish failed (exit $LASTEXITCODE)."
             if ($attempt -lt $maxAttempts) {

@@ -1,0 +1,218 @@
+name: Migrate Partner Center Draft and Publish
+
+# Microsoft will not let the submission API update, delete, or commit a draft
+# created/edited in Partner Center. This workflow snapshots that draft, retains
+# an encrypted recovery artifact, waits for its manual portal deletion, then
+# creates an API-owned clone and merges the preserved metadata into it.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Released version to submit'
+        required: true
+        default: '2.5.6'
+      source_submission_id:
+        description: 'Partner Center draft to preserve and replace'
+        required: true
+        default: '1152921505701429049'
+      snapshot_run_id:
+        description: 'Optional prior migration run containing an encrypted snapshot'
+        required: false
+        default: ''
+      wait_minutes:
+        description: 'Minutes to wait for manual deletion of the portal draft'
+        required: true
+        default: '240'
+
+permissions:
+  contents: read
+  actions: read
+  attestations: read
+
+concurrency:
+  group: microsoft-store-submission
+  cancel-in-progress: false
+
+env:
+  STORE_APP_ID: 9NJ59RH053PV
+  PROJECT_NAME: WindowsForum_Diagnostics
+
+jobs:
+  migrate-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - name: Checkout migration tooling
+        uses: actions/checkout@v4
+
+      - name: Download exact GitHub release bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_SUBMISSION_ID: ${{ inputs.source_submission_id }}
+          SNAPSHOT_RUN_ID: ${{ inputs.snapshot_run_id }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must use X.Y.Z"; exit 1
+          fi
+          if [[ ! "$SOURCE_SUBMISSION_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::Source submission ID must contain digits only"; exit 1
+          fi
+          if [[ -n "$SNAPSHOT_RUN_ID" && ! "$SNAPSHOT_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::Snapshot workflow run ID must contain digits only"; exit 1
+          fi
+          work_dir="${RUNNER_TEMP}/store-migration"
+          bundle_name="${PROJECT_NAME}_${VERSION}.msixbundle"
+          mkdir -p "$work_dir"
+          gh release download "v${VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$bundle_name" \
+            --dir "$work_dir"
+          test -s "$work_dir/$bundle_name"
+          count="$(find "$work_dir" -maxdepth 1 -name '*.msixbundle' -type f | wc -l)"
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Expected exactly one release bundle, found $count"; exit 1
+          fi
+          printf '%s  %s\n' "$(sha256sum "$work_dir/$bundle_name" | cut -d' ' -f1)" "$bundle_name"
+          signer_host="${GITHUB_SERVER_URL#https://}"
+          gh attestation verify "$work_dir/$bundle_name" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow \
+              "$signer_host/$GITHUB_REPOSITORY/.github/workflows/build-and-publish-store.yml" \
+            --source-ref "refs/tags/v${VERSION}"
+
+      - name: Test migration logic
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts/test_migrate_store_draft.py -v
+
+      - name: Capture current Partner Center draft
+        if: inputs.snapshot_run_id == ''
+        env:
+          SOURCE_SUBMISSION_ID: ${{ inputs.source_submission_id }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 scripts/migrate_store_draft.py snapshot \
+            --app-id "$STORE_APP_ID" \
+            --source-submission-id "$SOURCE_SUBMISSION_ID" \
+            --output "${RUNNER_TEMP}/store-migration/draft-snapshot.json"
+
+      - name: Recover encrypted snapshot from a prior run
+        if: inputs.snapshot_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SUBMISSION_ID: ${{ inputs.source_submission_id }}
+          SNAPSHOT_RUN_ID: ${{ inputs.snapshot_run_id }}
+          SNAPSHOT_PASSWORD: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          umask 077
+          work_dir="${RUNNER_TEMP}/store-migration"
+          artifact="store-draft-${SOURCE_SUBMISSION_ID}-${SNAPSHOT_RUN_ID}"
+          gh run download "$SNAPSHOT_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$artifact" \
+            --dir "$work_dir/recovery"
+          encrypted="$(find "$work_dir/recovery" -type f -name 'draft-snapshot.json.enc' -print -quit)"
+          auth_tag="$(find "$work_dir/recovery" -type f -name 'draft-snapshot.json.hmac' -print -quit)"
+          test -n "$encrypted"
+          test -n "$auth_tag"
+          python3 -c '
+          import hashlib, hmac, os, pathlib, sys
+          data = pathlib.Path(sys.argv[1]).read_bytes()
+          expected = pathlib.Path(sys.argv[2]).read_text(encoding="ascii").strip()
+          actual = hmac.new(
+              os.environ["SNAPSHOT_PASSWORD"].encode("utf-8"),
+              b"wfdiag-store-draft-v1\0" + data,
+              hashlib.sha256,
+          ).hexdigest()
+          if not hmac.compare_digest(actual, expected):
+              raise SystemExit("Encrypted snapshot authentication failed")
+          ' "$encrypted" "$auth_tag"
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in "$encrypted" \
+            -out "$work_dir/draft-snapshot.json" \
+            -pass env:SNAPSHOT_PASSWORD
+          python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
+            "$work_dir/draft-snapshot.json"
+          echo "Recovered encrypted snapshot from workflow run $SNAPSHOT_RUN_ID."
+
+      - name: Encrypt recovery snapshot
+        env:
+          SNAPSHOT_PASSWORD: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          umask 077
+          work_dir="${RUNNER_TEMP}/store-migration"
+          openssl enc -aes-256-cbc -pbkdf2 -salt \
+            -in "$work_dir/draft-snapshot.json" \
+            -out "$work_dir/draft-snapshot.json.enc" \
+            -pass env:SNAPSHOT_PASSWORD
+          test -s "$work_dir/draft-snapshot.json.enc"
+          python3 -c '
+          import hashlib, hmac, os, pathlib, sys
+          data = pathlib.Path(sys.argv[1]).read_bytes()
+          tag = hmac.new(
+              os.environ["SNAPSHOT_PASSWORD"].encode("utf-8"),
+              b"wfdiag-store-draft-v1\0" + data,
+              hashlib.sha256,
+          ).hexdigest()
+          pathlib.Path(sys.argv[2]).write_text(tag + "\n", encoding="ascii")
+          ' \
+            "$work_dir/draft-snapshot.json.enc" \
+            "$work_dir/draft-snapshot.json.hmac"
+          test -s "$work_dir/draft-snapshot.json.hmac"
+
+      - name: Retain encrypted recovery snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: store-draft-${{ inputs.source_submission_id }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/store-migration/draft-snapshot.json.enc
+            ${{ runner.temp }}/store-migration/draft-snapshot.json.hmac
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Wait for deletion, merge draft, and submit
+        id: submit
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SUBMISSION_ID: ${{ inputs.source_submission_id }}
+          WAIT_MINUTES: ${{ inputs.wait_minutes }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          umask 077
+          work_dir="${RUNNER_TEMP}/store-migration"
+          bundle_name="${PROJECT_NAME}_${VERSION}.msixbundle"
+          notes_file="store-assets/release-notes/${VERSION}.txt"
+          if [ ! -s "$notes_file" ]; then
+            echo "::error::Missing Store release notes: $notes_file"; exit 1
+          fi
+          python3 scripts/migrate_store_draft.py migrate \
+            --app-id "$STORE_APP_ID" \
+            --source-submission-id "$SOURCE_SUBMISSION_ID" \
+            --snapshot "$work_dir/draft-snapshot.json" \
+            --version "$VERSION" \
+            --package "$work_dir/$bundle_name" \
+            --release-notes-file "$notes_file" \
+            --wait-minutes "$WAIT_MINUTES" \
+            --commit-poll-minutes 20 \
+            --poll-seconds 30
+
+      - name: Confirm Store handoff
+        env:
+          NEW_SUBMISSION_ID: ${{ steps.submit.outputs.submission_id }}
+          CONFIRMED_STATUS: ${{ steps.submit.outputs.status }}
+        run: |
+          set -euo pipefail
+          test -n "$NEW_SUBMISSION_ID"
+          test -n "$CONFIRMED_STATUS"
+          echo "Microsoft Store accepted submission $NEW_SUBMISSION_ID ($CONFIRMED_STATUS)."
