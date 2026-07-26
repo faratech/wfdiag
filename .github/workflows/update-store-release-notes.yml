@@ -18,6 +18,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: microsoft-store-submission
+  cancel-in-progress: false
+
 env:
   STORE_APP_ID: 9NJ59RH053PV
 

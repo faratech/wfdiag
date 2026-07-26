@@ -10,6 +10,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: microsoft-store-submission
+  cancel-in-progress: false
+
 jobs:
   test-publish:
     runs-on: windows-latest
@@ -51,4 +55,4 @@ jobs:
       - name: Publish to Microsoft Store
         shell: pwsh
         run: |
-          msstore publish -i bundle -id 9NJ59RH053PV -v
+          msstore publish -i bundle -id 9NJ59RH053PV
