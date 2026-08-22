@@ -648,9 +648,26 @@ fn parse_codex_model_page(result: &Value) -> Result<CodexModelPage, String> {
         {
             page.default_model = Some(id.clone());
         }
+        // upgradeInfo.retirementAt (unix seconds, when present) means the
+        // vendor is retiring this model; surface that in the picker instead
+        // of letting users pin a model that stops working days later.
+        let retiring = raw
+            .pointer("/upgradeInfo/retirementAt")
+            .and_then(Value::as_i64)
+            .filter(|at| *at > 0);
+        let mut description = non_empty_owned(raw.get("description").and_then(Value::as_str));
+        if let Some(at) = retiring {
+            let date = crate::timestamp::Timestamp::from_secs(at)
+                .format("%Y-%m-%d");
+            let note = format!("Retiring {date} — pick a newer model");
+            description = Some(match description {
+                Some(existing) => format!("{existing} — {note}"),
+                None => note,
+            });
+        }
         page.models.push(BridgeModel {
             label: optional_distinct(raw.get("displayName").and_then(Value::as_str), &id),
-            description: non_empty_owned(raw.get("description").and_then(Value::as_str)),
+            description,
             id,
         });
     }
@@ -733,17 +750,22 @@ pub async fn run_headless(
     // timeout budget: the write previously ran before any timeout started,
     // so a child that never read its stdin — or filled an output pipe before
     // draining ours — hung this call indefinitely, unkillable from outside.
+    // The handle is MOVED into the write future and dropped right after the
+    // payload lands: the child must see end-of-input to start answering
+    // (`codex exec -`, `claude -p` both read the prompt to EOF). Keeping the
+    // handle alive until the child exits deadlocks both sides until the
+    // timeout fires.
     tokio::time::timeout(timeout, async {
         let write = async {
-            if let (Some(payload), Some(stdin)) = (stdin_payload, stdin.as_mut()) {
+            if let Some(payload) = stdin_payload
+                && let Some(mut stdin) = stdin.take()
+            {
                 stdin.write_all(payload.as_bytes()).await
             } else {
                 Ok(())
             }
         };
         let (write_result, output) = tokio::join!(write, child.wait_with_output());
-        // Dropping `stdin` at block end closes the pipe so the CLI sees
-        // end-of-input.
         write_result.map_err(|e| format!("Could not send input to {what}: {e}"))?;
         output.map_err(|e| format!("{what} failed to run: {e}"))
     })
@@ -797,6 +819,183 @@ pub async fn ai_bridge_status(
         invalidate(provider);
     }
     Ok(probe(provider).await.into())
+}
+
+/// Install budget: both vendors ship self-contained binaries (~50-100 MB);
+/// cold links can take minutes.
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Winget package IDs. Both CLIs publish official winget packages that need
+/// NO Node.js — the primary target systems never had Node installed.
+fn winget_package(provider: AIProvider) -> Option<&'static str> {
+    match provider {
+        AIProvider::CodexCli => Some("OpenAI.Codex"),
+        AIProvider::ClaudeCode => Some("Anthropic.ClaudeCode"),
+        _ => None,
+    }
+}
+
+/// Vendor PowerShell bootstrap (no winget, no Node, no admin required):
+/// downloads and runs each vendor's official silent installer.
+fn ps_bootstrap_script(provider: AIProvider) -> Option<&'static str> {
+    match provider {
+        AIProvider::CodexCli => Some("irm https://chatgpt.com/codex/install.ps1 | iex"),
+        AIProvider::ClaudeCode => Some("irm https://claude.ai/install.ps1 | iex"),
+        _ => None,
+    }
+}
+
+/// Where each vendor's installer puts its binary. A fresh install updates
+/// the REGISTRY PATH, but this app's environment block is stale until
+/// relaunch — where.exe would miss what was just written, so verification
+/// checks these paths directly.
+#[cfg(windows)]
+fn known_install_location(provider: AIProvider) -> Option<std::path::PathBuf> {
+    let (env_var, relative) = match provider {
+        AIProvider::CodexCli => ("LOCALAPPDATA", r"Programs\OpenAI\Codex\bin\codex.exe"),
+        AIProvider::ClaudeCode => ("USERPROFILE", r".local\bin\claude.exe"),
+        _ => return None,
+    };
+    std::env::var_os(env_var)
+        .map(|base| std::path::PathBuf::from(base).join(relative))
+        .filter(|path| path.exists())
+}
+
+#[cfg(not(windows))]
+fn known_install_location(_provider: AIProvider) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Probe a SPECIFIC binary path (used when the registry PATH is staler than
+/// the fresh install): run the spec's status args against it directly.
+async fn probe_explicit_path(
+    provider: AIProvider,
+    spec: &'static BridgeSpec,
+    path: &std::path::Path,
+) -> BridgeProbe {
+    let mut cmd = tokio::process::Command::new(path);
+    cmd.args(spec.status_args);
+    let authed = match run_headless(cmd, None, PROBE_TIMEOUT, spec.binary).await {
+        Ok(output) => {
+            let text = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            is_signed_in(spec, output.status.success(), &text)
+        }
+        Err(_) => false,
+    };
+    let _ = provider;
+    BridgeProbe {
+        path: Some(path.to_path_buf()),
+        authed,
+    }
+}
+
+/// Install a bridged CLI (user-initiated from Settings). Strategy, Node-free
+/// first because target machines often never had Node: 1) winget (official
+/// packages, preinstalled on Win11), 2) the vendor's own PowerShell
+/// bootstrap. Allowlisted constants only — no user input reaches a command
+/// line. Returns the post-install probe; when the registry PATH is staler
+/// than the install, the returned path comes from the known install
+/// location so callers can persist it as an explicit CLI path override.
+#[tauri::command]
+pub async fn ai_bridge_install(provider: String) -> Result<BridgeStatus, String> {
+    let provider_id = parse_bridge_provider(&provider)?;
+    let Some(spec) = spec_for(provider_id) else {
+        return Err(format!("No bridge spec for {provider}"));
+    };
+    let Some(_) = winget_package(provider_id) else {
+        return Err(format!("{provider} does not support automated installation"));
+    };
+
+    // Already resolvable? Nothing to install — report live status instead.
+    invalidate(provider_id);
+    if let Ok(existing) = resolve_cli(spec.binary, configured_cli_path(provider_id).as_deref()).await
+    {
+        let probe = probe_explicit_path(provider_id, spec, &existing).await;
+        return Ok(BridgeStatus::from(probe));
+    }
+
+    // 1) winget — preferred, official packages, ships with Windows 11.
+    let system32 = std::env::var_os("SystemRoot")
+        .map(|root| std::path::PathBuf::from(root).join("System32"))
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows\System32"));
+
+    let mut installed_via_winget = false;
+    let mut last_error = String::from("no installer could run");
+    if system32.join("winget.exe").exists() {
+        let mut cmd = tokio::process::Command::new(system32.join("winget.exe"));
+        cmd.args([
+            "install",
+            "-e",
+            "--id",
+            winget_package(provider_id).unwrap_or_default(),
+            "--silent",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ]);
+        match run_headless(cmd, None, INSTALL_TIMEOUT, "winget install").await {
+            Ok(output) if output.status.success() => installed_via_winget = true,
+            Ok(output) => {
+                let text = crate::security::decode_windows_output(&output.stdout);
+                let err_text = crate::security::decode_windows_output(&output.stderr);
+                last_error = tail(&format!("winget: {text}\n{err_text}"), 400);
+            }
+            Err(error) => last_error = format!("winget: {error}"),
+        }
+    } else {
+        last_error = "winget.exe not found".to_string();
+    }
+
+    // 2) Vendor PowerShell bootstrap — always available on Windows 10 1809+.
+    if !installed_via_winget {
+        let Some(script) = ps_bootstrap_script(provider_id) else {
+            return Err(format!("No install method available for {provider}: {last_error}"));
+        };
+        let mut cmd = tokio::process::Command::new(system32.join("windowspowershell")
+            .join("v1.0")
+            .join("powershell.exe"));
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ]);
+        match run_headless(cmd, None, INSTALL_TIMEOUT, "vendor installer").await {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let text = crate::security::decode_windows_output(&output.stdout);
+                let err_text = crate::security::decode_windows_output(&output.stderr);
+                return Err(format!(
+                    "The vendor installer failed:\n{}",
+                    tail(&format!("{text}\n{err_text}"), 600)
+                ));
+            }
+            Err(error) => return Err(format!("The vendor installer failed: {error}")),
+        }
+    }
+
+    // Verify. Prefer the explicit known location: the app's inherited PATH
+    // predates the install, so where.exe may legitimately miss the fresh
+    // binary until relaunch.
+    invalidate(provider_id);
+    let status: BridgeStatus = if let Some(path) = known_install_location(provider_id) {
+        probe_explicit_path(provider_id, spec, &path).await.into()
+    } else {
+        probe(provider_id).await.into()
+    };
+    if status.path.is_none() {
+        return Err(format!(
+            "The installer finished but {} was not found where expected. \
+             Restart the app (fresh PATH) and refresh in Settings.",
+            spec.binary
+        ));
+    }
+    Ok(status)
 }
 
 /// Spawn the CLI's own login command. The CLI opens the browser and stores
@@ -881,6 +1080,43 @@ pub(super) fn tail(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retiring_models_are_annotated_from_upgrade_info() {
+        let page = parse_codex_model_page(&json!({
+            "data": [
+                {
+                    "model": "gpt-5.6-sol",
+                    "displayName": "GPT-5.6-Sol",
+                    "isDefault": true
+                },
+                {
+                    "model": "gpt-5.4",
+                    "displayName": "GPT-5.4",
+                    "upgradeInfo": { "retirementAt": 1788202800i64 }
+                }
+            ],
+            "nextCursor": null
+        }))
+        .unwrap();
+        assert_eq!(page.models.len(), 2);
+        let retiring = page
+            .models
+            .iter()
+            .find(|m| m.id == "gpt-5.4")
+            .expect("gpt-5.4 present");
+        let note = retiring.description.as_deref().unwrap_or_default();
+        assert!(
+            note.starts_with("Retiring ") && note.contains("— pick a newer model"),
+            "unexpected annotation: {note}"
+        );
+        let healthy = page
+            .models
+            .iter()
+            .find(|m| m.id == "gpt-5.6-sol")
+            .expect("default present");
+        assert!(healthy.description.is_none());
+    }
 
     #[test]
     fn lookup_prefers_exe_over_cmd_shim() {

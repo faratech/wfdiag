@@ -95,6 +95,7 @@ async fn exec(cfg: &ResolvedProviderConfig, payload: String) -> Result<String, S
                 "no error output. If you recently signed out, sign in again in Settings."
                     .to_string()
             });
+        let detail = with_upstream_auth_hint(&detail);
         return Err(format!(
             "Codex CLI failed (exit {}): {}",
             output
@@ -126,6 +127,27 @@ fn extract_error(stdout: &str) -> Option<String> {
         }
     }
     message
+}
+
+/// Codex CLI 0.149.0 shipped an auth regression (upstream issues #39883 /
+/// #40138): `login status` still reports success but every ChatGPT-login
+/// request fails with 401/unauthorized. When that exact pattern shows up,
+/// point the user at the upstream fix instead of our config — nothing here
+/// is misconfigured.
+fn with_upstream_auth_hint(detail: &str) -> String {
+    let text = detail.to_lowercase();
+    let auth_failure = (text.contains("401") || text.contains("unauthorized"))
+        && (text.contains("login") || text.contains("auth") || text.contains("token")
+            || text.contains("sign in"));
+    if auth_failure {
+        format!(
+            "{detail}\n\nNote: Codex CLI 0.149.0 has a known sign-in bug that produces \
+             exactly this error. Downgrade with `npm install -g @openai/codex@0.148.0` \
+             and try again."
+        )
+    } else {
+        detail.to_string()
+    }
 }
 
 /// Extract the answer from `codex exec --json` output: JSONL thread events,
@@ -199,6 +221,20 @@ fn parse_exec_jsonl(stdout: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_auth_hint_fires_only_on_401_patterns() {
+        let hit = with_upstream_auth_hint(
+            "stream error: HTTP 401 Unauthorized while using ChatGPT login",
+        );
+        assert!(hit.contains("0.148.0"), "hint missing: {hit}");
+
+        let miss = with_upstream_auth_hint("model 'nope' is not available");
+        assert!(!miss.contains("0.148.0"), "hint must not fire here: {miss}");
+
+        let miss2 = with_upstream_auth_hint("sandbox denied access to C:\\Temp");
+        assert!(!miss2.contains("0.148.0"), "hint must not fire here: {miss2}");
+    }
 
     #[test]
     fn parses_the_last_agent_message() {

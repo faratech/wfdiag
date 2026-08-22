@@ -93,9 +93,11 @@ const BridgeAuthRow: React.FC<{
   hint: string
   signInText: string
   notDetectedText: string
-}> = ({ provider, accountLabel, hint, signInText, notDetectedText }) => {
+  /** Receives the freshly installed binary's path so the caller can pin it in settings (the running app's PATH is stale until relaunch). */
+  onInstalledPath?: (path: string) => void
+}> = ({ provider, accountLabel, hint, signInText, notDetectedText, onInstalledPath }) => {
   const [status, setStatus] = useState<BridgeStatus | null>(null)
-  const [busy, setBusy] = useState<'sign-in' | 'sign-out' | null>(null)
+  const [busy, setBusy] = useState<'sign-in' | 'sign-out' | 'install' | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -105,6 +107,27 @@ const BridgeAuthRow: React.FC<{
       .catch(() => { if (!cancelled) setStatus({ installed: false, signedIn: false }) })
     return () => { cancelled = true }
   }, [provider])
+
+  // Installs the vendor's own CLI through winget or their official
+  // PowerShell bootstrap — no Node.js required. Can take a few minutes on a
+  // cold link; the returned status carries the binary path even when this
+  // process's PATH predates the install.
+  const install = async () => {
+    setBusy('install')
+    setError(null)
+    try {
+      const installed = await invoke<BridgeStatus>('ai_bridge_install', { provider })
+      setStatus(installed)
+      if (installed.path && onInstalledPath) onInstalledPath(installed.path)
+      if (!installed.installed) {
+        setError('The installer finished but the CLI was not detected yet — restart the app and refresh.')
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
 
   const signIn = async () => {
     setBusy('sign-in')
@@ -146,7 +169,19 @@ const BridgeAuthRow: React.FC<{
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           {status === null && <span className="hint">Checking…</span>}
-          {status !== null && !status.installed && <span className="hint">{notDetectedText}</span>}
+          {status !== null && !status.installed && (
+            <>
+              <span className="hint">{notDetectedText}</span>
+              <Button
+                variant="primary"
+                onClick={install}
+                loading={busy === 'install'}
+                disabled={busy !== null}
+              >
+                {busy === 'install' ? 'Installing…' : 'Install CLI'}
+              </Button>
+            </>
+          )}
           {status?.installed && status.signedIn && (
             <>
               <span className="tag">Signed in</span>
@@ -965,9 +1000,10 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
             hint="OpenAI's own login opens in your browser; usage bills to your ChatGPT plan"
             signInText="Sign in with ChatGPT"
             notDetectedText="Codex CLI not detected"
+            onInstalledPath={path => set('codexCliPath', path)}
           />
           <div className="form-row">
-            <div><strong>CLI path</strong><div className="hint">Optional. Empty auto-detects codex on PATH (npm install -g @openai/codex)</div></div>
+            <div><strong>CLI path</strong><div className="hint">Optional. Empty auto-detects codex — use Install CLI above if it is missing</div></div>
             <input className="field-input" aria-label="Codex CLI path" type="text" value={draft.codexCliPath || ''} placeholder="Auto-detected" onChange={e => set('codexCliPath', e.target.value)} />
           </div>
           <div className="form-row">
@@ -995,9 +1031,10 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
             hint="Anthropic's own login opens in your browser; usage bills to your Claude plan"
             signInText="Sign in with Claude"
             notDetectedText="Claude Code not detected"
+            onInstalledPath={path => set('claudeCliPath', path)}
           />
           <div className="form-row">
-            <div><strong>CLI path</strong><div className="hint">Optional. Empty auto-detects claude on PATH (npm install -g @anthropic-ai/claude-code)</div></div>
+            <div><strong>CLI path</strong><div className="hint">Optional. Empty auto-detects claude — use Install CLI above if it is missing</div></div>
             <input className="field-input" aria-label="Claude Code CLI path" type="text" value={draft.claudeCliPath || ''} placeholder="Auto-detected" onChange={e => set('claudeCliPath', e.target.value)} />
           </div>
           <div className="form-row">

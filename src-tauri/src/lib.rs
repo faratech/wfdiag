@@ -1244,6 +1244,7 @@ pub fn run() {
             ai_providers::model_catalog::ai_list_models,
             // Subscription CLI bridge (Codex): the CLI owns sign-in
             ai_providers::cli_bridge::ai_bridge_status,
+            ai_providers::cli_bridge::ai_bridge_install,
             ai_providers::cli_bridge::ai_bridge_sign_in,
             ai_providers::cli_bridge::ai_bridge_sign_in_cancel,
             ai_providers::cli_bridge::ai_bridge_sign_out,

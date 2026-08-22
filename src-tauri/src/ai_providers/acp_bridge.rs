@@ -44,8 +44,11 @@ const MODEL_LIST_STDERR_LIMIT: u64 = 32 * 1024;
 
 /// Adapter package for Claude Code (renamed from the deprecated
 /// `@zed-industries/claude-code-acp` — same registry entry Intelligent
-/// Terminal launches).
-const CLAUDE_ADAPTER_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp";
+/// Terminal launches). PINNED: the project ships breaking changes in minor
+/// bumps pre-1.0, and an unpinned `npx -y` would take every release
+/// overnight with no code change on our side. Bump deliberately after
+/// re-verifying the handshake.
+const CLAUDE_ADAPTER_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.70.0";
 
 /// The one way an adapter process is launched, shared by discovery and
 /// prompts: `npx -y <package>` in the neutral bridge cwd, hidden, with the
@@ -53,10 +56,13 @@ const CLAUDE_ADAPTER_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp";
 /// recursion guard; the key vars would override the CLI's stored login and
 /// turn subscription runs into API billing) plus the documented
 /// `CLAUDE_CODE_EXECUTABLE` override so the adapter drives the exact CLI we
-/// resolved/configured instead of re-resolving its own.
+/// resolved/configured instead of re-resolving its own. --prefer-offline
+/// skips the per-run npm registry round-trip (measured ~12 s of every
+/// discovery) when the package is already in the npx cache — which the pin
+/// above guarantees after the first run.
 fn adapter_command(npx: &Path, workdir: &Path, claude_path: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(npx);
-    cmd.args(["-y", CLAUDE_ADAPTER_PACKAGE]);
+    cmd.args(["-y", "--prefer-offline", CLAUDE_ADAPTER_PACKAGE]);
     cmd.current_dir(workdir);
     #[cfg(windows)]
     {

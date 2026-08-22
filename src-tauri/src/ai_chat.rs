@@ -1812,6 +1812,38 @@ fn cancel_pending_fallback(session: &mut ChatSession) -> bool {
     true
 }
 
+/// Last-resort recovery when a turn task PANICS: the spawned future dies
+/// without emitting a terminal event and without clearing `busy`, which used
+/// to leave the session stuck on an eternal "Reasoning" chip until restart.
+/// Emits the standard error/done pair with a fresh emitter and flips the
+/// session back to idle WITHOUT touching stored messages (they hold the last
+/// good state the panic interrupted).
+async fn mark_session_errored_after_panic(
+    runtime: &ChatRuntimeState,
+    session_id: &str,
+    message_id: &str,
+) {
+    let mut cancels = runtime.chat_cancels.lock().await;
+    cancels.remove(message_id);
+    let mut sessions = runtime.chat_sessions.lock().await;
+    if let Some(session) = sessions.get_mut(session_id) {
+        session.busy = false;
+        session.active_message_id = None;
+        session.pending_fallback = None;
+        session.updated_at = std::time::SystemTime::now();
+        if let Some(turn) = session
+            .turns
+            .iter_mut()
+            .find(|turn| turn.message_id == message_id)
+            && turn.finish_reason.is_none()
+        {
+            turn.finish_reason = Some("error".to_string());
+            turn.terminal_message =
+                Some("The AI turn failed unexpectedly. Please try again.".to_string());
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn finish_session_with_tools(
     runtime: &ChatRuntimeState,
@@ -1865,7 +1897,17 @@ fn spawn_chat_run(
     cancel: CancellationToken,
     existing_activities: Vec<ToolActivityRecord>,
 ) {
+    // A panicking turn task used to die silently — no terminal event, busy
+    // never cleared, UI on an eternal "Reasoning" chip. Guard the whole body
+    // so a panic still produces the standard error/done pair and a clean
+    // idle session.
+    let panic_app = app.clone();
+    let panic_runtime = runtime.clone();
+    let panic_session_id = session_id.clone();
+    let panic_message_id = message_id.clone();
+    let panic_provider = initial_provider;
     tauri::async_runtime::spawn(async move {
+        let guarded = std::panic::AssertUnwindSafe(async move {
         let emitter = SessionEmitter::new(app, existing_activities);
         let mut cur_provider = start_provider;
         let mut cur_cfg = start_cfg;
@@ -2190,6 +2232,28 @@ fn spawn_chat_run(
                     cur_cfg = next_cfg;
                 }
             }
+        }
+        }); // end of guarded turn body
+        if futures::FutureExt::catch_unwind(guarded).await.is_err() {
+            eprintln!(
+                "AI chat turn panicked (session {panic_session_id}); recovering session state"
+            );
+            let emitter = SessionEmitter::new(panic_app, Vec::new());
+            emitter.error(&ErrorPayload {
+                session_id: panic_session_id.clone(),
+                message_id: panic_message_id.clone(),
+                message: "The AI turn failed unexpectedly. Please try again.".to_string(),
+            });
+            emitter.done(&DonePayload {
+                session_id: panic_session_id.clone(),
+                message_id: panic_message_id.clone(),
+                finish_reason: "error".to_string(),
+                provider: panic_provider.to_string(),
+                provider_use: ProviderUse::for_provider(panic_provider, None),
+                tool_call_count: 0,
+            });
+            mark_session_errored_after_panic(&panic_runtime, &panic_session_id, &panic_message_id)
+                .await;
         }
     });
 }

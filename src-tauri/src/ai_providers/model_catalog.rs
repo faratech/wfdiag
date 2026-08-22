@@ -229,20 +229,79 @@ async fn list_models_inner(
         "codex_cli" | "codexcli" | "codex" => {
             let settings = read_settings_from_disk().unwrap_or_default();
             let configured = cli_path.or(settings.codex_cli_path);
-            Ok(super::cli_bridge::list_codex_models(configured.as_deref())
-                .await?
-                .into())
+            let override_for_task = configured.clone();
+            let catalog = cached_bridge_catalog("codex", configured.as_deref(), move || {
+                Box::pin(async move {
+                    super::cli_bridge::list_codex_models(override_for_task.as_deref()).await
+                })
+            })
+            .await?;
+            Ok(catalog.into())
         }
         "claude_code" | "claudecode" | "claude" => {
             let settings = read_settings_from_disk().unwrap_or_default();
             let configured = cli_path.or(settings.claude_cli_path);
             let claude = super::cli_bridge::resolve_cli("claude", configured.as_deref()).await?;
-            Ok(super::acp_bridge::list_claude_models(&claude).await?.into())
+            let claude_for_task = claude.clone();
+            let catalog = cached_bridge_catalog("claude", configured.as_deref(), move || {
+                Box::pin(async move {
+                    super::acp_bridge::list_claude_models(&claude_for_task).await
+                })
+            })
+            .await?;
+            Ok(catalog.into())
         }
         // The on-device model is selected by Windows, not by the app.
         "phi_silica" | "phisilica" => Ok(ModelCatalog::default()),
         other => Err(format!("Unknown provider: {other}")),
     }
+}
+
+/// Successful bridge-catalog cache (short TTL). Discovery spawns a CLI (or a
+/// full npx + adapter chain for Claude), so Settings pane interactions that
+/// re-request within seconds were paying the whole cost again. Failures are
+/// never cached: a transient CLI hiccup self-heals on the next request.
+/// Keyed on provider AND the configured cli-path so an override change
+/// always re-discovers.
+fn bridge_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, (Instant, super::cli_bridge::BridgeModelCatalog)>,
+> {
+    static CACHE: OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, (Instant, super::cli_bridge::BridgeModelCatalog)>,
+        >,
+    > = OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+const BRIDGE_CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+async fn cached_bridge_catalog(
+    provider_key: &str,
+    configured_cli_path: Option<&str>,
+    discover: impl FnOnce() -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<super::cli_bridge::BridgeModelCatalog, String>,
+                > + Send,
+        >,
+    >,
+) -> Result<super::cli_bridge::BridgeModelCatalog, String> {
+    let key = format!(
+        "{provider_key}|{}",
+        configured_cli_path.unwrap_or_default()
+    );
+    if let Ok(cache) = bridge_cache().lock()
+        && let Some((at, catalog)) = cache.get(&key)
+        && at.elapsed() < BRIDGE_CATALOG_TTL
+    {
+        return Ok(catalog.clone());
+    }
+    let catalog = discover().await?;
+    if let Ok(mut cache) = bridge_cache().lock() {
+        cache.insert(key, (std::time::Instant::now(), catalog.clone()));
+    }
+    Ok(catalog)
 }
 
 impl From<super::cli_bridge::BridgeModelCatalog> for ModelCatalog {
