@@ -136,8 +136,13 @@ pub async fn probe(provider: AIProvider) -> BridgeProbe {
     {
         return probe.clone();
     }
-    let fresh = probe_uncached(provider, spec).await;
-    if let Ok(mut cache) = probe_cache().lock() {
+    let (fresh, conclusive) = probe_uncached(provider, spec).await;
+    // Cache definitive evidence only. A timed-out or failed status run says
+    // nothing about sign-in; caching it as "signed out" made Auto routing
+    // silently fall through to metered cloud API keys for the whole TTL.
+    if conclusive
+        && let Ok(mut cache) = probe_cache().lock()
+    {
         cache.insert(spec.binary, (Instant::now(), fresh.clone()));
     }
     fresh
@@ -152,27 +157,41 @@ pub fn invalidate(provider: AIProvider) {
     }
 }
 
-async fn probe_uncached(provider: AIProvider, spec: &'static BridgeSpec) -> BridgeProbe {
+/// Probe a bridged CLI. The bool reports whether the result is DEFINITIVE
+/// (worth caching): false means a transient failure — the probe answer is
+/// still returned for this call, but the next caller must re-probe.
+async fn probe_uncached(
+    provider: AIProvider,
+    spec: &'static BridgeSpec,
+) -> (BridgeProbe, bool) {
     let path = match resolve_cli(spec.binary, configured_cli_path(provider).as_deref()).await {
         Ok(path) => path,
-        Err(_) => return BridgeProbe::default(),
+        Err(_) => return (BridgeProbe::default(), true),
     };
     let mut cmd = tokio::process::Command::new(&path);
     cmd.args(spec.status_args);
-    let authed = match run_headless(cmd, None, PROBE_TIMEOUT, spec.binary).await {
+    match run_headless(cmd, None, PROBE_TIMEOUT, spec.binary).await {
         Ok(output) => {
             let text = format!(
                 "{}\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            is_signed_in(spec, output.status.success(), &text)
+            let authed = is_signed_in(spec, output.status.success(), &text);
+            (BridgeProbe {
+                path: Some(path),
+                authed,
+            }, true)
         }
-        Err(_) => false,
-    };
-    BridgeProbe {
-        path: Some(path),
-        authed,
+        // Timeout / spawn trouble: unknown, not signed out. Report unusable
+        // for this call but leave the cache untouched.
+        Err(error) => {
+            eprintln!("Bridge probe for {} inconclusive: {error}", spec.binary);
+            (BridgeProbe {
+                path: Some(path),
+                authed: false,
+            }, false)
+        }
     }
 }
 
@@ -700,22 +719,36 @@ pub async fn run_headless(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Could not start {what}: {e}"))?;
-    if let Some(payload) = stdin_payload {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| format!("Could not open stdin for {what}"))?;
-        stdin
-            .write_all(payload.as_bytes())
-            .await
-            .map_err(|e| format!("Could not send input to {what}: {e}"))?;
-        // Dropping the handle closes the pipe so the CLI sees end-of-input
-        drop(stdin);
-    }
-    tokio::time::timeout(timeout, child.wait_with_output())
-        .await
-        .map_err(|_| format!("{what} did not answer within {} seconds", timeout.as_secs()))?
-        .map_err(|e| format!("{what} failed to run: {e}"))
+    let mut stdin = match stdin_payload {
+        Some(_) => Some(
+            child
+                .stdin
+                .take()
+                .ok_or_else(|| format!("Could not open stdin for {what}"))?,
+        ),
+        None => None,
+    };
+
+    // Write the stdin payload and collect output CONCURRENTLY, all under ONE
+    // timeout budget: the write previously ran before any timeout started,
+    // so a child that never read its stdin — or filled an output pipe before
+    // draining ours — hung this call indefinitely, unkillable from outside.
+    tokio::time::timeout(timeout, async {
+        let write = async {
+            if let (Some(payload), Some(stdin)) = (stdin_payload, stdin.as_mut()) {
+                stdin.write_all(payload.as_bytes()).await
+            } else {
+                Ok(())
+            }
+        };
+        let (write_result, output) = tokio::join!(write, child.wait_with_output());
+        // Dropping `stdin` at block end closes the pipe so the CLI sees
+        // end-of-input.
+        write_result.map_err(|e| format!("Could not send input to {what}: {e}"))?;
+        output.map_err(|e| format!("{what} failed to run: {e}"))
+    })
+    .await
+    .map_err(|_| format!("{what} did not answer within {} seconds", timeout.as_secs()))?
 }
 
 // ============================================================================

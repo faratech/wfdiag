@@ -29,7 +29,11 @@ use super::cli_bridge;
 const INIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// The adapter spawns the agent CLI underneath during session/new.
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
-const PROMPT_TIMEOUT: Duration = Duration::from_secs(180);
+/// One prompt turn. Must stay STRICTLY below ai_chat's whole-turn deadline
+/// (TURN_TIMEOUT_SECS = 180 s, which wraps everything including this) or the
+/// outer limit kills the turn first and its specific "prompt timed out"
+/// error — and the adapter cleanup it triggers — becomes unreachable.
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(170);
 /// Outer safety net around model discovery: must exceed the sum of the
 /// per-step budgets it wraps (INIT 60 + SESSION 30 + margin), otherwise the
 /// inner timeouts are unreachable and a first-run `npx` package download
@@ -501,6 +505,18 @@ fn reject_outcome(options: &[v1::PermissionOption]) -> v1::RequestPermissionOutc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_timeout_stays_inside_the_chat_turn_deadline() {
+        // ai_chat.rs wraps the WHOLE turn (including this prompt) in
+        // TURN_TIMEOUT_SECS = 180 s. The inner budget must stay strictly
+        // below it or the outer limit fires first and this module's
+        // "prompt timed out" path — with its adapter cleanup — is
+        // unreachable. Same invariant family as model_catalog's
+        // BRIDGE_CATALOG_TIMEOUT test.
+        assert!(PROMPT_TIMEOUT < Duration::from_secs(180));
+        assert!(PROMPT_TIMEOUT > INIT_TIMEOUT + SESSION_TIMEOUT);
+    }
 
     fn option(id: &str, kind: v1::PermissionOptionKind) -> v1::PermissionOption {
         v1::PermissionOption::new(id.to_string(), id.to_string(), kind)

@@ -433,6 +433,16 @@ pub async fn chat_stream(
         {
             actual_models.push(model.to_string());
         }
+        // Safety blocks arrive as a terminal chunk carrying promptFeedback
+        // and NO candidates. Surface the real block reason instead of a
+        // confusing missing-candidate error — same contract as the
+        // non-stream parse_generate_response path.
+        if let Some(reason) = v
+            .pointer("/promptFeedback/blockReason")
+            .and_then(Value::as_str)
+        {
+            return Err(format!("Gemini blocked the request ({})", reason));
+        }
         let candidate = v
             .pointer("/candidates/0")
             .ok_or_else(|| "Gemini stream event omitted its candidate".to_string())?;

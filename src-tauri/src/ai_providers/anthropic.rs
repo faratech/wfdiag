@@ -101,17 +101,22 @@ async fn resolve_model_runtime_caps(cfg: &ResolvedProviderConfig, model: &str) -
     if let Some(cached) = model_caps_cache().read().await.get(model).copied() {
         return cached;
     }
-    let caps = fetch_model_runtime_caps(cfg, model)
-        .await
-        .unwrap_or(ModelRuntimeCaps {
+    match fetch_model_runtime_caps(cfg, model).await {
+        Some(caps) => {
+            model_caps_cache()
+                .write()
+                .await
+                .insert(model.to_string(), caps);
+            caps
+        }
+        // Transient failure (timeout, 5xx, bad body): fall back for THIS
+        // call but leave the cache empty so the next call retries — a
+        // cached fallback would pin the wrong caps until app restart.
+        None => ModelRuntimeCaps {
             adaptive_thinking: fallback_adaptive_thinking(model),
             max_tokens: None,
-        });
-    model_caps_cache()
-        .write()
-        .await
-        .insert(model.to_string(), caps);
-    caps
+        },
+    }
 }
 
 /// Build a Messages API request body. Pure and network-free for testability.
