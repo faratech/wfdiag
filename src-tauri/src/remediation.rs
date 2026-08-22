@@ -1055,16 +1055,35 @@ fn clear_temp_files(cancel: &CancellationToken) -> anyhow::Result<FixResult> {
     })
 }
 
+/// `net stop`/`net start` report "the service is ALREADY in that state" as a
+/// FAILURE exit (NET HELPMSG 3521 / 2182). For this reset those are no-op
+/// successes — recognize the benign messages (pure for testability).
+fn benign_service_state_output(output: &str) -> bool {
+    let text = output.to_lowercase();
+    // Matched by phrase AND by NET HELPMSG number: localized Windows
+    // translates the text but keeps the message number.
+    const BENIGN_MARKERS: [&str; 5] = [
+        "not started",
+        "3521",
+        "already been started",
+        "already running",
+        "2182",
+    ];
+    BENIGN_MARKERS.iter().any(|marker| text.contains(marker))
+}
+
 fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult> {
     // Stop -> clear download cache -> start. Bound service-control waits so a
     // hung SCM call cannot stall the remediation indefinitely.
     let mut actions_taken = Vec::new();
 
-    let run_quiet = |program: &str, args: &[&str]| -> anyhow::Result<bool> {
+    // Returns (exit_ok, combined output) — the output lets callers tell a
+    // real failure from a benign "already in target state" result.
+    let run_quiet = |program: &str, args: &[&str]| -> anyhow::Result<(bool, String)> {
         let mut cmd = std::process::Command::new(crate::security::trusted_system_program(program)?);
         cmd.args(args);
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -1074,9 +1093,9 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
         let mut child = cmd.spawn()?;
         let timeout = Duration::from_secs(60);
         let deadline = std::time::Instant::now() + timeout;
-        loop {
+        let status = loop {
             if let Some(status) = child.try_wait()? {
-                return Ok(status.success());
+                break status;
             }
             if std::time::Instant::now() >= deadline {
                 let _ = child.kill();
@@ -1089,12 +1108,26 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
                 );
             }
             std::thread::sleep(Duration::from_millis(100));
+        };
+        // Child has exited, so both pipes are complete (net.exe writes only
+        // a few lines — they cannot have filled and deadlocked it).
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        if let Some(mut pipe) = child.stdout.take() {
+            let _ = std::io::Read::read_to_end(&mut pipe, &mut stdout);
         }
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = std::io::Read::read_to_end(&mut pipe, &mut stderr);
+        }
+        let mut output = String::from_utf8_lossy(&stdout).into_owned();
+        output.push('\n');
+        output.push_str(&String::from_utf8_lossy(&stderr));
+        Ok((status.success(), output))
     };
 
     let mut steps = Vec::new();
     match run_quiet("net", &["stop", "wuauserv"]) {
-        Ok(true) => {
+        Ok((true, _)) => {
             actions_taken.push("Stopped Windows Update service".to_string());
             steps.push(RemediationStepResult {
                 action: "Stop Windows Update service".to_string(),
@@ -1102,7 +1135,15 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
                 detail: None,
             });
         }
-        Ok(false) => steps.push(RemediationStepResult {
+        Ok((false, output)) if benign_service_state_output(&output) => {
+            actions_taken.push("Windows Update service was already stopped".to_string());
+            steps.push(RemediationStepResult {
+                action: "Stop Windows Update service".to_string(),
+                status: RemediationStepStatus::Succeeded,
+                detail: Some("Service was already stopped".to_string()),
+            });
+        }
+        Ok((false, _)) => steps.push(RemediationStepResult {
             action: "Stop Windows Update service".to_string(),
             status: RemediationStepStatus::Failed,
             detail: Some("Service-control command returned a failure status".to_string()),
@@ -1158,7 +1199,7 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
     // Finally-style restoration: starting the service is attempted regardless
     // of stop/cache failures so a partial reset cannot leave it disabled.
     match run_quiet("net", &["start", "wuauserv"]) {
-        Ok(true) => {
+        Ok((true, _)) => {
             actions_taken.push("Restarted Windows Update service".to_string());
             steps.push(RemediationStepResult {
                 action: "Start Windows Update service".to_string(),
@@ -1166,7 +1207,15 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
                 detail: None,
             });
         }
-        Ok(false) => steps.push(RemediationStepResult {
+        Ok((false, output)) if benign_service_state_output(&output) => {
+            actions_taken.push("Windows Update service was already running".to_string());
+            steps.push(RemediationStepResult {
+                action: "Start Windows Update service".to_string(),
+                status: RemediationStepStatus::Succeeded,
+                detail: Some("Service was already running".to_string()),
+            });
+        }
+        Ok((false, _)) => steps.push(RemediationStepResult {
             action: "Start Windows Update service".to_string(),
             status: RemediationStepStatus::Failed,
             detail: Some("Service-control command returned a failure status".to_string()),
@@ -1198,6 +1247,26 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn benign_service_states_are_recognized() {
+        // `net stop` on an already-stopped service (English + message number)
+        assert!(benign_service_state_output(
+            "The Windows Update service is not started.\n\nNET HELPMSG 3521"
+        ));
+        // `net start` on an already-running service
+        assert!(benign_service_state_output(
+            "The wuauserv service is already running.\n\nNET HELPMSG 2182"
+        ));
+        assert!(benign_service_state_output(
+            "Der Dienst wurde bereits gestartet.\n\nNET HELPMSG 2182"
+        ));
+        // Real failures must stay failures.
+        assert!(!benign_service_state_output(
+            "System error 5 has occurred.\n\nAccess is denied."
+        ));
+        assert!(!benign_service_state_output(""));
+    }
 
     /// Records every call; never touches the system.
     #[derive(Default)]

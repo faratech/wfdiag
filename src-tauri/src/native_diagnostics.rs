@@ -1229,10 +1229,11 @@ impl NativeDiagnostics {
         let output =
             Self::execute_secure_command("powercfg", &["/batteryreport", "/output", &temp_path])?;
 
-        if output.status.success() && temp_file.exists() {
+        // Read/parse failures propagate AFTER the cleanup below so the
+        // report file never leaks in %TEMP% on repeated failing scans.
+        let result = if output.status.success() && temp_file.exists() {
             std::thread::sleep(std::time::Duration::from_millis(500));
             let html_content = fs::read_to_string(&temp_file)?;
-            let _ = fs::remove_file(&temp_file);
 
             // Parse the HTML to extract battery information safely
             let battery_info = self.parse_battery_html(&html_content)?;
@@ -1243,9 +1244,11 @@ impl NativeDiagnostics {
                 "parsed_data": true
             }))
         } else {
-            let _ = fs::remove_file(&temp_file);
             Err(anyhow::anyhow!("Failed to generate battery report"))
-        }
+        };
+
+        let _ = fs::remove_file(&temp_file);
+        result
     }
 
     /// Parse battery report HTML and extract key information using simple string parsing

@@ -1947,25 +1947,36 @@ pub async fn get_network_connections() -> Vec<NetworkConnection> {
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut connections = Vec::new();
+    parse_network_connections(&stdout)
+}
 
-    for line in stdout.lines().skip(4) {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 4 {
-            connections.push(NetworkConnection {
-                protocol: parts[0].to_string(),
-                local_addr: parts[1].to_string(),
-                remote_addr: parts[2].to_string(),
-                status: if parts.len() > 3 {
-                    parts[3].to_string()
-                } else {
-                    "NONE".to_string()
-                },
-            });
-        }
-    }
-
-    connections
+/// Parse `netstat -an` output. Pure for testability. Handles BOTH row
+/// shapes Windows prints: TCP has a trailing state column
+/// (`TCP 0.0.0.0:135 0.0.0.0:0 LISTENING`) while UDP has none
+/// (`UDP 0.0.0.0:123 *:*`) — requiring 4 tokens silently dropped every
+/// UDP entry from the list.
+fn parse_network_connections(stdout: &str) -> Vec<NetworkConnection> {
+    stdout
+        .lines()
+        .skip(4)
+        .filter_map(|line| {
+            match line.split_whitespace().collect::<Vec<&str>>().as_slice() {
+                [proto, local, remote, state, ..] => Some(NetworkConnection {
+                    protocol: (*proto).to_string(),
+                    local_addr: (*local).to_string(),
+                    remote_addr: (*remote).to_string(),
+                    status: (*state).to_string(),
+                }),
+                [proto, local, remote] => Some(NetworkConnection {
+                    protocol: (*proto).to_string(),
+                    local_addr: (*local).to_string(),
+                    remote_addr: (*remote).to_string(),
+                    status: "NONE".to_string(),
+                }),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -2326,7 +2337,11 @@ fn detect_npu_dxcore() -> Option<(String, u32)> {
 }
 
 /// Positive PnP device evidence of an NPU (an actual device is present).
-/// This is the only WMI signal allowed to claim NPU availability.
+/// This is the only WMI signal allowed to claim NPU availability. The loose
+/// LIKE query alone is NOT trusted: every candidate goes through the same
+/// exclusion list / classifier as the DXCore fallback, so a virtual or
+/// bus-enumerator device whose name merely contains "NPU" cannot be
+/// promoted to a real NPU.
 fn detect_npu_pnp_device() -> Option<String> {
     use crate::wmi_native::WmiConnection;
 
@@ -2343,10 +2358,27 @@ fn detect_npu_pnp_device() -> Option<String> {
         )
         .ok()?;
     results
-        .first()
-        .and_then(|device| device.get("Name"))
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
+        .iter()
+        .filter_map(|device| {
+            let name = device.get("Name").and_then(|v| v.as_str())?;
+            // Classify on name + device id: the id carries vendor evidence
+            // (e.g. PCI\\VEN_8086) the plain display name lacks.
+            let device_id = device.get("DeviceID").and_then(|v| v.as_str()).unwrap_or("");
+            let mut combined = String::with_capacity(name.len() + device_id.len());
+            combined.push_str(name);
+            combined.push(' ');
+            combined.push_str(device_id);
+            let evidence = NpuAdapterEvidence {
+                name: combined,
+                os_reports_npu: false,
+                has_compute: true,
+                has_graphics: false,
+                is_hardware: None,
+                vendor_id: None,
+            };
+            classify_npu_adapter(&evidence).then(|| name.to_string())
+        })
+        .next()
 }
 
 /// CPU-family heuristic: this processor family normally ships with an NPU.
@@ -2618,6 +2650,34 @@ mod tests {
         assert_eq!(page.offset, 2);
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].name, "gamma.exe");
+    }
+
+    #[test]
+    fn netstat_parsing_keeps_udp_rows() {
+        let sample = "\nActive Connections\n\n  Proto  Local Address          Foreign Address        State\n  \
+                      TCP    0.0.0.0:135            0.0.0.0:0              LISTENING\n  \
+                      TCP    127.0.0.1:49710        127.0.0.1:49711        ESTABLISHED\n  \
+                      UDP    0.0.0.0:123            *:*\n  \
+                      UDP    [::1]:1900             *:*\n";
+        let parsed = parse_network_connections(sample);
+        let udp: Vec<&NetworkConnection> = parsed
+            .iter()
+            .filter(|c| c.protocol.eq_ignore_ascii_case("udp"))
+            .collect();
+        assert_eq!(
+            udp.len(),
+            2,
+            "both UDP rows must survive parsing: {parsed:?}"
+        );
+        assert_eq!(udp[0].local_addr, "0.0.0.0:123");
+        assert_eq!(udp[0].status, "NONE");
+
+        let tcp: Vec<&NetworkConnection> = parsed
+            .iter()
+            .filter(|c| c.protocol.eq_ignore_ascii_case("tcp"))
+            .collect();
+        assert_eq!(tcp.len(), 2);
+        assert_eq!(tcp[0].status, "LISTENING");
     }
 
     fn npu_evidence(name: &str) -> NpuAdapterEvidence {

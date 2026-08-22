@@ -1,7 +1,6 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 
 #[cfg(windows)]
@@ -11,12 +10,6 @@ use windows::Win32::Security::Cryptography::{
 
 #[cfg(windows)]
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
-#[cfg(windows)]
-use windows::Win32::Storage::FileSystem::{
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-};
-#[cfg(windows)]
-use windows::core::PCWSTR;
 
 /// Encrypted file header containing metadata
 const VERSION: u8 = 2; // Bumped version for DPAPI format
@@ -172,25 +165,11 @@ impl EncryptedStorage {
         file_data.extend(header_json);
         file_data.extend(encrypted_data);
 
-        // Write to file atomically to avoid corruption on crashes
+        // Write to file atomically (temp + fsync + replace) to avoid
+        // corruption on crashes — same helper as settings.json / DPAPI blobs.
         let file_path = self.storage_path.join(format!("{}.enc", filename));
-        if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| anyhow!("Failed to create directory: {}", e))?;
-        }
-
-        let temp_path = file_path.with_extension("enc.tmp");
-        {
-            let mut temp_file = fs::File::create(&temp_path)
-                .map_err(|e| anyhow!("Failed to create temp file: {}", e))?;
-            temp_file
-                .write_all(&file_data)
-                .map_err(|e| anyhow!("Failed to write encrypted file: {}", e))?;
-            temp_file
-                .sync_all()
-                .map_err(|e| anyhow!("Failed to flush encrypted file: {}", e))?;
-        }
-
-        atomic_replace(&temp_path, &file_path)?;
+        crate::fs_atomic::write_file(&file_path, &file_data)
+            .map_err(|e| anyhow!("Failed to write encrypted file: {}", e))?;
 
         Ok(())
     }
@@ -302,37 +281,6 @@ impl EncryptedStorage {
         files.sort();
         Ok(files)
     }
-}
-
-#[cfg(windows)]
-fn atomic_replace(temp_path: &std::path::Path, file_path: &std::path::Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    let temp_wide: Vec<u16> = temp_path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let file_wide: Vec<u16> = file_path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-
-    unsafe {
-        MoveFileExW(
-            PCWSTR(temp_wide.as_ptr()),
-            PCWSTR(file_wide.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    }
-    .map_err(|error| anyhow!("Failed to atomically replace encrypted file: {}", error))
-}
-
-#[cfg(not(windows))]
-fn atomic_replace(temp_path: &std::path::Path, file_path: &std::path::Path) -> Result<()> {
-    fs::rename(temp_path, file_path)
-        .map_err(|error| anyhow!("Failed to finalize encrypted file: {}", error))
 }
 
 #[cfg(test)]

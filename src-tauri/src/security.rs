@@ -284,19 +284,27 @@ impl SecureCommandExecutor {
     fn validate_temp_path(&self, path: &str) -> Result<()> {
         // Ensure path is in temp directory and has safe filename
         let temp_dir = std::env::temp_dir();
+        // canonicalize() returns a VERBATIM (\\?\C:\...) path on Windows, so
+        // BOTH sides must be canonicalized — comparing against the plain
+        // temp_dir could never match an existing file's canonical form.
+        let temp_dir_canonical = temp_dir.canonicalize().unwrap_or(temp_dir.clone());
         let path_buf = std::path::PathBuf::from(path);
 
         // Check if path is in temp directory
         if let Ok(canonical_path) = path_buf.canonicalize() {
-            if !canonical_path.starts_with(&temp_dir) {
+            if !canonical_path.starts_with(&temp_dir_canonical) {
                 return Err(anyhow::anyhow!("Path must be in temp directory"));
             }
         } else {
             // For non-existent files, check parent directory
-            if let Some(parent) = path_buf.parent()
-                && parent != temp_dir
-            {
-                return Err(anyhow::anyhow!("Path must be in temp directory"));
+            if let Some(parent) = path_buf.parent() {
+                let parent_in_temp = parent == temp_dir
+                    || parent
+                        .canonicalize()
+                        .is_ok_and(|canonical| canonical.starts_with(&temp_dir_canonical));
+                if !parent_in_temp {
+                    return Err(anyhow::anyhow!("Path must be in temp directory"));
+                }
             }
         }
 
@@ -545,6 +553,27 @@ mod tests {
                 "must refuse {refs:?}"
             );
         }
+    }
+
+    #[test]
+    fn validate_temp_path_accepts_existing_temp_files() {
+        let executor = SecureCommandExecutor::new();
+        let dir = std::env::temp_dir().join("wfdiag_validate_temp_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("wfdiag_probe.html");
+        std::fs::write(&file, b"probe").unwrap();
+
+        // An EXISTING file inside %TEMP% must pass containment. Its
+        // canonical form carries the verbatim \\?\ prefix on Windows, which
+        // never prefix-matched the plain temp dir before the fix.
+        assert!(executor.validate_temp_path(file.to_str().unwrap()).is_ok());
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&dir);
+
+        // Outside temp stays rejected (nonexistent path → parent check).
+        assert!(executor
+            .validate_temp_path("C:\\Windows\\wfdiag_evil.html")
+            .is_err());
     }
 
     #[test]

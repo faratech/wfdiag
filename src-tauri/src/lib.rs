@@ -10,6 +10,7 @@ pub mod diagnostics;
 mod dpapi;
 mod encrypted_storage;
 pub mod error;
+mod fs_atomic;
 mod issue_catalog;
 mod issue_detector;
 mod native_diagnostics;

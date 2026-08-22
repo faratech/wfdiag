@@ -381,8 +381,10 @@ pub async fn save_settings(settings: AppSettings) -> Result<(), String> {
 
     let json = serde_json::to_string_pretty(&settings_for_disk(&settings))
         .map_err(|e| DiagError::serialization(e.to_string()))?;
-    std::fs::write(&path, &json)
-        .map_err(|e| DiagError::file(path.display().to_string(), e.to_string()))?;
+    // Atomic (temp + fsync + replace): a crash mid-write must never destroy
+    // the user's whole settings file.
+    crate::fs_atomic::write_file(&path, json.as_bytes())
+        .map_err(|e| DiagError::file(path.display().to_string(), e))?;
 
     // Sync settings the backend consults in memory
     sync_in_memory_state(&settings);
@@ -531,8 +533,8 @@ pub(crate) fn persist_cloud_fallback_policy(policy: CloudFallbackPolicy) -> Resu
     settings.cloud_fallback_policy = policy;
     let json = serde_json::to_string_pretty(&settings_for_disk(&settings))
         .map_err(|e| DiagError::serialization(e.to_string()))?;
-    std::fs::write(&path, json)
-        .map_err(|e| String::from(DiagError::file(path.display().to_string(), e.to_string())))?;
+    crate::fs_atomic::write_file(&path, json.as_bytes())
+        .map_err(|e| DiagError::file(path.display().to_string(), e).to_string())?;
     CLOUD_FALLBACK_POLICY.store(
         match policy {
             CloudFallbackPolicy::Ask => 0,

@@ -223,8 +223,10 @@ pub fn store_provider_key(id: ProviderKeyId, key: &str) -> Result<(), String> {
     let encrypted = dpapi_encrypt(key)?;
     let path = get_credentials_path(id)?;
 
-    fs::write(&path, encrypted)
-        .map_err(|e| DiagError::file(path.display().to_string(), e.to_string()))?;
+    // Atomic (temp + fsync + replace): a crash mid-write must not truncate
+    // the blob — the previous key would silently vanish.
+    crate::fs_atomic::write_file(&path, &encrypted)
+        .map_err(|e| DiagError::file(path.display().to_string(), e))?;
 
     println!("API key stored securely with DPAPI at {:?}", path);
     Ok(())
@@ -254,8 +256,14 @@ pub fn load_provider_key(id: ProviderKeyId) -> Result<Option<String>, String> {
             }
         }
         Err(e) => {
-            // If decryption fails, the file might be corrupted or from a different user
-            eprintln!("Warning: Failed to decrypt credentials: {}", e);
+            // Decryption failure means the blob is corrupted or belongs to
+            // another user. The key is unrecoverable — say so loudly instead
+            // of only eprintln-ing while callers conclude "no key set".
+            println!(
+                "WARNING: Stored credentials at {:?} could not be decrypted \
+                 ({}). The saved API key was discarded — please re-enter it in Settings.",
+                path, e
+            );
             Ok(None)
         }
     }
