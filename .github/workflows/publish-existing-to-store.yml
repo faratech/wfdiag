@@ -138,7 +138,14 @@ jobs:
           $succeeded = $false
           for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
             Write-Host "msstore publish attempt $attempt of $maxAttempts..."
-            msstore publish "$($bundleFile.FullName)" --appId 9NJ59RH053PV --noCommit
+            # --uploadTimeout is REQUIRED since msstore CLI v0.4.0: omitting it
+            # defaults the Azure SDK network timeout to 0 seconds
+            # (microsoft/msstore-cli#162), so every blob upload dies at 1%
+            # with "Error while uploading the application package." Passing
+            # the flag explicitly engages the option parser and sets a real
+            # timeout on v0.4.x, and remains harmless on versions that gain
+            # the corrected default.
+            msstore publish "$($bundleFile.FullName)" --appId 9NJ59RH053PV --noCommit --uploadTimeout 600
             if ($LASTEXITCODE -eq 0) { $succeeded = $true; break }
             Write-Warning "msstore publish failed (exit $LASTEXITCODE)."
             if ($attempt -lt $maxAttempts) {
