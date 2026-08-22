@@ -86,8 +86,11 @@ impl SecureCommandExecutor {
                     "/cleanup-image".to_string(),
                     "/checkhealth".to_string(),
                     "/scanhealth".to_string(),
+                    // Forces English output so the response parser is
+                    // deterministic on localized Windows installations.
+                    "/english".to_string(),
                 ],
-                max_args: 3,
+                max_args: 4, // /online /cleanup-image <mode> /english
             },
         );
 
@@ -209,6 +212,23 @@ impl SecureCommandExecutor {
                     Ok(())
                 } else {
                     Err(anyhow::anyhow!("Invalid powercfg arguments"))
+                }
+            }
+            "dism" => {
+                // Only allow the component-store health checks exactly as
+                // the diagnostics invoke them: /online /cleanup-image <mode>
+                // /english. Anything else (add/package/repair...) is refused.
+                if args.len() == 4
+                    && args[0] == "/online"
+                    && args[1] == "/cleanup-image"
+                    && (args[2] == "/checkhealth" || args[2] == "/scanhealth")
+                    && args[3] == "/english"
+                {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "Invalid dism arguments - only read-only health checks allowed"
+                    ))
                 }
             }
             "wevtutil" => {
@@ -494,6 +514,37 @@ mod tests {
         assert!(!executor.allowed_commands.contains_key("notepad"));
         assert!(!executor.allowed_commands.contains_key("powershell"));
         assert!(!executor.allowed_commands.contains_key("wmic"));
+    }
+
+    #[test]
+    fn dism_accepts_exactly_the_health_check_invocations() {
+        let executor = SecureCommandExecutor::new();
+        let config = &executor.allowed_commands["dism"];
+
+        // The exact shapes both diagnostics call sites use must validate.
+        for mode in ["/checkhealth", "/scanhealth"] {
+            let args = ["/online", "/cleanup-image", mode, "/english"];
+            assert!(args.len() <= config.max_args, "{mode}: arg budget");
+            executor
+                .validate_arguments("dism", &args, config)
+                .expect("health-check invocation must be allowed");
+        }
+
+        // Everything else is refused — including the 3-arg legacy shape,
+        // repair modes and reordered flags.
+        for bad in [
+            vec!["/online", "/cleanup-image", "/checkhealth"],
+            vec!["/online", "/cleanup-image", "/restorehealth", "/english"],
+            vec!["/online", "/get-packages", "/english"],
+            vec!["/cleanup-image", "/online", "/checkhealth", "/english"],
+            vec!["/online", "/cleanup-image", "/analyzecomponentstore"],
+        ] {
+            let refs: Vec<&str> = bad.clone();
+            assert!(
+                executor.validate_arguments("dism", &refs, config).is_err(),
+                "must refuse {refs:?}"
+            );
+        }
     }
 
     #[test]
