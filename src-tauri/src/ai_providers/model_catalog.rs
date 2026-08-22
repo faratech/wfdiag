@@ -17,6 +17,24 @@ use tokio::sync::Mutex as AsyncMutex;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
+/// CLI bridges may pay a first-run `npx` package download plus adapter and
+/// agent startup: resolve (≤10 s) + ACP init (≤60 s) + session (≤30 s). The
+/// outer budget must stay strictly above the sum of the inner ones or the
+/// per-step timeouts (and their specific error messages) become unreachable.
+const BRIDGE_CATALOG_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Discovery budget for a provider: subscription CLI bridges get the large
+/// budget, HTTP providers keep the snappy one.
+fn catalog_timeout(provider: &str) -> Duration {
+    if matches!(
+        provider.to_lowercase().as_str(),
+        "codex_cli" | "codexcli" | "codex" | "claude_code" | "claudecode" | "claude"
+    ) {
+        BRIDGE_CATALOG_TIMEOUT
+    } else {
+        CATALOG_TIMEOUT
+    }
+}
 const MAX_PAGES: usize = 50;
 const GEMINI_DEFAULT_TTL: Duration = Duration::from_secs(15 * 60);
 const GEMINI_FALLBACK_TTL: Duration = Duration::from_secs(60);
@@ -93,15 +111,16 @@ pub async fn ai_list_models(
     let endpoint = non_empty(endpoint);
     let cli_path = non_empty(cli_path);
 
+    let budget = catalog_timeout(&provider);
     tokio::time::timeout(
-        CATALOG_TIMEOUT,
+        budget,
         list_models_inner(provider, api_key, endpoint, cli_path),
     )
     .await
     .map_err(|_| {
         format!(
             "Model discovery did not finish within {} seconds.",
-            CATALOG_TIMEOUT.as_secs()
+            budget.as_secs()
         )
     })?
 }
@@ -1205,5 +1224,21 @@ mod tests {
         let deduped = stable_dedupe_entries(entries);
         assert_eq!(deduped.len(), 1);
         assert_eq!(deduped[0].label.as_deref(), Some("Newest label"));
+    }
+
+    #[test]
+    fn bridge_providers_get_a_budget_that_covers_their_inner_timeouts() {
+        for bridge in [
+            "codex_cli", "codexcli", "codex", "claude_code", "claudecode", "claude", "CLAUDE_CODE",
+        ] {
+            assert_eq!(catalog_timeout(bridge), BRIDGE_CATALOG_TIMEOUT, "{bridge}");
+        }
+        for http in ["openai", "anthropic", "gemini", "deepseek", "ollama", "unknown"] {
+            assert_eq!(catalog_timeout(http), CATALOG_TIMEOUT, "{http}");
+        }
+        // The outer budget must exceed the sum of the steps it wraps
+        // (resolve 10s + ACP init 60s + session 30s) or the specific
+        // per-step error messages become unreachable again.
+        assert!(BRIDGE_CATALOG_TIMEOUT > Duration::from_secs(10 + 60 + 30));
     }
 }

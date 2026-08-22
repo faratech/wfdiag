@@ -49,7 +49,7 @@ export const Titlebar: React.FC<TitlebarProps> = ({ isDark, onToggleTheme }) => 
   return (
     <div className="titlebar" data-tauri-drag-region>
       <div className="tb-left" data-tauri-drag-region>
-        <span className="tb-mark" aria-hidden="true"><img src="/wf-ds/icon-only.png" alt="" /></span>
+        <span className="tb-mark" aria-hidden="true"><img src="/wf-ds/app-badge.png" alt="" /></span>
         <span className="tb-title">WindowsForum Diagnostics</span>
       </div>
       <div className="tb-spacer" data-tauri-drag-region />

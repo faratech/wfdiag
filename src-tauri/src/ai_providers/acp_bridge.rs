@@ -19,7 +19,7 @@ use agent_client_protocol::schema::v1;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -30,7 +30,11 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// The adapter spawns the agent CLI underneath during session/new.
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(180);
-const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Outer safety net around model discovery: must exceed the sum of the
+/// per-step budgets it wraps (INIT 60 + SESSION 30 + margin), otherwise the
+/// inner timeouts are unreachable and a first-run `npx` package download
+/// always dies at the outer limit.
+const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(100);
 const MODEL_LIST_STDOUT_LIMIT: u64 = 2 * 1024 * 1024;
 const MODEL_LIST_STDERR_LIMIT: u64 = 32 * 1024;
 
@@ -38,6 +42,79 @@ const MODEL_LIST_STDERR_LIMIT: u64 = 32 * 1024;
 /// `@zed-industries/claude-code-acp` — same registry entry Intelligent
 /// Terminal launches).
 const CLAUDE_ADAPTER_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp";
+
+/// The one way an adapter process is launched, shared by discovery and
+/// prompts: `npx -y <package>` in the neutral bridge cwd, hidden, with the
+/// same scrubs Intelligent Terminal applies (CLAUDECODE is the adapter's
+/// recursion guard; the key vars would override the CLI's stored login and
+/// turn subscription runs into API billing) plus the documented
+/// `CLAUDE_CODE_EXECUTABLE` override so the adapter drives the exact CLI we
+/// resolved/configured instead of re-resolving its own.
+fn adapter_command(npx: &Path, workdir: &Path, claude_path: &Path) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(npx);
+    cmd.args(["-y", CLAUDE_ADAPTER_PACKAGE]);
+    cmd.current_dir(workdir);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.env_remove("CLAUDECODE");
+    for var in cli_bridge::SUBSCRIPTION_OVERRIDE_ENV_VARS {
+        cmd.env_remove(var);
+    }
+    cmd.env("CLAUDE_CODE_EXECUTABLE", claude_path);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    cmd
+}
+
+/// Bounded stderr reader shared by both entry points, joined (with a short
+/// timeout) after the child is gone so error messages can carry its tail.
+fn spawn_stderr_reader(
+    stderr: Option<tokio::process::ChildStderr>,
+) -> Option<tokio::task::JoinHandle<String>> {
+    stderr.map(|stderr| {
+        tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            let _ = stderr
+                .take(MODEL_LIST_STDERR_LIMIT)
+                .read_to_end(&mut bytes)
+                .await;
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+    })
+}
+
+/// Kill the adapter and collect what it wrote to stderr.
+async fn reap_adapter(
+    child: &mut tokio::process::Child,
+    stderr_task: Option<tokio::task::JoinHandle<String>>,
+) -> String {
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+    match stderr_task {
+        Some(task) => tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
+/// Describe a child that died before the protocol produced a result.
+fn adapter_exit_error(status: std::io::Result<std::process::ExitStatus>) -> acp::Error {
+    let exit = status
+        .ok()
+        .and_then(|s| s.code())
+        .map_or_else(|| "?".to_string(), |c| c.to_string());
+    acp::Error::internal_error().data(format!(
+        "the Claude ACP adapter exited before answering (exit {exit})"
+    ))
+}
 
 /// Result of attempting a prompt through the ACP adapter.
 pub enum AdapterOutcome {
@@ -72,28 +149,11 @@ async fn list_claude_models_inner(
     let npx = cli_bridge::resolve_cli("npx", None).await.map_err(|_| {
         "Claude Code model discovery requires Node.js/npm (npx was not found).".to_string()
     })?;
-    let workdir = cli_bridge::bridge_workdir()?;
+    let workdir = cli_bridge::bridge_workdir().await?;
 
-    let mut cmd = tokio::process::Command::new(&npx);
-    cmd.args(["-y", CLAUDE_ADAPTER_PACKAGE]);
-    cmd.current_dir(&workdir);
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    cmd.env_remove("CLAUDECODE");
-    for var in cli_bridge::SUBSCRIPTION_OVERRIDE_ENV_VARS {
-        cmd.env_remove(var);
-    }
-    // The adapter officially supports this path override. It makes an
-    // unsaved Settings draft effective for discovery too.
-    cmd.env("CLAUDE_CODE_EXECUTABLE", claude_path);
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-
+    // The path override makes an unsaved Settings draft effective for
+    // discovery too (see `adapter_command`).
+    let mut cmd = adapter_command(&npx, &workdir, claude_path);
     let mut child = cmd
         .spawn()
         .map_err(|error| format!("Could not start the Claude ACP adapter: {error}"))?;
@@ -108,16 +168,7 @@ async fn list_claude_models_inner(
         .ok_or_else(|| "Could not open the Claude ACP adapter stdout".to_string())?
         .take(MODEL_LIST_STDOUT_LIMIT)
         .compat();
-    let stderr_task = child.stderr.take().map(|stderr| {
-        tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            let _ = stderr
-                .take(MODEL_LIST_STDERR_LIMIT)
-                .read_to_end(&mut bytes)
-                .await;
-            String::from_utf8_lossy(&bytes).into_owned()
-        })
-    });
+    let stderr_task = spawn_stderr_reader(child.stderr.take());
 
     let builder = acp::Client
         .builder()
@@ -148,39 +199,37 @@ async fn list_claude_models_inner(
         );
 
     let workdir_for_session = workdir.clone();
-    let response = builder
-        .connect_with(acp::ByteStreams::new(outgoing, incoming), async move |cx| {
-            tokio::time::timeout(
-                INIT_TIMEOUT,
-                cx.send_request(
-                    v1::InitializeRequest::new(acp::schema::ProtocolVersion::V1)
-                        .client_info(v1::Implementation::new("wfdiag", env!("CARGO_PKG_VERSION"))),
-                )
+    let connect = builder.connect_with(acp::ByteStreams::new(outgoing, incoming), async move |cx| {
+        tokio::time::timeout(
+            INIT_TIMEOUT,
+            cx.send_request(
+                v1::InitializeRequest::new(acp::schema::ProtocolVersion::V1)
+                    .client_info(v1::Implementation::new("wfdiag", env!("CARGO_PKG_VERSION"))),
+            )
+            .block_task(),
+        )
+        .await
+        .map_err(|_| acp::Error::internal_error().data("initialize timed out"))??;
+
+        tokio::time::timeout(
+            SESSION_TIMEOUT,
+            cx.send_request(v1::NewSessionRequest::new(workdir_for_session))
                 .block_task(),
-            )
-            .await
-            .map_err(|_| acp::Error::internal_error().data("initialize timed out"))??;
-
-            tokio::time::timeout(
-                SESSION_TIMEOUT,
-                cx.send_request(v1::NewSessionRequest::new(workdir_for_session))
-                    .block_task(),
-            )
-            .await
-            .map_err(|_| acp::Error::internal_error().data("session/new timed out"))?
-        })
-        .await;
-
-    let _ = child.start_kill();
-    let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
-    let stderr = match stderr_task {
-        Some(task) => tokio::time::timeout(Duration::from_secs(1), task)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default(),
-        None => String::new(),
+        )
+        .await
+        .map_err(|_| acp::Error::internal_error().data("session/new timed out"))?
+    });
+    // Race the handshake against adapter death so a child that dies on
+    // startup (bad npx, unusable cwd, missing CLI) fails in about a second
+    // with its stderr instead of burning the full initialize timeout.
+    tokio::pin!(connect);
+    let response = tokio::select! {
+        biased; // prefer a completed protocol result over a simultaneous exit
+        res = &mut connect => res,
+        status = child.wait() => Err(adapter_exit_error(status)),
     };
+
+    let stderr = reap_adapter(&mut child, stderr_task).await;
 
     match response {
         Ok(session) => catalog_from_config_options(session.config_options.as_deref()),
@@ -255,11 +304,13 @@ fn non_empty_distinct(value: &str, id: &str) -> Option<String> {
     (!value.is_empty() && value != id).then(|| value.to_string())
 }
 
-/// Run one prompt through the Claude Code ACP adapter. `model` must already
+/// Run one prompt through the Claude Code ACP adapter, driving the CLI at
+/// `claude_path` (resolved/configured by the caller). `model` must already
 /// be sanitized; it rides the documented `ANTHROPIC_MODEL` env var (the
 /// adapter has no model flag). Text chunks stream into `delta_tx` as they
 /// arrive when a sender is provided.
 pub async fn claude_prompt(
+    claude_path: &Path,
     payload: &str,
     model: Option<&str>,
     delta_tx: Option<mpsc::Sender<String>>,
@@ -268,34 +319,15 @@ pub async fn claude_prompt(
         return AdapterOutcome::NoNpx;
     };
 
-    let workdir = match cli_bridge::bridge_workdir() {
+    let workdir = match cli_bridge::bridge_workdir().await {
         Ok(dir) => dir,
         Err(e) => return AdapterOutcome::Failed(e),
     };
 
-    let mut cmd = tokio::process::Command::new(&npx);
-    cmd.args(["-y", CLAUDE_ADAPTER_PACKAGE]);
-    cmd.current_dir(&workdir);
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    // Same scrubs as Intelligent Terminal plus our subscription-only rule:
-    // CLAUDECODE is the adapter's recursion guard (it refuses to start when
-    // set); the key vars would override the CLI's stored login and turn
-    // subscription runs into API billing.
-    cmd.env_remove("CLAUDECODE");
-    for var in cli_bridge::SUBSCRIPTION_OVERRIDE_ENV_VARS {
-        cmd.env_remove(var);
-    }
+    let mut cmd = adapter_command(&npx, &workdir, claude_path);
     if let Some(model) = model {
         cmd.env("ANTHROPIC_MODEL", model);
     }
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -305,19 +337,7 @@ pub async fn claude_prompt(
     let incoming = child.stdout.take().expect("stdout piped").compat();
     // Capture stderr for error messages (npx banners, adapter panics) and
     // keep the pipe drained so the adapter can't block on it.
-    let stderr_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
-    if let Some(stderr) = child.stderr.take() {
-        let buf = stderr_buf.clone();
-        tokio::spawn(async move {
-            let mut lines = tokio::io::BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if let Ok(mut buf) = buf.lock() {
-                    buf.push_str(&line);
-                    buf.push('\n');
-                }
-            }
-        });
-    }
+    let stderr_task = spawn_stderr_reader(child.stderr.take());
 
     let collected: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
@@ -376,47 +396,55 @@ pub async fn claude_prompt(
         );
 
     let workdir_for_session = workdir.clone();
-    let turn = builder
-        .connect_with(acp::ByteStreams::new(outgoing, incoming), async move |cx| {
-            tokio::time::timeout(
-                INIT_TIMEOUT,
-                cx.send_request(
-                    v1::InitializeRequest::new(acp::schema::ProtocolVersion::V1)
-                        .client_info(v1::Implementation::new("wfdiag", env!("CARGO_PKG_VERSION"))),
-                )
+    let connect = builder.connect_with(acp::ByteStreams::new(outgoing, incoming), async move |cx| {
+        tokio::time::timeout(
+            INIT_TIMEOUT,
+            cx.send_request(
+                v1::InitializeRequest::new(acp::schema::ProtocolVersion::V1)
+                    .client_info(v1::Implementation::new("wfdiag", env!("CARGO_PKG_VERSION"))),
+            )
+            .block_task(),
+        )
+        .await
+        .map_err(|_| acp::Error::internal_error().data("initialize timed out"))??;
+
+        let session = tokio::time::timeout(
+            SESSION_TIMEOUT,
+            cx.send_request(v1::NewSessionRequest::new(workdir_for_session))
                 .block_task(),
-            )
-            .await
-            .map_err(|_| acp::Error::internal_error().data("initialize timed out"))??;
+        )
+        .await
+        .map_err(|_| acp::Error::internal_error().data("session/new timed out"))??;
 
-            let session = tokio::time::timeout(
-                SESSION_TIMEOUT,
-                cx.send_request(v1::NewSessionRequest::new(workdir_for_session))
-                    .block_task(),
-            )
-            .await
-            .map_err(|_| acp::Error::internal_error().data("session/new timed out"))??;
+        let response = tokio::time::timeout(
+            PROMPT_TIMEOUT,
+            cx.send_request(v1::PromptRequest::new(
+                session.session_id,
+                vec![v1::ContentBlock::Text(v1::TextContent::new(payload))],
+            ))
+            .block_task(),
+        )
+        .await
+        .map_err(|_| acp::Error::internal_error().data("prompt timed out"))??;
 
-            let response = tokio::time::timeout(
-                PROMPT_TIMEOUT,
-                cx.send_request(v1::PromptRequest::new(
-                    session.session_id,
-                    vec![v1::ContentBlock::Text(v1::TextContent::new(payload))],
-                ))
-                .block_task(),
-            )
-            .await
-            .map_err(|_| acp::Error::internal_error().data("prompt timed out"))??;
+        Ok(response.stop_reason)
+    });
+    // Race the turn against adapter death — a child that dies on startup
+    // (bad npx, unusable cwd, missing CLI) fails in about a second with its
+    // stderr instead of burning the full initialize timeout.
+    tokio::pin!(connect);
+    let turn = tokio::select! {
+        biased; // prefer a completed protocol result over a simultaneous exit
+        res = &mut connect => res,
+        status = child.wait() => Err(adapter_exit_error(status)),
+    };
 
-            Ok(response.stop_reason)
-        })
-        .await;
+    let stderr = reap_adapter(&mut child, stderr_task).await;
 
     let text = collected.lock().map(|t| t.clone()).unwrap_or_default();
     match turn {
         Ok(stop) => finish_adapter_turn(stop, text),
         Err(e) => {
-            let stderr = stderr_buf.lock().map(|b| b.clone()).unwrap_or_default();
             let stderr_tail = cli_bridge::tail(stderr.trim(), 300);
             AdapterOutcome::Failed(if stderr_tail.is_empty() {
                 format!("Claude Code (ACP) failed: {e}")

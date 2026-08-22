@@ -24,8 +24,10 @@ pub fn decode_windows_output(bytes: &[u8]) -> String {
         let odd_nuls = probe.iter().skip(1).step_by(2).filter(|b| **b == 0).count();
         if odd_nuls > probe.len() / 4 {
             let units: Vec<u16> = bytes
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
                 .collect();
             return String::from_utf16_lossy(&units)
                 .trim_start_matches('\u{feff}')

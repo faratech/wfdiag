@@ -10,6 +10,9 @@
 use super::ResolvedProviderConfig;
 use super::discovery::{extract_http_base, normalize_base_url};
 use serde_json::Value;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Default model alias requested from Foundry Local. Phi Silica itself is NOT
 /// served by Foundry Local (it is only reachable through the Windows AI APIs,
@@ -26,21 +29,45 @@ fn configured_local_endpoint() -> Option<String> {
         .and_then(normalize_base_url)
 }
 
+/// Resolve the `foundry` CLI to an absolute path with a short TTL cache.
+/// `Command::new("foundry")` cannot spawn npm `.cmd` shims by bare name
+/// (same gotcha the Codex/Claude bridges document), so resolution goes
+/// through `cli_bridge::resolve_cli`; the cache keeps status refreshes and
+/// Auto routing from spawning `where.exe` on every probe.
+async fn resolved_foundry_cli() -> Option<PathBuf> {
+    static CACHE: Mutex<Option<(Instant, Option<PathBuf>)>> = Mutex::new(None);
+    const TTL: Duration = Duration::from_secs(30);
+    if let Ok(cache) = CACHE.lock()
+        && let Some((at, cached)) = cache.as_ref()
+        && at.elapsed() < TTL
+    {
+        return cached.clone();
+    }
+    let resolved = match super::cli_bridge::resolve_cli("foundry", None).await {
+        Ok(path) => Some(path),
+        Err(error) => {
+            eprintln!("Foundry CLI resolution failed: {error}");
+            None
+        }
+    };
+    if let Ok(mut cache) = CACHE.lock() {
+        *cache = Some((Instant::now(), resolved.clone()));
+    }
+    resolved
+}
+
 /// Ask the Foundry Local CLI where its service is listening. The service port
 /// is dynamic by design — Microsoft documents that it must never be hardcoded,
 /// so discovery goes through `foundry service status`.
 async fn discover_foundry_endpoint() -> Option<String> {
-    let mut cmd = tokio::process::Command::new("foundry");
+    let path = resolved_foundry_cli().await?;
+    let mut cmd = tokio::process::Command::new(&path);
     cmd.args(["service", "status"]);
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let output = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
-        .await
-        .ok()?
-        .ok()?;
+    // run_headless adds CREATE_NO_WINDOW, a neutral cwd and kill-on-drop.
+    let output =
+        super::cli_bridge::run_headless(cmd, None, Duration::from_secs(5), "Foundry Local CLI")
+            .await
+            .ok()?;
     extract_http_base(&String::from_utf8_lossy(&output.stdout))
 }
 

@@ -64,7 +64,7 @@ pub async fn chat_single_shot(
 
 async fn exec(cfg: &ResolvedProviderConfig, payload: String) -> Result<String, String> {
     let cli = cfg.endpoint_or_err(AIProvider::CodexCli)?;
-    let workdir = cli_bridge::bridge_workdir()?;
+    let workdir = cli_bridge::bridge_workdir().await?;
     let mut cmd = tokio::process::Command::new(cli);
     cmd.args(CODEX_EXEC_ARGS);
     cmd.arg("-C").arg(&workdir);

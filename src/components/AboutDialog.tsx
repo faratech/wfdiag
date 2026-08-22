@@ -14,7 +14,7 @@ export const AboutDialog: React.FC<AboutDialogProps> = ({ open, onOpenChange, up
   <Modal open={open} onClose={() => onOpenChange(false)} title="About" width={460}>
     <div style={{ padding: 8, textAlign: 'center' }}>
       <div className="rail-brand-mark" style={{ width: 56, height: 56, margin: '0 auto 14px', borderRadius: 12 }}>
-        <img src="/wf-ds/icon-only.png" alt="" style={{ width: 36, height: 36 }} />
+        <img src="/wf-ds/app-badge.png" alt="" style={{ width: 36, height: 36 }} />
       </div>
       <h2 style={{ margin: '0 0 4px' }}>WindowsForum Diagnostics</h2>
       <p style={{ color: 'var(--wf-text-muted)', margin: '0 0 16px' }}>Version 2.5.6</p>

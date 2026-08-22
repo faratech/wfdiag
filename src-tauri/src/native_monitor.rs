@@ -776,11 +776,16 @@ pub fn prewarm_npu_cache() {
 }
 
 fn detect_npu_info_uncached() -> (bool, Option<String>) {
+    // Device evidence only (DXCore, then a PnP device match). The CPU-model
+    // heuristic deliberately does not count: Live Monitor must not claim an
+    // NPU that isn't actually present/enabled.
     if let Some((name, _)) = detect_npu_dxcore() {
         (true, Some(name))
     } else {
-        let (available, name, _) = detect_npu_wmi_fallback();
-        (available, name)
+        match detect_npu_pnp_device() {
+            Some(name) => (true, Some(name)),
+            None => (false, None),
+        }
     }
 }
 
@@ -2059,163 +2064,275 @@ fn discover_npu_luid_with_wmi(wmi_con: &crate::wmi_native::WmiConnection) -> Opt
     None
 }
 
-fn detect_npu_dxcore() -> Option<(String, u32)> {
-    use windows::Win32::Graphics::DXCore::*;
-    use windows::core::GUID;
+// DXCore attribute GUIDs that are not (yet) in the windows crate metadata.
+// Values are from Microsoft's dxcore_interface.h documentation
+// (learn.microsoft.com "DXCore adapter attribute GUIDs"). The D3D12
+// CORE_COMPUTE / GRAPHICS attributes ARE bound by the crate and are used
+// via their crate constants.
 
-    // DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML - for ML-capable devices (NPUs and GPUs)
-    const DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML: GUID = GUID::from_values(
+/// ML-capable devices (NPUs and GPUs); reported by drivers that support the
+/// DirectX meta-commands required for ML workloads.
+const DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML: windows::core::GUID =
+    windows::core::GUID::from_values(
         0xb71b0d41,
         0x1088,
         0x422f,
         [0xa2, 0x7c, 0x02, 0x50, 0xb7, 0xd3, 0xa9, 0x88],
     );
 
-    // DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE - fallback for older Windows
-    const DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE: GUID = GUID::from_values(
-        0x248e2800,
-        0xa793,
-        0x4724,
-        [0xab, 0xaa, 0x23, 0xa6, 0xde, 0x1b, 0xe0, 0x90],
-    );
+/// The runtime-agnostic hardware type Microsoft documents for NPUs —
+/// "declared by NPUs with or without compute shader support", reported by
+/// the driver or inferred by DXCore itself (the same signal Task Manager
+/// uses to label adapters). This is the primary, OS-authoritative NPU
+/// detection on Windows 11 24H2+.
+const DXCORE_HARDWARE_TYPE_ATTRIBUTE_NPU: windows::core::GUID = windows::core::GUID::from_values(
+    0xd46140c4,
+    0xadd7,
+    0x451b,
+    [0x9e, 0x56, 0x06, 0xfe, 0x8c, 0x3b, 0x58, 0xed],
+);
 
-    // DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS - to exclude GPUs
-    const DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS: GUID = GUID::from_values(
-        0x0c9ece4d,
-        0x2f6e,
-        0x4f01,
-        [0x8c, 0x96, 0xe8, 0x9e, 0x33, 0x1b, 0x47, 0xb1],
-    );
+/// Known non-NPU device names, kept as defense-in-depth for the fallback
+/// classifier on Windows builds that predate the hardware-type attributes.
+const NPU_EXCLUDED_NAMES: &[&str] = &[
+    // Virtual/emulated devices
+    "umbus",
+    "enumerator",
+    "virtual",
+    "microsoft basic",
+    "remote desktop",
+    "remote display",
+    // USB/HID/Input devices (Issue #10)
+    "usb",
+    "hid",
+    "input device",
+    "keyboard",
+    "mouse",
+    "touchpad",
+    "touchscreen",
+    "gamepad",
+    "joystick",
+    "controller",
+    // Storage/Network (sometimes have compute caps)
+    "storage",
+    "ahci",
+    "nvme controller",
+    "sata",
+    "raid",
+    "ethernet",
+    "wifi",
+    "wireless",
+    "network adapter",
+    "bluetooth",
+];
 
-    // Known non-NPU device names to filter out
-    const EXCLUDED_NAMES: &[&str] = &[
-        // Virtual/emulated devices
-        "umbus",
-        "enumerator",
-        "virtual",
-        "microsoft basic",
-        "remote desktop",
-        // USB/HID/Input devices (Issue #10)
-        "usb",
-        "hid",
-        "input device",
-        "keyboard",
-        "mouse",
-        "touchpad",
-        "touchscreen",
-        "gamepad",
-        "joystick",
-        "controller",
-        // Storage/Network (sometimes have compute caps)
-        "storage",
-        "ahci",
-        "nvme controller",
-        "sata",
-        "raid",
-        "ethernet",
-        "wifi",
-        "wireless",
-        "network adapter",
-        "bluetooth",
-    ];
+/// Names that positively identify an NPU.
+const NPU_IDENTIFIERS: &[&str] = &[
+    "npu",
+    "neural",
+    "hexagon",
+    "ai accelerator",
+    "ai boost",
+    "xdna",
+    "myriad",
+];
 
-    // Known NPU identifiers
-    const NPU_IDENTIFIERS: &[&str] = &[
-        "npu",
-        "neural",
-        "hexagon",
-        "ai accelerator",
-        "ai boost",
-        "xdna",
-        "myriad",
-    ];
+/// PCI/ACPI vendor ids of NPU silicon vendors: Intel 0x8086; AMD 0x1022
+/// (NPU/IPU devices — deliberately not 0x1002, which is Radeon graphics);
+/// Qualcomm 0x17CB (PCI) and 0x5143 ("QCOM" ACPI). "Microsoft" is NOT
+/// vendor evidence — that matched virtual devices.
+const NPU_VENDOR_IDS: &[u32] = &[0x8086, 0x1022, 0x17CB, 0x5143];
 
+/// Everything the fallback classifier may consider about one DXCore
+/// adapter. Pure data, so classification is unit-testable.
+#[derive(Debug, Clone, Default)]
+struct NpuAdapterEvidence {
+    name: String,
+    /// The OS itself reports the NPU hardware type for this adapter.
+    os_reports_npu: bool,
+    has_compute: bool,
+    has_graphics: bool,
+    /// DXCoreAdapterProperty::IsHardware; None = property unsupported.
+    is_hardware: Option<bool>,
+    /// vendorID from DXCoreAdapterProperty::HardwareID; None = unavailable.
+    vendor_id: Option<u32>,
+}
+
+/// Fallback NPU classification for Windows builds without the hardware-type
+/// attribute: positive evidence only — a software adapter or a blocklisted
+/// virtual device is never an NPU, a name match is sufficient, and a
+/// capability-only match additionally requires known NPU silicon (by
+/// hardware id when available, by vendor name otherwise).
+fn classify_npu_adapter(e: &NpuAdapterEvidence) -> bool {
+    let name = e.name.to_lowercase();
+    if name.is_empty() || e.is_hardware == Some(false) {
+        return false;
+    }
+    if NPU_EXCLUDED_NAMES.iter().any(|ex| name.contains(ex)) {
+        return false;
+    }
+    if e.os_reports_npu {
+        return true;
+    }
+    if NPU_IDENTIFIERS.iter().any(|id| name.contains(id)) {
+        return true;
+    }
+    if !e.has_compute || e.has_graphics {
+        return false;
+    }
+    match e.vendor_id {
+        Some(vendor) => NPU_VENDOR_IDS.contains(&vendor),
+        None => ["qualcomm", "intel", "amd"]
+            .iter()
+            .any(|vendor| name.contains(vendor)),
+    }
+}
+
+/// DXCoreAdapterProperty::IsHardware for an adapter, if the OS supports it.
+unsafe fn dxcore_adapter_is_hardware(
+    adapter: &windows::Win32::Graphics::DXCore::IDXCoreAdapter,
+) -> Option<bool> {
+    use windows::Win32::Graphics::DXCore::*;
     unsafe {
-        let factory: IDXCoreAdapterFactory = DXCoreCreateAdapterFactory().ok()?;
-
-        // Try GENERIC_ML first, then CORE_COMPUTE as fallback
-        let adapter_list: IDXCoreAdapterList = factory
-            .CreateAdapterList(&[DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML])
-            .or_else(|_| factory.CreateAdapterList(&[DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE]))
-            .ok()?;
-
-        let adapter_count = adapter_list.GetAdapterCount();
-        if adapter_count == 0 {
+        if !adapter.IsPropertySupported(IsHardware) {
             return None;
         }
+        let mut value = false;
+        adapter
+            .GetProperty(
+                IsHardware,
+                std::mem::size_of::<bool>(),
+                &mut value as *mut _ as *mut _,
+            )
+            .ok()?;
+        Some(value)
+    }
+}
 
-        // Iterate through all adapters to find actual NPUs
-        for i in 0..adapter_count {
-            let adapter: IDXCoreAdapter = match adapter_list.GetAdapter(i) {
-                Ok(a) => a,
-                Err(_) => continue,
+/// vendorID from DXCoreAdapterProperty::HardwareID, if available.
+unsafe fn dxcore_adapter_vendor_id(
+    adapter: &windows::Win32::Graphics::DXCore::IDXCoreAdapter,
+) -> Option<u32> {
+    use windows::Win32::Graphics::DXCore::*;
+    unsafe {
+        if !adapter.IsPropertySupported(HardwareID) {
+            return None;
+        }
+        let mut hardware_id = DXCoreHardwareID::default();
+        adapter
+            .GetProperty(
+                HardwareID,
+                std::mem::size_of::<DXCoreHardwareID>(),
+                &mut hardware_id as *mut _ as *mut _,
+            )
+            .ok()?;
+        Some(hardware_id.vendorID)
+    }
+}
+
+/// DriverDescription of an adapter, trimmed; None when empty/unreadable.
+unsafe fn dxcore_adapter_name(
+    adapter: &windows::Win32::Graphics::DXCore::IDXCoreAdapter,
+) -> Option<String> {
+    use windows::Win32::Graphics::DXCore::*;
+    unsafe {
+        let size = adapter
+            .GetPropertySize(DriverDescription)
+            .ok()
+            .filter(|size| *size > 0)?;
+        let mut buffer: Vec<u8> = vec![0; size];
+        adapter
+            .GetProperty(DriverDescription, size, buffer.as_mut_ptr() as *mut _)
+            .ok()?;
+        let name = String::from_utf8_lossy(&buffer)
+            .trim_end_matches('\0')
+            .to_string();
+        (!name.is_empty()).then_some(name)
+    }
+}
+
+/// Primary detection, exactly the way Microsoft documents it: ask DXCore
+/// for the adapters whose hardware type IS "NPU" (driver-declared or
+/// OS-inferred; also catches MCDM NPUs without a D3D user-mode driver) and
+/// take the first real hardware one.
+unsafe fn find_npu_by_hardware_type(
+    factory: &windows::Win32::Graphics::DXCore::IDXCoreAdapterFactory,
+) -> Option<String> {
+    use windows::Win32::Graphics::DXCore::*;
+    unsafe {
+        let list: IDXCoreAdapterList = factory
+            .CreateAdapterList(&[DXCORE_HARDWARE_TYPE_ATTRIBUTE_NPU])
+            .ok()?;
+        for index in 0..list.GetAdapterCount() {
+            let Ok(adapter) = list.GetAdapter::<IDXCoreAdapter>(index) else {
+                continue;
             };
-
-            // Check if this is an NPU (has CORE_COMPUTE but NOT GRAPHICS)
-            let has_compute =
-                adapter.IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE);
-            let has_graphics =
-                adapter.IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS);
-
-            // Get driver description
-            let desc_size = match adapter.GetPropertySize(DriverDescription) {
-                Ok(s) if s > 0 => s,
-                _ => continue,
-            };
-
-            let mut desc_buffer: Vec<u8> = vec![0; desc_size];
-            if adapter
-                .GetProperty(
-                    DriverDescription,
-                    desc_size,
-                    desc_buffer.as_mut_ptr() as *mut _,
-                )
-                .is_err()
-            {
+            if dxcore_adapter_is_hardware(&adapter) == Some(false) {
                 continue;
             }
-
-            let name = String::from_utf8_lossy(&desc_buffer)
-                .trim_end_matches('\0')
-                .to_string();
-
-            if name.is_empty() {
-                continue;
-            }
-
-            let name_lower = name.to_lowercase();
-
-            // Filter out known non-NPU devices
-            if EXCLUDED_NAMES.iter().any(|ex| name_lower.contains(ex)) {
-                continue;
-            }
-
-            // Check if it's an NPU by:
-            // 1. Name contains NPU identifiers (highest confidence)
-            // 2. OR has CORE_COMPUTE but NOT GRAPHICS AND is from a known NPU vendor
-            let is_npu_by_name = NPU_IDENTIFIERS.iter().any(|id| name_lower.contains(id));
-            let is_npu_by_caps = has_compute && !has_graphics;
-
-            // Require known vendor match for capability-only detection to avoid false positives (Issue #10)
-            let is_known_npu_vendor = name_lower.contains("qualcomm")
-                || name_lower.contains("intel")
-                || name_lower.contains("amd")
-                || name_lower.contains("microsoft");
-
-            if is_npu_by_name || (is_npu_by_caps && is_known_npu_vendor) {
-                return Some((name, 1));
+            if let Some(name) = dxcore_adapter_name(&adapter) {
+                return Some(name);
             }
         }
-
         None
     }
 }
 
-fn detect_npu_wmi_fallback() -> (bool, Option<String>, Option<f32>) {
+/// Fallback for Windows builds that predate the hardware-type attributes:
+/// enumerate ML/compute adapters and apply `classify_npu_adapter`.
+unsafe fn find_npu_by_ml_evidence(
+    factory: &windows::Win32::Graphics::DXCore::IDXCoreAdapterFactory,
+) -> Option<String> {
+    use windows::Win32::Graphics::DXCore::*;
+    unsafe {
+        let list: IDXCoreAdapterList = factory
+            .CreateAdapterList(&[DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML])
+            .or_else(|_| factory.CreateAdapterList(&[DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE]))
+            .ok()?;
+        for index in 0..list.GetAdapterCount() {
+            let Ok(adapter) = list.GetAdapter::<IDXCoreAdapter>(index) else {
+                continue;
+            };
+            let Some(name) = dxcore_adapter_name(&adapter) else {
+                continue;
+            };
+            let evidence = NpuAdapterEvidence {
+                name,
+                os_reports_npu: adapter.IsAttributeSupported(&DXCORE_HARDWARE_TYPE_ATTRIBUTE_NPU),
+                has_compute: adapter
+                    .IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE),
+                has_graphics: adapter.IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS),
+                is_hardware: dxcore_adapter_is_hardware(&adapter),
+                vendor_id: dxcore_adapter_vendor_id(&adapter),
+            };
+            if classify_npu_adapter(&evidence) {
+                return Some(evidence.name);
+            }
+        }
+        None
+    }
+}
+
+fn detect_npu_dxcore() -> Option<(String, u32)> {
+    use windows::Win32::Graphics::DXCore::*;
+
+    unsafe {
+        let factory: IDXCoreAdapterFactory = DXCoreCreateAdapterFactory().ok()?;
+        if let Some(name) = find_npu_by_hardware_type(&factory) {
+            return Some((name, 1));
+        }
+        find_npu_by_ml_evidence(&factory).map(|name| (name, 1))
+    }
+}
+
+/// Positive PnP device evidence of an NPU (an actual device is present).
+/// This is the only WMI signal allowed to claim NPU availability.
+fn detect_npu_pnp_device() -> Option<String> {
     use crate::wmi_native::WmiConnection;
 
-    if let Ok(wmi_con) = WmiConnection::new() {
-        if let Ok(results) = wmi_con.query(
+    let wmi_con = WmiConnection::new().ok()?;
+    let results = wmi_con
+        .query(
             "SELECT Name, DeviceID, Description FROM Win32_PnPEntity WHERE \
              Name LIKE '%NPU%' OR \
              Name LIKE '%Neural%' OR \
@@ -2223,43 +2340,49 @@ fn detect_npu_wmi_fallback() -> (bool, Option<String>, Option<f32>) {
              Name LIKE '%Hexagon%' OR \
              Description LIKE '%Neural Processing%' OR \
              DeviceID LIKE '%NPU%'",
-        ) && let Some(device) = results.first()
-            && let Some(name) = device.get("Name").and_then(|v| v.as_str())
-        {
-            return (true, Some(name.to_string()), None);
-        }
+        )
+        .ok()?;
+    results
+        .first()
+        .and_then(|device| device.get("Name"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
 
-        if let Ok(cpu_results) = wmi_con.query("SELECT Name FROM Win32_Processor")
-            && let Some(cpu) = cpu_results.first()
-            && let Some(name) = cpu.get("Name").and_then(|v| v.as_str())
-        {
-            let name_lower = name.to_lowercase();
+/// CPU-family heuristic: this processor family normally ships with an NPU.
+/// NOT device evidence — the NPU may be disabled or missing a driver — so
+/// it never sets `npu_available`; it only enriches the diagnostics text.
+fn detect_npu_cpu_hint() -> Option<String> {
+    use crate::wmi_native::WmiConnection;
 
-            if name_lower.contains("core ultra")
-                || name_lower.contains("meteor lake")
-                || name_lower.contains("arrow lake")
-                || name_lower.contains("lunar lake")
-            {
-                return (true, Some(format!("{} (Intel NPU)", name)), None);
-            }
+    let wmi_con = WmiConnection::new().ok()?;
+    let cpu_results = wmi_con.query("SELECT Name FROM Win32_Processor").ok()?;
+    let name = cpu_results
+        .first()
+        .and_then(|cpu| cpu.get("Name"))
+        .and_then(|value| value.as_str())?;
+    let name_lower = name.to_lowercase();
 
-            if name_lower.contains("ryzen ai")
-                || name_lower.contains("ryzen 8000")
-                || name_lower.contains("ryzen 9000")
-            {
-                return (true, Some(format!("{} (AMD XDNA NPU)", name)), None);
-            }
-
-            if name_lower.contains("snapdragon")
-                || name_lower.contains("x elite")
-                || name_lower.contains("x plus")
-            {
-                return (true, Some(format!("{} (Qualcomm Hexagon NPU)", name)), None);
-            }
-        }
+    if name_lower.contains("core ultra")
+        || name_lower.contains("meteor lake")
+        || name_lower.contains("arrow lake")
+        || name_lower.contains("lunar lake")
+    {
+        return Some(format!("{} (Intel NPU)", name));
     }
-
-    (false, None, None)
+    if name_lower.contains("ryzen ai")
+        || name_lower.contains("ryzen 8000")
+        || name_lower.contains("ryzen 9000")
+    {
+        return Some(format!("{} (AMD XDNA NPU)", name));
+    }
+    if name_lower.contains("snapdragon")
+        || name_lower.contains("x elite")
+        || name_lower.contains("x plus")
+    {
+        return Some(format!("{} (Qualcomm Hexagon NPU)", name));
+    }
+    None
 }
 
 // ============================================================================
@@ -2292,10 +2415,8 @@ pub fn get_npu_diagnostic_info() -> serde_json::Value {
         });
     }
 
-    // Fall back to WMI (slower but catches more devices)
-    let (available, name, _) = detect_npu_wmi_fallback();
-    if available {
-        let name = name.unwrap_or_else(|| "Unknown NPU".to_string());
+    // Fall back to WMI device evidence (slower but catches more devices)
+    if let Some(name) = detect_npu_pnp_device() {
         let tops = estimate_npu_tops(&name);
         return json!({
             "detected": true,
@@ -2305,6 +2426,25 @@ pub fn get_npu_diagnostic_info() -> serde_json::Value {
             "phi_silica_capable": tops.map(|t| t >= 40).unwrap_or(false),
             "status": "Available",
             "description": format_npu_description(&name, tops),
+        });
+    }
+
+    // No NPU device found. The CPU-family heuristic is context, not
+    // detection: the silicon normally includes an NPU, but no device is
+    // visible (disabled in firmware, missing driver, or cut-down SKU).
+    if let Some(hint) = detect_npu_cpu_hint() {
+        return json!({
+            "detected": false,
+            "name": null,
+            "detection_method": null,
+            "tops_estimate": null,
+            "phi_silica_capable": false,
+            "status": "Not Detected",
+            "cpu_hint": hint,
+            "description": format!(
+                "No NPU device was detected. This processor ({hint}) normally includes one — \
+                 it may be disabled in firmware or missing a driver."
+            ),
         });
     }
 
@@ -2478,5 +2618,96 @@ mod tests {
         assert_eq!(page.offset, 2);
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].name, "gamma.exe");
+    }
+
+    fn npu_evidence(name: &str) -> NpuAdapterEvidence {
+        NpuAdapterEvidence {
+            name: name.to_string(),
+            os_reports_npu: false,
+            has_compute: true,
+            has_graphics: false,
+            is_hardware: None,
+            vendor_id: None,
+        }
+    }
+
+    #[test]
+    fn umbus_and_virtual_adapters_are_never_npus() {
+        for name in [
+            "UMBus Enumerator",
+            "UMBus Root Bus Enumerator",
+            "Microsoft Basic Render Driver",
+            "Microsoft Remote Display Adapter",
+        ] {
+            assert!(!classify_npu_adapter(&npu_evidence(name)), "{name}");
+            // Even with a claimed vendor id, the blocklist wins.
+            assert!(
+                !classify_npu_adapter(&NpuAdapterEvidence {
+                    vendor_id: Some(0x1414),
+                    ..npu_evidence(name)
+                }),
+                "{name} with vendor id"
+            );
+        }
+    }
+
+    #[test]
+    fn software_adapters_are_rejected_even_with_npu_names() {
+        assert!(!classify_npu_adapter(&NpuAdapterEvidence {
+            is_hardware: Some(false),
+            ..npu_evidence("Some Emulated NPU Device")
+        }));
+        assert!(!classify_npu_adapter(&npu_evidence("")));
+    }
+
+    #[test]
+    fn npu_name_identifiers_are_sufficient_evidence() {
+        assert!(classify_npu_adapter(&npu_evidence("Intel(R) AI Boost")));
+        assert!(classify_npu_adapter(&npu_evidence(
+            "Qualcomm(R) Hexagon(TM) NPU"
+        )));
+        assert!(classify_npu_adapter(&npu_evidence("AMD XDNA Processor")));
+    }
+
+    #[test]
+    fn os_reported_npu_hardware_type_is_decisive() {
+        assert!(classify_npu_adapter(&NpuAdapterEvidence {
+            os_reports_npu: true,
+            has_compute: false,
+            ..npu_evidence("Vendor ML Coprocessor")
+        }));
+    }
+
+    #[test]
+    fn vendor_hardware_id_beats_name_matching() {
+        // Real AMD NPU device id → accepted even without an NPU-ish name
+        assert!(classify_npu_adapter(&NpuAdapterEvidence {
+            vendor_id: Some(0x1022),
+            ..npu_evidence("AMD IPU Device")
+        }));
+        // A Microsoft vendor id must NOT count as NPU silicon
+        assert!(!classify_npu_adapter(&NpuAdapterEvidence {
+            vendor_id: Some(0x1414),
+            ..npu_evidence("Compute Device")
+        }));
+        // Without a hardware id, a vendor name is the (weaker) fallback
+        assert!(classify_npu_adapter(&npu_evidence("AMD IPU Device")));
+        assert!(!classify_npu_adapter(&npu_evidence(
+            "Microsoft Compute Device"
+        )));
+    }
+
+    #[test]
+    fn graphics_capable_adapters_are_gpus_not_npus() {
+        for name in ["NVIDIA GeForce RTX 4080", "Intel(R) Iris(R) Xe Graphics"] {
+            assert!(
+                !classify_npu_adapter(&NpuAdapterEvidence {
+                    has_graphics: true,
+                    vendor_id: Some(0x8086),
+                    ..npu_evidence(name)
+                }),
+                "{name}"
+            );
+        }
     }
 }

@@ -9,16 +9,20 @@
 //!
 //! Primary transport is the ACP adapter (`acp_bridge.rs`) — the exact
 //! integration Intelligent Terminal ships, with streamed message chunks.
-//! When npx isn't available (native CLI install without Node), requests
-//! fall back to the CLI's own headless mode: `-p --output-format json`
-//! (one JSON result object on stdout) with the payload piped via stdin, a
-//! neutral empty working directory and `--max-turns 2` so the CLI answers
-//! instead of wandering into its agent loop. No tool-calling either way
-//! (the CLI runs its own loop, not ours).
+//! When npx isn't available (native CLI install without Node), OR the
+//! adapter fails before anything streamed (broken npx/Node/cwd
+//! environments), requests fall back to the CLI's own headless mode:
+//! `-p --output-format json` (one JSON result object on stdout) with the
+//! payload piped via stdin, a neutral empty working directory and
+//! `--max-turns 2` so the CLI answers instead of wandering into its agent
+//! loop. No tool-calling either way (the CLI runs its own loop, not ours).
 
 use super::acp_bridge::{self, AdapterOutcome};
 use super::{ChatRequest, ChatTurn, FinishReason, ResolvedProviderConfig, cli_bridge};
 use crate::ai_service::AIProvider;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -58,28 +62,72 @@ pub async fn chat_single_shot(
 }
 
 /// Run one prompt: ACP adapter first (the Intelligent Terminal path),
-/// `claude -p` as the no-Node fallback. When `delta_tx` is given the caller
-/// gets streaming deltas either way (chunked over ACP, one shot otherwise).
+/// `claude -p` as the fallback — both when npx is missing entirely and when
+/// the adapter failed before any text reached the UI (a retry after partial
+/// output would duplicate it). When `delta_tx` is given the caller gets
+/// streaming deltas either way (chunked over ACP, one shot otherwise).
 async fn exec(
     cfg: &ResolvedProviderConfig,
     payload: String,
     delta_tx: Option<mpsc::Sender<String>>,
 ) -> Result<String, String> {
-    match acp_bridge::claude_prompt(&payload, cfg.model.as_deref(), delta_tx.clone()).await {
-        AdapterOutcome::Answer(text) => return Ok(text),
-        AdapterOutcome::Failed(error) => return Err(error),
-        AdapterOutcome::NoNpx => {}
+    let cli = cfg.endpoint_or_err(AIProvider::ClaudeCode)?;
+    let cli = Path::new(&cli);
+
+    // Relay deltas so we know whether the ACP attempt emitted anything.
+    // All sender clones live inside `claude_prompt`; when it returns they
+    // drop, the relay drains and ends, so awaiting it cannot hang and no
+    // buffered chunk is lost.
+    let emitted = Arc::new(AtomicBool::new(false));
+    let (acp_tx, relay) = match delta_tx.clone() {
+        Some(real) => {
+            let (tx, mut rx) = mpsc::channel::<String>(32);
+            let flag = emitted.clone();
+            let task = tokio::spawn(async move {
+                while let Some(chunk) = rx.recv().await {
+                    flag.store(true, Ordering::Relaxed);
+                    let _ = real.send(chunk).await;
+                }
+            });
+            (Some(tx), Some(task))
+        }
+        None => (None, None),
+    };
+
+    let outcome = acp_bridge::claude_prompt(cli, &payload, cfg.model.as_deref(), acp_tx).await;
+    if let Some(task) = relay {
+        let _ = task.await;
     }
-    let text = exec_print_mode(cfg, payload).await?;
-    if let Some(tx) = delta_tx {
-        let _ = tx.send(text.clone()).await;
+
+    match outcome {
+        AdapterOutcome::Answer(text) => Ok(text),
+        AdapterOutcome::Failed(acp_error) if !emitted.load(Ordering::Relaxed) => {
+            match exec_print_mode(cfg, payload).await {
+                Ok(text) => {
+                    if let Some(tx) = delta_tx {
+                        let _ = tx.send(text.clone()).await;
+                    }
+                    Ok(text)
+                }
+                Err(print_error) => Err(format!(
+                    "{acp_error} — print-mode fallback also failed: {print_error}"
+                )),
+            }
+        }
+        AdapterOutcome::Failed(acp_error) => Err(acp_error),
+        AdapterOutcome::NoNpx => {
+            let text = exec_print_mode(cfg, payload).await?;
+            if let Some(tx) = delta_tx {
+                let _ = tx.send(text.clone()).await;
+            }
+            Ok(text)
+        }
     }
-    Ok(text)
 }
 
 async fn exec_print_mode(cfg: &ResolvedProviderConfig, payload: String) -> Result<String, String> {
     let cli = cfg.endpoint_or_err(AIProvider::ClaudeCode)?;
-    let workdir = cli_bridge::bridge_workdir()?;
+    let workdir = cli_bridge::bridge_workdir().await?;
     let mut cmd = tokio::process::Command::new(cli);
     cmd.args([
         "-p",

@@ -162,7 +162,7 @@ const AppContent: React.FC = () => {
         {/* Nav rail — transparent, on the wallpaper */}
         <nav className="nav-rail" aria-label="Primary">
           <div className="rail-brand">
-            <div className="rail-brand-mark"><img src="/wf-ds/icon-only.png" alt="WindowsForum" /></div>
+            <div className="rail-brand-mark"><img src="/wf-ds/app-badge.png" alt="WindowsForum" /></div>
             <div className="rail-brand-text">
               <div className="b1">WindowsForum</div>
               <div className="b2">Diagnostics · {APP_VERSION}</div>

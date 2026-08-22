@@ -37,8 +37,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The login command waits for the user to finish a browser flow.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(180);
 const SIGN_OUT_TIMEOUT: Duration = Duration::from_secs(15);
-/// Model discovery must remain a lightweight Settings operation.
-const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Outer safety net for Codex model discovery. The app-server has no
+/// per-step timeouts underneath, and a cold Node-based CLI boot alone can
+/// take well over 15 seconds on Windows.
+const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(60);
 const MODEL_LIST_MAX_PAGES: usize = 50;
 /// Bound stdout/stderr retained from a local helper process.
 const MODEL_LIST_STDOUT_LIMIT: u64 = 2 * 1024 * 1024;
@@ -198,7 +200,7 @@ pub async fn resolve_cli(
     binary: &'static str,
     override_path: Option<&str>,
 ) -> Result<PathBuf, String> {
-    if let Some(configured) = override_path {
+    if let Some(configured) = normalized_override(override_path) {
         let path = Path::new(configured);
         if !path.is_absolute() {
             return Err(format!(
@@ -221,6 +223,13 @@ pub async fn resolve_cli(
     }
     pick_lookup_candidate(&String::from_utf8_lossy(&output.stdout))
         .ok_or_else(|| format!("'{binary}' was not found on PATH"))
+}
+
+/// Trim a configured CLI-path override; whitespace-only counts as unset.
+/// Centralized here so the stored-settings fallback (read from disk without
+/// the Settings dialog's trimming) is normalized on every entry point.
+fn normalized_override(path: Option<&str>) -> Option<&str> {
+    path.map(str::trim).filter(|p| !p.is_empty())
 }
 
 /// PATH lookup command: `where.exe` by absolute path (it lives in System32;
@@ -286,16 +295,94 @@ pub fn sanitize_model(model: &str) -> Result<String, String> {
     }
 }
 
+/// Validation budget for one working-directory candidate.
+const WORKDIR_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// First workdir that passed validation. Success-only cache: failures are
+/// never stored, so a transient condition self-heals on the next call.
+static VALIDATED_WORKDIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Candidate roots for the neutral bridge cwd, most preferred first. The
+/// config dir is the historical location; temp and home cover installs where
+/// AppData writes are virtualized away from child processes (MSIX/Store).
+fn workdir_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(base) = dirs::config_dir() {
+        candidates.push(
+            base.join("com.windowsforum.diagnostics")
+                .join("cli-bridge-cwd"),
+        );
+    }
+    candidates.push(
+        std::env::temp_dir()
+            .join("com.windowsforum.diagnostics")
+            .join("cli-bridge-cwd"),
+    );
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".wfdiag").join("cli-bridge-cwd"));
+    }
+    candidates
+}
+
+/// Whether a child process can actually start in `dir`. Under MSIX AppData
+/// virtualization a directory this process just created may not exist for
+/// cmd.exe — the host of every npm `.cmd` shim — which then prints "The
+/// current directory is invalid." and dies. Spawned directly, never through
+/// `run_headless` (which itself resolves the workdir).
+#[cfg(windows)]
+async fn windows_cwd_is_spawnable(dir: &Path) -> bool {
+    let system32 = std::env::var_os("SystemRoot")
+        .map(|root| PathBuf::from(root).join("System32"))
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32"));
+    let mut cmd = tokio::process::Command::new(system32.join("cmd.exe"));
+    cmd.args(["/d", "/c", "cd"]);
+    cmd.current_dir(dir);
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    matches!(
+        tokio::time::timeout(WORKDIR_PROBE_TIMEOUT, cmd.status()).await,
+        Ok(Ok(status)) if status.success()
+    )
+}
+
 /// Neutral, empty working directory for bridged CLI runs so an agentic CLI
-/// with a read-only sandbox still has nothing interesting to read.
-pub fn bridge_workdir() -> Result<PathBuf, String> {
-    let base = dirs::config_dir().ok_or_else(|| "Could not find config directory".to_string())?;
-    let dir = base
-        .join("com.windowsforum.diagnostics")
-        .join("cli-bridge-cwd");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Could not create {}: {}", dir.display(), e))?;
-    Ok(dir)
+/// with a read-only sandbox still has nothing interesting to read. Each
+/// candidate is validated by an actual child spawn on Windows before being
+/// cached, because the directory must be real for child processes too (see
+/// `windows_cwd_is_spawnable`).
+pub async fn bridge_workdir() -> Result<PathBuf, String> {
+    if let Some(dir) = VALIDATED_WORKDIR.get() {
+        // Cheap self-heal if something deleted the directory since validation.
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("Could not create {}: {}", dir.display(), e))?;
+        return Ok(dir.clone());
+    }
+    let mut failures = Vec::new();
+    for candidate in workdir_candidates() {
+        if let Err(error) = std::fs::create_dir_all(&candidate) {
+            failures.push(format!("{}: {}", candidate.display(), error));
+            continue;
+        }
+        #[cfg(windows)]
+        if !windows_cwd_is_spawnable(&candidate).await {
+            failures.push(format!(
+                "{}: child processes cannot start there",
+                candidate.display()
+            ));
+            continue;
+        }
+        let _ = VALIDATED_WORKDIR.set(candidate.clone());
+        return Ok(candidate);
+    }
+    Err(format!(
+        "No usable working directory for CLI bridge runs ({}) — this can happen with \
+         virtualized Store installs",
+        failures.join("; ")
+    ))
 }
 
 /// Provider-neutral model metadata reported by a subscription CLI.
@@ -330,7 +417,7 @@ pub async fn list_codex_models(override_path: Option<&str>) -> Result<BridgeMode
 }
 
 async fn list_codex_models_inner(path: PathBuf) -> Result<BridgeModelCatalog, String> {
-    let workdir = bridge_workdir()?;
+    let workdir = bridge_workdir().await?;
     let mut cmd = tokio::process::Command::new(path);
     cmd.args(["app-server", "--stdio"]);
     cmd.current_dir(workdir);
@@ -584,6 +671,16 @@ pub async fn run_headless(
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    // Neutral cwd (best-effort): bridge children must not inherit the app's
+    // working directory — for Store launches that's the WindowsApps install
+    // dir, which cmd.exe-hosted npm shims may be unable to start in. Callers
+    // that already set a cwd set the same validated path, so this never
+    // conflicts. Best-effort because where.exe and native exes run fine from
+    // any cwd.
+    #[cfg(windows)]
+    if let Ok(dir) = bridge_workdir().await {
+        cmd.current_dir(dir);
+    }
     // Bridge runs must bill to the CLI's own signed-in subscription. In
     // headless mode these env vars silently override the stored login ("the
     // key is always used when present"), turning subscription runs into API
@@ -823,6 +920,33 @@ mod tests {
             "Logged in as: mike@example.com"
         ));
         assert!(!is_signed_in(&CODEX_SPEC, true, "Not logged in"));
+    }
+
+    #[test]
+    fn workdir_candidates_prefer_config_then_temp_then_home() {
+        let candidates = workdir_candidates();
+        assert!(!candidates.is_empty());
+        // Every candidate ends in the dedicated bridge-cwd leaf so an
+        // accidental fallback can never hand the CLI a populated directory.
+        for candidate in &candidates {
+            let name = candidate.file_name().and_then(|n| n.to_str());
+            assert_eq!(name, Some("cli-bridge-cwd"), "bad leaf in {candidate:?}");
+        }
+        if let Some(config) = dirs::config_dir() {
+            assert!(candidates[0].starts_with(config));
+        }
+        assert!(candidates.iter().any(|c| c.starts_with(std::env::temp_dir())));
+    }
+
+    #[test]
+    fn cli_path_overrides_are_trimmed_and_blank_means_unset() {
+        assert_eq!(normalized_override(None), None);
+        assert_eq!(normalized_override(Some("")), None);
+        assert_eq!(normalized_override(Some("   ")), None);
+        assert_eq!(
+            normalized_override(Some("  C:\\Tools\\claude.exe \r\n")),
+            Some("C:\\Tools\\claude.exe")
+        );
     }
 
     #[test]

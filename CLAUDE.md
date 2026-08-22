@@ -92,7 +92,16 @@ This is a Tauri v2 application with a clear separation between frontend and back
 - **wmi_native.rs**: Native WMI wrapper using Windows COM APIs (IWbemLocator, IWbemServices)
 - **windows_native.rs**: Direct Windows API bindings and wrappers
 - **architecture.rs**: CPU architecture detection (x64, ARM64) and emulation detection
-- **native_monitor.rs**: Real-time system monitoring with CPU, memory, disk, network and NPU stats
+- **native_monitor.rs**: Real-time system monitoring with CPU, memory, disk, network and NPU stats.
+  NPU detection follows Microsoft's documented DXCore approach: primary is the OS's own
+  classification via `DXCORE_HARDWARE_TYPE_ATTRIBUTE_NPU` (hand-defined GUID — windows-rs
+  only binds the v1 DXCore API, no `IDXCoreAdapterFactory1`/`CreateAdapterListByWorkload`);
+  fallback for older builds is the pure `classify_npu_adapter` (unit-tested): software
+  adapters and blocklisted virtual devices are never NPUs, name evidence suffices, and
+  capability-only matches require NPU-vendor hardware IDs (Intel/AMD/Qualcomm — never
+  "microsoft", which matched virtual devices like UMBus/Remote Display). The CPU-family
+  heuristic ("Core Ultra" ⇒ has NPU) is context for diagnostics text only and must never
+  set `npu_available`
 - **ai_service.rs / ai_cache.rs / ai_prompts.rs**: Unified AI layer (provider routing, response cache, budget-aware prompts)
 - **ai_providers/**: One client module per provider (openai, anthropic, gemini, openai_compat, ollama, foundry, phi) + `capabilities()` table, `resolve_config()`, shared discovery/SSE helpers; **phi_silica.rs**: on-device Phi Silica WinRT
 - **ai_chat.rs / ai_tools.rs**: Agentic chat (backend session store, streaming tool loop) and its READ-ONLY tool registry
@@ -404,8 +413,25 @@ Provider gotchas encoded in the clients (don't relearn these):
   same `agent-client-protocol` crate (initialize → session/new →
   session/prompt; agent_message_chunk streams as deltas; permission
   requests are rejected — Q&A only; scrub `CLAUDECODE` or the adapter
-  refuses to start). `claude -p --output-format json --max-turns 2` is only
-  the no-Node fallback. What Anthropic's Feb 2026 terms ban is extracting
+  refuses to start; the crate is pinned at 1.x — 2.0 rewrites the
+  transport/handler layer and needs a deliberate migration).
+  `claude -p --output-format json --max-turns 2` is the fallback both when
+  npx is missing AND when the ACP adapter fails before any text streamed
+  (`claude_cli::exec` tracks emitted deltas via a relay channel).
+  `bridge_workdir()` is async and VALIDATED: each candidate (config dir →
+  temp → home) is probed by actually spawning `cmd.exe /d /c cd` there,
+  because MSIX/Store AppData virtualization can make a freshly created
+  config-dir path invisible to cmd.exe — the host of every npm `.cmd`
+  shim — which then dies with "The current directory is invalid" (the
+  original Claude-switch bug). Both ACP entry points also race the
+  handshake against `child.wait()` so a dead adapter fails in ~1 s with
+  its stderr instead of a 60 s "Initialize timed out". Timeout budgets are
+  strictly nested and must stay that way: `ai_list_models` gives bridge
+  providers 120 s (`BRIDGE_CATALOG_TIMEOUT` > resolve 10 s + ACP wrapper
+  100 s ≥ init 60 s + session 30 s; first `npx -y` run downloads the
+  adapter package) while HTTP providers keep 15 s — an outer timeout
+  smaller than the inner ones silently breaks first-run model discovery
+  (the original "no model list on x64" bug). What Anthropic's Feb 2026 terms ban is extracting
   subscription OAuth tokens for direct API use — never do that. Prompts go
   via stdin (never argv — npm `.cmd` shims + quoting), exes are resolved
   through `where.exe` because bare `Command::new("codex")` cannot spawn npm
