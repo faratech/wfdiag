@@ -98,6 +98,6 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"{\"v\":2}");
         assert!(!temp_sibling(&path).exists());
 
-        fs::remove_dir_all(&dir.parent().unwrap()).unwrap();
+        fs::remove_dir_all(dir.parent().unwrap()).unwrap();
     }
 }
