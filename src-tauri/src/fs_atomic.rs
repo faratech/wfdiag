@@ -14,12 +14,8 @@ use std::path::Path;
 pub fn write_file(path: &Path, contents: &[u8]) -> Result<(), String> {
     let temp_path = temp_sibling(path);
     {
-        let mut file = fs::File::create(&temp_path).map_err(|e| {
-            format!(
-                "Failed to create temp file {}: {e}",
-                temp_path.display()
-            )
-        })?;
+        let mut file = fs::File::create(&temp_path)
+            .map_err(|e| format!("Failed to create temp file {}: {e}", temp_path.display()))?;
         file.write_all(contents)
             .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
         file.sync_all()
@@ -41,10 +37,10 @@ fn temp_sibling(path: &Path) -> std::path::PathBuf {
 #[cfg(windows)]
 fn replace(temp_path: &Path, path: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
+    use windows::core::PCWSTR;
 
     // Wide paths: MoveFileExW handles long/unicode destinations that
     // fs::rename cannot on Windows.

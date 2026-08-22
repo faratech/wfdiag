@@ -159,8 +159,8 @@ fn cached_model_guard()
 /// behind in-flight inference for minutes. Returns None only when another
 /// thread actively holds the mutex (poison is still recovered).
 #[cfg(windows)]
-fn try_cached_model_guard(
-) -> Option<std::sync::MutexGuard<'static, Option<crate::windows_ai_bindings::LanguageModel>>> {
+fn try_cached_model_guard()
+-> Option<std::sync::MutexGuard<'static, Option<crate::windows_ai_bindings::LanguageModel>>> {
     use std::sync::TryLockError;
     let mutex = LANGUAGE_MODEL_CACHE.get_or_init(|| std::sync::Mutex::new(None));
     match mutex.try_lock() {

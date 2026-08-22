@@ -137,7 +137,9 @@ fn extract_error(stdout: &str) -> Option<String> {
 fn with_upstream_auth_hint(detail: &str) -> String {
     let text = detail.to_lowercase();
     let auth_failure = (text.contains("401") || text.contains("unauthorized"))
-        && (text.contains("login") || text.contains("auth") || text.contains("token")
+        && (text.contains("login")
+            || text.contains("auth")
+            || text.contains("token")
             || text.contains("sign in"));
     if auth_failure {
         format!(
@@ -233,7 +235,10 @@ mod tests {
         assert!(!miss.contains("0.148.0"), "hint must not fire here: {miss}");
 
         let miss2 = with_upstream_auth_hint("sandbox denied access to C:\\Temp");
-        assert!(!miss2.contains("0.148.0"), "hint must not fire here: {miss2}");
+        assert!(
+            !miss2.contains("0.148.0"),
+            "hint must not fire here: {miss2}"
+        );
     }
 
     #[test]

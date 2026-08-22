@@ -269,7 +269,9 @@ fn detected_issues(session: Option<&DiagnosticSession>) -> Vec<Issue> {
 /// Blocking %TEMP% enumeration, kept SEPARATE from detection so callers
 /// holding the scan-session lock can run it beforehand (see action_approve).
 fn count_temp_entries() -> Option<usize> {
-    std::fs::read_dir(std::env::temp_dir()).ok().map(|entries| entries.count())
+    std::fs::read_dir(std::env::temp_dir())
+        .ok()
+        .map(|entries| entries.count())
 }
 
 fn detected_issues_with(

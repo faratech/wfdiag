@@ -1908,210 +1908,173 @@ fn spawn_chat_run(
     let panic_provider = initial_provider;
     tauri::async_runtime::spawn(async move {
         let guarded = std::panic::AssertUnwindSafe(async move {
-        let emitter = SessionEmitter::new(app, existing_activities);
-        let mut cur_provider = start_provider;
-        let mut cur_cfg = start_cfg;
-        let mut grounding_cache: Option<String> = None;
-        let mut grounding_attempted = false;
+            let emitter = SessionEmitter::new(app, existing_activities);
+            let mut cur_provider = start_provider;
+            let mut cur_cfg = start_cfg;
+            let mut grounding_cache: Option<String> = None;
+            let mut grounding_attempted = false;
 
-        loop {
-            let caps = crate::ai_providers::capabilities(cur_provider);
-            let plan = plan_context(caps.context_budget_chars);
-            let (scan_context, os_output, evidence_error) = {
-                let session = runtime.current_session.lock().await;
-                let os_output = session
-                    .as_ref()
-                    .and_then(|session| session.results.get("os_info"))
-                    .map(|result| result.output.clone());
-                let evidence = (!caps.supports_tools)
-                    .then(|| compact_scan_evidence(session.as_ref(), &query, plan.tool_data_chars));
-                let (scan_context, evidence_error) = match evidence {
-                    Some(Ok(evidence)) => (Some(evidence), None),
-                    Some(Err(error)) => (None, Some(error)),
-                    None => (None, None),
-                };
-                (scan_context, os_output, evidence_error)
-            };
-            let grounding_enabled = crate::commands::settings::network_grounding_enabled();
-            let should_pre_ground = grounding_enabled
-                && !caps.supports_tools
-                && evidence_error.is_none()
-                && needs_mandatory_grounding(&query, os_output.as_deref());
-            let grounding = if should_pre_ground {
-                if !grounding_attempted {
-                    grounding_attempted = true;
-                    let grounding_query =
-                        crate::ai_grounding::chat_grounding_query(&query, os_output.as_deref());
-                    grounding_cache = pre_ground_chat(
-                        &emitter,
-                        &session_id,
-                        &message_id,
-                        &grounding_query,
-                        plan.tool_result_chars,
-                        &cancel,
-                    )
-                    .await;
-                }
-                grounding_cache.clone()
-            } else {
-                None
-            };
-            // Current web evidence goes first so a tiny-context provider can
-            // never lose the fact that triggered the currentness gate. Local
-            // evidence follows within the same deterministic data budget.
-            let evidence_context = match (grounding.as_deref(), scan_context.as_deref()) {
-                (Some(grounding), Some(scan)) => Some(format!(
-                    "CURRENT WINDOWS EVIDENCE:\n{}\n\nLOCAL SCAN EVIDENCE:\n{}",
-                    grounding, scan
-                )),
-                (Some(grounding), None) => Some(grounding.to_string()),
-                (None, Some(scan)) => Some(scan.to_string()),
-                (None, None) => None,
-            };
-            let system = build_system_prompt(
-                caps.supports_tools,
-                grounding_enabled,
-                evidence_context.as_deref(),
-                &plan,
-            );
-
-            let executor = crate::ai_tools::AppToolExecutor {
-                current_session: runtime.current_session.clone(),
-                scan_storage: runtime.scan_storage.clone(),
-                system_monitor: runtime.system_monitor.clone(),
-                action_broker: runtime.action_broker.clone(),
-                max_result_chars: plan.tool_result_chars,
-            };
-            let tools: Vec<ToolSpec> = crate::ai_tools::tool_registry()
-                .into_iter()
-                .filter(|tool| grounding_enabled || tool.name != "search_windows_knowledge")
-                .collect();
-            let next = crate::ai_service::next_auto_provider(pref, &tried).await;
-            let mut provider_use = ProviderUse::for_provider(
-                cur_provider,
-                (cur_provider != initial_provider).then_some(initial_provider),
-            )
-            .with_requested_model(cur_cfg.model.as_deref());
-            let chat = RealChatProvider {
-                provider: cur_provider,
-                cfg: cur_cfg.clone(),
-            };
-            let outcome = if let Some(error) = evidence_error {
-                Err(error)
-            } else {
-                run_chat_turn(
-                    &mut provider_use,
-                    caps,
-                    &chat,
-                    &session_id,
-                    &message_id,
-                    &mut messages,
-                    &system,
-                    &tools,
-                    &executor,
-                    &emitter,
-                    cancel.clone(),
-                    next.is_some(),
-                )
-                .await
-            };
-
-            match outcome {
-                Ok(TurnStatus::Completed { finish_reason }) => {
-                    // Re-read scan provenance after the model finishes. A
-                    // manual Full Scan may have completed during a long turn;
-                    // coverage captured before the request would create a
-                    // stale, redundant consent prompt.
-                    let (latest_coverage, source_scan_id) = {
-                        let session = runtime.current_session.lock().await;
-                        (
-                            crate::ai_tools::scan_coverage(session.as_ref()),
-                            session.as_ref().map(|scan| scan.session_id.clone()),
-                        )
+            loop {
+                let caps = crate::ai_providers::capabilities(cur_provider);
+                let plan = plan_context(caps.context_budget_chars);
+                let (scan_context, os_output, evidence_error) = {
+                    let session = runtime.current_session.lock().await;
+                    let os_output = session
+                        .as_ref()
+                        .and_then(|session| session.results.get("os_info"))
+                        .map(|result| result.output.clone());
+                    let evidence = (!caps.supports_tools).then(|| {
+                        compact_scan_evidence(session.as_ref(), &query, plan.tool_data_chars)
+                    });
+                    let (scan_context, evidence_error) = match evidence {
+                        Some(Ok(evidence)) => (Some(evidence), None),
+                        Some(Err(error)) => (None, Some(error)),
+                        None => (None, None),
                     };
-                    if let (Some(reason), Some(source_scan_id)) = (
-                        completed_scan_request_reason(
-                            caps.supports_tools,
-                            latest_coverage,
-                            &messages,
-                        ),
-                        source_scan_id,
-                    ) {
-                        emitter.scan_request(&ScanRequestPayload {
-                            session_id: session_id.clone(),
-                            message_id: message_id.clone(),
+                    (scan_context, os_output, evidence_error)
+                };
+                let grounding_enabled = crate::commands::settings::network_grounding_enabled();
+                let should_pre_ground = grounding_enabled
+                    && !caps.supports_tools
+                    && evidence_error.is_none()
+                    && needs_mandatory_grounding(&query, os_output.as_deref());
+                let grounding = if should_pre_ground {
+                    if !grounding_attempted {
+                        grounding_attempted = true;
+                        let grounding_query =
+                            crate::ai_grounding::chat_grounding_query(&query, os_output.as_deref());
+                        grounding_cache = pre_ground_chat(
+                            &emitter,
+                            &session_id,
+                            &message_id,
+                            &grounding_query,
+                            plan.tool_result_chars,
+                            &cancel,
+                        )
+                        .await;
+                    }
+                    grounding_cache.clone()
+                } else {
+                    None
+                };
+                // Current web evidence goes first so a tiny-context provider can
+                // never lose the fact that triggered the currentness gate. Local
+                // evidence follows within the same deterministic data budget.
+                let evidence_context = match (grounding.as_deref(), scan_context.as_deref()) {
+                    (Some(grounding), Some(scan)) => Some(format!(
+                        "CURRENT WINDOWS EVIDENCE:\n{}\n\nLOCAL SCAN EVIDENCE:\n{}",
+                        grounding, scan
+                    )),
+                    (Some(grounding), None) => Some(grounding.to_string()),
+                    (None, Some(scan)) => Some(scan.to_string()),
+                    (None, None) => None,
+                };
+                let system = build_system_prompt(
+                    caps.supports_tools,
+                    grounding_enabled,
+                    evidence_context.as_deref(),
+                    &plan,
+                );
+
+                let executor = crate::ai_tools::AppToolExecutor {
+                    current_session: runtime.current_session.clone(),
+                    scan_storage: runtime.scan_storage.clone(),
+                    system_monitor: runtime.system_monitor.clone(),
+                    action_broker: runtime.action_broker.clone(),
+                    max_result_chars: plan.tool_result_chars,
+                };
+                let tools: Vec<ToolSpec> = crate::ai_tools::tool_registry()
+                    .into_iter()
+                    .filter(|tool| grounding_enabled || tool.name != "search_windows_knowledge")
+                    .collect();
+                let next = crate::ai_service::next_auto_provider(pref, &tried).await;
+                let mut provider_use = ProviderUse::for_provider(
+                    cur_provider,
+                    (cur_provider != initial_provider).then_some(initial_provider),
+                )
+                .with_requested_model(cur_cfg.model.as_deref());
+                let chat = RealChatProvider {
+                    provider: cur_provider,
+                    cfg: cur_cfg.clone(),
+                };
+                let outcome = if let Some(error) = evidence_error {
+                    Err(error)
+                } else {
+                    run_chat_turn(
+                        &mut provider_use,
+                        caps,
+                        &chat,
+                        &session_id,
+                        &message_id,
+                        &mut messages,
+                        &system,
+                        &tools,
+                        &executor,
+                        &emitter,
+                        cancel.clone(),
+                        next.is_some(),
+                    )
+                    .await
+                };
+
+                match outcome {
+                    Ok(TurnStatus::Completed { finish_reason }) => {
+                        // Re-read scan provenance after the model finishes. A
+                        // manual Full Scan may have completed during a long turn;
+                        // coverage captured before the request would create a
+                        // stale, redundant consent prompt.
+                        let (latest_coverage, source_scan_id) = {
+                            let session = runtime.current_session.lock().await;
+                            (
+                                crate::ai_tools::scan_coverage(session.as_ref()),
+                                session.as_ref().map(|scan| scan.session_id.clone()),
+                            )
+                        };
+                        if let (Some(reason), Some(source_scan_id)) = (
+                            completed_scan_request_reason(
+                                caps.supports_tools,
+                                latest_coverage,
+                                &messages,
+                            ),
                             source_scan_id,
-                            kind: "full".to_string(),
-                            reason,
-                            question: query.clone(),
-                        });
-                    }
-                    finish_session_with_tools(
-                        &runtime,
-                        &session_id,
-                        &message_id,
-                        messages,
-                        Some(provider_use),
-                        &finish_reason,
-                        emitter.terminal_message_snapshot(&finish_reason),
-                        emitter.activity_snapshot(),
-                    )
-                    .await;
-                    return;
-                }
-                Ok(TurnStatus::Cancelled) => {
-                    finish_session_with_tools(
-                        &runtime,
-                        &session_id,
-                        &message_id,
-                        messages,
-                        Some(provider_use),
-                        "cancelled",
-                        emitter.terminal_message_snapshot("cancelled"),
-                        emitter.activity_snapshot(),
-                    )
-                    .await;
-                    return;
-                }
-                Ok(TurnStatus::Error) => {
-                    finish_session_with_tools(
-                        &runtime,
-                        &session_id,
-                        &message_id,
-                        messages,
-                        Some(provider_use),
-                        "error",
-                        emitter.terminal_message_snapshot("error"),
-                        emitter.activity_snapshot(),
-                    )
-                    .await;
-                    return;
-                }
-                Err(failed_message) => {
-                    let mut candidate = next;
-                    let mut resolved = None;
-                    while let Some(next_provider) = candidate {
-                        tried.push(next_provider);
-                        if let Ok(cfg) = crate::ai_providers::resolve_config(next_provider).await {
-                            resolved = Some((next_provider, cfg));
-                            break;
+                        ) {
+                            emitter.scan_request(&ScanRequestPayload {
+                                session_id: session_id.clone(),
+                                message_id: message_id.clone(),
+                                source_scan_id,
+                                kind: "full".to_string(),
+                                reason,
+                                question: query.clone(),
+                            });
                         }
-                        candidate = crate::ai_service::next_auto_provider(pref, &tried).await;
+                        finish_session_with_tools(
+                            &runtime,
+                            &session_id,
+                            &message_id,
+                            messages,
+                            Some(provider_use),
+                            &finish_reason,
+                            emitter.terminal_message_snapshot(&finish_reason),
+                            emitter.activity_snapshot(),
+                        )
+                        .await;
+                        return;
                     }
-                    let Some((next_provider, next_cfg)) = resolved else {
-                        emitter.error(&ErrorPayload {
-                            session_id: session_id.clone(),
-                            message_id: message_id.clone(),
-                            message: failed_message,
-                        });
-                        emitter.done(&DonePayload {
-                            session_id: session_id.clone(),
-                            message_id: message_id.clone(),
-                            finish_reason: "error".to_string(),
-                            provider: provider_use.provider_id.clone(),
-                            provider_use: provider_use.clone(),
-                            tool_call_count: 0,
-                        });
+                    Ok(TurnStatus::Cancelled) => {
+                        finish_session_with_tools(
+                            &runtime,
+                            &session_id,
+                            &message_id,
+                            messages,
+                            Some(provider_use),
+                            "cancelled",
+                            emitter.terminal_message_snapshot("cancelled"),
+                            emitter.activity_snapshot(),
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(TurnStatus::Error) => {
                         finish_session_with_tools(
                             &runtime,
                             &session_id,
@@ -2124,115 +2087,156 @@ fn spawn_chat_run(
                         )
                         .await;
                         return;
-                    };
-
-                    let next_use = ProviderUse::for_provider(next_provider, Some(initial_provider))
-                        .with_requested_model(next_cfg.model.as_deref());
-                    let crosses_to_cloud = !provider_use.execution_class.is_cloud()
-                        && next_use.execution_class.is_cloud();
-                    if crosses_to_cloud {
-                        use crate::commands::settings::CloudFallbackPolicy;
-                        match crate::commands::settings::cloud_fallback_policy() {
-                            CloudFallbackPolicy::Never => {
-                                let message = format!(
-                                    "{} Cloud fallback is disabled in Settings.",
-                                    failed_message
-                                );
-                                emitter.error(&ErrorPayload {
-                                    session_id: session_id.clone(),
-                                    message_id: message_id.clone(),
-                                    message,
-                                });
-                                emitter.done(&DonePayload {
-                                    session_id: session_id.clone(),
-                                    message_id: message_id.clone(),
-                                    finish_reason: "error".to_string(),
-                                    provider: provider_use.provider_id.clone(),
-                                    provider_use: provider_use.clone(),
-                                    tool_call_count: 0,
-                                });
-                                finish_session_with_tools(
-                                    &runtime,
-                                    &session_id,
-                                    &message_id,
-                                    messages,
-                                    Some(provider_use),
-                                    "error",
-                                    emitter.terminal_message_snapshot("error"),
-                                    emitter.activity_snapshot(),
-                                )
-                                .await;
-                                return;
-                            }
-                            CloudFallbackPolicy::Ask => {
-                                let pending = PendingChatFallback {
-                                    message_id: message_id.clone(),
-                                    from: provider_use.clone(),
-                                    to: next_use.clone(),
-                                    tried,
-                                    failed_message: failed_message.clone(),
-                                };
-                                {
-                                    // Serialize with cancellation. If cancel
-                                    // won before this point, do not resurrect
-                                    // a paused fallback after its task exited.
-                                    let _cancels = runtime.chat_cancels.lock().await;
-                                    let mut sessions = runtime.chat_sessions.lock().await;
-                                    if !cancel.is_cancelled()
-                                        && let Some(session) = sessions.get_mut(&session_id)
-                                        && session.busy
-                                        && session.active_message_id.as_deref()
-                                            == Some(message_id.as_str())
-                                    {
-                                        session.messages = messages.clone();
-                                        if let Some(turn) = session
-                                            .turns
-                                            .iter_mut()
-                                            .find(|turn| turn.message_id == message_id)
-                                        {
-                                            turn.tool_activities = emitter.activity_snapshot();
-                                        }
-                                        session.pending_fallback = Some(pending);
-                                        session.updated_at = std::time::SystemTime::now();
-                                        emitter.fallback_required(&FallbackRequiredPayload {
-                                            session_id,
-                                            message_id,
-                                            from: provider_use,
-                                            to: next_use,
-                                            reason: failed_message,
-                                        });
-                                        return;
-                                    }
-                                }
-                                emitter.done(&DonePayload {
-                                    session_id: session_id.clone(),
-                                    message_id: message_id.clone(),
-                                    finish_reason: "cancelled".to_string(),
-                                    provider: provider_use.provider_id.clone(),
-                                    provider_use: provider_use.clone(),
-                                    tool_call_count: 0,
-                                });
-                                finish_session_with_tools(
-                                    &runtime,
-                                    &session_id,
-                                    &message_id,
-                                    messages,
-                                    Some(provider_use),
-                                    "cancelled",
-                                    emitter.terminal_message_snapshot("cancelled"),
-                                    emitter.activity_snapshot(),
-                                )
-                                .await;
-                                return;
-                            }
-                            CloudFallbackPolicy::Allow => {}
-                        }
                     }
-                    cur_provider = next_provider;
-                    cur_cfg = next_cfg;
+                    Err(failed_message) => {
+                        let mut candidate = next;
+                        let mut resolved = None;
+                        while let Some(next_provider) = candidate {
+                            tried.push(next_provider);
+                            if let Ok(cfg) =
+                                crate::ai_providers::resolve_config(next_provider).await
+                            {
+                                resolved = Some((next_provider, cfg));
+                                break;
+                            }
+                            candidate = crate::ai_service::next_auto_provider(pref, &tried).await;
+                        }
+                        let Some((next_provider, next_cfg)) = resolved else {
+                            emitter.error(&ErrorPayload {
+                                session_id: session_id.clone(),
+                                message_id: message_id.clone(),
+                                message: failed_message,
+                            });
+                            emitter.done(&DonePayload {
+                                session_id: session_id.clone(),
+                                message_id: message_id.clone(),
+                                finish_reason: "error".to_string(),
+                                provider: provider_use.provider_id.clone(),
+                                provider_use: provider_use.clone(),
+                                tool_call_count: 0,
+                            });
+                            finish_session_with_tools(
+                                &runtime,
+                                &session_id,
+                                &message_id,
+                                messages,
+                                Some(provider_use),
+                                "error",
+                                emitter.terminal_message_snapshot("error"),
+                                emitter.activity_snapshot(),
+                            )
+                            .await;
+                            return;
+                        };
+
+                        let next_use =
+                            ProviderUse::for_provider(next_provider, Some(initial_provider))
+                                .with_requested_model(next_cfg.model.as_deref());
+                        let crosses_to_cloud = !provider_use.execution_class.is_cloud()
+                            && next_use.execution_class.is_cloud();
+                        if crosses_to_cloud {
+                            use crate::commands::settings::CloudFallbackPolicy;
+                            match crate::commands::settings::cloud_fallback_policy() {
+                                CloudFallbackPolicy::Never => {
+                                    let message = format!(
+                                        "{} Cloud fallback is disabled in Settings.",
+                                        failed_message
+                                    );
+                                    emitter.error(&ErrorPayload {
+                                        session_id: session_id.clone(),
+                                        message_id: message_id.clone(),
+                                        message,
+                                    });
+                                    emitter.done(&DonePayload {
+                                        session_id: session_id.clone(),
+                                        message_id: message_id.clone(),
+                                        finish_reason: "error".to_string(),
+                                        provider: provider_use.provider_id.clone(),
+                                        provider_use: provider_use.clone(),
+                                        tool_call_count: 0,
+                                    });
+                                    finish_session_with_tools(
+                                        &runtime,
+                                        &session_id,
+                                        &message_id,
+                                        messages,
+                                        Some(provider_use),
+                                        "error",
+                                        emitter.terminal_message_snapshot("error"),
+                                        emitter.activity_snapshot(),
+                                    )
+                                    .await;
+                                    return;
+                                }
+                                CloudFallbackPolicy::Ask => {
+                                    let pending = PendingChatFallback {
+                                        message_id: message_id.clone(),
+                                        from: provider_use.clone(),
+                                        to: next_use.clone(),
+                                        tried,
+                                        failed_message: failed_message.clone(),
+                                    };
+                                    {
+                                        // Serialize with cancellation. If cancel
+                                        // won before this point, do not resurrect
+                                        // a paused fallback after its task exited.
+                                        let _cancels = runtime.chat_cancels.lock().await;
+                                        let mut sessions = runtime.chat_sessions.lock().await;
+                                        if !cancel.is_cancelled()
+                                            && let Some(session) = sessions.get_mut(&session_id)
+                                            && session.busy
+                                            && session.active_message_id.as_deref()
+                                                == Some(message_id.as_str())
+                                        {
+                                            session.messages = messages.clone();
+                                            if let Some(turn) = session
+                                                .turns
+                                                .iter_mut()
+                                                .find(|turn| turn.message_id == message_id)
+                                            {
+                                                turn.tool_activities = emitter.activity_snapshot();
+                                            }
+                                            session.pending_fallback = Some(pending);
+                                            session.updated_at = std::time::SystemTime::now();
+                                            emitter.fallback_required(&FallbackRequiredPayload {
+                                                session_id,
+                                                message_id,
+                                                from: provider_use,
+                                                to: next_use,
+                                                reason: failed_message,
+                                            });
+                                            return;
+                                        }
+                                    }
+                                    emitter.done(&DonePayload {
+                                        session_id: session_id.clone(),
+                                        message_id: message_id.clone(),
+                                        finish_reason: "cancelled".to_string(),
+                                        provider: provider_use.provider_id.clone(),
+                                        provider_use: provider_use.clone(),
+                                        tool_call_count: 0,
+                                    });
+                                    finish_session_with_tools(
+                                        &runtime,
+                                        &session_id,
+                                        &message_id,
+                                        messages,
+                                        Some(provider_use),
+                                        "cancelled",
+                                        emitter.terminal_message_snapshot("cancelled"),
+                                        emitter.activity_snapshot(),
+                                    )
+                                    .await;
+                                    return;
+                                }
+                                CloudFallbackPolicy::Allow => {}
+                            }
+                        }
+                        cur_provider = next_provider;
+                        cur_cfg = next_cfg;
+                    }
                 }
             }
-        }
         }); // end of guarded turn body
         if futures::FutureExt::catch_unwind(guarded).await.is_err() {
             eprintln!(

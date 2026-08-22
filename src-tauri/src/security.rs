@@ -571,9 +571,11 @@ mod tests {
         let _ = std::fs::remove_dir(&dir);
 
         // Outside temp stays rejected (nonexistent path → parent check).
-        assert!(executor
-            .validate_temp_path("C:\\Windows\\wfdiag_evil.html")
-            .is_err());
+        assert!(
+            executor
+                .validate_temp_path("C:\\Windows\\wfdiag_evil.html")
+                .is_err()
+        );
     }
 
     #[test]

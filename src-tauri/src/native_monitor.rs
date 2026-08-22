@@ -1959,8 +1959,8 @@ fn parse_network_connections(stdout: &str) -> Vec<NetworkConnection> {
     stdout
         .lines()
         .skip(4)
-        .filter_map(|line| {
-            match line.split_whitespace().collect::<Vec<&str>>().as_slice() {
+        .filter_map(
+            |line| match line.split_whitespace().collect::<Vec<&str>>().as_slice() {
                 [proto, local, remote, state, ..] => Some(NetworkConnection {
                     protocol: (*proto).to_string(),
                     local_addr: (*local).to_string(),
@@ -1974,8 +1974,8 @@ fn parse_network_connections(stdout: &str) -> Vec<NetworkConnection> {
                     status: "NONE".to_string(),
                 }),
                 _ => None,
-            }
-        })
+            },
+        )
         .collect()
 }
 
@@ -2312,7 +2312,8 @@ unsafe fn find_npu_by_ml_evidence(
                 os_reports_npu: adapter.IsAttributeSupported(&DXCORE_HARDWARE_TYPE_ATTRIBUTE_NPU),
                 has_compute: adapter
                     .IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE),
-                has_graphics: adapter.IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS),
+                has_graphics: adapter
+                    .IsAttributeSupported(&DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS),
                 is_hardware: dxcore_adapter_is_hardware(&adapter),
                 vendor_id: dxcore_adapter_vendor_id(&adapter),
             };
@@ -2363,7 +2364,10 @@ fn detect_npu_pnp_device() -> Option<String> {
             let name = device.get("Name").and_then(|v| v.as_str())?;
             // Classify on name + device id: the id carries vendor evidence
             // (e.g. PCI\\VEN_8086) the plain display name lacks.
-            let device_id = device.get("DeviceID").and_then(|v| v.as_str()).unwrap_or("");
+            let device_id = device
+                .get("DeviceID")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let mut combined = String::with_capacity(name.len() + device_id.len());
             combined.push_str(name);
             combined.push(' ');

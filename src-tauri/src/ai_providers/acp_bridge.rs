@@ -209,26 +209,27 @@ async fn list_claude_models_inner(
         );
 
     let workdir_for_session = workdir.clone();
-    let connect = builder.connect_with(acp::ByteStreams::new(outgoing, incoming), async move |cx| {
-        tokio::time::timeout(
-            INIT_TIMEOUT,
-            cx.send_request(
-                v1::InitializeRequest::new(acp::schema::ProtocolVersion::V1)
-                    .client_info(v1::Implementation::new("wfdiag", env!("CARGO_PKG_VERSION"))),
-            )
-            .block_task(),
-        )
-        .await
-        .map_err(|_| acp::Error::internal_error().data("initialize timed out"))??;
-
-        tokio::time::timeout(
-            SESSION_TIMEOUT,
-            cx.send_request(v1::NewSessionRequest::new(workdir_for_session))
+    let connect =
+        builder.connect_with(acp::ByteStreams::new(outgoing, incoming), async move |cx| {
+            tokio::time::timeout(
+                INIT_TIMEOUT,
+                cx.send_request(
+                    v1::InitializeRequest::new(acp::schema::ProtocolVersion::V1)
+                        .client_info(v1::Implementation::new("wfdiag", env!("CARGO_PKG_VERSION"))),
+                )
                 .block_task(),
-        )
-        .await
-        .map_err(|_| acp::Error::internal_error().data("session/new timed out"))?
-    });
+            )
+            .await
+            .map_err(|_| acp::Error::internal_error().data("initialize timed out"))??;
+
+            tokio::time::timeout(
+                SESSION_TIMEOUT,
+                cx.send_request(v1::NewSessionRequest::new(workdir_for_session))
+                    .block_task(),
+            )
+            .await
+            .map_err(|_| acp::Error::internal_error().data("session/new timed out"))?
+        });
     // Race the handshake against adapter death so a child that dies on
     // startup (bad npx, unusable cwd, missing CLI) fails in about a second
     // with its stderr instead of burning the full initialize timeout.
@@ -406,39 +407,40 @@ pub async fn claude_prompt(
         );
 
     let workdir_for_session = workdir.clone();
-    let connect = builder.connect_with(acp::ByteStreams::new(outgoing, incoming), async move |cx| {
-        tokio::time::timeout(
-            INIT_TIMEOUT,
-            cx.send_request(
-                v1::InitializeRequest::new(acp::schema::ProtocolVersion::V1)
-                    .client_info(v1::Implementation::new("wfdiag", env!("CARGO_PKG_VERSION"))),
-            )
-            .block_task(),
-        )
-        .await
-        .map_err(|_| acp::Error::internal_error().data("initialize timed out"))??;
-
-        let session = tokio::time::timeout(
-            SESSION_TIMEOUT,
-            cx.send_request(v1::NewSessionRequest::new(workdir_for_session))
+    let connect =
+        builder.connect_with(acp::ByteStreams::new(outgoing, incoming), async move |cx| {
+            tokio::time::timeout(
+                INIT_TIMEOUT,
+                cx.send_request(
+                    v1::InitializeRequest::new(acp::schema::ProtocolVersion::V1)
+                        .client_info(v1::Implementation::new("wfdiag", env!("CARGO_PKG_VERSION"))),
+                )
                 .block_task(),
-        )
-        .await
-        .map_err(|_| acp::Error::internal_error().data("session/new timed out"))??;
+            )
+            .await
+            .map_err(|_| acp::Error::internal_error().data("initialize timed out"))??;
 
-        let response = tokio::time::timeout(
-            PROMPT_TIMEOUT,
-            cx.send_request(v1::PromptRequest::new(
-                session.session_id,
-                vec![v1::ContentBlock::Text(v1::TextContent::new(payload))],
-            ))
-            .block_task(),
-        )
-        .await
-        .map_err(|_| acp::Error::internal_error().data("prompt timed out"))??;
+            let session = tokio::time::timeout(
+                SESSION_TIMEOUT,
+                cx.send_request(v1::NewSessionRequest::new(workdir_for_session))
+                    .block_task(),
+            )
+            .await
+            .map_err(|_| acp::Error::internal_error().data("session/new timed out"))??;
 
-        Ok(response.stop_reason)
-    });
+            let response = tokio::time::timeout(
+                PROMPT_TIMEOUT,
+                cx.send_request(v1::PromptRequest::new(
+                    session.session_id,
+                    vec![v1::ContentBlock::Text(v1::TextContent::new(payload))],
+                ))
+                .block_task(),
+            )
+            .await
+            .map_err(|_| acp::Error::internal_error().data("prompt timed out"))??;
+
+            Ok(response.stop_reason)
+        });
     // Race the turn against adapter death — a child that dies on startup
     // (bad npx, unusable cwd, missing CLI) fails in about a second with its
     // stderr instead of burning the full initialize timeout.

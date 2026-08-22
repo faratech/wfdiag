@@ -140,9 +140,7 @@ pub async fn probe(provider: AIProvider) -> BridgeProbe {
     // Cache definitive evidence only. A timed-out or failed status run says
     // nothing about sign-in; caching it as "signed out" made Auto routing
     // silently fall through to metered cloud API keys for the whole TTL.
-    if conclusive
-        && let Ok(mut cache) = probe_cache().lock()
-    {
+    if conclusive && let Ok(mut cache) = probe_cache().lock() {
         cache.insert(spec.binary, (Instant::now(), fresh.clone()));
     }
     fresh
@@ -160,10 +158,7 @@ pub fn invalidate(provider: AIProvider) {
 /// Probe a bridged CLI. The bool reports whether the result is DEFINITIVE
 /// (worth caching): false means a transient failure — the probe answer is
 /// still returned for this call, but the next caller must re-probe.
-async fn probe_uncached(
-    provider: AIProvider,
-    spec: &'static BridgeSpec,
-) -> (BridgeProbe, bool) {
+async fn probe_uncached(provider: AIProvider, spec: &'static BridgeSpec) -> (BridgeProbe, bool) {
     let path = match resolve_cli(spec.binary, configured_cli_path(provider).as_deref()).await {
         Ok(path) => path,
         Err(_) => return (BridgeProbe::default(), true),
@@ -178,19 +173,25 @@ async fn probe_uncached(
                 String::from_utf8_lossy(&output.stderr)
             );
             let authed = is_signed_in(spec, output.status.success(), &text);
-            (BridgeProbe {
-                path: Some(path),
-                authed,
-            }, true)
+            (
+                BridgeProbe {
+                    path: Some(path),
+                    authed,
+                },
+                true,
+            )
         }
         // Timeout / spawn trouble: unknown, not signed out. Report unusable
         // for this call but leave the cache untouched.
         Err(error) => {
             eprintln!("Bridge probe for {} inconclusive: {error}", spec.binary);
-            (BridgeProbe {
-                path: Some(path),
-                authed: false,
-            }, false)
+            (
+                BridgeProbe {
+                    path: Some(path),
+                    authed: false,
+                },
+                false,
+            )
         }
     }
 }
@@ -657,8 +658,7 @@ fn parse_codex_model_page(result: &Value) -> Result<CodexModelPage, String> {
             .filter(|at| *at > 0);
         let mut description = non_empty_owned(raw.get("description").and_then(Value::as_str));
         if let Some(at) = retiring {
-            let date = crate::timestamp::Timestamp::from_secs(at)
-                .format("%Y-%m-%d");
+            let date = crate::timestamp::Timestamp::from_secs(at).format("%Y-%m-%d");
             let note = format!("Retiring {date} — pick a newer model");
             description = Some(match description {
                 Some(existing) => format!("{existing} — {note}"),
@@ -907,12 +907,15 @@ pub async fn ai_bridge_install(provider: String) -> Result<BridgeStatus, String>
         return Err(format!("No bridge spec for {provider}"));
     };
     let Some(_) = winget_package(provider_id) else {
-        return Err(format!("{provider} does not support automated installation"));
+        return Err(format!(
+            "{provider} does not support automated installation"
+        ));
     };
 
     // Already resolvable? Nothing to install — report live status instead.
     invalidate(provider_id);
-    if let Ok(existing) = resolve_cli(spec.binary, configured_cli_path(provider_id).as_deref()).await
+    if let Ok(existing) =
+        resolve_cli(spec.binary, configured_cli_path(provider_id).as_deref()).await
     {
         let probe = probe_explicit_path(provider_id, spec, &existing).await;
         return Ok(BridgeStatus::from(probe));
@@ -926,9 +929,8 @@ pub async fn ai_bridge_install(provider: String) -> Result<BridgeStatus, String>
         .map(|root| std::path::PathBuf::from(root).join("System32"))
         .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows\System32"));
 
-    let alias = std::env::var_os("LOCALAPPDATA").map(|local| {
-        std::path::PathBuf::from(&local).join(r"Microsoft\WindowsApps\winget.exe")
-    });
+    let alias = std::env::var_os("LOCALAPPDATA")
+        .map(|local| std::path::PathBuf::from(&local).join(r"Microsoft\WindowsApps\winget.exe"));
     let winget_exe = match alias {
         Some(ref a) if a.exists() => Some(a.clone()),
         _ => {
@@ -966,15 +968,20 @@ pub async fn ai_bridge_install(provider: String) -> Result<BridgeStatus, String>
     // 2) Vendor PowerShell bootstrap — always available on Windows 10 1809+.
     if !installed_via_winget {
         let Some(script) = ps_bootstrap_script(provider_id) else {
-            return Err(format!("No install method available for {provider}: {last_error}"));
+            return Err(format!(
+                "No install method available for {provider}: {last_error}"
+            ));
         };
         // The Codex installer prompts when replacing an old-layout install;
         // its documented CODEX_NON_INTERACTIVE switch keeps the run fully
         // silent (-NonInteractive alone would fail the whole install).
         let command = format!("$env:CODEX_NON_INTERACTIVE = '1'; {script}");
-        let mut cmd = tokio::process::Command::new(system32.join("windowspowershell")
-            .join("v1.0")
-            .join("powershell.exe"));
+        let mut cmd = tokio::process::Command::new(
+            system32
+                .join("windowspowershell")
+                .join("v1.0")
+                .join("powershell.exe"),
+        );
         cmd.args([
             "-NoProfile",
             "-NonInteractive",
@@ -1222,7 +1229,11 @@ mod tests {
         if let Some(config) = dirs::config_dir() {
             assert!(candidates[0].starts_with(config));
         }
-        assert!(candidates.iter().any(|c| c.starts_with(std::env::temp_dir())));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.starts_with(std::env::temp_dir()))
+        );
     }
 
     #[test]

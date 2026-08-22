@@ -244,9 +244,9 @@ async fn list_models_inner(
             let claude = super::cli_bridge::resolve_cli("claude", configured.as_deref()).await?;
             let claude_for_task = claude.clone();
             let catalog = cached_bridge_catalog("claude", configured.as_deref(), move || {
-                Box::pin(async move {
-                    super::acp_bridge::list_claude_models(&claude_for_task).await
-                })
+                Box::pin(
+                    async move { super::acp_bridge::list_claude_models(&claude_for_task).await },
+                )
             })
             .await?;
             Ok(catalog.into())
@@ -281,16 +281,12 @@ async fn cached_bridge_catalog(
     configured_cli_path: Option<&str>,
     discover: impl FnOnce() -> std::pin::Pin<
         Box<
-            dyn std::future::Future<
-                    Output = Result<super::cli_bridge::BridgeModelCatalog, String>,
-                > + Send,
+            dyn std::future::Future<Output = Result<super::cli_bridge::BridgeModelCatalog, String>>
+                + Send,
         >,
     >,
 ) -> Result<super::cli_bridge::BridgeModelCatalog, String> {
-    let key = format!(
-        "{provider_key}|{}",
-        configured_cli_path.unwrap_or_default()
-    );
+    let key = format!("{provider_key}|{}", configured_cli_path.unwrap_or_default());
     if let Ok(cache) = bridge_cache().lock()
         && let Some((at, catalog)) = cache.get(&key)
         && at.elapsed() < BRIDGE_CATALOG_TTL
@@ -1288,11 +1284,24 @@ mod tests {
     #[test]
     fn bridge_providers_get_a_budget_that_covers_their_inner_timeouts() {
         for bridge in [
-            "codex_cli", "codexcli", "codex", "claude_code", "claudecode", "claude", "CLAUDE_CODE",
+            "codex_cli",
+            "codexcli",
+            "codex",
+            "claude_code",
+            "claudecode",
+            "claude",
+            "CLAUDE_CODE",
         ] {
             assert_eq!(catalog_timeout(bridge), BRIDGE_CATALOG_TIMEOUT, "{bridge}");
         }
-        for http in ["openai", "anthropic", "gemini", "deepseek", "ollama", "unknown"] {
+        for http in [
+            "openai",
+            "anthropic",
+            "gemini",
+            "deepseek",
+            "ollama",
+            "unknown",
+        ] {
             assert_eq!(catalog_timeout(http), CATALOG_TIMEOUT, "{http}");
         }
         // The outer budget must exceed the sum of the steps it wraps
