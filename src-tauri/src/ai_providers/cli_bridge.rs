@@ -918,15 +918,29 @@ pub async fn ai_bridge_install(provider: String) -> Result<BridgeStatus, String>
         return Ok(BridgeStatus::from(probe));
     }
 
-    // 1) winget — preferred, official packages, ships with Windows 11.
+    // 1) winget — preferred, official packages. winget.exe is NOT in
+    // System32 on typical systems (validated live): it installs as a
+    // per-user App Execution Alias under %LOCALAPPDATA%\Microsoft\WindowsApps,
+    // with a System32 copy only on some provisioned machines. Check both.
     let system32 = std::env::var_os("SystemRoot")
         .map(|root| std::path::PathBuf::from(root).join("System32"))
         .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows\System32"));
 
+    let alias = std::env::var_os("LOCALAPPDATA").map(|local| {
+        std::path::PathBuf::from(&local).join(r"Microsoft\WindowsApps\winget.exe")
+    });
+    let winget_exe = match alias {
+        Some(ref a) if a.exists() => Some(a.clone()),
+        _ => {
+            let candidate = system32.join("winget.exe");
+            candidate.exists().then_some(candidate)
+        }
+    };
+
     let mut installed_via_winget = false;
     let mut last_error = String::from("no installer could run");
-    if system32.join("winget.exe").exists() {
-        let mut cmd = tokio::process::Command::new(system32.join("winget.exe"));
+    if let Some(winget) = winget_exe {
+        let mut cmd = tokio::process::Command::new(winget);
         cmd.args([
             "install",
             "-e",
@@ -954,6 +968,10 @@ pub async fn ai_bridge_install(provider: String) -> Result<BridgeStatus, String>
         let Some(script) = ps_bootstrap_script(provider_id) else {
             return Err(format!("No install method available for {provider}: {last_error}"));
         };
+        // The Codex installer prompts when replacing an old-layout install;
+        // its documented CODEX_NON_INTERACTIVE switch keeps the run fully
+        // silent (-NonInteractive alone would fail the whole install).
+        let command = format!("$env:CODEX_NON_INTERACTIVE = '1'; {script}");
         let mut cmd = tokio::process::Command::new(system32.join("windowspowershell")
             .join("v1.0")
             .join("powershell.exe"));
@@ -963,7 +981,7 @@ pub async fn ai_bridge_install(provider: String) -> Result<BridgeStatus, String>
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            script,
+            command.as_str(),
         ]);
         match run_headless(cmd, None, INSTALL_TIMEOUT, "vendor installer").await {
             Ok(output) if output.status.success() => {}

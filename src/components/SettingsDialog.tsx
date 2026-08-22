@@ -203,6 +203,14 @@ const BridgeAuthRow: React.FC<{
           {error}
         </div>
       )}
+      {status?.installed && !status.signedIn && (
+        <div className="hint" style={{ marginBottom: 8 }}>
+          Signing in opens the vendor&apos;s own browser login — any plan tier works, and this
+          app never sees your credentials. No subscription? Skip this CLI entirely: put an API
+          key under the OpenAI or Anthropic sections above, or run fully local with Foundry
+          Local / Ollama.
+        </div>
+      )}
     </>
   )
 }
