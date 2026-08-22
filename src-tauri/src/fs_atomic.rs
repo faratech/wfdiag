@@ -11,7 +11,13 @@ use std::path::Path;
 /// Write `contents` to `path` atomically: data lands in a sibling `.tmp`
 /// file that is flushed with `sync_all` before an atomic replace, so a
 /// crash mid-write can never truncate or corrupt the previous contents.
+/// Creates the parent directory when missing — callers pass first-run
+/// paths (config dirs, credential stores) that may not exist yet.
 pub fn write_file(path: &Path, contents: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
+    }
     let temp_path = temp_sibling(path);
     {
         let mut file = fs::File::create(&temp_path)
@@ -75,8 +81,13 @@ mod tests {
 
     #[test]
     fn write_then_read_roundtrips_and_leaves_no_temp() {
-        let dir = std::env::temp_dir().join("wfdiag_fs_atomic_test");
-        fs::create_dir_all(&dir).unwrap();
+        // The parent is deliberately NOT pre-created: the helper must create
+        // missing directories (first-run config/credential paths depend on
+        // this — a missing parent here is exactly what broke CI once).
+        let dir = std::env::temp_dir()
+            .join("wfdiag_fs_atomic_test")
+            .join("nested");
+        fs::remove_dir_all(&dir).ok();
         let path = dir.join("roundtrip.json");
 
         write_file(&path, br#"{"v":1}"#).unwrap();
@@ -87,6 +98,6 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"{\"v\":2}");
         assert!(!temp_sibling(&path).exists());
 
-        fs::remove_file(&path).unwrap();
+        fs::remove_dir_all(&dir.parent().unwrap()).unwrap();
     }
 }
