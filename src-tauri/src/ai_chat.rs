@@ -42,7 +42,10 @@ pub const TOOL_TIMEOUT_SECS: u64 = 45;
 /// Concurrent tool executions per turn (kept low so chat-triggered WMI work
 /// never saturates a running scan).
 pub const TOOL_CONCURRENCY: usize = 3;
-/// Whole-turn deadline, including provider requests and tool rounds.
+/// Deadline for ONE model request inside a turn. Tool rounds run outside it
+/// (their per-tool caps bound them instead) and grant the next request a
+/// fresh budget — otherwise a slow tool round expired the shared deadline
+/// and the forced-final answer was discarded with a bogus timeout error.
 pub const TURN_TIMEOUT_SECS: u64 = 180;
 /// Delta coalescing: flush at this many characters…
 const FLUSH_CHARS: usize = 120;
@@ -1046,7 +1049,8 @@ pub async fn run_chat_turn(
     let mut forced_final = false;
     let mut staged_remediation = false;
     let mut requested_full_scan = false;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(TURN_TIMEOUT_SECS);
+    let mut deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(TURN_TIMEOUT_SECS);
 
     let done =
         |provider_use: &ProviderUse, finish_reason: &str, tool_call_count: usize| DonePayload {
@@ -1087,7 +1091,10 @@ pub async fn run_chat_turn(
         .await;
         let turn = match stream {
             Err(_) => {
-                let message = format!("AI turn timed out after {} seconds", TURN_TIMEOUT_SECS);
+                let message = format!(
+                    "The AI request did not finish within {} seconds",
+                    TURN_TIMEOUT_SECS
+                );
                 if allow_fallback && round == 0 && tool_call_count == 0 {
                     return Err(message);
                 }
@@ -1230,6 +1237,14 @@ pub async fn run_chat_turn(
             emitter.done(&done(provider_use, "cancelled", tool_call_count));
             return Ok(TurnStatus::Cancelled);
         }
+
+        // Tool rounds run under their own per-tool caps, outside the request
+        // deadline. Time they consumed must not eat the next model request's
+        // budget: with one absolute deadline for the whole turn, a slow tool
+        // round expired it and the forced-final answer was discarded with a
+        // bogus "turn timed out" even though every tool succeeded. The turn
+        // stays bounded: rounds × (per-tool caps + one fresh budget each).
+        deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(TURN_TIMEOUT_SECS);
 
         // Append the assistant tool turn and its results only once both
         // exist, so the history never holds a dangling pair.

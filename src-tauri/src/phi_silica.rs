@@ -154,6 +154,28 @@ fn cached_model_guard()
         })
 }
 
+/// Non-blocking variant for STATUS PROBES: the generation path holds the
+/// cache guard for the whole response, so a probing `.lock()` used to queue
+/// behind in-flight inference for minutes. Returns None only when another
+/// thread actively holds the mutex (poison is still recovered).
+#[cfg(windows)]
+fn try_cached_model_guard(
+) -> Option<std::sync::MutexGuard<'static, Option<crate::windows_ai_bindings::LanguageModel>>> {
+    use std::sync::TryLockError;
+    let mutex = LANGUAGE_MODEL_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(poisoned)) => {
+            log_phi_silica("LanguageModel cache mutex was poisoned; recovering it");
+            Some(poisoned.into_inner())
+        }
+        Err(TryLockError::WouldBlock) => {
+            log_phi_silica("LanguageModel cache is busy (generation or model load in flight)");
+            None
+        }
+    }
+}
+
 /// Unlock the Limited Access Feature for Phi Silica
 /// Returns (success, status_message)
 #[cfg(windows)]
@@ -929,7 +951,22 @@ fn check_phi_silica_safe() -> (bool, String, Option<String>, Option<String>) {
                 log_phi_silica(
                     "GetReadyState blocked (Ro path); attempting direct DLL activation...",
                 );
-                let mut cached = cached_model_guard();
+                // Never block here: the generation path holds this guard for
+                // the whole response, so a status probe used to wait minutes.
+                // Contention itself is evidence a model exists and is busy —
+                // report that instead of queuing behind it.
+                let Some(mut cached) = try_cached_model_guard() else {
+                    return (
+                        true,
+                        format!(
+                            "Phi Silica is ready but currently generating; try again shortly. \
+                             Build: {}",
+                            build
+                        ),
+                        Some("Busy".to_string()),
+                        None,
+                    );
+                };
                 match ensure_cached_model_locked(&mut cached) {
                     Ok(()) => {
                         log_phi_silica("Direct DLL activation succeeded — Phi Silica IS available");

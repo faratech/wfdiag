@@ -769,16 +769,24 @@ async fn save_current_scan(
     duration_ms: u64,
     tags: Vec<String>,
 ) -> Result<String, String> {
-    let session = state.current_session.lock().await;
+    // System info first, OUTSIDE the session lock: it awaits real WMI work.
+    let system_info = get_system_info().await?;
 
-    if let Some(session) = session.as_ref() {
-        let system_info = get_system_info().await?;
+    // Snapshot the session under a short-lived guard. This used to hold
+    // current_session across get_system_info().await AND the blocking disk
+    // write below, stalling every other command that needs the session
+    // (chat tools, scan start/cancel) for the whole save.
+    let scan_record = {
+        let session = state.current_session.lock().await;
+        let Some(session) = session.as_ref() else {
+            return Err(DiagError::NoActiveSession.into());
+        };
 
         let success_count = session.results.values().filter(|r| r.success).count();
         let failure_count = session.results.values().filter(|r| !r.success).count();
 
         // Use the session ID directly - no more ID mismatch!
-        let scan_record = ScanRecord {
+        ScanRecord {
             id: session.session_id.clone(),
             timestamp: timestamp::Timestamp::now(),
             computer_name: system_info.computer_name,
@@ -791,20 +799,27 @@ async fn save_current_scan(
             duration_ms,
             label: None,
             tags,
-        };
+        }
+    }; // session guard dropped
 
-        println!("Auto-saving scan with session ID: {}", scan_record.id);
-        println!("Scan has {} task results", scan_record.results.len());
+    println!("Auto-saving scan with session ID: {}", scan_record.id);
+    println!("Scan has {} task results", scan_record.results.len());
 
-        let storage = state.scan_storage.lock().await;
+    let id = scan_record.id.clone();
+    let storage = state.scan_storage.clone();
+    let storage_error = state.scan_storage_error.clone();
+    // save_scan is synchronous file IO: run it on the blocking pool so no
+    // async worker (or anything awaiting these mutexes) waits on the disk.
+    tokio::task::spawn_blocking(move || {
+        let storage = storage.blocking_lock();
         match storage.as_ref() {
             Some(storage) => {
                 storage.save_scan(&scan_record)?;
-                println!("Scan auto-saved successfully: {}", scan_record.id);
-                Ok(scan_record.id)
+                println!("Scan auto-saved successfully: {}", id);
+                Ok(id)
             }
             None => {
-                let error = state.scan_storage_error.lock().await;
+                let error = storage_error.blocking_lock();
                 Err(DiagError::storage(
                     "save_scan",
                     error.as_deref().unwrap_or("Storage initialization failed"),
@@ -812,9 +827,9 @@ async fn save_current_scan(
                 .into())
             }
         }
-    } else {
-        Err(DiagError::NoActiveSession.into())
-    }
+    })
+    .await
+    .map_err(|e| format!("Scan save task failed: {e}"))?
 }
 
 #[tauri::command]

@@ -262,12 +262,23 @@ pub(crate) fn catalog_fingerprint() -> String {
 }
 
 fn detected_issues(session: Option<&DiagnosticSession>) -> Vec<Issue> {
+    let temp_file_count = count_temp_entries();
+    detected_issues_with(session, temp_file_count)
+}
+
+/// Blocking %TEMP% enumeration, kept SEPARATE from detection so callers
+/// holding the scan-session lock can run it beforehand (see action_approve).
+fn count_temp_entries() -> Option<usize> {
+    std::fs::read_dir(std::env::temp_dir()).ok().map(|entries| entries.count())
+}
+
+fn detected_issues_with(
+    session: Option<&DiagnosticSession>,
+    temp_file_count: Option<usize>,
+) -> Vec<Issue> {
     let Some(session) = session else {
         return Vec::new();
     };
-    let temp_file_count = std::fs::read_dir(std::env::temp_dir())
-        .ok()
-        .map(|entries| entries.count());
     crate::issue_catalog::detect_all(&DetectCtx {
         results: &session.results,
         now: crate::timestamp::Timestamp::now(),
@@ -634,11 +645,14 @@ pub async fn action_approve(
     proposal_id: String,
 ) -> Result<ActionRunSummary, String> {
     let is_admin = crate::get_system_info().await?.is_admin;
+    // The %TEMP% walk is blocking IO: run it BEFORE taking the scan snapshot
+    // so no directory enumeration happens while the session mutex is held.
+    let temp_file_count = count_temp_entries();
     // Hold the scan snapshot through grant creation so a scan update cannot
     // land between fingerprint validation and authorization consumption.
     let session = state.current_session.lock().await;
     let current_scan = scan_fingerprint(session.as_ref());
-    let current_issues = detected_issues(session.as_ref());
+    let current_issues = detected_issues_with(session.as_ref(), temp_file_count);
     let current_catalog = catalog_fingerprint();
     let authorized = state.action_broker.lock().await.authorize(
         &proposal_id,
