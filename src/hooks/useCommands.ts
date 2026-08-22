@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { useAppContext } from '../contexts/AppContext'
 import { useTheme } from '../contexts/ThemeContext'
+import { useToast } from '../contexts/ToastContext'
 import { useScanner } from './useScanner'
 import { useDiagnostics } from './useDiagnostics'
 import { NAV_TAB_ICON } from '../ui/diagnostic-icons'
@@ -38,6 +39,7 @@ export function useCommands(): Command[] {
     setSelectedDiagnosticId, settings, saveSettings,
   } = useAppContext()
   const { setThemeMode, isDark } = useTheme()
+  const { showError } = useToast()
   const { rerunDiagnostic, runQuickScan, runFullScan, stopScan } = useScanner()
   const { copyToClipboard, exportResults, shareToWindowsForum, emailReport, generateSupportPackage } = useDiagnostics()
 
@@ -109,7 +111,11 @@ export function useCommands(): Command[] {
         run: () => {
           const nextTheme = isDark ? 'light' : 'dark'
           setThemeMode(nextTheme)
-          void saveSettings({ ...settings, theme: nextTheme })
+          // Surface persistence failures: a silent rejection would leave the
+          // UI theme and the saved settings diverging until the next restart.
+          saveSettings({ ...settings, theme: nextTheme }).catch(() =>
+            showError('Could not save the theme preference — it will revert on restart.')
+          )
         },
       },
       {
@@ -169,6 +175,7 @@ export function useCommands(): Command[] {
     availableTasks, results, isRunning, hasResults, isDark, navRailCollapsed, systemInfo,
     setSelectedTab, setShowSettings, setShowAbout, setNavRailCollapsed, setSelectedDiagnosticId,
     settings, saveSettings, setThemeMode, rerunDiagnostic, runQuickScan, runFullScan, stopScan,
+    showError,
     copyToClipboard, exportResults, shareToWindowsForum, emailReport, generateSupportPackage,
   ])
 }

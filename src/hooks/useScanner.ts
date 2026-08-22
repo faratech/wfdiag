@@ -227,6 +227,12 @@ export const useScanner = () => {
         }
       })
 
+      // Set when the invoke resolved with the full result set while the
+      // cancel marker was already raised: the backend committed before the
+      // Stop landed, so results stay on screen and only the auto-save is
+      // skipped (read after the try/finally below).
+      let committedAfterStop = false
+
       try {
         const scanResults = await invoke<Array<[string, TaskResult]>>('run_diagnostics_parallel', {
           taskIds,
@@ -247,7 +253,18 @@ export const useScanner = () => {
           return 'cancelled'
         }
 
-        if (cancelledScanSessionId !== newSessionId) {
+        // A resolve with the COMPLETE result set means the backend committed
+        // the replacement session. A Stop click landing between that commit
+        // and this continuation misses stopScan's finalizing guard and sets
+        // the cancel marker without the backend cancelling anything — the
+        // resolved results are then the backend's truth and must not be
+        // swapped back out for pre-scan data below.
+        committedAfterStop = cancelledScanSessionId === newSessionId && scanResults.length >= taskIds.length
+        if (committedAfterStop) {
+          logger.info('useScanner', 'Stop arrived after the backend committed; keeping results')
+        }
+
+        if (cancelledScanSessionId !== newSessionId || committedAfterStop) {
           if (scanResults.length < taskIds.length) {
             throw new Error(
               `The scan returned only ${scanResults.length} of ${taskIds.length} requested diagnostics`,
@@ -274,7 +291,10 @@ export const useScanner = () => {
         }
       }
 
-      const wasCancelled = cancelledScanSessionId === newSessionId
+      // A committed-after-Stop scan is completed from the backend's point of
+      // view: keep the results, but honor the Stop by skipping the auto-save
+      // — exactly what stopScan's finalizing branch promises.
+      const wasCancelled = cancelledScanSessionId === newSessionId && !committedAfterStop
       if (wasCancelled) {
         setResults(previousResults)
         setSessionId(previousSessionId)
@@ -282,7 +302,7 @@ export const useScanner = () => {
       setCurrentProgress(wasCancelled ? 0 : 100)
       setTaskbarProgress(null)
 
-      if (settings.autoSave && !wasCancelled) {
+      if (settings.autoSave && !wasCancelled && !committedAfterStop) {
         // Awaited (not fire-and-forget) so the scan lock is held through the
         // auto-save, yet always released by the finally below. stopScan and
         // unmount cancel the delay early via clearAutoSaveTimeout.

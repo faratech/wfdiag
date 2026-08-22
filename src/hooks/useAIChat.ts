@@ -137,6 +137,10 @@ export function useAIChat(providerReady = true) {
   const { settings, setSettings } = useAppContext()
   const aiEnabled = settings.aiEnabled ?? true
   const [messages, setMessages] = useState<ChatMessageVM[]>([])
+  // Render-time mirror (same idiom as providerReadyRef below) so the flush
+  // timer callback can tell which buffered message ids have live messages.
+  const messagesRef = useRef<ChatMessageVM[]>([])
+  messagesRef.current = messages
   const [isStreaming, setIsStreaming] = useState(false)
   const [isStopping, setIsStopping] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(persistentSessionId)
@@ -190,17 +194,24 @@ export function useAIChat(providerReady = true) {
     flushTimerRef.current = null
     const pending = pendingTextRef.current
     if (pending.size === 0) return
-    setMessages(prev => {
-      const applied = new Set<string>()
-      const next = prev.map(message => {
-        const extra = pending.get(message.id)
+    // Drain only entries whose message exists yet — deltas that arrived
+    // before their send ack stay buffered for buildAssistantMessage to pick
+    // up. The updater reads an immutable snapshot and mutates nothing:
+    // React may invoke it twice (StrictMode), and an updater that deleted
+    // from the shared buffer would drop chunks its first pass consumed.
+    const live = new Map<string, string>()
+    pending.forEach((text, id) => {
+      if (messagesRef.current.some(message => message.id === id)) live.set(id, text)
+    })
+    if (live.size === 0) return
+    live.forEach((_, id) => pending.delete(id))
+    setMessages(prev =>
+      prev.map(message => {
+        const extra = live.get(message.id)
         if (extra === undefined) return message
-        applied.add(message.id)
         return { ...message, text: message.text + extra }
       })
-      applied.forEach(id => pending.delete(id))
-      return next
-    })
+    )
   }, [])
 
   const scheduleFlush = useCallback(() => {

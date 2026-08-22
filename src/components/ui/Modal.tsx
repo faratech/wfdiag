@@ -39,6 +39,13 @@ const ModalInner: React.FC<ModalProps> = ({ onClose, title, width = 520, childre
       const first = cardRef.current?.querySelector<HTMLElement>(FOCUSABLE)
       ;(first ?? cardRef.current)?.focus()
     })
+    // Restore focus on EVERY unmount path. The out-animation handler below
+    // used to be the only restoration point, but closes that skip the
+    // animation (parent-driven open=false, reduced-motion) left keyboard
+    // focus on <body>.
+    return () => {
+      restoreRef.current?.focus()
+    }
   }, [])
 
   const requestClose = useCallback(() => setClosing(true), [])
@@ -57,7 +64,8 @@ const ModalInner: React.FC<ModalProps> = ({ onClose, title, width = 520, childre
   const handleAnimationEnd = (e: React.AnimationEvent) => {
     if (closing && e.animationName === 'overlay-out') {
       onClose()
-      restoreRef.current?.focus()
+      // Focus restoration happens in the mount-effect cleanup, which runs
+      // when the parent flips open=false — covering every close path.
     }
   }
 

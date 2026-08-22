@@ -2,6 +2,7 @@ import React from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook } from '@testing-library/react'
 import { ThemeProvider } from '../contexts/ThemeContext'
+import { ToastProvider } from '../contexts/ToastContext'
 import { useCommands } from './useCommands'
 
 const saveSettings = vi.fn()
@@ -58,7 +59,9 @@ afterEach(() => {
 describe('useCommands theme command', () => {
   it('uses the effective system dark theme when mode is Auto', () => {
     const wrapper: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-      <ThemeProvider initialMode="auto">{children}</ThemeProvider>
+      <ToastProvider>
+        <ThemeProvider initialMode="auto">{children}</ThemeProvider>
+      </ToastProvider>
     )
 
     const { result } = renderHook(() => useCommands(), { wrapper })
