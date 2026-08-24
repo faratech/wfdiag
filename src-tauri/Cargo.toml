@@ -1,10 +1,10 @@
 [package]
 name = "wfdiag-tauri"
-version = "2.5.7"
+version = "2.5.8"
 description = "WindowsForum Diagnostic Tool"
 authors = ["WindowsForum"]
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.98"
 
 [lib]
 name = "wfdiag_tauri"

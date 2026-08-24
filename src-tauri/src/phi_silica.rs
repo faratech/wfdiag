@@ -22,27 +22,40 @@ use crate::error::DiagError;
 /// LAF constants for Phi Silica access
 #[cfg(windows)]
 const LAF_FEATURE_ID: &str = "com.microsoft.windows.ai.languagemodel";
-/// Built-in fallback token. A Microsoft-issued token is tied to a specific
-/// package family, so the real one is supplied at runtime via the
-/// `phiSilicaLafToken` setting or the `WFDIAG_LAF_TOKEN` env var.
+/// Primary built-in token supplied by Microsoft. A Microsoft-issued token is
+/// tied to a specific package family; an explicit runtime override can still
+/// be supplied via the `phiSilicaLafToken` setting or the
+/// `WFDIAG_LAF_TOKEN` env var.
 #[cfg(windows)]
-const LAF_TOKEN: &str = "edibyiYSeHx+qsGpzHNoCQ==";
+const LAF_TOKEN: &str = "ZSF3bP1v81nh6EwD4DF4QQ==";
+/// Previous Microsoft-issued token. This is attempted only if the selected
+/// primary token fails, to preserve access on systems where it remains valid.
+#[cfg(windows)]
+const LEGACY_LAF_TOKEN: &str = "edibyiYSeHx+qsGpzHNoCQ==";
 /// Fallback publisher id, used only when the running package's family name is
 /// unavailable. Normally derived at runtime from the package identity.
 #[cfg(windows)]
 const LAF_PUBLISHER_ID: &str = "t6j5qexy2jpp2";
 
-/// The LAF token to use: env var first (handy for testing an approved token
-/// without editing settings), then the `phiSilicaLafToken` setting, then the
-/// built-in fallback.
+/// The LAF token to use, plus which source it came from — env var first
+/// (handy for testing an approved token without editing settings), then the
+/// `phiSilicaLafToken` setting, then the primary built-in token. The source is
+/// for diagnostics only (`try_unlock_laf` logs it, never the token itself) so
+/// a stale settings override can be distinguished from the built-in token
+/// failing. The legacy built-in token is handled separately and only retried
+/// after this selected primary token fails.
 #[cfg(windows)]
-fn configured_laf_token() -> String {
-    if let Ok(token) = std::env::var("WFDIAG_LAF_TOKEN")
-        && !token.trim().is_empty()
-    {
-        return token;
+fn configured_laf_token() -> (String, &'static str) {
+    if let Ok(token) = std::env::var("WFDIAG_LAF_TOKEN") {
+        let token = token.trim().to_string();
+        if !token.is_empty() && token != LEGACY_LAF_TOKEN {
+            return (token, "env");
+        }
+        if token == LEGACY_LAF_TOKEN {
+            log_phi_silica("WFDIAG_LAF_TOKEN contains the legacy token; reserving it for fallback");
+        }
     }
-    crate::commands::settings::get_settings_path()
+    let setting_token = crate::commands::settings::get_settings_path()
         .ok()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|content| {
@@ -51,7 +64,11 @@ fn configured_laf_token() -> String {
         .and_then(|settings| settings.phi_silica_laf_token)
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| LAF_TOKEN.to_string())
+        .filter(|t| t != LEGACY_LAF_TOKEN);
+    if let Some(token) = setting_token {
+        return (token, "setting");
+    }
+    (LAF_TOKEN.to_string(), "built-in-primary")
 }
 
 /// Publisher id hash from the running package's family name
@@ -113,6 +130,24 @@ fn get_windows_build() -> Option<u32> {
         .ok()?;
     let build_str: String = key.get_value("CurrentBuildNumber").ok()?;
     build_str.parse().ok()
+}
+
+/// Get the Windows update build revision (UBR) — the number after the dot in
+/// a full build string (e.g. `26200.7309`). Microsoft's Phi Silica
+/// requirements are sometimes stated down to this revision, but
+/// `CurrentBuildNumber` alone can't distinguish an old vs. new servicing
+/// update within the same major build; this is debug-log-only, not surfaced
+/// in `PhiSilicaStatus` or any user-facing text.
+#[cfg(windows)]
+fn get_windows_ubr() -> Option<u32> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let key = hklm
+        .open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion")
+        .ok()?;
+    key.get_value("UBR").ok()
 }
 
 /// Initialize WinRT runtime (required before using WinRT APIs)
@@ -189,50 +224,82 @@ fn try_unlock_laf() -> (bool, String) {
         return (true, "LAF already unlocked".to_string());
     }
 
-    let feature_id = HSTRING::from(LAF_FEATURE_ID);
-    let token = HSTRING::from(configured_laf_token());
-    let attestation = HSTRING::from(format!(
-        "{} has registered their use of {} with Microsoft and agrees to the terms of use.",
-        current_publisher_id(),
-        LAF_FEATURE_ID
+    let (primary_token, primary_source) = configured_laf_token();
+    let publisher_id = current_publisher_id();
+    log_phi_silica(&format!(
+        "LAF unlock: token source={primary_source}, publisher id={publisher_id}"
     ));
 
-    match LimitedAccessFeatures::TryUnlockFeature(&feature_id, &token, &attestation) {
-        Ok(result) => {
-            let status = result
-                .Status()
-                .unwrap_or(LimitedAccessFeatureStatus::Unknown);
-            let status_name = match status {
-                LimitedAccessFeatureStatus::Available => "Available",
-                LimitedAccessFeatureStatus::AvailableWithoutToken => "AvailableWithoutToken",
-                LimitedAccessFeatureStatus::Unknown => "Unknown",
-                LimitedAccessFeatureStatus::Unavailable => "Unavailable",
-                _ => "Unknown",
-            };
+    let feature_id = HSTRING::from(LAF_FEATURE_ID);
+    let attestation = HSTRING::from(format!(
+        "{} has registered their use of {} with Microsoft and agrees to the terms of use.",
+        publisher_id, LAF_FEATURE_ID
+    ));
 
-            if status == LimitedAccessFeatureStatus::Available
-                || status == LimitedAccessFeatureStatus::AvailableWithoutToken
-            {
-                LAF_UNLOCKED.store(true, Ordering::SeqCst);
-                (
-                    true,
-                    format!("LAF unlocked successfully (status: {})", status_name),
-                )
-            } else {
+    let try_token = |token_value: &str| {
+        let token = HSTRING::from(token_value);
+        match LimitedAccessFeatures::TryUnlockFeature(&feature_id, &token, &attestation) {
+            Ok(result) => {
+                let status = result
+                    .Status()
+                    .unwrap_or(LimitedAccessFeatureStatus::Unknown);
+                let status_name = match status {
+                    LimitedAccessFeatureStatus::Available => "Available",
+                    LimitedAccessFeatureStatus::AvailableWithoutToken => "AvailableWithoutToken",
+                    LimitedAccessFeatureStatus::Unknown => "Unknown",
+                    LimitedAccessFeatureStatus::Unavailable => "Unavailable",
+                    _ => "Unknown",
+                };
+
+                if status == LimitedAccessFeatureStatus::Available
+                    || status == LimitedAccessFeatureStatus::AvailableWithoutToken
+                {
+                    (
+                        true,
+                        format!("LAF unlocked successfully (status: {status_name})"),
+                    )
+                } else {
+                    (false, format!("LAF unlock returned status: {status_name}"))
+                }
+            }
+            Err(e) => {
+                let code = e.code().0 as u32;
                 (
                     false,
-                    format!("LAF unlock returned status: {}", status_name),
+                    format!("LAF unlock failed: 0x{code:08X}: {}", e.message()),
                 )
             }
         }
-        Err(e) => {
-            let code = e.code().0 as u32;
-            (
-                false,
-                format!("LAF unlock failed: 0x{:08X}: {}", code, e.message()),
-            )
-        }
+    };
+
+    let (primary_success, primary_message) = try_token(&primary_token);
+    if primary_success {
+        LAF_UNLOCKED.store(true, Ordering::SeqCst);
+        return (true, primary_message);
     }
+
+    if primary_token == LEGACY_LAF_TOKEN {
+        return (false, primary_message);
+    }
+
+    log_phi_silica(&format!(
+        "LAF unlock using token source={primary_source} failed ({primary_message}); trying legacy built-in fallback"
+    ));
+    let (fallback_success, fallback_message) = try_token(LEGACY_LAF_TOKEN);
+    if fallback_success {
+        LAF_UNLOCKED.store(true, Ordering::SeqCst);
+        return (
+            true,
+            format!("{fallback_message}; token source=legacy-built-in-fallback"),
+        );
+    }
+
+    (
+        false,
+        format!(
+            "primary token source={primary_source}: {primary_message}; legacy built-in fallback: {fallback_message}"
+        ),
+    )
 }
 
 /// Initialize Windows App SDK bootstrapper for AI APIs access
@@ -502,31 +569,69 @@ fn create_language_model_winrt() -> Result<crate::windows_ai_bindings::LanguageM
     wait_for_async_blocking(op)
 }
 
-/// Create a LanguageModel, preferring DllGetActivationFactory on the loaded
-/// AI Text DLL and falling back to standard WinRT activation.
+/// Create a LanguageModel, preferring the Microsoft-documented standard
+/// WinRT activation path (`LanguageModel::CreateAsync()` — every official
+/// sample uses only this) and falling back to a direct
+/// `DllGetActivationFactory` call if that fails.
 ///
-/// The direct-DLL path goes FIRST because it is the configuration the MSIX
-/// build has always shipped and verified (RoGetActivationFactory has
-/// historically returned E_ACCESSDENIED for third-party apps even with
-/// identity). Both paths require registered package identity at the API
-/// level — an unpackaged process gets 0x80070005 from either, which is why
-/// loose builds don't route here at all.
+/// Standard activation is the default as of 2026-08-23: a live test on a
+/// real Copilot+ device (pure PowerShell, zero WFDiag code, zero LAF
+/// unlock attempted) showed `LanguageModel::GetReadyState()` succeeding
+/// cleanly via the standard path, which updates the older finding that
+/// justified direct-DLL-first (`RoGetActivationFactory` returning
+/// E_ACCESSDENIED for third-party apps even with identity — see CLAUDE.md's
+/// "Audit vs. official docs" note for the full history). Both paths still
+/// require registered package identity at the API level — an unpackaged
+/// process gets 0x80070005 from either, which is why loose builds don't
+/// route here at all.
+///
+/// `WFDIAG_ACTIVATION_ORDER=direct` forces the old direct-DLL-first
+/// behavior, for comparison/debugging if standard activation ever
+/// regresses on some device.
 #[cfg(windows)]
 fn create_language_model() -> Result<crate::windows_ai_bindings::LanguageModel, String> {
-    match create_language_model_direct() {
+    let force_direct_first = std::env::var("WFDIAG_ACTIVATION_ORDER")
+        .map(|v| v.eq_ignore_ascii_case("direct"))
+        .unwrap_or(false);
+
+    if force_direct_first {
+        log_phi_silica(
+            "WFDIAG_ACTIVATION_ORDER=direct set — trying direct DLL activation before standard WinRT",
+        );
+        return match create_language_model_direct() {
+            Ok(model) => {
+                log_phi_silica("LanguageModel created via direct DLL activation");
+                Ok(model)
+            }
+            Err(direct_err) => {
+                log_phi_silica(&format!(
+                    "Direct DLL activation failed ({}); falling back to standard WinRT activation",
+                    direct_err
+                ));
+                create_language_model_winrt().map_err(|winrt_err| {
+                    format!(
+                        "Phi Silica model creation failed. Direct DLL path: {} | WinRT path: {}",
+                        direct_err, winrt_err
+                    )
+                })
+            }
+        };
+    }
+
+    match create_language_model_winrt() {
         Ok(model) => {
-            log_phi_silica("LanguageModel created via direct DLL activation");
+            log_phi_silica("LanguageModel created via standard WinRT activation");
             Ok(model)
         }
-        Err(direct_err) => {
+        Err(winrt_err) => {
             log_phi_silica(&format!(
-                "Direct DLL activation failed ({}); falling back to WinRT activation",
-                direct_err
+                "Standard WinRT activation failed ({}); falling back to direct DLL activation",
+                winrt_err
             ));
-            create_language_model_winrt().map_err(|winrt_err| {
+            create_language_model_direct().map_err(|direct_err| {
                 format!(
-                    "Phi Silica model creation failed. Direct DLL path: {} | WinRT path: {}",
-                    direct_err, winrt_err
+                    "Phi Silica model creation failed. WinRT path: {} | Direct DLL path: {}",
+                    winrt_err, direct_err
                 )
             })
         }
@@ -846,7 +951,13 @@ fn check_phi_silica_safe() -> (bool, String, Option<String>, Option<String>) {
     }
 
     let build = get_windows_build().unwrap_or(0);
-    log_phi_silica(&format!("Windows build: {}", build));
+    let ubr = get_windows_ubr();
+    log_phi_silica(&format!(
+        "Windows build: {}.{}",
+        build,
+        ubr.map(|u| u.to_string())
+            .unwrap_or_else(|| "?".to_string())
+    ));
 
     // Try to unlock Limited Access Feature BEFORE accessing Phi Silica APIs
     let (laf_success, laf_message) = try_unlock_laf();

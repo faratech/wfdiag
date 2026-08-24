@@ -159,7 +159,8 @@ pub struct AppSettings {
     pub local_ai_model: Option<String>,
     // Microsoft-issued Limited Access Feature token for Phi Silica
     // (systemAIModels). When set, the supported WinRT activation path works
-    // without the bundled-DLL bypass. Empty uses the built-in fallback token.
+    // without the bundled-DLL bypass. Empty uses the primary built-in token,
+    // with the previous built-in token retained only as an unlock fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phi_silica_laf_token: Option<String>,
     // Closing the main window hides to the system tray instead of exiting

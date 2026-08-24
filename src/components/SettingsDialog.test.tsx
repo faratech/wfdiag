@@ -60,15 +60,17 @@ describe('SettingsDialog provider setup seeding', () => {
 
     const active = screen.getByLabelText('AI provider') as HTMLSelectElement
     expect(active.querySelector<HTMLOptionElement>('option[value="phi_silica"]')).toBeDisabled()
-    expect(screen.queryByLabelText('Provider to set up')).not.toBeInTheDocument()
 
-    fireEvent.change(active, { target: { value: 'auto' } })
+    // The setup browser is always available, independent of Active AI — no
+    // need to switch Active AI to Auto just to look at Phi's settings.
     const configure = screen.getByLabelText('Provider to set up') as HTMLSelectElement
     expect(configure.querySelector<HTMLOptionElement>('option[value="phi_silica"]')).not.toBeDisabled()
     expect(screen.getByText(reason)).toBeInTheDocument()
 
     fireEvent.change(configure, { target: { value: 'phi_silica' } })
     expect(screen.getByText('LAF token')).toBeInTheDocument()
+    // Browsing Phi's setup pane must not change what's actually active.
+    expect(active).toHaveValue('codex_cli')
   })
 
   it('also disables Phi when the package is supported but its model is not ready', () => {
@@ -125,13 +127,36 @@ describe('SettingsDialog provider setup seeding', () => {
 
     const active = screen.getByLabelText('AI provider') as HTMLSelectElement
     expect(active.querySelector<HTMLOptionElement>('option[value="phi_silica"]')).toBeDisabled()
-    expect(screen.queryByLabelText('Provider to set up')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Provider to set up')).toHaveValue('phi_silica')
     expect(screen.getByText('LAF token')).toBeInTheDocument()
     expect(screen.getByText(/Checking whether Phi Silica is available/)).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/Wait for the check to finish/))
     expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('never traps the selector: a confirmed-unavailable Phi that is already selected stays choosable', async () => {
+    const onSave = vi.fn()
+    render(
+      <SettingsDialog
+        open
+        onOpenChange={vi.fn()}
+        onSave={onSave}
+        settings={{ preferredAIProvider: 'phi_silica' }}
+        aiStatus={phiStatus({ active_provider: 'none' })}
+      />
+    )
+
+    const active = screen.getByLabelText('AI provider') as HTMLSelectElement
+    expect(active.value).toBe('phi_silica')
+    expect(active.querySelector<HTMLOptionElement>('option[value="phi_silica"]')).not.toBeDisabled()
+
+    fireEvent.change(active, { target: { value: 'codex_cli' } })
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ preferredAIProvider: 'codex_cli' })
+    ))
   })
 
   it('opens the configured Anthropic pane when Active AI is Auto', () => {
@@ -167,7 +192,7 @@ describe('SettingsDialog provider setup seeding', () => {
     expect(screen.getByText('Endpoint URL')).toBeInTheDocument()
   })
 
-  it('uses one provider selector and synchronizes a concrete choice with its setup pane', async () => {
+  it('synchronizes an explicit Active AI choice with its setup pane without hiding the browser', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     render(
       <SettingsDialog
@@ -185,7 +210,10 @@ describe('SettingsDialog provider setup seeding', () => {
     fireEvent.change(provider, { target: { value: 'anthropic' } })
 
     expect(provider).toHaveValue('anthropic')
-    expect(screen.queryByLabelText('Provider to set up')).not.toBeInTheDocument()
+    // Picking a concrete Active AI still conveniently jumps the setup
+    // browser to match — but the browser itself stays available afterward,
+    // so switching it doesn't require going back through Auto.
+    expect(screen.getByLabelText('Provider to set up')).toHaveValue('anthropic')
     expect(screen.getByText('Anthropic API key')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }))

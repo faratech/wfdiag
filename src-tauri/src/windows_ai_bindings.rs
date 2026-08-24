@@ -61,6 +61,17 @@ impl AIFeatureReadyResult {
             .map(|| result__)
         }
     }
+    pub fn PackageInstallationFailed(&self) -> windows_core::Result<bool> {
+        let this = &windows_core::Interface::cast::<IAIFeatureReadyResult2>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).PackageInstallationFailed)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
 }
 impl windows_core::RuntimeType for AIFeatureReadyResult {
     const SIGNATURE: windows_core::imp::ConstBuffer =
@@ -362,6 +373,22 @@ pub struct IAIFeatureReadyResult_Vtbl {
     ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
+    IAIFeatureReadyResult2,
+    IAIFeatureReadyResult2_Vtbl,
+    0xec5f1d67_43c1_5bdb_b9f4_a0c7110582cb
+);
+impl windows_core::RuntimeType for IAIFeatureReadyResult2 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IAIFeatureReadyResult2_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub PackageInstallationFailed:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
     IClosable,
     IClosable_Vtbl,
     0x30d5a829_7fa4_4026_83bb_d75bae4ea99e
@@ -602,60 +629,6 @@ pub struct ILanguageModelEmbeddingVectorResult_Vtbl {
     ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
-    ILanguageModelExperimental,
-    ILanguageModelExperimental_Vtbl,
-    0xdebb7cdd_c981_5d84_9f8d_e42b57c3cefb
-);
-impl windows_core::RuntimeType for ILanguageModelExperimental {
-    const SIGNATURE: windows_core::imp::ConstBuffer =
-        windows_core::imp::ConstBuffer::for_interface::<Self>();
-}
-#[repr(C)]
-#[doc(hidden)]
-pub struct ILanguageModelExperimental_Vtbl {
-    pub base__: windows_core::IInspectable_Vtbl,
-    pub LoadAdapter: unsafe extern "system" fn(
-        *mut core::ffi::c_void,
-        *mut core::ffi::c_void,
-        *mut *mut core::ffi::c_void,
-    ) -> windows_core::HRESULT,
-    LoadAdapter2: usize,
-    pub GenerateResponseAsync: unsafe extern "system" fn(
-        *mut core::ffi::c_void,
-        *mut core::ffi::c_void,
-        *mut core::ffi::c_void,
-        *mut *mut core::ffi::c_void,
-    ) -> windows_core::HRESULT,
-    pub GenerateResponseAsync2: unsafe extern "system" fn(
-        *mut core::ffi::c_void,
-        *mut core::ffi::c_void,
-        *mut core::ffi::c_void,
-        *mut core::ffi::c_void,
-        *mut *mut core::ffi::c_void,
-    ) -> windows_core::HRESULT,
-    GenerateResponseFromEmbeddingsAsync: usize,
-    GenerateResponseFromEmbeddingsAsync2: usize,
-}
-windows_core::imp::define_interface!(
-    ILanguageModelExperimentalFactory,
-    ILanguageModelExperimentalFactory_Vtbl,
-    0x6a3b389b_7aa8_549c_8351_c1b8eaf9ef3f
-);
-impl windows_core::RuntimeType for ILanguageModelExperimentalFactory {
-    const SIGNATURE: windows_core::imp::ConstBuffer =
-        windows_core::imp::ConstBuffer::for_interface::<Self>();
-}
-#[repr(C)]
-#[doc(hidden)]
-pub struct ILanguageModelExperimentalFactory_Vtbl {
-    pub base__: windows_core::IInspectable_Vtbl,
-    pub CreateInstance: unsafe extern "system" fn(
-        *mut core::ffi::c_void,
-        *mut core::ffi::c_void,
-        *mut *mut core::ffi::c_void,
-    ) -> windows_core::HRESULT,
-}
-windows_core::imp::define_interface!(
     ILanguageModelOptions,
     ILanguageModelOptions_Vtbl,
     0x7f380003_5a09_5f1f_afb0_aa483e3670cc
@@ -678,57 +651,6 @@ pub struct ILanguageModelOptions_Vtbl {
     pub SetTopK: unsafe extern "system" fn(*mut core::ffi::c_void, u32) -> windows_core::HRESULT,
     ContentFilterOptions: usize,
     SetContentFilterOptions: usize,
-}
-windows_core::imp::define_interface!(
-    ILanguageModelOptionsExperimental,
-    ILanguageModelOptionsExperimental_Vtbl,
-    0xa6a10830_f03d_5ea9_9bec_65d2601ac8c9
-);
-impl windows_core::RuntimeType for ILanguageModelOptionsExperimental {
-    const SIGNATURE: windows_core::imp::ConstBuffer =
-        windows_core::imp::ConstBuffer::for_interface::<Self>();
-}
-#[repr(C)]
-#[doc(hidden)]
-pub struct ILanguageModelOptionsExperimental_Vtbl {
-    pub base__: windows_core::IInspectable_Vtbl,
-    pub Temperature:
-        unsafe extern "system" fn(*mut core::ffi::c_void, *mut f32) -> windows_core::HRESULT,
-    pub SetTemperature:
-        unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
-    pub TopP: unsafe extern "system" fn(*mut core::ffi::c_void, *mut f32) -> windows_core::HRESULT,
-    pub SetTopP: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
-    pub TopK: unsafe extern "system" fn(*mut core::ffi::c_void, *mut u32) -> windows_core::HRESULT,
-    pub SetTopK: unsafe extern "system" fn(*mut core::ffi::c_void, u32) -> windows_core::HRESULT,
-    ContentFilterOptions: usize,
-    SetContentFilterOptions: usize,
-    pub LoraAdapter: unsafe extern "system" fn(
-        *mut core::ffi::c_void,
-        *mut *mut core::ffi::c_void,
-    ) -> windows_core::HRESULT,
-    pub SetLoraAdapter: unsafe extern "system" fn(
-        *mut core::ffi::c_void,
-        *mut core::ffi::c_void,
-    ) -> windows_core::HRESULT,
-}
-windows_core::imp::define_interface!(
-    ILanguageModelOptionsExperimentalStatics,
-    ILanguageModelOptionsExperimentalStatics_Vtbl,
-    0x78c940f7_7ea2_5007_8658_4459fe1dd9e5
-);
-impl windows_core::RuntimeType for ILanguageModelOptionsExperimentalStatics {
-    const SIGNATURE: windows_core::imp::ConstBuffer =
-        windows_core::imp::ConstBuffer::for_interface::<Self>();
-}
-#[repr(C)]
-#[doc(hidden)]
-pub struct ILanguageModelOptionsExperimentalStatics_Vtbl {
-    pub base__: windows_core::IInspectable_Vtbl,
-    pub GetForLanguageModelOptions: unsafe extern "system" fn(
-        *mut core::ffi::c_void,
-        *mut core::ffi::c_void,
-        *mut *mut core::ffi::c_void,
-    ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
     ILanguageModelResponseResult,
@@ -781,20 +703,6 @@ pub struct ILanguageModelStatics_Vtbl {
         *mut core::ffi::c_void,
         *mut *mut core::ffi::c_void,
     ) -> windows_core::HRESULT,
-}
-windows_core::imp::define_interface!(
-    ILowRankAdaptation,
-    ILowRankAdaptation_Vtbl,
-    0x904dd39a_91d5_5ffb_9dc2_137461e28d63
-);
-impl windows_core::RuntimeType for ILowRankAdaptation {
-    const SIGNATURE: windows_core::imp::ConstBuffer =
-        windows_core::imp::ConstBuffer::for_interface::<Self>();
-}
-#[repr(C)]
-#[doc(hidden)]
-pub struct ILowRankAdaptation_Vtbl {
-    pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
     ITextRewriter,
@@ -1386,131 +1294,6 @@ unsafe impl Send for LanguageModelEmbeddingVectorResult {}
 unsafe impl Sync for LanguageModelEmbeddingVectorResult {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LanguageModelExperimental(windows_core::IUnknown);
-windows_core::imp::interface_hierarchy!(
-    LanguageModelExperimental,
-    windows_core::IUnknown,
-    windows_core::IInspectable
-);
-windows_core::imp::required_hierarchy!(LanguageModelExperimental, IClosable);
-impl LanguageModelExperimental {
-    pub fn Close(&self) -> windows_core::Result<()> {
-        let this = &windows_core::Interface::cast::<IClosable>(self)?;
-        unsafe {
-            (windows_core::Interface::vtable(this).Close)(windows_core::Interface::as_raw(this))
-                .ok()
-        }
-    }
-    pub fn LoadAdapter(
-        &self,
-        filepath: &windows_core::HSTRING,
-    ) -> windows_core::Result<LowRankAdaptation> {
-        let this = self;
-        unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(this).LoadAdapter)(
-                windows_core::Interface::as_raw(this),
-                core::mem::transmute_copy(filepath),
-                &mut result__,
-            )
-            .and_then(|| windows_core::Type::from_abi(result__))
-        }
-    }
-    pub fn GenerateResponseAsync<P1>(
-        &self,
-        prompt: &windows_core::HSTRING,
-        options: P1,
-    ) -> windows_core::Result<
-        windows_future::IAsyncOperationWithProgress<
-            LanguageModelResponseResult,
-            windows_core::HSTRING,
-        >,
-    >
-    where
-        P1: windows_core::Param<LanguageModelOptionsExperimental>,
-    {
-        let this = self;
-        unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(this).GenerateResponseAsync)(
-                windows_core::Interface::as_raw(this),
-                core::mem::transmute_copy(prompt),
-                options.param().abi(),
-                &mut result__,
-            )
-            .and_then(|| windows_core::Type::from_abi(result__))
-        }
-    }
-    pub fn GenerateResponseAsync2<P0, P2>(
-        &self,
-        context: P0,
-        prompt: &windows_core::HSTRING,
-        options: P2,
-    ) -> windows_core::Result<
-        windows_future::IAsyncOperationWithProgress<
-            LanguageModelResponseResult,
-            windows_core::HSTRING,
-        >,
-    >
-    where
-        P0: windows_core::Param<LanguageModelContext>,
-        P2: windows_core::Param<LanguageModelOptionsExperimental>,
-    {
-        let this = self;
-        unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(this).GenerateResponseAsync2)(
-                windows_core::Interface::as_raw(this),
-                context.param().abi(),
-                core::mem::transmute_copy(prompt),
-                options.param().abi(),
-                &mut result__,
-            )
-            .and_then(|| windows_core::Type::from_abi(result__))
-        }
-    }
-    pub fn CreateInstance<P0>(languagemodel: P0) -> windows_core::Result<LanguageModelExperimental>
-    where
-        P0: windows_core::Param<LanguageModel>,
-    {
-        Self::ILanguageModelExperimentalFactory(|this| unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(this).CreateInstance)(
-                windows_core::Interface::as_raw(this),
-                languagemodel.param().abi(),
-                &mut result__,
-            )
-            .and_then(|| windows_core::Type::from_abi(result__))
-        })
-    }
-    fn ILanguageModelExperimentalFactory<
-        R,
-        F: FnOnce(&ILanguageModelExperimentalFactory) -> windows_core::Result<R>,
-    >(
-        callback: F,
-    ) -> windows_core::Result<R> {
-        static SHARED: windows_core::imp::FactoryCache<
-            LanguageModelExperimental,
-            ILanguageModelExperimentalFactory,
-        > = windows_core::imp::FactoryCache::new();
-        SHARED.call(callback)
-    }
-}
-impl windows_core::RuntimeType for LanguageModelExperimental {
-    const SIGNATURE: windows_core::imp::ConstBuffer =
-        windows_core::imp::ConstBuffer::for_class::<Self, ILanguageModelExperimental>();
-}
-unsafe impl windows_core::Interface for LanguageModelExperimental {
-    type Vtable = <ILanguageModelExperimental as windows_core::Interface>::Vtable;
-    const IID: windows_core::GUID = <ILanguageModelExperimental as windows_core::Interface>::IID;
-}
-impl windows_core::RuntimeName for LanguageModelExperimental {
-    const NAME: &'static str = "Microsoft.Windows.AI.Text.Experimental.LanguageModelExperimental";
-}
-unsafe impl Send for LanguageModelExperimental {}
-unsafe impl Sync for LanguageModelExperimental {}
-#[repr(transparent)]
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LanguageModelOptions(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(
     LanguageModelOptions,
@@ -1612,161 +1395,6 @@ unsafe impl Send for LanguageModelOptions {}
 unsafe impl Sync for LanguageModelOptions {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LanguageModelOptionsExperimental(windows_core::IUnknown);
-windows_core::imp::interface_hierarchy!(
-    LanguageModelOptionsExperimental,
-    windows_core::IUnknown,
-    windows_core::IInspectable
-);
-impl LanguageModelOptionsExperimental {
-    pub fn new() -> windows_core::Result<Self> {
-        Self::IActivationFactory(|f| f.ActivateInstance::<Self>())
-    }
-    fn IActivationFactory<
-        R,
-        F: FnOnce(&windows_core::imp::IGenericFactory) -> windows_core::Result<R>,
-    >(
-        callback: F,
-    ) -> windows_core::Result<R> {
-        static SHARED: windows_core::imp::FactoryCache<
-            LanguageModelOptionsExperimental,
-            windows_core::imp::IGenericFactory,
-        > = windows_core::imp::FactoryCache::new();
-        SHARED.call(callback)
-    }
-    pub fn Temperature(&self) -> windows_core::Result<f32> {
-        let this = self;
-        unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(this).Temperature)(
-                windows_core::Interface::as_raw(this),
-                &mut result__,
-            )
-            .map(|| result__)
-        }
-    }
-    pub fn SetTemperature(&self, value: f32) -> windows_core::Result<()> {
-        let this = self;
-        unsafe {
-            (windows_core::Interface::vtable(this).SetTemperature)(
-                windows_core::Interface::as_raw(this),
-                value,
-            )
-            .ok()
-        }
-    }
-    pub fn TopP(&self) -> windows_core::Result<f32> {
-        let this = self;
-        unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(this).TopP)(
-                windows_core::Interface::as_raw(this),
-                &mut result__,
-            )
-            .map(|| result__)
-        }
-    }
-    pub fn SetTopP(&self, value: f32) -> windows_core::Result<()> {
-        let this = self;
-        unsafe {
-            (windows_core::Interface::vtable(this).SetTopP)(
-                windows_core::Interface::as_raw(this),
-                value,
-            )
-            .ok()
-        }
-    }
-    pub fn TopK(&self) -> windows_core::Result<u32> {
-        let this = self;
-        unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(this).TopK)(
-                windows_core::Interface::as_raw(this),
-                &mut result__,
-            )
-            .map(|| result__)
-        }
-    }
-    pub fn SetTopK(&self, value: u32) -> windows_core::Result<()> {
-        let this = self;
-        unsafe {
-            (windows_core::Interface::vtable(this).SetTopK)(
-                windows_core::Interface::as_raw(this),
-                value,
-            )
-            .ok()
-        }
-    }
-    pub fn LoraAdapter(&self) -> windows_core::Result<LowRankAdaptation> {
-        let this = self;
-        unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(this).LoraAdapter)(
-                windows_core::Interface::as_raw(this),
-                &mut result__,
-            )
-            .and_then(|| windows_core::Type::from_abi(result__))
-        }
-    }
-    pub fn SetLoraAdapter<P0>(&self, value: P0) -> windows_core::Result<()>
-    where
-        P0: windows_core::Param<LowRankAdaptation>,
-    {
-        let this = self;
-        unsafe {
-            (windows_core::Interface::vtable(this).SetLoraAdapter)(
-                windows_core::Interface::as_raw(this),
-                value.param().abi(),
-            )
-            .ok()
-        }
-    }
-    pub fn GetForLanguageModelOptions<P0>(
-        options: P0,
-    ) -> windows_core::Result<LanguageModelOptionsExperimental>
-    where
-        P0: windows_core::Param<LanguageModelOptions>,
-    {
-        Self::ILanguageModelOptionsExperimentalStatics(|this| unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(this).GetForLanguageModelOptions)(
-                windows_core::Interface::as_raw(this),
-                options.param().abi(),
-                &mut result__,
-            )
-            .and_then(|| windows_core::Type::from_abi(result__))
-        })
-    }
-    fn ILanguageModelOptionsExperimentalStatics<
-        R,
-        F: FnOnce(&ILanguageModelOptionsExperimentalStatics) -> windows_core::Result<R>,
-    >(
-        callback: F,
-    ) -> windows_core::Result<R> {
-        static SHARED: windows_core::imp::FactoryCache<
-            LanguageModelOptionsExperimental,
-            ILanguageModelOptionsExperimentalStatics,
-        > = windows_core::imp::FactoryCache::new();
-        SHARED.call(callback)
-    }
-}
-impl windows_core::RuntimeType for LanguageModelOptionsExperimental {
-    const SIGNATURE: windows_core::imp::ConstBuffer =
-        windows_core::imp::ConstBuffer::for_class::<Self, ILanguageModelOptionsExperimental>();
-}
-unsafe impl windows_core::Interface for LanguageModelOptionsExperimental {
-    type Vtable = <ILanguageModelOptionsExperimental as windows_core::Interface>::Vtable;
-    const IID: windows_core::GUID =
-        <ILanguageModelOptionsExperimental as windows_core::Interface>::IID;
-}
-impl windows_core::RuntimeName for LanguageModelOptionsExperimental {
-    const NAME: &'static str =
-        "Microsoft.Windows.AI.Text.Experimental.LanguageModelOptionsExperimental";
-}
-unsafe impl Send for LanguageModelOptionsExperimental {}
-unsafe impl Sync for LanguageModelOptionsExperimental {}
-#[repr(transparent)]
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LanguageModelResponseResult(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(
     LanguageModelResponseResult,
@@ -1841,37 +1469,6 @@ impl windows_core::RuntimeType for LanguageModelResponseStatus {
         b"enum(Microsoft.Windows.AI.Text.LanguageModelResponseStatus;i4)",
     );
 }
-#[repr(transparent)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LowRankAdaptation(windows_core::IUnknown);
-windows_core::imp::interface_hierarchy!(
-    LowRankAdaptation,
-    windows_core::IUnknown,
-    windows_core::IInspectable
-);
-windows_core::imp::required_hierarchy!(LowRankAdaptation, IClosable);
-impl LowRankAdaptation {
-    pub fn Close(&self) -> windows_core::Result<()> {
-        let this = &windows_core::Interface::cast::<IClosable>(self)?;
-        unsafe {
-            (windows_core::Interface::vtable(this).Close)(windows_core::Interface::as_raw(this))
-                .ok()
-        }
-    }
-}
-impl windows_core::RuntimeType for LowRankAdaptation {
-    const SIGNATURE: windows_core::imp::ConstBuffer =
-        windows_core::imp::ConstBuffer::for_class::<Self, ILowRankAdaptation>();
-}
-unsafe impl windows_core::Interface for LowRankAdaptation {
-    type Vtable = <ILowRankAdaptation as windows_core::Interface>::Vtable;
-    const IID: windows_core::GUID = <ILowRankAdaptation as windows_core::Interface>::IID;
-}
-impl windows_core::RuntimeName for LowRankAdaptation {
-    const NAME: &'static str = "Microsoft.Windows.AI.Text.Experimental.LowRankAdaptation";
-}
-unsafe impl Send for LowRankAdaptation {}
-unsafe impl Sync for LowRankAdaptation {}
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TextRewriteTone(pub i32);

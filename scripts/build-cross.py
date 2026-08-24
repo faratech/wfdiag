@@ -212,7 +212,7 @@ def generate_windows_ai_bindings() -> bool:
 name = "bindgen_runner"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.98"
 
 [dependencies]
 windows-bindgen = "=0.66.0"

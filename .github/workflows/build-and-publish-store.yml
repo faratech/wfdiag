@@ -390,10 +390,8 @@ jobs:
             "Square44x44Logo.png",
             "Wide310x150Logo.png",
             "Microsoft.Windows.AI.Text.dll",
-            "Microsoft.Windows.AI.Text.Projection.dll",
             "Microsoft.WindowsAppRuntime.dll",
-            "Microsoft.WindowsAppRuntime.Bootstrap.dll",
-            "WinRT.Runtime.dll"
+            "Microsoft.WindowsAppRuntime.Bootstrap.dll"
           )
           $foundArchitectures = @()
 

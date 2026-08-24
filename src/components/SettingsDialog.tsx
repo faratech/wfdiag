@@ -567,7 +567,6 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
   const [configProvider, setConfigProvider] = useState<AIProviderId>(() =>
     configuredProviderFromSettings(settings)
   )
-  const autoProvider = !draft.preferredAIProvider || draft.preferredAIProvider === 'auto'
   const phiUnavailable = !!aiStatus
     && (!aiStatus.phi_silica_available || !aiStatus.phi_silica_ready)
   const phiStatusPending = aiStatusLoading === true || aiStatus === null
@@ -788,7 +787,21 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
         >
           <option value="auto">Auto</option>
           {PROVIDER_OPTIONS.map(p => (
-            <option key={p.id} value={p.id} disabled={p.id === 'phi_silica' && phiBlocked}>
+            <option
+              key={p.id}
+              value={p.id}
+              // A disabled option that is also the <select>'s current value
+              // traps the control (browsers render/behave as if the whole
+              // select were disabled). Once Phi is confirmed unavailable
+              // (not just still checking) and it's already selected, leave
+              // it selectable so the user can always pick a different
+              // provider — Save still blocks while it stays selected.
+              disabled={
+                p.id === 'phi_silica' &&
+                phiBlocked &&
+                !(phiUnavailable && draft.preferredAIProvider === 'phi_silica')
+              }
+            >
               {p.label}
             </option>
           ))}
@@ -831,23 +844,19 @@ const SettingsDialogInner: React.FC<SettingsDialogProps> = ({ open, onOpenChange
 
       <SectionTitle>Provider setup</SectionTitle>
       <p className="settings-section-intro">
-        {autoProvider
-          ? 'Set up any providers Auto may use. Local providers keep prompts on this PC; subscription and API providers receive only the question and selected diagnostic context.'
-          : 'Configure the active provider. Local providers keep prompts on this PC; subscription and API providers receive only the question and selected diagnostic context.'}
+        Configure credentials for any provider here — independent of which one is active above. Local providers keep prompts on this PC; subscription and API providers receive only the question and selected diagnostic context.
       </p>
-      {autoProvider && (
-        <div className="form-row settings-provider-navigator">
-          <div><strong>Set up provider</strong><div className="hint">Auto can use multiple providers; choose one to edit its settings</div></div>
-          <select
-            className="field-input"
-            aria-label="Provider to set up"
-            value={configProvider}
-            onChange={e => setConfigProvider(e.target.value as AIProviderId)}
-          >
-            {PROVIDER_OPTIONS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
-          </select>
-        </div>
-      )}
+      <div className="form-row settings-provider-navigator">
+        <div><strong>Set up provider</strong><div className="hint">Browse and edit any provider's settings, whether or not it's currently active</div></div>
+        <select
+          className="field-input"
+          aria-label="Provider to set up"
+          value={configProvider}
+          onChange={e => setConfigProvider(e.target.value as AIProviderId)}
+        >
+          {PROVIDER_OPTIONS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+        </select>
+      </div>
 
       {configProvider === 'openai' && (
         <>

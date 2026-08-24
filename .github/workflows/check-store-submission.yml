@@ -10,6 +10,10 @@ on:
       submission_id:
         description: 'Submission ID to inspect'
         required: true
+      cancel_submission:
+        description: 'Cancel this submission after verifying it is the active pending submission'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,6 +26,7 @@ jobs:
         env:
           APP_ID: ${{ github.event.inputs.app_id }}
           SUBMISSION_ID: ${{ github.event.inputs.submission_id }}
+          CANCEL_SUBMISSION: ${{ github.event.inputs.cancel_submission }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
@@ -100,3 +105,39 @@ jobs:
             hasAdvancedListingPermission,
             packageValidationResult
           }'
+
+          if [ "$CANCEL_SUBMISSION" != "true" ]; then
+            exit 0
+          fi
+
+          pending_id="$(echo "$app_details" | jq -r '.pendingApplicationSubmission.id // empty')"
+          if [ "$pending_id" != "$SUBMISSION_ID" ]; then
+            echo "::error::Refusing to cancel submission $SUBMISSION_ID because Partner Center reports active pending submission '$pending_id'."
+            exit 1
+          fi
+
+          submission_status="$(echo "$submission" | jq -r '.status // empty')"
+          echo "Cancelling verified pending submission $SUBMISSION_ID (status: $submission_status)..."
+          http_status="$(curl -sS -o cancel-response.json -w '%{http_code}' -X DELETE \
+            "$base_url/submissions/${SUBMISSION_ID}" \
+            -H "Authorization: Bearer $token")"
+          if [ "$http_status" != "200" ] && [ "$http_status" != "204" ]; then
+            echo "::error::Partner Center cancellation failed with HTTP $http_status."
+            jq '{code, message, target, details}' cancel-response.json 2>/dev/null || true
+            exit 1
+          fi
+
+          for attempt in $(seq 1 30); do
+            app_after="$(curl -sS -X GET "$base_url" \
+              -H "Authorization: Bearer $token")"
+            pending_after="$(echo "$app_after" | jq -r '.pendingApplicationSubmission.id // empty')"
+            if [ -z "$pending_after" ]; then
+              echo "Submission $SUBMISSION_ID cancelled; Partner Center pending pointer is clear."
+              exit 0
+            fi
+            echo "Cancellation accepted; pending pointer is still $pending_after (check $attempt/30)."
+            sleep 10
+          done
+
+          echo "::error::Partner Center accepted cancellation but did not clear the pending pointer within five minutes."
+          exit 1
