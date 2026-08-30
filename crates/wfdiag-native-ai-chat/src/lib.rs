@@ -13,6 +13,7 @@
 #![deny(unsafe_code)]
 #![allow(clippy::missing_errors_doc)]
 
+mod compat_provider;
 mod contract;
 mod engine;
 mod model;
@@ -34,6 +35,7 @@ pub mod ollama {
 #[path = "../../../src-tauri/src/ai_providers/openai_compat.rs"]
 pub mod openai_compat;
 
+pub use compat_provider::CompatChatProvider;
 pub use contract::*;
 pub use engine::*;
 pub use model::*;

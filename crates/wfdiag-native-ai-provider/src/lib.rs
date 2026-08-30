@@ -17,10 +17,16 @@ use std::thread::JoinHandle;
 use tokio::sync::{mpsc, oneshot};
 
 mod cache;
+mod compat;
 mod composition;
 mod local_probes;
 mod network;
+mod provider_config;
 
+pub use compat::{
+    CompatConfigPorts, ProviderKeySource, compat_caps, resolve_compat_config,
+};
+pub use provider_config::ResolvedProviderConfig;
 pub use cache::{ProviderCacheControl, SharedAiCache};
 pub use composition::{
     CustomEndpointSource, FoundryEndpointSource, OllamaSource, PackageIdentitySource,
