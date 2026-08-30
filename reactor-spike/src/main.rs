@@ -3,12 +3,14 @@
 mod export_support;
 mod icons;
 mod issue_support;
+mod save_picker;
 mod update_support;
 
 use export_support::{
     ExportExternalAction, current_export_date_strings, launch_export_external_action,
     write_text_to_clipboard,
 };
+use save_picker::{SavePickerOutcome, ValidatedExportPath};
 use icons::FaIcon;
 use issue_support::{
     PendingIssueDetection, PreparedIssueDetection, advance_nonzero_generation,
@@ -33,7 +35,7 @@ use wfdiag_native_diagnostics::{
 };
 use wfdiag_native_export::{
     ExportCompleted, ExportMetadata, ExportPayload, ExportRequest, ExportRequestKind,
-    ExportRuntime, ExportTask, TaskResult as ExportTaskResult,
+    ExportRuntime, ExportTask, ReportFormat, TaskResult as ExportTaskResult,
 };
 use wfdiag_native_history::{
     ComparisonSummary, DiagnosticTask as HistoryDiagnosticTask, HistoryReply, HistoryRuntimeConfig,
@@ -790,6 +792,9 @@ enum Message {
         request_id: u64,
     },
     ExportRuntimeCompleted(Box<ExportCompleted>),
+    /// The rendered report file was written to the validated user path. The
+    /// write happens on a background worker; the error is already a string.
+    ExportFileSaved(Box<Result<std::path::PathBuf, String>>),
     ExportWorkerStopped,
     ExportWaitCancelled,
     ExportWaitRejected,
@@ -846,12 +851,14 @@ struct DiagnosticSnapshot {
     errors: usize,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum PendingExportAction {
     ShareToWindowsForum,
+    /// Write the rendered report to the user-chosen, policy-validated path.
+    SaveToFile { path: ValidatedExportPath },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingExport {
     request_id: u64,
     action: PendingExportAction,
@@ -1668,6 +1675,39 @@ fn spawn_export_wait(
     )
 }
 
+/// User-facing label for a report format, matching the save-dialog filter
+/// names.
+#[must_use]
+const fn export_format_label(format: ReportFormat) -> &'static str {
+    match format {
+        ReportFormat::Json => "JSON",
+        ReportFormat::Text => "TXT",
+        ReportFormat::Html => "HTML",
+    }
+}
+
+fn spawn_export_file_write(
+    context: &ComponentContext<WfdiagSpike>,
+    path: ValidatedExportPath,
+    content: String,
+) -> ComponentTask {
+    context.spawn_background_with_rejection(
+        move |cancellation| {
+            // The path was policy-validated on the UI thread by the save
+            // picker; only the (potentially large) file write happens here.
+            let result = if cancellation.is_cancelled() {
+                Err("The export was cancelled".to_string())
+            } else {
+                std::fs::write(path.as_path(), content)
+                    .map(|()| path.into_path())
+                    .map_err(|error| error.to_string())
+            };
+            Message::ExportFileSaved(Box::new(result))
+        },
+        Message::ExportWaitRejected,
+    )
+}
+
 fn spawn_issue_request_preparation(
     context: &ComponentContext<WfdiagSpike>,
     pending: PendingIssueDetection,
@@ -2246,15 +2286,80 @@ impl WfdiagSpike {
         self.resume_export_wait(context);
     }
 
-    fn report_export_unavailable(&mut self) {
-        if self.diagnostic_results.is_empty() {
-            self.status = "Run a scan before exporting a report".to_string();
-        } else {
-            self.status = format!(
-                "Native {} export is waiting for an owner-window save picker",
-                self.settings_snapshot.export_format.to_ascii_uppercase()
-            );
+    /// Export the latest completed scan to a user-chosen file, mirroring the
+    /// Store 2.5.8 flow: the native save dialog runs synchronously on this
+    /// UI thread (owner-validated by `save_picker`), while rendering and
+    /// file I/O stay on workers. A dialog cancellation is a silent no-op,
+    /// exactly like the shipping `save()` dialog path.
+    fn request_export_to_file(&mut self, context: &ComponentContext<Self>) {
+        if self.deterministic_visual {
+            self.status = "Visual fixture mode · file export is disabled".to_string();
+            return;
         }
+        if self.export_pending.is_some() {
+            self.status = "A report is already being prepared…".to_string();
+            return;
+        }
+        let Some(results) = self.export_results_snapshot() else {
+            self.status = "Run a scan before exporting a report".to_string();
+            return;
+        };
+        let Some(runtime) = self.export_runtime.as_ref() else {
+            self.status = self
+                .export_error
+                .clone()
+                .unwrap_or_else(|| "Native report generation is unavailable".to_string());
+            return;
+        };
+        let Ok(format) = ReportFormat::try_from(self.settings_snapshot.export_format.as_str())
+        else {
+            self.status = "The selected export format is not available".to_string();
+            return;
+        };
+        let Ok(SavePickerOutcome::Selected(path)) = save_picker::show_export_save_picker(format)
+        else {
+            return;
+        };
+        let dates = match current_export_date_strings() {
+            Ok(dates) => dates,
+            Err(error) => {
+                self.export_error = Some(error.to_string());
+                self.status = "Failed to prepare export. Please try again.".to_string();
+                return;
+            }
+        };
+        let Some(request_id) = advance_nonzero_generation(&mut self.export_request_id) else {
+            self.export_error = Some("Native export request identity was exhausted".to_string());
+            self.status = "Native report generation is unavailable".to_string();
+            return;
+        };
+        let request = ExportRequest {
+            request_id,
+            kind: ExportRequestKind::SavedReport {
+                format,
+                include_raw: true,
+                metadata: ExportMetadata {
+                    generated: dates.generated,
+                    local_date: dates.local_date,
+                    computer_name: self.system_info.computer_name.clone(),
+                    os_version: self.system_info.os_version.clone(),
+                    is_admin: self.system_info.is_admin,
+                },
+            },
+            results,
+        };
+        if let Err(error) = runtime.enqueue(request) {
+            self.export_error = Some(error.to_string());
+            self.status = "Failed to prepare export. Please try again.".to_string();
+            return;
+        }
+        self.export_pending = Some(PendingExport {
+            request_id,
+            action: PendingExportAction::SaveToFile { path },
+        });
+        self.export_error = None;
+        self.status = format!("Preparing {} export…", export_format_label(format));
+        self.resume_export_wait(context);
     }
 
     fn stop_issue_delivery(&mut self, reason: impl Into<String>) {
@@ -3799,7 +3904,7 @@ impl Component for WfdiagSpike {
                     self.begin_diagnostic_scan(ScanKind::Quick, context);
                 } else {
                     match tag.as_str() {
-                        "export" => self.report_export_unavailable(),
+                        "export" => self.request_export_to_file(context),
                         "share" => self.request_share_to_windowsforum(context),
                         _ => (),
                     }
@@ -4300,14 +4405,14 @@ impl Component for WfdiagSpike {
             }
             Message::ExportRuntimeCompleted(completed) => {
                 self.export_wait = None;
-                let Some(pending) = self.export_pending else {
+                let Some(pending) = self.export_pending.take() else {
                     return;
                 };
                 if completed.request_id != pending.request_id {
+                    self.export_pending = Some(pending);
                     self.resume_export_wait(context);
                     return;
                 }
-                self.export_pending = None;
                 match (pending.action, completed.result) {
                     (
                         PendingExportAction::ShareToWindowsForum,
@@ -4332,6 +4437,15 @@ impl Component for WfdiagSpike {
                             self.status = "Failed to prepare share. Please try again.".to_string();
                         }
                     },
+                    (
+                        PendingExportAction::SaveToFile { path },
+                        Ok(ExportPayload::Report(content)),
+                    ) => {
+                        self.export_error = None;
+                        self.status =
+                            format!("Writing {} report…", export_format_label(path.format()));
+                        spawn_export_file_write(context, path, content);
+                    }
                     (_, Ok(_)) => {
                         self.export_error =
                             Some("Native export worker returned an unexpected payload".to_string());
@@ -4343,6 +4457,17 @@ impl Component for WfdiagSpike {
                     }
                 }
             }
+            Message::ExportFileSaved(result) => match *result {
+                Ok(path) => {
+                    self.export_error = None;
+                    self.status = format!("Results saved to {}", path.display());
+                }
+                Err(error) => {
+                    self.export_error = Some(error);
+                    self.status =
+                        "Failed to save the file. Please try a different location.".to_string();
+                }
+            },
             Message::ExportWorkerStopped => {
                 self.export_wait = None;
                 self.export_pending = None;
