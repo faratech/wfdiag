@@ -33,10 +33,12 @@ wfdiag-native-update = { path = "../crates/wfdiag-native-update" }
 wfdiag-ui-core = { path = "../crates/wfdiag-ui-core" }
 windows = { version = "0.62", features = [
     "ApplicationModel_DataTransfer",
+    "Data_Xml_Dom",
     "Foundation_Collections",
     "Globalization_DateTimeFormatting",
     "System_UserProfile",
     "Win32_Foundation",
+    "UI_Notifications",
     "Win32_System_Com",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

@@ -4,7 +4,9 @@ mod action_support;
 mod chat_support;
 mod export_support;
 mod icons;
+mod instance_support;
 mod issue_support;
+mod notification_support;
 mod report_support;
 mod save_picker;
 mod update_support;
@@ -865,6 +867,7 @@ enum Message {
     ActionWaitRejected,
     RestartAsAdmin,
     RestartAsAdminFinished(Result<bool, String>),
+    InstanceActivated,
     BackendBatch {
         events: Vec<UiEvent>,
         terminated: bool,
@@ -1244,6 +1247,7 @@ struct WfdiagSpike {
     action_pending: Option<u64>,
     repair_confirm: Option<RemediationSummary>,
     admin_relaunch_task: Option<ComponentTask>,
+    instance_wait: Option<ComponentTask>,
     ai_mode: AiMode,
     ai_provider_runtime: Option<NativeAiProviderRuntime>,
     ai_provider_status: Option<AIProviderStatus>,
@@ -1723,6 +1727,21 @@ fn spawn_chat_wait(
             }
         },
         Message::ChatWaitRejected,
+    )
+}
+
+fn spawn_instance_watch(context: &ComponentContext<WfdiagSpike>) -> ComponentTask {
+    context.spawn_background_with_rejection(
+        move |cancellation| loop {
+            if cancellation.is_cancelled() {
+                return Message::ActionWaitCancelled;
+            }
+            if instance_support::activation_requested() {
+                return Message::InstanceActivated;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        },
+        Message::ActionWaitCancelled,
     )
 }
 
@@ -2367,6 +2386,26 @@ impl WfdiagSpike {
         if let Some(receiver) = self.action_receiver.as_ref() {
             self.action_wait = Some(spawn_action_wait(context, Arc::clone(receiver)));
         }
+    }
+
+    /// Fire-and-forget scan-completion toast, mirroring the shipping
+    /// plugin's behavior when notifications are enabled. Best effort: any
+    /// failure is silent (the scan itself succeeded).
+    fn notify_scan_completion(&self) {
+        if self.deterministic_visual || !self.settings_snapshot.show_notifications {
+            return;
+        }
+        let collected = self.diagnostic_results.len();
+        let errors = self
+            .diagnostic_results
+            .iter()
+            .filter(|result| !result.success)
+            .count();
+        let _ = std::thread::Builder::new()
+            .name("wfdiag-reactor-toast".to_string())
+            .spawn(move || {
+                let _ = notification_support::show_scan_complete_toast(collected, errors);
+            });
     }
 
     fn resume_report_wait(&mut self, context: &ComponentContext<Self>) {
@@ -3259,6 +3298,7 @@ impl WfdiagSpike {
         let label = self.diagnostic_scan_kind.map_or("Scan", scan_kind_label);
         self.previous_diagnostic_snapshot = None;
         self.reset_diagnostic_activity();
+        self.notify_scan_completion();
         if let Some(error) = history_error {
             self.history_error = Some(format!("Scan history was not saved: {error}"));
             self.status = format!(
@@ -3943,6 +3983,11 @@ impl Component for WfdiagSpike {
                 }
             }
         };
+        let instance_wait = if deterministic_visual {
+            None
+        } else {
+            Some(spawn_instance_watch(context))
+        };
         let (ai_provider_runtime, ai_status_error) = if deterministic_visual {
             (None, None)
         } else {
@@ -4076,6 +4121,7 @@ impl Component for WfdiagSpike {
             action_pending: None,
             repair_confirm: None,
             admin_relaunch_task: None,
+            instance_wait,
             ai_mode: AiMode::Assistant,
             ai_provider_runtime,
             ai_provider_status: None,
@@ -4976,6 +5022,11 @@ impl Component for WfdiagSpike {
                 if self.admin_relaunch_task.is_none() {
                     self.admin_relaunch_task = Some(spawn_relaunch_as_admin(context));
                 }
+            }
+            Message::InstanceActivated => {
+                // Another launch asked this instance to the foreground.
+                instance_support::activate_main_window();
+                self.instance_wait = Some(spawn_instance_watch(context));
             }
             Message::RestartAsAdminFinished(result) => {
                 self.admin_relaunch_task = None;
@@ -12849,6 +12900,13 @@ fn main() {
     // This probe must remain ahead of App::run_component so version validation
     // never initializes WinUI or creates a visible window.
     if write_version_probe_if_requested() {
+        return;
+    }
+    // Refuse a second instance before any WinUI work; the primary is asked
+    // to come to the foreground via the activation event.
+    if let instance_support::SingleInstanceDecision::Secondary =
+        instance_support::acquire("com.windowsforum.diagnostics")
+    {
         return;
     }
     App::run_component::<WfdiagSpike>(()).unwrap();
