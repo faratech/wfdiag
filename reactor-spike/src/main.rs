@@ -63,8 +63,8 @@ use wfdiag_native_monitor::{
 };
 use wfdiag_native_phi::WindowsPhiStatusSource;
 use wfdiag_native_settings::{
-    AppSettings, CloudFallbackPolicy, SettingsCommand, SettingsEvent, SettingsRuntime,
-    SettingsService, SettingsValidator, windows_shipping_settings_service,
+    AppSettings, CloudFallbackPolicy, ProviderKeyId, SettingsCommand, SettingsEvent,
+    SettingsRuntime, SettingsService, SettingsValidator, windows_shipping_settings_service,
 };
 #[cfg(feature = "settings-test-path")]
 use wfdiag_native_settings::{ShippingSettingsStorage, WindowsDpapiCredentialStorage};
@@ -864,6 +864,9 @@ enum Message {
     PaletteCommand(String),
     ShowShortcutHelp,
     CloseShortcutHelp,
+    ProviderKeyDraftChanged(usize, String),
+    StoreProviderKey(usize),
+    ClearProviderKey(usize),
     RepairDialogClosed {
         remediation_id: String,
         result: ContentDialogResult,
@@ -1260,6 +1263,8 @@ struct WfdiagSpike {
     palette_query: String,
     shortcut_help_open: bool,
     window_hook_installed: bool,
+    provider_key_drafts: [String; 4],
+    provider_key_busy: bool,
     ai_mode: AiMode,
     ai_provider_runtime: Option<NativeAiProviderRuntime>,
     ai_provider_status: Option<AIProviderStatus>,
@@ -2369,6 +2374,57 @@ impl WfdiagSpike {
         }
     }
 
+    /// Store or clear a provider credential through the settings worker.
+    /// The draft text never persists to settings.json — only the DPAPI
+    /// credential file for the provider's closed key id.
+    fn submit_provider_key(&mut self, index: usize, store: bool) {
+        const KEY_IDS: [ProviderKeyId; 4] = [
+            ProviderKeyId::OpenAI,
+            ProviderKeyId::Anthropic,
+            ProviderKeyId::Gemini,
+            ProviderKeyId::Custom,
+        ];
+        let Some(provider) = KEY_IDS.get(index).copied() else {
+            return;
+        };
+        if self.deterministic_visual {
+            self.status =
+                "Visual fixture mode · credential changes are disabled".to_string();
+            return;
+        }
+        let key = self.provider_key_drafts[index].clone();
+        if store && key.trim().is_empty() {
+            self.status = "Enter an API key first".to_string();
+            return;
+        }
+        let request_id = self.next_settings_request_id();
+        // The settings worker borrow is taken last: nothing above may hold a
+        // borrow across the &mut request-id bump.
+        let Some(settings_runtime) = self.settings_runtime.as_ref() else {
+            self.status = "Native settings persistence is unavailable".to_string();
+            return;
+        };
+        let command = if store {
+            SettingsCommand::StoreProviderKey {
+                request_id,
+                provider,
+                key,
+            }
+        } else {
+            SettingsCommand::ClearProviderKey { request_id, provider }
+        };
+        if let Err(error) = settings_runtime.send(command) {
+            self.status = format!("Credential change failed: {error}");
+            return;
+        }
+        self.provider_key_busy = true;
+        self.status = if store {
+            "Saving API key…".to_string()
+        } else {
+            "Clearing API key…".to_string()
+        };
+    }
+
     /// Install the tray + close-to-tray hook once the WinUI window exists.
     /// Runs on the UI thread (subclassing requires the owning thread); the
     /// bool guard makes it a cheap no-op afterwards.
@@ -3134,10 +3190,22 @@ impl WfdiagSpike {
                     }
                 }
             }
+            SettingsEvent::ProviderKeyStored { result, .. } => {
+                self.provider_key_busy = false;
+                self.status = match result {
+                    Ok(()) => "API key saved".to_string(),
+                    Err(error) => format!("Credential change failed: {error}"),
+                };
+            }
+            SettingsEvent::ProviderKeyCleared { result, .. } => {
+                self.provider_key_busy = false;
+                self.status = match result {
+                    Ok(()) => "API key cleared".to_string(),
+                    Err(error) => format!("Credential change failed: {error}"),
+                };
+            }
             SettingsEvent::Stopped => worker_stopped = true,
-            SettingsEvent::Updated { .. }
-            | SettingsEvent::ProviderKeyStored { .. }
-            | SettingsEvent::ProviderKeyCleared { .. } => {}
+            SettingsEvent::Updated { .. } => {}
         }
 
         if worker_stopped {
@@ -4214,6 +4282,8 @@ impl Component for WfdiagSpike {
             palette_query: String::new(),
             shortcut_help_open: false,
             window_hook_installed: false,
+            provider_key_drafts: Default::default(),
+            provider_key_busy: false,
             ai_mode: AiMode::Assistant,
             ai_provider_runtime,
             ai_provider_status: None,
@@ -4339,6 +4409,18 @@ impl Component for WfdiagSpike {
             }
             Message::ShowShortcutHelp => self.shortcut_help_open = true,
             Message::CloseShortcutHelp => self.shortcut_help_open = false,
+            Message::ProviderKeyDraftChanged(index, value) => {
+                if let Some(draft) = self.provider_key_drafts.get_mut(index) {
+                    *draft = value;
+                }
+            }
+            Message::StoreProviderKey(index) => {
+                self.submit_provider_key(index, true);
+            }
+            Message::ClearProviderKey(index) => {
+                self.provider_key_drafts[index] = String::new();
+                self.submit_provider_key(index, false);
+            }
             Message::AboutClosed { epoch } => self.close_about(epoch),
             Message::AboutExternalRequested { epoch, action } => {
                 self.request_about_external_action(epoch, action, context);
@@ -6222,6 +6304,17 @@ impl Component for WfdiagSpike {
                     epoch,
                     action: SettingsDialogAction::Save,
                 }),
+                &self.provider_key_drafts,
+                [
+                    self.settings_snapshot.open_ai_api_key_set,
+                    self.settings_snapshot.anthropic_api_key_set,
+                    self.settings_snapshot.gemini_api_key_set,
+                    self.settings_snapshot.custom_api_key_set,
+                ],
+                self.provider_key_busy,
+                context.callback(move |(index, value)| Message::ProviderKeyDraftChanged(index, value)),
+                context.callback(Message::StoreProviderKey),
+                context.callback(Message::ClearProviderKey),
             )
         } else {
             View::empty()
@@ -12338,6 +12431,12 @@ fn settings_dialog(
     codex_model_changed: Callback<Option<usize>>,
     cancel: Callback<()>,
     save: Callback<()>,
+    provider_key_drafts: &[String; 4],
+    provider_keys_set: [bool; 4],
+    key_busy: bool,
+    key_draft_changed: Callback<(usize, String)>,
+    key_store: Callback<usize>,
+    key_clear: Callback<usize>,
 ) -> View {
     let actions: View = StackPanel::new()
         .orientation(Orientation::Horizontal)
@@ -12474,6 +12573,12 @@ fn settings_dialog(
                                     settings,
                                     provider_setup_partial,
                                     editable,
+                                    provider_key_drafts,
+                                    provider_keys_set,
+                                    key_busy,
+                                    key_draft_changed,
+                                    key_store,
+                                    key_clear,
                                     theme_changed,
                                     export_format_changed,
                                     auto_save_changed,
@@ -12500,6 +12605,97 @@ fn settings_dialog(
         )
 }
 
+
+/// API keys section: DPAPI-backed credential entry per provider. Shared by
+/// both settings layouts.
+#[allow(clippy::too_many_arguments)]
+fn settings_provider_keys_section(
+    palette: Palette,
+    provider_key_drafts: &[String; 4],
+    provider_keys_set: [bool; 4],
+    key_busy: bool,
+    editable: bool,
+    key_draft_changed: Callback<(usize, String)>,
+    key_store: Callback<usize>,
+    key_clear: Callback<usize>,
+) -> View {
+    const KEY_PROVIDERS: [(&str, usize); 4] = [
+        ("OpenAI", 0),
+        ("Anthropic Claude", 1),
+        ("Google Gemini", 2),
+        ("Custom endpoint", 3),
+    ];
+    let rows: Vec<KeyedView> = KEY_PROVIDERS
+        .iter()
+        .map(|(label, index)| {
+            let draft_changed = key_draft_changed.clone();
+            let store = key_store.clone();
+            let clear = key_clear.clone();
+            let index = *index;
+            let set = provider_keys_set[index];
+            let draft = &provider_key_drafts[index];
+            KeyedView::new(
+                *label,
+                settings_wrapped_row(
+                    palette,
+                    label,
+                    Some(if set {
+                        "A key is stored for this provider"
+                    } else {
+                        "No key stored yet"
+                    }),
+                    StackPanel::new()
+                        .orientation(Orientation::Horizontal)
+                        .spacing(6.0)
+                        .children((
+                            PasswordBox::new()
+                                .width(200.0)
+                                .height(32.0)
+                                .password(draft.clone())
+                                .is_enabled(editable && !key_busy)
+                                .on_password_changed(move |value| {
+                                    let _ = draft_changed.call((index, value));
+                                })
+                                .automation_name(format!("{label} API key")),
+                            Button::new()
+                                .height(32.0)
+                                .width(58.0)
+                                .is_enabled(editable && !key_busy)
+                                .on_click(move || {
+                                    let _ = store.call(index);
+                                })
+                                .content("Save"),
+                            Button::new()
+                                .height(32.0)
+                                .width(58.0)
+                                .is_enabled(editable && !key_busy && set)
+                                .on_click(move || {
+                                    let _ = clear.call(index);
+                                })
+                                .content("Clear"),
+                        )),
+                    58.0,
+                ),
+            )
+        })
+        .collect();
+    StackPanel::new()
+        .spacing(4.0)
+        .children((
+            settings_section(palette, "API KEYS"),
+            Border::new()
+                .padding(Thickness::new(0.0, 8.0, 0.0, 5.0))
+                .content(
+                    TextBlock::new()
+                        .text("Keys are stored with Windows DPAPI per provider — never in settings.json and never in the cloud.")
+                        .font_size(11.5)
+                        .foreground(palette.muted)
+                        .text_wrapping(TextWrapping::Wrap),
+                ),
+            StackPanel::new().keyed_children(rows),
+        ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn settings_content(
     theme: WindowTheme,
@@ -12507,6 +12703,12 @@ fn settings_content(
     settings: &AppSettings,
     provider_setup_partial: bool,
     editable: bool,
+    provider_key_drafts: &[String; 4],
+    provider_keys_set: [bool; 4],
+    key_busy: bool,
+    key_draft_changed: Callback<(usize, String)>,
+    key_store: Callback<usize>,
+    key_clear: Callback<usize>,
     theme_changed: Callback<Option<usize>>,
     export_format_changed: Callback<Option<usize>>,
     auto_save_changed: Callback<bool>,
@@ -12529,6 +12731,12 @@ fn settings_content(
             settings,
             provider_setup_partial,
             editable,
+            provider_key_drafts,
+            provider_keys_set,
+            key_busy,
+            key_draft_changed,
+            key_store,
+            key_clear,
             theme_changed,
             export_format_changed,
             auto_save_changed,
@@ -12737,7 +12945,18 @@ fn settings_content(
                             .font_size(13.0)
                             .text_wrapping(TextWrapping::Wrap),
                 ),
+
                 StackPanel::new().children((
+                settings_provider_keys_section(
+                    palette,
+                    provider_key_drafts,
+                    provider_keys_set,
+                    key_busy,
+                    editable,
+                    key_draft_changed,
+                    key_store,
+                    key_clear,
+                ),
                     settings_section(palette, "GENERAL"),
                     settings_row(
                     palette,
@@ -12839,6 +13058,12 @@ fn settings_content_bottom(
     settings: &AppSettings,
     provider_setup_partial: bool,
     editable: bool,
+    provider_key_drafts: &[String; 4],
+    provider_keys_set: [bool; 4],
+    key_busy: bool,
+    key_draft_changed: Callback<(usize, String)>,
+    key_store: Callback<usize>,
+    key_clear: Callback<usize>,
     theme_changed: Callback<Option<usize>>,
     export_format_changed: Callback<Option<usize>>,
     auto_save_changed: Callback<bool>,
@@ -12961,6 +13186,16 @@ fn settings_content_bottom(
                     .font_size(13.0)
                     .text_wrapping(TextWrapping::Wrap),
             ),
+        settings_provider_keys_section(
+            palette,
+            provider_key_drafts,
+            provider_keys_set,
+            key_busy,
+            editable,
+            key_draft_changed,
+            key_store,
+            key_clear,
+        ),
         settings_section(palette, "GENERAL"),
     ));
 
