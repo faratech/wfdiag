@@ -678,7 +678,6 @@ impl SettingsDialogAction {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HistoryAckKind {
     Tags,
-    Label,
     Clear,
 }
 
@@ -4565,10 +4564,6 @@ impl Component for WfdiagSpike {
                     }
                     (HistoryAckKind::Tags, Ok(())) => {
                         self.status = "Tags saved".to_string();
-                        self.request_history_list(context);
-                    }
-                    (HistoryAckKind::Label, Ok(())) => {
-                        self.status = "Label saved".to_string();
                         self.request_history_list(context);
                     }
                     (_, Err(message)) => self.status = message,
