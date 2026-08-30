@@ -42,15 +42,6 @@ pub struct DiagnosticSession {
     pub results: HashMap<String, TaskResult>,
 }
 
-/// Control plane for one streaming scan report. `finished` is signalled only
-/// after the report's cache-key lock has been released, so a caller awaiting
-/// cancellation can safely start a replacement generation.
-#[derive(Clone)]
-pub struct ReportControl {
-    pub cancel: tokio_util::sync::CancellationToken,
-    pub finished: tokio_util::sync::CancellationToken,
-}
-
 /// Main application state managed by Tauri
 pub struct AppState {
     pub current_session: Arc<Mutex<Option<DiagnosticSession>>>,
@@ -71,13 +62,6 @@ pub struct AppState {
     pub chat_sessions: Arc<Mutex<HashMap<String, ChatSession>>>,
     /// Cancellation tokens for in-flight chat turns, keyed by chat session id
     pub chat_cancels: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
-    /// Report cache keys with a generation currently streaming. Prevents a
-    /// fast double-click on "Generate report" from firing a second,
-    /// concurrent paid-provider request for the same scan.
-    pub report_in_flight: Arc<Mutex<HashSet<String>>>,
-    /// Cancellation and completion signals for streaming scan reports, keyed
-    /// by report id.
-    pub report_cancels: Arc<Mutex<HashMap<String, ReportControl>>>,
     /// Trusted proposal/authorization/execution state for catalog-backed
     /// remediations. Model output never receives a reference to this store.
     pub action_broker: Arc<Mutex<crate::action_broker::ActionBrokerState>>,
@@ -97,8 +81,6 @@ impl AppState {
             active_scan_runners: Arc::new(Mutex::new(HashSet::new())),
             chat_sessions: Arc::new(Mutex::new(HashMap::new())),
             chat_cancels: Arc::new(Mutex::new(HashMap::new())),
-            report_in_flight: Arc::new(Mutex::new(HashSet::new())),
-            report_cancels: Arc::new(Mutex::new(HashMap::new())),
             action_broker: Arc::new(Mutex::new(
                 crate::action_broker::ActionBrokerState::default(),
             )),

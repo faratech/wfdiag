@@ -4,7 +4,7 @@
 //! local-first provider routing policy, cache identity, duplicate suppression,
 //! streaming projection, and cancellation lifecycle. A desktop shell supplies
 //! only scan/history snapshots, concrete provider resolution, and an event
-//! sink. There is no dependency on Tauri, Wry, WebView2, or Reactor.
+//! sink. There is no dependency on `Tauri`, `Wry`, `WebView2`, or `Reactor`.
 
 #![deny(unsafe_code)]
 #![allow(clippy::missing_errors_doc)]
@@ -95,7 +95,7 @@ pub struct ReportErrorPayload {
 }
 
 /// Shell event boundary. Implementations normally marshal these events to a
-/// WinUI dispatcher or map them to the established Tauri event names.
+/// `WinUI` dispatcher or map them to the established `Tauri` event names.
 pub trait ReportEmitter: Send + Sync + 'static {
     fn delta(&self, payload: &ReportDeltaPayload);
     fn done(&self, payload: &ReportDonePayload);
@@ -174,6 +174,22 @@ struct ReportState {
     controls: HashMap<String, ReportControl>,
 }
 
+/// Outcome of resolving policy, evidence, and the cache fast path: either a
+/// cached acknowledgement served inline, or everything needed to start one
+/// streaming generation.
+enum PreparedReport {
+    Cached(ReportAck),
+    Streaming {
+        provider: AIProvider,
+        cache_key: String,
+        caps: ProviderCaps,
+        concrete: ResolvedReportProvider,
+        provider_use: ProviderUse,
+        system: String,
+        prompt: String,
+    },
+}
+
 /// Cloneable report service shared by either desktop shell.
 #[derive(Clone)]
 pub struct ReportService {
@@ -213,6 +229,34 @@ impl ReportService {
             );
         }
 
+        match self.prepare(&request, resolver.as_ref()).await? {
+            PreparedReport::Cached(ack) => Ok(ack),
+            PreparedReport::Streaming {
+                provider,
+                cache_key,
+                caps,
+                concrete,
+                provider_use,
+                system,
+                prompt,
+            } => self.start_streaming(
+                provider,
+                cache_key,
+                caps,
+                concrete,
+                provider_use,
+                system,
+                prompt,
+                emitter,
+            ),
+        }
+    }
+
+    async fn prepare(
+        &self,
+        request: &ReportRequest,
+        resolver: &dyn ReportProviderResolver,
+    ) -> Result<PreparedReport, String> {
         let preference = resolver.preference();
         let initial_provider = resolver.determine_active(preference).await;
         let provider = choose_report_provider(
@@ -234,7 +278,7 @@ impl ReportService {
             );
         }
 
-        let resolved = resolver.resolve(provider).await?;
+        let concrete = resolver.resolve(provider).await?;
         let caps = capabilities(provider);
         let compact = caps.context_budget_chars <= 4_000;
         let data_budget = if compact {
@@ -268,26 +312,50 @@ impl ReportService {
         let cache_hash = report_cache_hash(
             &request.scan.results,
             previous_scan_id,
-            &resolved.config_fingerprint,
+            &concrete.config_fingerprint,
         );
         let provider_use = ProviderUse::for_provider(
             provider,
             (provider != initial_provider).then_some(initial_provider),
         )
-        .with_requested_model(resolved.requested_model.as_deref());
+        .with_requested_model(concrete.requested_model.as_deref());
         let cache_key = format!("report:{provider}:{cache_hash}");
         if !request.force_refresh
             && let Some(cached) = self.cache.get(&cache_key)
         {
-            return Ok(ReportAck {
+            return Ok(PreparedReport::Cached(ReportAck {
                 report_id: format!("report_{cache_hash}"),
                 cached: true,
                 provider: provider.to_string(),
                 provider_use,
                 report: Some(cached),
-            });
+            }));
         }
 
+        Ok(PreparedReport::Streaming {
+            provider,
+            cache_key,
+            caps,
+            concrete,
+            provider_use,
+            system,
+            prompt,
+        })
+    }
+
+    /// Register the in-flight guard and spawn the streaming generation task.
+    #[allow(clippy::too_many_arguments)]
+    fn start_streaming(
+        &self,
+        provider: AIProvider,
+        cache_key: String,
+        caps: ProviderCaps,
+        concrete: ResolvedReportProvider,
+        provider_use: ProviderUse,
+        system: String,
+        prompt: String,
+        emitter: Arc<dyn ReportEmitter>,
+    ) -> Result<ReportAck, String> {
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|_| "The AI report runtime is not available".to_string())?;
         let report_id = format!("report_{}", uuid::Uuid::new_v4().simple());
@@ -325,7 +393,7 @@ impl ReportService {
             cache_key,
             report_id,
             caps,
-            resolved,
+            concrete,
             emitter,
             cancel,
             finished,
@@ -364,7 +432,7 @@ struct ReportTask {
     cache_key: String,
     report_id: String,
     caps: ProviderCaps,
-    resolved: ResolvedReportProvider,
+    concrete: ResolvedReportProvider,
     emitter: Arc<dyn ReportEmitter>,
     cancel: CancellationToken,
     finished: CancellationToken,
@@ -391,7 +459,7 @@ impl ReportTask {
         let outcome = run_chat_turn(
             &mut self.provider_use,
             report_caps,
-            self.resolved.chat.as_ref(),
+            self.concrete.chat.as_ref(),
             "report",
             &self.report_id,
             &mut self.messages,
@@ -518,6 +586,10 @@ pub fn resolve_loaded_report_baseline<T>(
 
 /// Assemble report context deterministically, with highest-value evidence
 /// first and whole-record fitting within the selected provider's budget.
+// The concrete `HashMap` type is deliberate: the evidence builder this
+// delegates to (shared verbatim with the shipping backend) takes the same
+// concrete map, so generalizing here would only move the special case.
+#[allow(clippy::implicit_hasher)]
 pub fn build_report_context(
     results: &HashMap<String, TaskResult>,
     issues: &[Issue],

@@ -62,6 +62,7 @@ wfdiag-native-issues = { path = "../crates/wfdiag-native-issues" }
 wfdiag-native-monitor = { path = "../crates/wfdiag-native-monitor" }
 wfdiag-native-ai-provider = { path = "../crates/wfdiag-native-ai-provider" }
 wfdiag-native-ai-chat = { path = "../crates/wfdiag-native-ai-chat" }
+wfdiag-native-ai-report = { path = "../crates/wfdiag-native-ai-report" }
 wfdiag-native-phi = { path = "../crates/wfdiag-native-phi" }
 wfdiag-native-settings = { path = "../crates/wfdiag-native-settings" }
 wfdiag-native-system = { path = "../crates/wfdiag-native-system" }

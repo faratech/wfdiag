@@ -130,7 +130,7 @@ pub fn init_ai_service() {
 }
 
 /// Get the AI cache
-fn get_cache() -> &'static SharedAiCache {
+pub(crate) fn get_cache() -> &'static SharedAiCache {
     AI_CACHE.get_or_init(|| SharedAiCache::new(100))
 }
 
@@ -711,16 +711,6 @@ pub async fn analyze(
             }
         }
     }
-}
-
-/// Read the shared AI response cache (used by the scan report).
-pub(crate) fn cached_value(key: &str) -> Option<String> {
-    get_cache().get(key)
-}
-
-/// Write to the shared AI response cache (used by the scan report).
-pub(crate) fn cache_value(key: String, value: String) {
-    get_cache().insert(key, value);
 }
 
 // ============================================================================
