@@ -857,6 +857,12 @@ enum Message {
     RunRemediation(String),
     AskAiAboutIssue(String),
     ProposeFixPlan,
+    TogglePalette,
+    ClosePalette,
+    PaletteQueryChanged(String),
+    PaletteCommand(String),
+    ShowShortcutHelp,
+    CloseShortcutHelp,
     RepairDialogClosed {
         remediation_id: String,
         result: ContentDialogResult,
@@ -1248,6 +1254,9 @@ struct WfdiagSpike {
     repair_confirm: Option<RemediationSummary>,
     admin_relaunch_task: Option<ComponentTask>,
     instance_wait: Option<ComponentTask>,
+    palette_open: bool,
+    palette_query: String,
+    shortcut_help_open: bool,
     ai_mode: AiMode,
     ai_provider_runtime: Option<NativeAiProviderRuntime>,
     ai_provider_status: Option<AIProviderStatus>,
@@ -2350,6 +2359,56 @@ impl WfdiagSpike {
         }
         if let Some(receiver) = self.chat_receiver.as_ref() {
             self.chat_wait = Some(spawn_chat_wait(context, Arc::clone(receiver)));
+        }
+    }
+
+    /// Execute one command-palette entry. Page tags reuse the navigation
+    /// path; action tags mirror their titlebar/nav equivalents.
+    fn handle_palette_command(&mut self, tag: String, context: &ComponentContext<Self>) {
+        if let Some(page) = Page::from_tag(&tag) {
+            let entering_processes = page == Page::Processes && self.page != Page::Processes;
+            let entering_history = page == Page::History && self.page != Page::History;
+            let entering_ai = page == Page::Ai && self.page != Page::Ai;
+            self.page = page;
+            if entering_processes {
+                self.process_offset = 0;
+                self.selected_process_pid = None;
+                self.request_process_page(context, false);
+            }
+            if entering_history {
+                self.request_history_list(context);
+            }
+            if entering_ai {
+                self.request_ai_provider_status(context);
+            }
+            return;
+        }
+        match tag.as_str() {
+            "quick-scan" => {
+                self.page = Page::Diagnostics;
+                self.begin_diagnostic_scan(ScanKind::Quick, context);
+            }
+            "full-scan" => {
+                self.page = Page::Diagnostics;
+                self.begin_diagnostic_scan(ScanKind::Full, context);
+            }
+            "export" => self.request_export_to_file(context),
+            "share" => self.request_share_to_windowsforum(context),
+            "settings" => self.open_settings(),
+            "about" => self.open_about(),
+            "shortcut-help" => self.shortcut_help_open = true,
+            "toggle-theme" => {
+                let next = match self.theme {
+                    WindowTheme::Dark => "light",
+                    _ => "dark",
+                };
+                self.settings_snapshot.theme = next.to_string();
+                self.theme = match self.theme {
+                    WindowTheme::Dark => WindowTheme::Light,
+                    _ => WindowTheme::Dark,
+                };
+            }
+            _ => (),
         }
     }
 
@@ -4122,6 +4181,9 @@ impl Component for WfdiagSpike {
             repair_confirm: None,
             admin_relaunch_task: None,
             instance_wait,
+            palette_open: false,
+            palette_query: String::new(),
+            shortcut_help_open: false,
             ai_mode: AiMode::Assistant,
             ai_provider_runtime,
             ai_provider_status: None,
@@ -4234,6 +4296,18 @@ impl Component for WfdiagSpike {
             Message::WindowSize(size) => self.window_size = size,
             Message::TogglePane => self.pane_open = !self.pane_open,
             Message::OpenAbout => self.open_about(),
+            Message::TogglePalette => {
+                self.palette_open = !self.palette_open;
+                self.palette_query.clear();
+            }
+            Message::ClosePalette => self.palette_open = false,
+            Message::PaletteQueryChanged(value) => self.palette_query = value,
+            Message::PaletteCommand(tag) => {
+                self.palette_open = false;
+                self.handle_palette_command(tag, context);
+            }
+            Message::ShowShortcutHelp => self.shortcut_help_open = true,
+            Message::CloseShortcutHelp => self.shortcut_help_open = false,
             Message::AboutClosed { epoch } => self.close_about(epoch),
             Message::AboutExternalRequested { epoch, action } => {
                 self.request_about_external_action(epoch, action, context);
@@ -5806,6 +5880,132 @@ impl Component for WfdiagSpike {
             .is_back_button_visible(false)
             .is_pane_toggle_button_visible(false);
 
+        let palette_commands: &[(&str, &str)] = &[
+            ("Diagnostics", "diagnostics"),
+            ("Live Monitor", "monitor"),
+            ("Processes", "processes"),
+            ("AI Analysis", "ai"),
+            ("Issues", "issues"),
+            ("History", "history"),
+            ("Quick Scan", "quick-scan"),
+            ("Full Scan", "full-scan"),
+            ("Export report", "export"),
+            ("Share to WindowsForum", "share"),
+            ("Settings", "settings"),
+            ("About", "about"),
+            ("Toggle theme", "toggle-theme"),
+            ("Keyboard shortcuts", "shortcut-help"),
+        ];
+        let palette_query_lower = self.palette_query.to_ascii_lowercase();
+        let palette_rows: Vec<KeyedView> = palette_commands
+            .iter()
+            .filter(|(label, _)| {
+                self.palette_query.is_empty()
+                    || label.to_ascii_lowercase().contains(&palette_query_lower)
+            })
+            .map(|(label, tag)| {
+                let execute = context.message(Message::PaletteCommand((*tag).to_string()));
+                KeyedView::new(
+                    *tag,
+                    Button::new()
+                        .width(430.0)
+                        .style(ButtonStyle::Subtle)
+                        .horizontal_alignment(HorizontalAlignment::Left)
+                        .on_click(execute)
+                        .content(
+                            TextBlock::new()
+                                .text((*label).to_string())
+                                .horizontal_alignment(HorizontalAlignment::Left),
+                        ),
+                )
+            })
+            .collect();
+        let palette_dialog = if self.palette_open {
+            let query_changed = context.callback(Message::PaletteQueryChanged);
+            let close = context.message(Message::ClosePalette);
+            ContentDialog::new()
+                .title("Command palette")
+                .is_open(true)
+                .close_button_text("Close")
+                .on_closed(move |_| {
+                    let _ = close.call(());
+                })
+                .content(
+                    StackPanel::new()
+                        .width(460.0)
+                        .spacing(9.0)
+                        .children((
+                            Border::new()
+                                .background(palette.card_strong)
+                                .border_brush(palette.border)
+                                .border_thickness(1.0)
+                                .corner_radius(6.0)
+                                .padding(Thickness::new(10.0, 7.0, 10.0, 7.0))
+                                .content(
+                                    TextBox::new()
+                                        .placeholder_text("Type a command…")
+                                        .on_text_changed(query_changed),
+                                ),
+                            ScrollViewer::new()
+                                .max_height(360.0)
+                                .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                                .content(
+                                    StackPanel::new().spacing(2.0).keyed_children(palette_rows),
+                                ),
+                        )),
+                )
+        } else {
+            View::empty()
+        };
+        let shortcut_rows: &[(&str, &str)] = &[
+            ("Ctrl+K", "Open the command palette"),
+            ("Ctrl+1 … Ctrl+6", "Switch between screens"),
+            ("Ctrl+Shift+Q", "Run a Quick Scan"),
+            ("Ctrl+Shift+F", "Run a Full Scan"),
+            ("Ctrl+R", "Refresh"),
+            ("Ctrl+/", "Show this shortcut list"),
+            ("Esc", "Close dialogs and overlays"),
+        ];
+        let shortcut_dialog = if self.shortcut_help_open {
+            let close = context.message(Message::CloseShortcutHelp);
+            ContentDialog::new()
+                .title("Keyboard Shortcuts")
+                .is_open(true)
+                .close_button_text("Close")
+                .on_closed(move |_| {
+                    let _ = close.call(());
+                })
+                .content(
+                    Border::new()
+                        .width(400.0)
+                        .background(palette.card_strong)
+                        .padding(Thickness::new(14.0, 10.0, 14.0, 10.0))
+                        .content(StackPanel::new().spacing(6.0).keyed_children(
+                            shortcut_rows
+                                .iter()
+                                .map(|(keys, description)| {
+                                    KeyedView::new(
+                                        *keys,
+                                        Grid::new()
+                                            .columns([GridLength::Star(1.0), GridLength::Auto])
+                                            .children((
+                                                TextBlock::new()
+                                                    .text((*description).to_string())
+                                                    .font_size(13.0),
+                                                TextBlock::new()
+                                                    .text((*keys).to_string())
+                                                    .font_size(12.0)
+                                                    .foreground(palette.muted),
+                                            )),
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        )),
+                )
+        } else {
+            View::empty()
+        };
+
         let title_settings = Button::new()
             .grid_row(0)
             .width(46.0)
@@ -5816,6 +6016,27 @@ impl Component for WfdiagSpike {
             .on_click(context.message(Message::OpenSettings))
             .automation_name("Open Settings")
             .content(icons::path(FaIcon::Settings));
+
+        let title_palette = Button::new()
+            .grid_row(0)
+            .width(46.0)
+            .height(42.0)
+            .margin(Thickness::new(0.0, 0.0, 190.0, 0.0))
+            .horizontal_alignment(HorizontalAlignment::Right)
+            .style(ButtonStyle::Subtle)
+            .on_click(context.message(Message::TogglePalette))
+            .automation_name("Open the command palette")
+            .content(fa_icon_label(FaIcon::MagnifyingGlass, ""));
+        let title_help = Button::new()
+            .grid_row(0)
+            .width(46.0)
+            .height(42.0)
+            .margin(Thickness::new(0.0, 0.0, 236.0, 0.0))
+            .horizontal_alignment(HorizontalAlignment::Right)
+            .style(ButtonStyle::Subtle)
+            .on_click(context.message(Message::ShowShortcutHelp))
+            .automation_name("Keyboard shortcuts")
+            .content(icons::path(FaIcon::CircleInfo));
 
         let body = Grid::new()
             .grid_row(1)
@@ -6072,17 +6293,56 @@ impl Component for WfdiagSpike {
 
         Grid::new()
             .rows([GridLength::Pixel(42.0), GridLength::Star(1.0)])
-            .key_accelerators(KeyAccelerators::new([KeyAccelerator::new(
-                AcceleratorKey::R,
-                AcceleratorModifiers::Control,
-                context.message(Message::Refresh),
-            )]))
+            // Reactor's pinned accelerator enum can only express Control plus
+            // these keys (no main-row digits, K, slash, or Shift), so the
+            // shipping Ctrl+1..6/K///Shift+Q/Shift+F set is upstream-blocked;
+            // the palette and shortcut list stay reachable from the titlebar,
+            // and Ctrl+Numpad1..6 cover screen switching where expressible.
+            .key_accelerators(KeyAccelerators::new([
+                KeyAccelerator::new(
+                    AcceleratorKey::R,
+                    AcceleratorModifiers::Control,
+                    context.message(Message::Refresh),
+                ),
+                KeyAccelerator::new(
+                    AcceleratorKey::NumberPad1,
+                    AcceleratorModifiers::Control,
+                    context.message(Message::Navigate(Some("diagnostics".to_string()))),
+                ),
+                KeyAccelerator::new(
+                    AcceleratorKey::NumberPad2,
+                    AcceleratorModifiers::Control,
+                    context.message(Message::Navigate(Some("monitor".to_string()))),
+                ),
+                KeyAccelerator::new(
+                    AcceleratorKey::NumberPad3,
+                    AcceleratorModifiers::Control,
+                    context.message(Message::Navigate(Some("processes".to_string()))),
+                ),
+                KeyAccelerator::new(
+                    AcceleratorKey::NumberPad4,
+                    AcceleratorModifiers::Control,
+                    context.message(Message::Navigate(Some("ai".to_string()))),
+                ),
+                KeyAccelerator::new(
+                    AcceleratorKey::NumberPad5,
+                    AcceleratorModifiers::Control,
+                    context.message(Message::Navigate(Some("issues".to_string()))),
+                ),
+                KeyAccelerator::new(
+                    AcceleratorKey::NumberPad6,
+                    AcceleratorModifiers::Control,
+                    context.message(Message::Navigate(Some("history".to_string()))),
+                ),
+            ]))
             .children((
                 light_wallpaper,
                 dark_wallpaper,
                 Border::new().grid_row_span(2).background(palette.dim),
                 title_brand,
                 title_bar,
+                title_palette,
+                title_help,
                 title_settings,
                 body,
                 update_notice,
@@ -6090,6 +6350,8 @@ impl Component for WfdiagSpike {
                 about_scrim,
                 about,
                 repair_dialog,
+                palette_dialog,
+                shortcut_dialog,
             ))
     }
 }
