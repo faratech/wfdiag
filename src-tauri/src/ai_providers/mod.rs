@@ -31,7 +31,6 @@ pub mod gemini;
 pub mod model_catalog;
 pub mod ollama;
 pub mod openai;
-pub mod openai_compat;
 pub mod phi;
 pub mod sse;
 
@@ -45,36 +44,13 @@ pub use wfdiag_native_ai_provider::{ProviderCaps, capabilities};
 // ============================================================================
 
 pub use wfdiag_native_ai_chat::{
-    ChatMessage, ChatRequest, ChatRole, ChatTurn, FinishReason, ProviderReplay, ToolCall, ToolSpec,
+    ChatMessage, ChatRequest, ChatRole, ChatTurn, FinishReason, ProviderReplay, ResolvedProviderConfig,
+    ToolCall, ToolSpec,
 };
 
-/// Everything a provider call needs, resolved once per request: API key from
-/// DPAPI/keyring, endpoint and model from settings (with provider defaults).
-#[derive(Debug, Clone, Default)]
-pub struct ResolvedProviderConfig {
-    pub api_key: Option<String>,
-    /// Base URL for local/custom providers (no `/v1` suffix)
-    pub endpoint: Option<String>,
-    pub model: Option<String>,
-}
-
-impl ResolvedProviderConfig {
-    fn key(&self) -> &str {
-        self.api_key.as_deref().unwrap_or_default()
-    }
-
-    fn endpoint_or_err(&self, provider: AIProvider) -> Result<&str, String> {
-        self.endpoint
-            .as_deref()
-            .ok_or_else(|| format!("No endpoint resolved for {}", provider))
-    }
-
-    fn model_or_err(&self, provider: AIProvider) -> Result<&str, String> {
-        self.model
-            .as_deref()
-            .ok_or_else(|| format!("No model resolved for {}", provider))
-    }
-}
+// The shared `/v1/chat/completions` client compiles once, in the native chat
+// crate, and both shells use it.
+pub use wfdiag_native_ai_chat::openai_compat;
 
 /// Resolve key/endpoint/model for a provider. Credentials come exclusively
 /// from backend secure storage; per-request IPC can never override them.

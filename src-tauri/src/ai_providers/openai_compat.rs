@@ -1,10 +1,10 @@
 //! Shared `/v1/chat/completions` client for every OpenAI-compatible target:
-//! cloud OpenAI chat, the user-configured custom endpoint (OpenRouter, Groq,
+//! cloud `OpenAI` chat, the user-configured custom endpoint (`OpenRouter`, Groq,
 //! Gemini's compat layer, …), Ollama, and Foundry Local chat.
 //!
 //! Generic providers do NOT serve `/v1/responses`, which is why chat goes
 //! through chat completions while the OpenAI/Foundry one-shot paths keep the
-//! Responses API. No token cap is sent: OpenAI's current models reject the
+//! Responses API. No token cap is sent: `OpenAI`'s current models reject the
 //! legacy `max_tokens` while several compat servers don't know
 //! `max_completion_tokens` — prompts are budgeted on our side instead.
 
@@ -126,7 +126,7 @@ pub(crate) fn to_openai_tools(tools: &[ToolSpec], strict: bool) -> Vec<ChatCompl
 }
 
 /// GPT-5.6 function tools on Chat Completions require effective reasoning
-/// `none`. Keep this scoped to OpenAI: compatibility servers may reject the
+/// `none`. Keep this scoped to `OpenAI`: compatibility servers may reject the
 /// field even when a user-defined model happens to share the same prefix.
 fn requires_none_reasoning(provider: AIProvider, model: &str, has_tools: bool) -> bool {
     provider == AIProvider::OpenAI && has_tools && model.starts_with("gpt-5.6")
@@ -141,7 +141,7 @@ fn client_for(provider: AIProvider, cfg: &ResolvedProviderConfig) -> Client<Open
         None => {}
     }
     if let Some(endpoint) = cfg.endpoint.as_deref() {
-        config = config.with_api_base(format!("{}/v1", endpoint));
+        config = config.with_api_base(format!("{endpoint}/v1"));
     }
     Client::with_config(config)
 }
@@ -202,7 +202,7 @@ fn finish_streamed_turn(
             None if provider == AIProvider::OpenAI => {
                 return Err("OpenAI returned a tool call without an id".to_string());
             }
-            None => format!("{}#{}", name, index),
+            None => format!("{name}#{index}"),
         };
         let arguments: serde_json::Value = serde_json::from_str(&arguments).map_err(|error| {
             format!("{provider} returned invalid JSON arguments for {name}: {error}")
@@ -219,10 +219,10 @@ fn finish_streamed_turn(
         });
     }
 
-    let finished = if !refusal.trim().is_empty() {
-        FinishReason::Refusal
-    } else {
+    let finished = if refusal.trim().is_empty() {
         map_finish(finish, !tool_calls.is_empty())
+    } else {
+        FinishReason::Refusal
     };
     if finished == FinishReason::Refusal && refusal.trim().is_empty() {
         return Err(format!(
@@ -256,7 +256,7 @@ fn friendly_error(provider: AIProvider, error: impl std::fmt::Display) -> String
     } else {
         ""
     };
-    format!("{} error: {}.{}", provider, detail, hint)
+    format!("{provider} error: {detail}.{hint}")
 }
 
 /// One-shot analysis through chat completions (system + single user message).
@@ -280,7 +280,7 @@ pub async fn one_shot(
             &request.messages,
         ))
         .build()
-        .map_err(|e| format!("Failed to build request: {}", e))?;
+        .map_err(|e| format!("Failed to build request: {e}"))?;
 
     let response = client
         .chat()
@@ -328,7 +328,7 @@ pub async fn chat_stream(
     }
     let chat_request = args
         .build()
-        .map_err(|e| format!("Failed to build request: {}", e))?;
+        .map_err(|e| format!("Failed to build request: {e}"))?;
 
     let mut stream = client
         .chat()

@@ -8,6 +8,8 @@ license-file = "../../LICENSE"
 publish = false
 
 [dependencies]
+# Shared chat-completions client for the OpenAI-compatible providers
+async-openai = { version = "0.41", default-features = false, features = ["native-tls", "chat-completion"] }
 futures = "0.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.145"
