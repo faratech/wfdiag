@@ -874,6 +874,7 @@ enum Message {
     ProviderKeyDraftChanged(usize, String),
     StoreProviderKey(usize),
     ClearProviderKey(usize),
+    ToggleQuickScanTask(String),
     ToggleClearHistoryConfirm(bool),
     ClearHistoryConfirmed,
     HistoryTagDraftChanged(String),
@@ -4535,6 +4536,22 @@ impl Component for WfdiagSpike {
             Message::StoreProviderKey(index) => {
                 self.submit_provider_key(index, true);
             }
+            Message::ToggleQuickScanTask(task_id) => {
+                let tasks = self
+                    .settings_draft
+                    .quick_scan_tasks
+                    .get_or_insert_with(Vec::new);
+                match tasks.iter().position(|existing| existing == &task_id) {
+                    Some(position) => {
+                        tasks.remove(position);
+                    }
+                    None => tasks.push(task_id.clone()),
+                }
+                self.status = format!(
+                    "Quick Scan customization: {} tasks selected · press Save to apply",
+                    tasks.len()
+                );
+            }
             Message::ClearProviderKey(index) => {
                 self.provider_key_drafts[index] = String::new();
                 self.submit_provider_key(index, false);
@@ -6471,6 +6488,8 @@ impl Component for WfdiagSpike {
                 context.callback(move |(index, value)| Message::ProviderKeyDraftChanged(index, value)),
                 context.callback(Message::StoreProviderKey),
                 context.callback(Message::ClearProviderKey),
+                &self.diagnostic_catalog,
+                context.callback(Message::ToggleQuickScanTask),
             )
         } else {
             View::empty()
@@ -12682,6 +12701,8 @@ fn settings_dialog(
     key_draft_changed: Callback<(usize, String)>,
     key_store: Callback<usize>,
     key_clear: Callback<usize>,
+    scan_catalog: &[DiagnosticTask],
+    toggle_quick_task: Callback<String>,
 ) -> View {
     let actions: View = StackPanel::new()
         .orientation(Orientation::Horizontal)
@@ -12818,6 +12839,8 @@ fn settings_dialog(
                                     settings,
                                     provider_setup_partial,
                                     editable,
+                                    scan_catalog,
+                                    toggle_quick_task,
                                     provider_key_drafts,
                                     provider_keys_set,
                                     key_busy,
@@ -12850,6 +12873,109 @@ fn settings_dialog(
         )
 }
 
+
+/// Quick Scan customization section: pick which catalog tasks a customized
+/// Quick Scan runs. Saved through the normal settings Save path
+/// (`quick_scan_tasks`); an empty selection restores the shipping defaults.
+fn settings_quick_scan_tasks_section(
+    palette: Palette,
+    catalog: &[DiagnosticTask],
+    settings: &AppSettings,
+    editable: bool,
+    toggle_task: Callback<String>,
+) -> View {
+    let effective: Vec<String> = settings
+        .quick_scan_tasks
+        .clone()
+        .filter(|tasks| !tasks.is_empty())
+        .unwrap_or_else(|| QUICK_SCAN_TASK_IDS.iter().map(|id| (*id).to_string()).collect());
+    let rows: Vec<KeyedView> = catalog
+        .iter()
+        .map(|task| {
+            let checked = effective.iter().any(|id| id == &task.id);
+            let toggle = toggle_task.clone();
+            let task_id = task.id.clone();
+            let admin_note = if task.admin_required {
+                Some(" · admin")
+            } else {
+                None
+            };
+            let note_text = admin_note.map(|note| format!("{}{}", task.description, note));
+            let hint: View = note_text
+                .as_deref()
+                .map(|hint| {
+                    View::from(
+                        TextBlock::new()
+                            .text(hint.to_string())
+                            .font_size(11.0)
+                            .foreground(palette.muted),
+                    )
+                })
+                .unwrap_or_else(View::empty);
+            KeyedView::new(
+                task.id.clone(),
+                Border::new()
+                    .height(44.0)
+                    .border_brush(palette.border)
+                    .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
+                    .content(
+                        Grid::new()
+                            .columns([GridLength::Star(1.0), GridLength::Pixel(24.0)])
+                            .children((
+                                Border::new()
+                                    .vertical_alignment(VerticalAlignment::Center)
+                                    .content(
+                                        StackPanel::new()
+                                            .spacing(2.0)
+                                            .children((
+                                                TextBlock::new()
+                                                    .text(task.name.clone())
+                                                    .font_size(12.5),
+                                                hint,
+                                            )),
+                                    ),
+                                Border::new()
+                                    .grid_column(1)
+                                    .width(24.0)
+                                    .height(32.0)
+                                    .margin(Thickness::new(0.0, 0.0, 4.0, 0.0))
+                                    .horizontal_alignment(HorizontalAlignment::Right)
+                                    .vertical_alignment(VerticalAlignment::Center)
+                                    .content(
+                                        CheckBox::new()
+                                            .is_checked(checked)
+                                            .is_enabled(editable)
+                                            .automation_name(format!(
+                                                "Quick Scan task: {}",
+                                                task.name
+                                            ))
+                                            .on_is_checked_changed(move |_| {
+                                                let _ = toggle.call(task_id.clone());
+                                            })
+                                            .width(14.0)
+                                            .height(14.0),
+                                    ),
+                            )),
+                    ),
+            )
+        })
+        .collect();
+    StackPanel::new()
+        .spacing(4.0)
+        .children((
+            settings_section(palette, "QUICK SCAN TASKS"),
+            Border::new()
+                .padding(Thickness::new(0.0, 8.0, 0.0, 5.0))
+                .content(
+                    TextBlock::new()
+                        .text("Choose which diagnostics a customized Quick Scan runs. Detection-only tasks stay included automatically; an empty selection restores the defaults.")
+                        .font_size(11.5)
+                        .foreground(palette.muted)
+                        .text_wrapping(TextWrapping::Wrap),
+                ),
+            StackPanel::new().keyed_children(rows),
+        ))
+}
 
 /// API keys section: DPAPI-backed credential entry per provider. Shared by
 /// both settings layouts.
@@ -12948,6 +13074,8 @@ fn settings_content(
     settings: &AppSettings,
     provider_setup_partial: bool,
     editable: bool,
+    scan_catalog: &[DiagnosticTask],
+    toggle_quick_task: Callback<String>,
     provider_key_drafts: &[String; 4],
     provider_keys_set: [bool; 4],
     key_busy: bool,
@@ -12976,6 +13104,8 @@ fn settings_content(
             settings,
             provider_setup_partial,
             editable,
+            scan_catalog,
+            toggle_quick_task,
             provider_key_drafts,
             provider_keys_set,
             key_busy,
@@ -13202,6 +13332,13 @@ fn settings_content(
                     key_store,
                     key_clear,
                 ),
+                settings_quick_scan_tasks_section(
+                    palette,
+                    scan_catalog,
+                    settings,
+                    editable,
+                    toggle_quick_task,
+                ),
                     settings_section(palette, "GENERAL"),
                     settings_row(
                     palette,
@@ -13303,6 +13440,8 @@ fn settings_content_bottom(
     settings: &AppSettings,
     provider_setup_partial: bool,
     editable: bool,
+    scan_catalog: &[DiagnosticTask],
+    toggle_quick_task: Callback<String>,
     provider_key_drafts: &[String; 4],
     provider_keys_set: [bool; 4],
     key_busy: bool,
@@ -13440,6 +13579,13 @@ fn settings_content_bottom(
             key_draft_changed,
             key_store,
             key_clear,
+        ),
+        settings_quick_scan_tasks_section(
+            palette,
+            scan_catalog,
+            settings,
+            editable,
+            toggle_quick_task,
         ),
         settings_section(palette, "GENERAL"),
     ));
