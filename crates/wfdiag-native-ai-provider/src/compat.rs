@@ -117,6 +117,35 @@ pub async fn resolve_compat_config(
     }
 }
 
+/// Stable non-secret identity of one resolved provider configuration: the
+/// key participates only as a hash, never in the clear. Cache identity in
+/// both shells derives from this, so the function body must not drift.
+#[must_use]
+pub fn provider_config_fingerprint(provider: AIProvider, cfg: &ResolvedProviderConfig) -> String {
+    fn key_fingerprint(key: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        "wfdiag-ai-key-v1".hash(&mut hasher);
+        key.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    let key = cfg.api_key.as_deref().filter(|key| !key.is_empty()).map_or_else(
+        || "none".to_string(),
+        key_fingerprint,
+    );
+
+    format!(
+        "provider={};endpoint={};model={};key={}",
+        provider,
+        cfg.endpoint.as_deref().unwrap_or("none"),
+        cfg.model.as_deref().unwrap_or("none"),
+        key
+    )
+}
+
 /// Capability projection for a chat-completions turn (streaming, budget).
 #[must_use]
 pub fn compat_caps(provider: AIProvider) -> ProviderCaps {

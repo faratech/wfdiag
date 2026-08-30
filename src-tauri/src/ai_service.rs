@@ -505,35 +505,7 @@ fn generate_cache_key(
     )
 }
 
-pub(crate) fn provider_config_fingerprint(
-    provider: AIProvider,
-    cfg: &crate::ai_providers::ResolvedProviderConfig,
-) -> String {
-    fn key_fingerprint(key: &str) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        "wfdiag-ai-key-v1".hash(&mut hasher);
-        key.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
-    }
-
-    let key = cfg
-        .api_key
-        .as_deref()
-        .filter(|key| !key.is_empty())
-        .map(key_fingerprint)
-        .unwrap_or_else(|| "none".to_string());
-
-    format!(
-        "provider={};endpoint={};model={};key={}",
-        provider,
-        cfg.endpoint.as_deref().unwrap_or_default(),
-        cfg.model.as_deref().unwrap_or_default(),
-        key
-    )
-}
+pub(crate) use wfdiag_native_ai_provider::provider_config_fingerprint;
 
 /// How many characters of diagnostic DATA a one-shot prompt may embed for a
 /// provider — roughly half its whole-request budget (the rest is template,

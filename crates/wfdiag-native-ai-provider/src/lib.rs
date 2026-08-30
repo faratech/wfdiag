@@ -24,7 +24,8 @@ mod network;
 mod provider_config;
 
 pub use compat::{
-    CompatConfigPorts, ProviderKeySource, compat_caps, resolve_compat_config,
+    CompatConfigPorts, ProviderKeySource, compat_caps, provider_config_fingerprint,
+    resolve_compat_config,
 };
 pub use provider_config::ResolvedProviderConfig;
 pub use cache::{ProviderCacheControl, SharedAiCache};

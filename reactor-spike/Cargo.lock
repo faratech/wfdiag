@@ -1569,6 +1569,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "wfdiag-native-ai-report"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "wfdiag-native-ai-chat",
+ "wfdiag-native-ai-provider",
+ "wfdiag-native-history",
+ "wfdiag-native-issues",
+]
+
+[[package]]
 name = "wfdiag-native-diagnostics"
 version = "0.1.0"
 dependencies = [
@@ -1693,6 +1708,7 @@ dependencies = [
  "tokio-util",
  "wfdiag-native-ai-chat",
  "wfdiag-native-ai-provider",
+ "wfdiag-native-ai-report",
  "wfdiag-native-diagnostics",
  "wfdiag-native-export",
  "wfdiag-native-history",

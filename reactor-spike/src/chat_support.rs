@@ -33,15 +33,28 @@ use wfdiag_native_settings::{ProviderKeyId, SettingsService};
 pub const CHAT_SESSION_ID: &str = "reactor-chat";
 
 /// Credential and endpoint ports for one resolved turn. Rebuilt per turn so
-/// settings edits and saved keys apply to the very next message.
-struct ShellChatSource {
+/// settings edits and saved keys apply to the very next message. Shared with
+/// the report worker, which resolves the same provider set.
+pub(crate) struct ShellChatSource {
     settings: SettingsService,
     foundry: Arc<dyn FoundryEndpointSource>,
     ollama: Arc<dyn OllamaSource>,
 }
 
 impl ShellChatSource {
-    fn ports(&self) -> CompatConfigPorts {
+    pub(crate) fn new(
+        settings: SettingsService,
+        foundry: Arc<dyn FoundryEndpointSource>,
+        ollama: Arc<dyn OllamaSource>,
+    ) -> Self {
+        Self {
+            settings,
+            foundry,
+            ollama,
+        }
+    }
+
+    pub(crate) fn ports(&self) -> CompatConfigPorts {
         CompatConfigPorts {
             settings: self.settings.load().unwrap_or_default(),
             keys: Arc::new(SettingsKeySource(self.settings.clone())),

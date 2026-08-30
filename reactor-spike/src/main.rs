@@ -4,6 +4,7 @@ mod chat_support;
 mod export_support;
 mod icons;
 mod issue_support;
+mod report_support;
 mod save_picker;
 mod update_support;
 
@@ -12,6 +13,7 @@ use export_support::{
     write_text_to_clipboard,
 };
 use chat_support::{CHAT_WAIT_POLL, ChatWorkerEvent, NativeChatRuntime};
+use report_support::{NativeReportRuntime, ReportWorkerEvent, ReportScan};
 use save_picker::{SavePickerOutcome, ValidatedExportPath};
 use icons::FaIcon;
 use issue_support::{
@@ -841,6 +843,12 @@ enum Message {
     ChatWorkerStopped,
     ChatWaitCancelled,
     ChatWaitRejected,
+    ReportWorkerEventReceived(Box<ReportWorkerEvent>),
+    ReportWorkerStopped,
+    ReportWaitCancelled,
+    ReportWaitRejected,
+    GenerateReport,
+    CancelReport,
     BackendBatch {
         events: Vec<UiEvent>,
         terminated: bool,
@@ -1203,6 +1211,15 @@ struct WfdiagSpike {
     chat_wait: Option<ComponentTask>,
     chat_request_id: u64,
     chat_pending: Option<u64>,
+    report_runtime: Option<NativeReportRuntime>,
+    report_receiver:
+        Option<Arc<Mutex<std::sync::mpsc::Receiver<ReportWorkerEvent>>>>,
+    report_wait: Option<ComponentTask>,
+    report_request_id: u64,
+    report_pending: Option<u64>,
+    report_text: Option<String>,
+    report_provider: Option<String>,
+    report_error: Option<String>,
     ai_mode: AiMode,
     ai_provider_runtime: Option<NativeAiProviderRuntime>,
     ai_provider_status: Option<AIProviderStatus>,
@@ -1682,6 +1699,31 @@ fn spawn_chat_wait(
             }
         },
         Message::ChatWaitRejected,
+    )
+}
+
+fn spawn_report_wait(
+    context: &ComponentContext<WfdiagSpike>,
+    receiver: Arc<Mutex<std::sync::mpsc::Receiver<ReportWorkerEvent>>>,
+) -> ComponentTask {
+    context.spawn_background_with_rejection(
+        move |cancellation| loop {
+            if cancellation.is_cancelled() {
+                return Message::ReportWaitCancelled;
+            }
+            let received = match receiver.lock() {
+                Ok(receiver) => receiver.recv_timeout(CHAT_WAIT_POLL),
+                Err(_) => return Message::ReportWorkerStopped,
+            };
+            match received {
+                Ok(event) => return Message::ReportWorkerEventReceived(Box::new(event)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Message::ReportWorkerStopped;
+                }
+            }
+        },
+        Message::ReportWaitRejected,
     )
 }
 
@@ -2225,6 +2267,15 @@ impl WfdiagSpike {
         }
         if let Some(receiver) = self.chat_receiver.as_ref() {
             self.chat_wait = Some(spawn_chat_wait(context, Arc::clone(receiver)));
+        }
+    }
+
+    fn resume_report_wait(&mut self, context: &ComponentContext<Self>) {
+        if self.report_wait.is_some() {
+            return;
+        }
+        if let Some(receiver) = self.report_receiver.as_ref() {
+            self.report_wait = Some(spawn_report_wait(context, Arc::clone(receiver)));
         }
     }
 
@@ -3756,6 +3807,27 @@ impl Component for WfdiagSpike {
         } else {
             (None, None, None)
         };
+        let (report_runtime, report_receiver, report_wait) = if deterministic_visual {
+            (None, None, None)
+        } else if let Some(settings) = settings_service.as_ref() {
+            match NativeReportRuntime::start(
+                settings.clone(),
+                Arc::new(FoundryCliEndpointSource::new()),
+                Arc::new(ReqwestOllamaSource),
+            ) {
+                Ok((runtime, receiver)) => {
+                    let receiver = Arc::new(Mutex::new(receiver));
+                    let wait = spawn_report_wait(context, Arc::clone(&receiver));
+                    (Some(runtime), Some(receiver), Some(wait))
+                }
+                Err(error) => {
+                    status = format!("Native AI report unavailable · {error}");
+                    (None, None, None)
+                }
+            }
+        } else {
+            (None, None, None)
+        };
         let (ai_provider_runtime, ai_status_error) = if deterministic_visual {
             (None, None)
         } else {
@@ -3874,6 +3946,14 @@ impl Component for WfdiagSpike {
             chat_wait,
             chat_request_id: 0,
             chat_pending: None,
+            report_runtime,
+            report_receiver,
+            report_wait,
+            report_request_id: 0,
+            report_pending: None,
+            report_text: None,
+            report_provider: None,
+            report_error: None,
             ai_mode: AiMode::Assistant,
             ai_provider_runtime,
             ai_provider_status: None,
@@ -4528,6 +4608,131 @@ impl Component for WfdiagSpike {
                 self.chat_pending = None;
                 self.status = "The native chat queue rejected a worker hand-off".to_string();
             }
+            Message::GenerateReport => {
+                if self.deterministic_visual {
+                    self.status = "Visual fixture mode · report generation is disabled".to_string();
+                    return;
+                }
+                if self.report_pending.is_some() {
+                    self.status = "A report is already being generated…".to_string();
+                    return;
+                }
+                if !self.settings_snapshot.ai_enabled {
+                    self.status =
+                        "Enable AI insights in Settings before generating a report".to_string();
+                    return;
+                }
+                let Some(provider) = self
+                    .ai_provider_status
+                    .as_ref()
+                    .map(|status| status.active_provider)
+                    .filter(|provider| *provider != AIProvider::None)
+                else {
+                    self.status = "Set up an available AI provider before generating".to_string();
+                    return;
+                };
+                let Some(runtime) = self.report_runtime.as_ref() else {
+                    self.status = self
+                        .report_error
+                        .clone()
+                        .unwrap_or_else(|| "Native AI report generation is unavailable".to_string());
+                    return;
+                };
+                let Some(session_id) = self
+                    .diagnostic_results
+                    .first()
+                    .map(|result| result.session_id.clone())
+                else {
+                    self.status = "Run a scan before generating a report".to_string();
+                    return;
+                };
+                let Some(results) = self.export_results_snapshot() else {
+                    self.status = "Run a scan before generating a report".to_string();
+                    return;
+                };
+                let Some(request_id) = advance_nonzero_generation(&mut self.report_request_id)
+                else {
+                    self.status = "Native report request identity was exhausted".to_string();
+                    return;
+                };
+                self.report_text = None;
+                self.report_provider = None;
+                self.report_error = None;
+                self.report_pending = Some(request_id);
+                runtime.generate(
+                    request_id,
+                    ReportScan {
+                        session_id,
+                        results: (*results).clone(),
+                    },
+                    provider,
+                    false,
+                );
+                self.status = "Preparing AI report…".to_string();
+                self.resume_report_wait(context);
+            }
+            Message::CancelReport => {
+                if let (Some(runtime), Some(pending)) =
+                    (self.report_runtime.as_ref(), self.report_pending)
+                    && runtime.cancel(pending)
+                {
+                    self.status = "Cancelling the AI report…".to_string();
+                }
+            }
+            Message::ReportWorkerEventReceived(event) => {
+                let Some(pending) = self.report_pending else {
+                    return;
+                };
+                if pending != event.request_id() {
+                    self.resume_report_wait(context);
+                    return;
+                }
+                match *event {
+                    ReportWorkerEvent::Delta { text, .. } => {
+                        self.report_text
+                            .get_or_insert_with(String::new)
+                            .push_str(&text);
+                        self.resume_report_wait(context);
+                    }
+                    ReportWorkerEvent::Done { provider, cached, .. } => {
+                        self.report_pending = None;
+                        self.report_wait = None;
+                        self.report_provider = Some(provider.clone());
+                        self.status = if cached {
+                            format!("AI report ready · {provider} · cached")
+                        } else {
+                            format!("AI report ready · {provider}")
+                        };
+                    }
+                    ReportWorkerEvent::Failed { message, .. } => {
+                        self.report_pending = None;
+                        self.report_wait = None;
+                        self.report_error = Some(message.clone());
+                        self.status = message;
+                    }
+                    ReportWorkerEvent::Cancelled { .. } => {
+                        self.report_pending = None;
+                        self.report_wait = None;
+                        self.report_error = None;
+                        self.status = "AI report cancelled".to_string();
+                    }
+                }
+            }
+            Message::ReportWorkerStopped => {
+                self.report_wait = None;
+                self.report_pending = None;
+                self.report_receiver = None;
+                self.report_runtime = None;
+                self.status = "Native AI report worker stopped".to_string();
+            }
+            Message::ReportWaitCancelled => {
+                self.report_wait = None;
+            }
+            Message::ReportWaitRejected => {
+                self.report_wait = None;
+                self.report_pending = None;
+                self.status = "The native report queue rejected a worker hand-off".to_string();
+            }
             Message::ExportRuntimeCompleted(completed) => {
                 self.export_wait = None;
                 let Some(pending) = self.export_pending.take() else {
@@ -4997,6 +5202,13 @@ impl Component for WfdiagSpike {
                 context.callback(Message::UsePrompt),
                 context.message(Message::SendChat),
                 context.message(Message::OpenSettings),
+                self.report_text.as_deref(),
+                self.report_provider.as_deref(),
+                self.report_pending.is_some(),
+                self.report_error.as_deref(),
+                !self.diagnostic_results.is_empty(),
+                context.message(Message::GenerateReport),
+                context.message(Message::CancelReport),
             ),
             Page::Issues => issues_page(
                 palette,
@@ -8809,6 +9021,13 @@ fn ai_page(
     use_prompt: Callback<String>,
     send: Callback<()>,
     open_settings: Callback<()>,
+    report_text: Option<&str>,
+    report_provider: Option<&str>,
+    report_generating: bool,
+    report_error: Option<&str>,
+    report_has_scan: bool,
+    generate_report: Callback<()>,
+    cancel_report: Callback<()>,
 ) -> View {
     let prompts = [
         "Summarize my latest scan",
@@ -8981,7 +9200,18 @@ fn ai_page(
             send,
         )
     } else {
-        ai_scan_report_workspace(palette, narrow, workspace_height)
+        ai_scan_report_workspace(
+            palette,
+            narrow,
+            workspace_height,
+            report_text,
+            report_provider,
+            report_generating,
+            report_error,
+            report_has_scan,
+            generate_report,
+            cancel_report,
+        )
     };
 
     StackPanel::new().spacing(16.0).children((
@@ -9600,37 +9830,149 @@ fn primary_button_resources() -> ResourceOverrides {
         .set("ControlCornerRadius", CornerRadius::uniform(7.0))
 }
 
-fn ai_scan_report_workspace(palette: Palette, narrow: bool, workspace_height: f64) -> View {
+#[allow(clippy::too_many_arguments)] // mirror ai_page's explicit view-parameter style
+fn ai_scan_report_workspace(
+    palette: Palette,
+    narrow: bool,
+    workspace_height: f64,
+    report_text: Option<&str>,
+    report_provider: Option<&str>,
+    report_generating: bool,
+    report_error: Option<&str>,
+    has_scan: bool,
+    generate: Callback<()>,
+    cancel: Callback<()>,
+) -> View {
+    let body: View = if !has_scan {
+        StackPanel::new()
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .vertical_alignment(VerticalAlignment::Center)
+            .spacing(9.0)
+            .children((
+                Border::new()
+                    .width(48.0)
+                    .height(48.0)
+                    .background(palette.active)
+                    .corner_radius(10.0)
+                    .content(icons::path(FaIcon::FileExport).width(23.0).height(23.0)),
+                TextBlock::new()
+                    .text("Run a scan to create a report")
+                    .font_size(18.0)
+                    .font_weight(FontWeight::BOLD),
+                TextBlock::new()
+                    .text("A focused health report will summarize collected diagnostics, errors, risks, and next steps.")
+                    .font_size(12.5)
+                    .foreground(palette.muted)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .max_width(470.0),
+            ))
+    } else if let Some(error) = report_error {
+        StackPanel::new()
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .vertical_alignment(VerticalAlignment::Center)
+            .spacing(10.0)
+            .children((
+                icons::path(FaIcon::TriangleExclamation)
+                    .width(30.0)
+                    .height(30.0),
+                TextBlock::new()
+                    .text("The report could not be generated")
+                    .font_size(16.0)
+                    .font_weight(FontWeight::SEMI_BOLD),
+                TextBlock::new()
+                    .text(error.to_string())
+                    .font_size(12.5)
+                    .foreground(palette.muted)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .max_width(470.0)
+                    .horizontal_alignment(HorizontalAlignment::Center),
+                Button::new().on_click(generate).content("Try again"),
+            ))
+    } else if report_generating {
+        StackPanel::new()
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .vertical_alignment(VerticalAlignment::Center)
+            .spacing(10.0)
+            .children((
+                Border::new()
+                    .width(48.0)
+                    .height(48.0)
+                    .background(palette.active)
+                    .corner_radius(10.0)
+                    .content(icons::path(FaIcon::WandMagicSparkles).width(23.0).height(23.0)),
+                TextBlock::new()
+                    .text("Generating report…")
+                    .font_size(18.0)
+                    .font_weight(FontWeight::BOLD),
+                TextBlock::new()
+                    .text("The AI assistant is reviewing the latest scan.")
+                    .font_size(12.5)
+                    .foreground(palette.muted),
+                Button::new().on_click(cancel).content("Cancel"),
+            ))
+    } else if let Some(text) = report_text {
+        ScrollViewer::new()
+            .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+            .content(
+                Border::new().padding(Thickness::new(24.0, 20.0, 24.0, 20.0)).content(
+                    StackPanel::new()
+                        .spacing(12.0)
+                        .children((
+                            Grid::new()
+                                .columns([GridLength::Star(1.0), GridLength::Auto])
+                                .children((
+                                    TextBlock::new()
+                                        .text("Scan health report")
+                                        .font_size(17.0)
+                                        .font_weight(FontWeight::BOLD),
+                                    Button::new().on_click(generate).content("Regenerate"),
+                                )),
+                            TextBlock::new()
+                                .text(report_provider
+                                    .map(|provider| format!("Generated by {provider}"))
+                                    .unwrap_or_else(|| "Generated by the local AI assistant".to_string()))
+                                .font_size(11.5)
+                                .foreground(palette.muted),
+                            TextBlock::new()
+                                .text(text.to_string())
+                                .font_size(13.0)
+                                .text_wrapping(TextWrapping::Wrap),
+                        )),
+                ),
+            )
+    } else {
+        StackPanel::new()
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .vertical_alignment(VerticalAlignment::Center)
+            .spacing(9.0)
+            .children((
+                Border::new()
+                    .width(48.0)
+                    .height(48.0)
+                    .background(palette.active)
+                    .corner_radius(10.0)
+                    .content(icons::path(FaIcon::FileExport).width(23.0).height(23.0)),
+                TextBlock::new()
+                    .text("Ready to create your report")
+                    .font_size(18.0)
+                    .font_weight(FontWeight::BOLD),
+                TextBlock::new()
+                    .text("A focused health report will summarize collected diagnostics, errors, risks, and next steps.")
+                    .font_size(12.5)
+                    .foreground(palette.muted)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .max_width(470.0)
+                    .horizontal_alignment(HorizontalAlignment::Center),
+                Button::new().on_click(generate).content("Generate report"),
+            ))
+    };
     Border::new()
         .height(workspace_height.max(if narrow { 550.0 } else { 650.0 }))
         .background(palette.card)
         .border_brush(palette.border)
         .border_thickness(1.0)
         .corner_radius(9.0)
-        .content(
-            StackPanel::new()
-                .horizontal_alignment(HorizontalAlignment::Center)
-                .vertical_alignment(VerticalAlignment::Center)
-                .spacing(9.0)
-                .children((
-                    Border::new()
-                        .width(48.0)
-                        .height(48.0)
-                        .background(palette.active)
-                        .corner_radius(10.0)
-                        .content(icons::path(FaIcon::FileExport).width(23.0).height(23.0)),
-                    TextBlock::new()
-                        .text("Run a scan to create a report")
-                        .font_size(18.0)
-                        .font_weight(FontWeight::BOLD),
-                    TextBlock::new()
-                        .text("A focused health report will summarize collected diagnostics, errors, risks, and next steps.")
-                        .font_size(12.5)
-                        .foreground(palette.muted)
-                        .text_wrapping(TextWrapping::Wrap)
-                        .max_width(470.0),
-                )),
-        )
+        .content(body)
 }
 
 #[allow(clippy::too_many_arguments)]
