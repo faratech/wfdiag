@@ -1666,6 +1666,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wfdiag-native-remediation"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "encoding_rs",
+ "serde",
+ "tokio",
+ "tokio-util",
+ "wfdiag-native-issues",
+ "wfdiag-remediation-catalog",
+ "windows",
+]
+
+[[package]]
 name = "wfdiag-native-settings"
 version = "0.1.0"
 dependencies = [
@@ -1715,6 +1729,7 @@ dependencies = [
  "wfdiag-native-issues",
  "wfdiag-native-monitor",
  "wfdiag-native-phi",
+ "wfdiag-native-remediation",
  "wfdiag-native-settings",
  "wfdiag-native-system",
  "wfdiag-native-update",

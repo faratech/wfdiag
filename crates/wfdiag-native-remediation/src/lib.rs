@@ -20,6 +20,9 @@ pub use remediation_catalog::{RemediationMetadata, RemediationSummary, Remediati
 #[path = "../../../src-tauri/src/remediation.rs"]
 pub mod remediation;
 
+/// Administrator relaunch via the `runas` verb.
+pub mod elevation;
+
 /// Adapter shim: the trusted-program allowlist and console-output decoding
 /// the real runner uses.
 #[path = "../../../src-tauri/src/security.rs"]

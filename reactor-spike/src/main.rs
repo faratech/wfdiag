@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod action_support;
 mod chat_support;
 mod export_support;
 mod icons;
@@ -12,8 +13,10 @@ use export_support::{
     ExportExternalAction, current_export_date_strings, launch_export_external_action,
     write_text_to_clipboard,
 };
+use action_support::{ActionWorkerEvent, NativeActionRuntime};
 use chat_support::{CHAT_WAIT_POLL, ChatWorkerEvent, NativeChatRuntime};
 use report_support::{NativeReportRuntime, ReportWorkerEvent, ReportScan};
+use wfdiag_native_remediation::remediation;
 use save_picker::{SavePickerOutcome, ValidatedExportPath};
 use icons::FaIcon;
 use issue_support::{
@@ -849,6 +852,19 @@ enum Message {
     ReportWaitRejected,
     GenerateReport,
     CancelReport,
+    RunRemediation(String),
+    AskAiAboutIssue(String),
+    ProposeFixPlan,
+    RepairDialogClosed {
+        remediation_id: String,
+        result: ContentDialogResult,
+    },
+    ActionWorkerEventReceived(Box<ActionWorkerEvent>),
+    ActionWorkerStopped,
+    ActionWaitCancelled,
+    ActionWaitRejected,
+    RestartAsAdmin,
+    RestartAsAdminFinished(Result<bool, String>),
     BackendBatch {
         events: Vec<UiEvent>,
         terminated: bool,
@@ -1220,6 +1236,14 @@ struct WfdiagSpike {
     report_text: Option<String>,
     report_provider: Option<String>,
     report_error: Option<String>,
+    action_runtime: Option<NativeActionRuntime>,
+    action_receiver:
+        Option<Arc<Mutex<std::sync::mpsc::Receiver<ActionWorkerEvent>>>>,
+    action_wait: Option<ComponentTask>,
+    action_request_id: u64,
+    action_pending: Option<u64>,
+    repair_confirm: Option<RemediationSummary>,
+    admin_relaunch_task: Option<ComponentTask>,
     ai_mode: AiMode,
     ai_provider_runtime: Option<NativeAiProviderRuntime>,
     ai_provider_status: Option<AIProviderStatus>,
@@ -1699,6 +1723,46 @@ fn spawn_chat_wait(
             }
         },
         Message::ChatWaitRejected,
+    )
+}
+
+fn spawn_action_wait(
+    context: &ComponentContext<WfdiagSpike>,
+    receiver: Arc<Mutex<std::sync::mpsc::Receiver<ActionWorkerEvent>>>,
+) -> ComponentTask {
+    context.spawn_background_with_rejection(
+        move |cancellation| loop {
+            if cancellation.is_cancelled() {
+                return Message::ActionWaitCancelled;
+            }
+            let received = match receiver.lock() {
+                Ok(receiver) => receiver.recv_timeout(CHAT_WAIT_POLL),
+                Err(_) => return Message::ActionWorkerStopped,
+            };
+            match received {
+                Ok(event) => return Message::ActionWorkerEventReceived(Box::new(event)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Message::ActionWorkerStopped;
+                }
+            }
+        },
+        Message::ActionWaitRejected,
+    )
+}
+
+/// `relaunch_self_elevated` blocks on the UAC prompt and COM; keep it off
+/// the WinUI thread.
+fn spawn_relaunch_as_admin(context: &ComponentContext<WfdiagSpike>) -> ComponentTask {
+    context.spawn_background_with_rejection(
+        move |_cancellation| {
+            Message::RestartAsAdminFinished(
+                wfdiag_native_remediation::elevation::relaunch_self_elevated(),
+            )
+        },
+        Message::RestartAsAdminFinished(Err(
+            "The Reactor background queue rejected the elevation hand-off".to_string(),
+        )),
     )
 }
 
@@ -2267,6 +2331,41 @@ impl WfdiagSpike {
         }
         if let Some(receiver) = self.chat_receiver.as_ref() {
             self.chat_wait = Some(spawn_chat_wait(context, Arc::clone(receiver)));
+        }
+    }
+
+    /// Dispatch an authorized catalog execution. The confirmed flag is only
+    /// ever true after the Repair confirmation dialog's Primary button.
+    fn execute_remediation(
+        &mut self,
+        remediation_id: String,
+        confirmed: bool,
+        context: &ComponentContext<Self>,
+    ) {
+        let Some(runtime) = self.action_runtime.as_ref() else {
+            self.status = "Native remediation is unavailable".to_string();
+            return;
+        };
+        if self.action_pending.is_some() {
+            self.status = "A remediation is already running…".to_string();
+            return;
+        }
+        let Some(request_id) = advance_nonzero_generation(&mut self.action_request_id) else {
+            self.status = "Native remediation request identity was exhausted".to_string();
+            return;
+        };
+        self.action_pending = Some(request_id);
+        runtime.execute(request_id, remediation_id.clone(), confirmed);
+        self.status = format!("Running '{remediation_id}'…");
+        self.resume_action_wait(context);
+    }
+
+    fn resume_action_wait(&mut self, context: &ComponentContext<Self>) {
+        if self.action_wait.is_some() {
+            return;
+        }
+        if let Some(receiver) = self.action_receiver.as_ref() {
+            self.action_wait = Some(spawn_action_wait(context, Arc::clone(receiver)));
         }
     }
 
@@ -3828,6 +3927,22 @@ impl Component for WfdiagSpike {
         } else {
             (None, None, None)
         };
+        let (action_runtime, action_receiver, action_wait) = if deterministic_visual {
+            // Fixture mode never executes anything; the worker is not built.
+            (None, None, None)
+        } else {
+            match NativeActionRuntime::start() {
+                Ok((runtime, receiver)) => {
+                    let receiver = Arc::new(Mutex::new(receiver));
+                    let wait = spawn_action_wait(context, Arc::clone(&receiver));
+                    (Some(runtime), Some(receiver), Some(wait))
+                }
+                Err(error) => {
+                    status = format!("Native remediation unavailable · {error}");
+                    (None, None, None)
+                }
+            }
+        };
         let (ai_provider_runtime, ai_status_error) = if deterministic_visual {
             (None, None)
         } else {
@@ -3954,6 +4069,13 @@ impl Component for WfdiagSpike {
             report_text: None,
             report_provider: None,
             report_error: None,
+            action_runtime,
+            action_receiver,
+            action_wait,
+            action_request_id: 0,
+            action_pending: None,
+            repair_confirm: None,
+            admin_relaunch_task: None,
             ai_mode: AiMode::Assistant,
             ai_provider_runtime,
             ai_provider_status: None,
@@ -4733,6 +4855,137 @@ impl Component for WfdiagSpike {
                 self.report_pending = None;
                 self.status = "The native report queue rejected a worker hand-off".to_string();
             }
+            Message::RunRemediation(remediation_id) => {
+                if self.deterministic_visual {
+                    self.status =
+                        "Visual fixture mode · remediation is disabled".to_string();
+                    return;
+                }
+                let Some(spec) = remediation::find(&remediation_id) else {
+                    self.status = format!("Unknown remediation '{remediation_id}'");
+                    return;
+                };
+                if spec.tier == RemediationTier::Repair {
+                    // Production execution of a Repair is reachable only after
+                    // this explicit confirmation; the engine's own gate would
+                    // still refuse an unauthorized run.
+                    self.repair_confirm = Some(spec.summary());
+                    return;
+                }
+                self.execute_remediation(remediation_id, false, context);
+            }
+            Message::RepairDialogClosed {
+                remediation_id,
+                result,
+            } => {
+                let confirmed = self.repair_confirm.take().is_some()
+                    && result == ContentDialogResult::Primary;
+                if confirmed {
+                    self.execute_remediation(remediation_id, true, context);
+                }
+            }
+            Message::ActionWorkerEventReceived(event) => {
+                let Some(pending) = self.action_pending else {
+                    return;
+                };
+                if pending != event.request_id() {
+                    self.resume_action_wait(context);
+                    return;
+                }
+                match *event {
+                    ActionWorkerEvent::Done { result, .. } => {
+                        self.action_pending = None;
+                        self.action_wait = None;
+                        let success = result.success;
+                        self.status = result.message.clone();
+                        if success {
+                            // The fix may have changed what detection sees.
+                            if self.page == Page::Issues && !self.deterministic_visual {
+                                self.request_issue_detection(context);
+                            }
+                        }
+                    }
+                    ActionWorkerEvent::Failed { message, .. } => {
+                        self.action_pending = None;
+                        self.action_wait = None;
+                        self.status = message;
+                    }
+                    ActionWorkerEvent::NeedsConfirmation { remediation_id, .. } => {
+                        self.action_pending = None;
+                        self.action_wait = None;
+                        if let Some(spec) = remediation::find(&remediation_id) {
+                            self.repair_confirm = Some(spec.summary());
+                        }
+                    }
+                }
+            }
+            Message::ActionWorkerStopped => {
+                self.action_wait = None;
+                self.action_pending = None;
+                self.action_receiver = None;
+                self.action_runtime = None;
+                self.status = "Native remediation worker stopped".to_string();
+            }
+            Message::ActionWaitCancelled => {
+                self.action_wait = None;
+            }
+            Message::ActionWaitRejected => {
+                self.action_wait = None;
+                self.action_pending = None;
+                self.status = "The native remediation queue rejected a worker hand-off".to_string();
+            }
+            Message::AskAiAboutIssue(issue_id) => {
+                let Some(issue) = self.issues.iter().find(|issue| issue.id == issue_id) else {
+                    return;
+                };
+                self.chat_input = format!(
+                    "How do I fix \"{}\"? ({} — {})",
+                    issue.title, issue.category, issue.description
+                );
+                self.ai_mode = AiMode::Assistant;
+                self.status = "Ask added to the chat input · press Send".to_string();
+            }
+            Message::ProposeFixPlan => {
+                // The model may only reference the vetted catalog's labels;
+                // its output never reaches execution — the user still runs
+                // each action through the tier-gated buttons above.
+                let detected: Vec<String> = self
+                    .issues
+                    .iter()
+                    .filter(|issue| issue.detected)
+                    .map(|issue| format!("- {} ({})", issue.title, issue.category))
+                    .collect();
+                let catalog: Vec<String> = self
+                    .issue_maintenance
+                    .iter()
+                    .map(|entry| format!("- {} ({:?})", entry.label, entry.tier))
+                    .collect();
+                self.chat_input = format!(
+                    "Propose an ordered fix plan for these detected issues: {}. Only suggest these vetted actions: {}",
+                    detected.join("; "),
+                    catalog.join(" "),
+                );
+                self.ai_mode = AiMode::Assistant;
+                self.status = "Fix-plan prompt added to the chat input · press Send".to_string();
+            }
+            Message::RestartAsAdmin => {
+                if self.deterministic_visual {
+                    self.status = "Visual fixture mode · elevation is disabled".to_string();
+                    return;
+                }
+                if self.admin_relaunch_task.is_none() {
+                    self.admin_relaunch_task = Some(spawn_relaunch_as_admin(context));
+                }
+            }
+            Message::RestartAsAdminFinished(result) => {
+                self.admin_relaunch_task = None;
+                match result {
+                    Ok(true) => self.status = "Relaunching with administrator rights…".to_string(),
+                    // Dismissed UAC prompt — keep running, no error.
+                    Ok(false) => self.status = "Administrator relaunch was cancelled".to_string(),
+                    Err(message) => self.status = message,
+                }
+            }
             Message::ExportRuntimeCompleted(completed) => {
                 self.export_wait = None;
                 let Some(pending) = self.export_pending.take() else {
@@ -5221,6 +5474,10 @@ impl Component for WfdiagSpike {
                 self.issue_source_session_id.is_some(),
                 issue_projection_current,
                 context.message(Message::RequestQuickScan),
+                context.callback(Message::RunRemediation),
+                context.callback(Message::AskAiAboutIssue),
+                context.message(Message::ProposeFixPlan),
+                context.message(Message::RestartAsAdmin),
             ),
             Page::History => history_page(
                 palette,
@@ -5719,6 +5976,49 @@ impl Component for WfdiagSpike {
             context.message(Message::AboutClosed { epoch: about_epoch }),
         );
 
+        let repair_dialog = if let Some(summary) = self.repair_confirm.as_ref() {
+            // Repair preview comes only from catalog constants; no argv is
+            // ever constructed from model or user input.
+            let steps = remediation::find(&summary.id)
+                .map(|spec| spec.preview_steps())
+                .unwrap_or_default();
+            let mut preview = String::from(
+                "This repair alters system state and may require elevation. It will run:\n",
+            );
+            for step in &steps {
+                preview.push_str("\n· ");
+                preview.push_str(step);
+            }
+            if summary.requires_restart {
+                preview.push_str("\n\nA restart is required afterwards.");
+            }
+            let remediation_id = summary.id.clone();
+            let on_closed = context.callback(move |result| Message::RepairDialogClosed {
+                remediation_id: remediation_id.clone(),
+                result,
+            });
+            ContentDialog::new()
+                .title("Run this repair?")
+                .is_open(true)
+                .primary_button_text("Run repair")
+                .secondary_button_text("Cancel")
+                .on_closed(on_closed)
+                .content(
+                    Border::new()
+                        .width(412.0)
+                        .background(palette.card_strong)
+                        .padding(Thickness::new(18.0, 14.0, 18.0, 14.0))
+                        .content(
+                            TextBlock::new()
+                                .text(preview)
+                                .font_size(12.5)
+                                .text_wrapping(TextWrapping::Wrap),
+                        ),
+                )
+        } else {
+            View::empty()
+        };
+
         Grid::new()
             .rows([GridLength::Pixel(42.0), GridLength::Star(1.0)])
             .key_accelerators(KeyAccelerators::new([KeyAccelerator::new(
@@ -5738,6 +6038,7 @@ impl Component for WfdiagSpike {
                 settings,
                 about_scrim,
                 about,
+                repair_dialog,
             ))
     }
 }
@@ -9987,6 +10288,10 @@ fn issues_page(
     has_committed_evidence: bool,
     projection_current: bool,
     quick_scan: Callback<()>,
+    run_remediation: Callback<String>,
+    ask_ai: Callback<String>,
+    propose_fix_plan: Callback<()>,
+    restart_admin: Callback<()>,
 ) -> View {
     if !has_committed_evidence || issues.is_empty() {
         return issues_empty_page(
@@ -9997,6 +10302,7 @@ fn issues_page(
             detection_pending,
             detection_error,
             quick_scan,
+            run_remediation,
         );
     }
 
@@ -10059,7 +10365,7 @@ fn issues_page(
     if !projection.detected.is_empty() {
         children.push(KeyedView::new(
             "ai-assistance",
-            issue_ai_assistance(palette),
+            issue_ai_assistance(palette, propose_fix_plan),
         ));
     }
 
@@ -10076,8 +10382,10 @@ fn issues_page(
                 "Crash dumps (BSOD), SMART & disk health, system-file (DISM) and battery checks only run when the app is elevated, so they were skipped. Restart as administrator to include them.",
                 None,
                 None,
-                Some(("Restart as administrator", FaIcon::UserShield)),
-                None,
+                Some(("Restart as administrator", FaIcon::UserShield, move || {
+                    let _ = restart_admin.call(());
+                })),
+                None::<(&str, fn())>,
                 112.0,
                 198.0,
             ),
@@ -10087,10 +10395,22 @@ fn issues_page(
     for issue in &projection.detected {
         let (tint, accent, icon_data, severity_label) =
             issue_severity_visual(palette, theme, issue.severity);
-        let primary_action = issue
-            .remediation
-            .as_ref()
-            .map(|remediation| (remediation.label.as_str(), remediation_icon(remediation)));
+        let primary_action = issue.remediation.as_ref().map(|remediation| {
+            (remediation.label.as_str(), remediation_icon(remediation), {
+                let run = run_remediation.clone();
+                let remediation_id = remediation.id.clone();
+                move || {
+                    let _ = run.call(remediation_id.clone());
+                }
+            })
+        });
+        let ask_ai_callback = {
+            let ask_ai = ask_ai.clone();
+            let issue_id = issue.id.clone();
+            move || {
+                let _ = ask_ai.call(issue_id.clone());
+            }
+        };
         children.push(KeyedView::new(
             format!("issue:{}", issue.id),
             issue_card(
@@ -10104,7 +10424,7 @@ fn issues_page(
                 (!issue.recommendation.is_empty()).then_some(issue.recommendation.as_str()),
                 Some((issue.category.as_str(), severity_label)),
                 primary_action,
-                Some("Ask AI"),
+                Some(("Ask AI", ask_ai_callback)),
                 153.0,
                 190.0,
             ),
@@ -10148,6 +10468,7 @@ fn issues_empty_page(
     detection_pending: bool,
     detection_error: Option<&str>,
     quick_scan: Callback<()>,
+    run_remediation: Callback<String>,
 ) -> View {
     let (title, description) = if detection_pending {
         (
@@ -10223,11 +10544,11 @@ fn issues_empty_page(
     StackPanel::new().spacing(0.0).children((
         page_header(palette, Page::Issues, View::empty()),
         hero,
-        maintenance_card(palette, maintenance),
+        maintenance_card(palette, maintenance, run_remediation),
     ))
 }
 
-fn issue_ai_assistance(palette: Palette) -> View {
+fn issue_ai_assistance(palette: Palette, propose_fix_plan: Callback<()>) -> View {
     Border::new()
         .height(61.0)
         .padding(Thickness::xy(18.0, 0.0))
@@ -10263,7 +10584,21 @@ fn issue_ai_assistance(palette: Palette) -> View {
                         .vertical_alignment(VerticalAlignment::Center)
                         .children((
                             issue_ghost_button(palette, FaIcon::RankingStar, "Prioritize"),
-                            issue_ghost_button(palette, FaIcon::ListCheck, "Propose fix plan"),
+                            Button::new()
+                                .height(32.0)
+                                .on_click(propose_fix_plan)
+                                .resource_overrides(
+                                    ResourceOverrides::new()
+                                        .set("ButtonBackground", Color::transparent())
+                                        .set("ButtonBackgroundPointerOver", palette.active)
+                                        .set("ButtonBackgroundPressed", palette.active)
+                                        .set("ButtonBackgroundDisabled", Color::transparent())
+                                        .set("ButtonForeground", palette.text)
+                                        .set("ButtonForegroundDisabled", palette.text)
+                                        .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
+                                        .set("ButtonPadding", Thickness::xy(10.0, 0.0)),
+                                )
+                                .content(fa_icon_label(FaIcon::ListCheck, "Propose fix plan")),
                         )),
                 )),
         )
@@ -10294,13 +10629,21 @@ fn issue_detection_notice(palette: Palette, text: &str, is_error: bool) -> View 
         )
 }
 
-fn maintenance_card(palette: Palette, maintenance: &[RemediationSummary]) -> View {
+fn maintenance_card(
+    palette: Palette,
+    maintenance: &[RemediationSummary],
+    run_remediation: Callback<String>,
+) -> View {
     let rows = maintenance
         .iter()
         .map(|remediation| {
+            let run = run_remediation.clone();
+            let remediation_id = remediation.id.clone();
             KeyedView::new(
                 remediation.id.clone(),
-                maintenance_row(palette, remediation),
+                maintenance_row(palette, remediation, move || {
+                    let _ = run.call(remediation_id.clone());
+                }),
             )
         })
         .collect::<Vec<_>>();
@@ -10341,7 +10684,7 @@ fn maintenance_card(palette: Palette, maintenance: &[RemediationSummary]) -> Vie
         )
 }
 
-fn maintenance_row(palette: Palette, remediation: &RemediationSummary) -> View {
+fn maintenance_row(palette: Palette, remediation: &RemediationSummary, run: impl Fn() + 'static) -> View {
     let mut title = remediation.label.clone();
     if remediation.tier == RemediationTier::Repair {
         title.push_str(" repair");
@@ -10377,7 +10720,7 @@ fn maintenance_row(palette: Palette, remediation: &RemediationSummary) -> View {
                         .grid_column(1)
                         .width(58.0)
                         .height(31.0)
-                        .is_enabled(false)
+                        .on_click(run)
                         .resource_overrides(
                             ResourceOverrides::new().set("ButtonForegroundDisabled", palette.text),
                         )
@@ -10429,8 +10772,8 @@ fn issue_card(
     description: &str,
     recommendation: Option<&str>,
     chips: Option<(&str, &str)>,
-    primary_action: Option<(&str, FaIcon)>,
-    secondary_action: Option<&str>,
+    primary_action: Option<(&str, FaIcon, impl Fn() + 'static)>,
+    secondary_action: Option<(&str, impl Fn() + 'static)>,
     min_height: f64,
     action_width: f64,
 ) -> View {
@@ -10469,11 +10812,11 @@ fn issue_card(
         View::empty()
     };
 
-    let secondary_action: View = if let Some(label) = secondary_action {
+    let secondary_action: View = if let Some((label, on_click)) = secondary_action {
         Button::new()
             .width(action_width)
             .style(ButtonStyle::Subtle)
-            .is_enabled(false)
+            .on_click(on_click)
             .resource_overrides(
                 ResourceOverrides::new().set("ButtonForegroundDisabled", palette.text),
             )
@@ -10481,11 +10824,11 @@ fn issue_card(
     } else {
         View::empty()
     };
-    let primary_action: View = if let Some((label, icon)) = primary_action {
+    let primary_action: View = if let Some((label, icon, on_click)) = primary_action {
         Button::new()
             .width(action_width)
             .height(32.0)
-            .is_enabled(false)
+            .on_click(on_click)
             .resource_overrides(issue_primary_button_resources())
             .content(fa_icon_label(icon, label))
     } else {

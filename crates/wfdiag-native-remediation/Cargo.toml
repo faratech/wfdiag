@@ -19,8 +19,11 @@ wfdiag-remediation-catalog = { path = "../wfdiag-remediation-catalog" }
 encoding_rs = "0.8"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]

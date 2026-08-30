@@ -19,6 +19,7 @@ tokio = { version = "1.52.0", features = ["rt-multi-thread"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 wfdiag-native-ai-chat = { path = "../crates/wfdiag-native-ai-chat" }
 wfdiag-native-ai-report = { path = "../crates/wfdiag-native-ai-report" }
+wfdiag-native-remediation = { path = "../crates/wfdiag-native-remediation" }
 wfdiag-native-ai-provider = { path = "../crates/wfdiag-native-ai-provider" }
 wfdiag-native-diagnostics = { path = "../crates/wfdiag-native-diagnostics" }
 wfdiag-native-export = { path = "../crates/wfdiag-native-export" }
