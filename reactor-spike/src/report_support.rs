@@ -213,7 +213,8 @@ impl WorkerState {
 
 /// Cloneable handle the component holds on the UI thread.
 pub struct NativeReportRuntime {
-    commands: std_mpsc::Sender<ReportCommand>,
+    /// Option so Drop can release the sender BEFORE joining the worker.
+    commands: Option<std_mpsc::Sender<ReportCommand>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -232,12 +233,6 @@ impl NativeReportRuntime {
         let worker = std::thread::Builder::new()
             .name("wfdiag-reactor-report".to_string())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build();
-                let Ok(runtime) = runtime else {
-                    return;
-                };
                 let mut state = WorkerState {
                     source: ShellChatSource::new(settings, foundry, ollama),
                     events,
@@ -245,6 +240,18 @@ impl NativeReportRuntime {
                     in_flight: None,
                 };
                 while let Ok(command) = command_rx.recv() {
+                    // A runtime is created per command and kept alive only
+                    // while a generation is in flight: generate() spawns the
+                    // streaming task onto it, so dropping early would abort
+                    // a live report — but an idle runtime must not outlast
+                    // the command (see close-handling note in the chat
+                    // worker).
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build();
+                    let Ok(runtime) = runtime else {
+                        continue;
+                    };
                     match command {
                         ReportCommand::Generate {
                             request_id,
@@ -271,7 +278,7 @@ impl NativeReportRuntime {
             })?;
         Ok((
             Self {
-                commands,
+                commands: Some(commands),
                 worker: Some(worker),
             },
             event_rx,
@@ -285,24 +292,27 @@ impl NativeReportRuntime {
         provider: AIProvider,
         force_refresh: bool,
     ) {
-        let _ = self.commands.send(ReportCommand::Generate {
-            request_id,
-            scan,
-            provider,
-            force_refresh,
-        });
+        if let Some(commands) = self.commands.as_ref() {
+            let _ = commands.send(ReportCommand::Generate {
+                request_id,
+                scan,
+                provider,
+                force_refresh,
+            });
+        }
     }
 
     #[must_use]
     pub fn cancel(&self, request_id: u64) -> bool {
         self.commands
-            .send(ReportCommand::Cancel { request_id })
-            .is_ok()
+            .as_ref()
+            .is_some_and(|commands| commands.send(ReportCommand::Cancel { request_id }).is_ok())
     }
 }
 
 impl Drop for NativeReportRuntime {
     fn drop(&mut self) {
+        self.commands = None;
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

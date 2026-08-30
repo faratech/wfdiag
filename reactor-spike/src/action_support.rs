@@ -55,7 +55,8 @@ impl ActionWorkerEvent {
 
 /// Cloneable handle the component holds on the UI thread.
 pub struct NativeActionRuntime {
-    commands: std_mpsc::Sender<ActionCommand>,
+    /// Option so Drop can release the sender BEFORE joining the worker.
+    commands: Option<std_mpsc::Sender<ActionCommand>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -70,13 +71,13 @@ impl NativeActionRuntime {
         let worker = std::thread::Builder::new()
             .name("wfdiag-reactor-actions".to_string())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build();
-                let Ok(runtime) = runtime else {
-                    return;
-                };
                 while let Ok(command) = command_rx.recv() {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build();
+                    let Ok(runtime) = runtime else {
+                        continue;
+                    };
                     let ActionCommand::Execute {
                         request_id,
                         remediation_id,
@@ -116,7 +117,7 @@ impl NativeActionRuntime {
             })?;
         Ok((
             Self {
-                commands,
+                commands: Some(commands),
                 worker: Some(worker),
             },
             event_rx,
@@ -124,16 +125,19 @@ impl NativeActionRuntime {
     }
 
     pub fn execute(&self, request_id: u64, remediation_id: String, confirmed: bool) {
-        let _ = self.commands.send(ActionCommand::Execute {
-            request_id,
-            remediation_id,
-            confirmed,
-        });
+        if let Some(commands) = self.commands.as_ref() {
+            let _ = commands.send(ActionCommand::Execute {
+                request_id,
+                remediation_id,
+                confirmed,
+            });
+        }
     }
 }
 
 impl Drop for NativeActionRuntime {
     fn drop(&mut self) {
+        self.commands = None;
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

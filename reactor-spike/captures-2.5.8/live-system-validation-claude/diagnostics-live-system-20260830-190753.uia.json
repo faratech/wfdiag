@@ -1,0 +1,31 @@
+﻿{
+    "executable":  "C:\\Temp\\claude\\wfdiag\\reactor-spike\\target\\aarch64-pc-windows-msvc\\debug\\wfdiag-reactor-spike.exe",
+    "executableSha256":  "10CB1E2BA221BD9F4DEE5B63D2F83A469B324A7E3FEC64C8CC8E52CFA762CF68",
+    "applicationVersion":  "2.5.8",
+    "pid":  18088,
+    "computerName":  "ANDROMEDA",
+    "osVersion":  "Windows 11 Professional (25H2)",
+    "privilege":  "Standard user",
+    "architecture":  {
+                         "processMachine":  "0x0000",
+                         "processArchitecture":  "ARM64",
+                         "nativeMachine":  "0xAA64",
+                         "nativeArchitecture":  "ARM64",
+                         "isEmulated":  false,
+                         "status":  "Native ARM64 execution"
+                     },
+    "machineCardAutomationName":  "Computer ANDROMEDA, Windows 11 Professional (25H2), Standard user, Native ARM64 execution",
+    "footerAutomationName":  "Standard user    wfdiag 2.5.8 · WindowsForum.com",
+    "logicalViewport":  {
+                            "width":  1440,
+                            "height":  1000
+                        },
+    "dpi":  144,
+    "physicalViewport":  {
+                             "width":  2160,
+                             "height":  1500
+                         },
+    "fixtureEnvironmentCleared":  true,
+    "localXamlPath":  "C:\\Temp\\claude\\wfdiag\\reactor-spike\\target\\aarch64-pc-windows-msvc\\debug\\Microsoft.ui.xaml.dll",
+    "webViewModuleLoaded":  false
+}

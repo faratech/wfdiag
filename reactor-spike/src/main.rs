@@ -57,7 +57,7 @@ use wfdiag_native_issues::{
     Issue, IssueDetectionCompleted, IssueRuntime, IssueSeverity, RemediationSummary,
     RemediationTier, Timestamp as IssueTimestamp,
 };
-use wfdiag_native_monitor::{
+use wfdiag_native_monitor::{NetworkConnection, 
     NativeMonitorRuntime, ProcessPage, ProcessQuery, ProcessRow, ProcessSortDirection,
     ProcessSortKey,
 };
@@ -875,6 +875,8 @@ enum Message {
     StoreProviderKey(usize),
     ClearProviderKey(usize),
     ToggleQuickScanTask(String),
+    RequestNetworkConnections,
+    NetworkConnectionsFinished(Box<Result<Vec<NetworkConnection>, String>>),
     ToggleClearHistoryConfirm(bool),
     ClearHistoryConfirmed,
     HistoryTagDraftChanged(String),
@@ -1285,6 +1287,8 @@ struct WfdiagSpike {
     history_tag_draft: String,
     history_ack_busy: bool,
     history_wait: Option<ComponentTask>,
+    network_connections: Option<Vec<NetworkConnection>>,
+    network_loading: bool,
     ai_mode: AiMode,
     ai_provider_runtime: Option<NativeAiProviderRuntime>,
     ai_provider_status: Option<AIProviderStatus>,
@@ -2545,6 +2549,11 @@ impl WfdiagSpike {
     /// bool guard makes it a cheap no-op afterwards.
     fn ensure_window_hook(&mut self) {
         if self.window_hook_installed || self.deterministic_visual {
+            return;
+        }
+        // Investigation switch: WFDIAG_NO_TRAY skips the tray subclass.
+        if std::env::var_os("WFDIAG_NO_TRAY").is_some() {
+            self.window_hook_installed = true;
             return;
         }
         let Some(window) = instance_support::main_window_hwnd() else {
@@ -4196,7 +4205,14 @@ impl Component for WfdiagSpike {
                 Err(error) => (None, None, None, 0, None, false, Some(error.to_string())),
             }
         };
-        let (chat_runtime, chat_receiver, chat_wait) = if deterministic_visual {
+        // Investigation switch for the graceful-close defect (see runbook):
+        // WFDIAG_NO_WORKERS=chat|report|action|instance|only-chat|... skips
+        // individual workers/tasks; only-chat/only-report/only-action skip
+        // that worker while keeping the others; none keeps the watch only.
+        let skip_workers = std::env::var_os("WFDIAG_NO_WORKERS");
+        let skip_workers = skip_workers.as_deref().unwrap_or_default();
+        let skip_chat = skip_workers.is_empty() || skip_workers == "chat";
+        let (chat_runtime, chat_receiver, chat_wait) = if deterministic_visual || skip_chat || skip_workers == "only-report" || skip_workers == "only-action" || skip_workers == "only-instance" || skip_workers == "none" {
             (None, None, None)
         } else if let Some(settings) = settings_service.as_ref() {
             match NativeChatRuntime::start(
@@ -4206,8 +4222,12 @@ impl Component for WfdiagSpike {
             ) {
                 Ok((runtime, receiver)) => {
                     let receiver = Arc::new(Mutex::new(receiver));
-                    let wait = spawn_chat_wait(context, Arc::clone(&receiver));
-                    (Some(runtime), Some(receiver), Some(wait))
+                    let wait = if skip_workers.is_empty() {
+                        Some(spawn_chat_wait(context, Arc::clone(&receiver)))
+                    } else {
+                        None
+                    };
+                    (Some(runtime), Some(receiver), wait)
                 }
                 Err(error) => {
                     status = format!("Native AI chat unavailable · {error}");
@@ -4217,7 +4237,7 @@ impl Component for WfdiagSpike {
         } else {
             (None, None, None)
         };
-        let (report_runtime, report_receiver, report_wait) = if deterministic_visual {
+        let (report_runtime, report_receiver, report_wait) = if deterministic_visual || skip_workers == "report" || skip_workers == "only-action" || skip_workers == "only-chat" || skip_workers == "only-instance" || skip_workers == "none" {
             (None, None, None)
         } else if let Some(settings) = settings_service.as_ref() {
             match NativeReportRuntime::start(
@@ -4227,8 +4247,12 @@ impl Component for WfdiagSpike {
             ) {
                 Ok((runtime, receiver)) => {
                     let receiver = Arc::new(Mutex::new(receiver));
-                    let wait = spawn_report_wait(context, Arc::clone(&receiver));
-                    (Some(runtime), Some(receiver), Some(wait))
+                    let wait = if skip_workers.is_empty() {
+                        Some(spawn_report_wait(context, Arc::clone(&receiver)))
+                    } else {
+                        None
+                    };
+                    (Some(runtime), Some(receiver), wait)
                 }
                 Err(error) => {
                     status = format!("Native AI report unavailable · {error}");
@@ -4238,15 +4262,19 @@ impl Component for WfdiagSpike {
         } else {
             (None, None, None)
         };
-        let (action_runtime, action_receiver, action_wait) = if deterministic_visual {
+        let (action_runtime, action_receiver, action_wait) = if deterministic_visual || skip_workers == "action" || skip_workers == "only-report" || skip_workers == "only-chat" || skip_workers == "only-instance" || skip_workers == "none" {
             // Fixture mode never executes anything; the worker is not built.
             (None, None, None)
         } else {
             match NativeActionRuntime::start() {
                 Ok((runtime, receiver)) => {
                     let receiver = Arc::new(Mutex::new(receiver));
-                    let wait = spawn_action_wait(context, Arc::clone(&receiver));
-                    (Some(runtime), Some(receiver), Some(wait))
+                    let wait = if skip_workers.is_empty() {
+                        Some(spawn_action_wait(context, Arc::clone(&receiver)))
+                    } else {
+                        None
+                    };
+                    (Some(runtime), Some(receiver), wait)
                 }
                 Err(error) => {
                     status = format!("Native remediation unavailable · {error}");
@@ -4254,7 +4282,7 @@ impl Component for WfdiagSpike {
                 }
             }
         };
-        let instance_wait = if deterministic_visual {
+        let instance_wait = if deterministic_visual || skip_workers == "instance" {
             None
         } else {
             Some(spawn_instance_watch(context))
@@ -4403,6 +4431,8 @@ impl Component for WfdiagSpike {
             history_tag_draft: String::new(),
             history_ack_busy: false,
             history_wait: None,
+            network_connections: None,
+            network_loading: false,
             ai_mode: AiMode::Assistant,
             ai_provider_runtime,
             ai_provider_status: None,
@@ -4535,6 +4565,38 @@ impl Component for WfdiagSpike {
             }
             Message::StoreProviderKey(index) => {
                 self.submit_provider_key(index, true);
+            }
+            Message::RequestNetworkConnections => {
+                if self.deterministic_visual || self.network_loading {
+                    return;
+                }
+                self.network_loading = true;
+                context.spawn_background_with_rejection(
+                    move |_cancellation| {
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build();
+                        let result = match runtime {
+                            Ok(runtime) => {
+                                let connections =
+                                    runtime.block_on(wfdiag_native_monitor::get_network_connections());
+                                Ok(connections)
+                            }
+                            Err(error) => Err(error.to_string()),
+                        };
+                        Message::NetworkConnectionsFinished(Box::new(result))
+                    },
+                    Message::NetworkConnectionsFinished(Box::new(Err(
+                        "The Reactor background queue rejected the connections query".to_string(),
+                    ))),
+                );
+            }
+            Message::NetworkConnectionsFinished(result) => {
+                self.network_loading = false;
+                match *result {
+                    Ok(connections) => self.network_connections = Some(connections),
+                    Err(message) => self.status = message,
+                }
             }
             Message::ToggleQuickScanTask(task_id) => {
                 let tasks = self
@@ -5845,6 +5907,9 @@ impl Component for WfdiagSpike {
                 &self.monitor_history,
                 context.message(Message::ToggleMonitoring),
                 context.message(Message::Refresh),
+                self.network_connections.as_deref(),
+                self.network_loading,
+                context.message(Message::RequestNetworkConnections),
             ),
             Page::Processes => processes_page(
                 palette,
@@ -8584,6 +8649,7 @@ fn monitor_status_pill(palette: Palette, paused: bool) -> View {
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn monitor_page(
     palette: Palette,
     narrow: bool,
@@ -8592,6 +8658,9 @@ fn monitor_page(
     history: &MonitorHistory,
     toggle: Callback<()>,
     refresh: Callback<()>,
+    connections: Option<&[NetworkConnection]>,
+    connections_loading: bool,
+    load_connections: Callback<()>,
 ) -> View {
     let actions = StackPanel::new()
         .orientation(Orientation::Horizontal)
@@ -8829,6 +8898,76 @@ fn monitor_page(
                 )
             }))
     };
+    let connections_card: View = {
+        let header = Grid::new()
+            .columns([GridLength::Auto, GridLength::Star(1.0)])
+            .children((
+                TextBlock::new()
+                    .text("NETWORK CONNECTIONS")
+                    .font_size(11.0)
+                    .font_weight(FontWeight::BOLD)
+                    .foreground(palette.muted),
+                Button::new()
+                    .grid_column(1)
+                    .width(86.0)
+                    .height(30.0)
+                    .horizontal_alignment(HorizontalAlignment::Right)
+                    .is_enabled(!connections_loading)
+                    .on_click(load_connections)
+                    .content(if connections_loading {
+                        fa_icon_label(FaIcon::Refresh, "…")
+                    } else {
+                        fa_icon_label(FaIcon::Refresh, "Load")
+                    }),
+            ));
+        let rows: View = match connections {
+            None => View::from(
+                TextBlock::new()
+                    .text("Press Load to capture the current TCP connection table.")
+                    .font_size(12.0)
+                    .foreground(palette.muted),
+            ),
+            Some([]) => View::from(
+                TextBlock::new().text("No TCP connections found.").font_size(12.0),
+            ),
+            Some(list) => {
+                let items: Vec<KeyedView> = list
+                    .iter()
+                    .take(10)
+                    .enumerate()
+                    .map(|(index, connection)| {
+                        KeyedView::new(
+                            index,
+                            Grid::new()
+                                .columns([
+                                    GridLength::Pixel(52.0),
+                                    GridLength::Star(2.0),
+                                    GridLength::Star(2.0),
+                                    GridLength::Pixel(96.0),
+                                ])
+                                .children((
+                                    TextBlock::new().text(connection.protocol.clone()).font_size(11.5),
+                                    TextBlock::new().text(connection.local_addr.clone()).font_size(11.5),
+                                    TextBlock::new().text(connection.remote_addr.clone()).font_size(11.5),
+                                    TextBlock::new()
+                                        .text(connection.status.clone())
+                                        .font_size(11.5)
+                                        .foreground(palette.muted),
+                                )),
+                        )
+                    })
+                    .collect();
+                StackPanel::new().spacing(2.0).keyed_children(items)
+            }
+        };
+        Border::new()
+            .background(palette.card)
+            .border_brush(palette.border)
+            .border_thickness(1.0)
+            .corner_radius(9.0)
+            .padding(Thickness::new(14.0, 12.0, 14.0, 12.0))
+            .content(StackPanel::new().spacing(8.0).children((header, rows)))
+    };
     StackPanel::new().spacing(16.0).children((
         page_header(palette, Page::Monitor, View::empty()),
         Border::new()
@@ -8854,6 +8993,9 @@ fn monitor_page(
         Border::new()
             .margin(Thickness::new(0.0, 1.0, 0.0, 0.0))
             .content(metrics),
+        Border::new()
+            .margin(Thickness::new(0.0, 1.0, 0.0, 0.0))
+            .content(connections_card),
     ))
 }
 

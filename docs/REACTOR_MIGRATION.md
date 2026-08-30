@@ -236,6 +236,19 @@ wiring frontier moved substantially in one reviewed series:
   customization; History gained tags editing and a destructive clear behind
   an explicit confirmation.
 
+**Live validation (2026-08-30, ARM64 self-contained, debug).** A native
+host build of the full current candidate passed
+`scripts/test-reactor-live-system.ps1` end to end with every new
+subsystem constructed (chat, report, action, instance, tray hook):
+native ARM64 execution, Store-matching machine card and footer UIA,
+logical/physical/UIA evidence under
+`reactor-spike/captures-2.5.8/live-system-validation-claude/`, zero
+Application Error/WER events, and a clean graceful close. The run
+initially exposed a graceful-close hang — root-caused to the worker
+runtimes joining their OS threads while the command sender was still
+alive (recv never disconnected); fixed by releasing the sender before
+the join in all three workers.
+
 `wfdiag-native-system` now owns the canonical machine, Windows-version,
 elevation, process/native architecture, emulation, page-size, and processor
 count projections behind a nonblocking worker. `wfdiag-native-update` owns the

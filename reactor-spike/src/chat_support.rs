@@ -248,7 +248,10 @@ impl WorkerState {
 
 /// Cloneable handle the component holds on the UI thread.
 pub struct NativeChatRuntime {
-    commands: std_mpsc::Sender<ChatCommand>,
+    /// Option so Drop can release the sender BEFORE joining the worker;
+    /// joining while the sender is alive would deadlock (recv never
+    /// disconnects on the shutting-down UI thread).
+    commands: Option<std_mpsc::Sender<ChatCommand>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -298,7 +301,7 @@ impl NativeChatRuntime {
             })?;
         Ok((
             Self {
-                commands,
+                commands: Some(commands),
                 worker: Some(worker),
             },
             event_rx,
@@ -306,11 +309,13 @@ impl NativeChatRuntime {
     }
 
     pub fn send(&self, request_id: u64, prompt: String, provider: AIProvider) {
-        let _ = self.commands.send(ChatCommand::Send {
-            request_id,
-            prompt,
-            provider,
-        });
+        if let Some(commands) = self.commands.as_ref() {
+            let _ = commands.send(ChatCommand::Send {
+                request_id,
+                prompt,
+                provider,
+            });
+        }
     }
 
 }

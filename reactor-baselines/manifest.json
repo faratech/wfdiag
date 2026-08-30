@@ -436,12 +436,14 @@
       "evidence": [
         "crates/wfdiag-native-system/src/lib.rs",
         "crates/wfdiag-native-system/src/runtime.rs",
-        "src-tauri/src/architecture.rs",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "reactor-spike/captures-2.5.8/live-system-validation/diagnostics-empty-desktop-dark-live-system-store-left-reactor-right.png",
+        "reactor-spike/captures-2.5.8/live-system-validation/diagnostics-live-system-20260830-114311.png",
+        "reactor-spike/captures-2.5.8/live-system-validation/diagnostics-live-system-20260830-114311.uia.json",
         "reactor-spike/src/main.rs",
         "scripts/test-reactor-live-system.ps1",
-        "reactor-spike/captures-2.5.8/live-system-validation/diagnostics-live-system-20260830-114311.uia.json",
-        "reactor-spike/captures-2.5.8/live-system-validation/diagnostics-live-system-20260830-114311.png",
-        "reactor-spike/captures-2.5.8/live-system-validation/diagnostics-empty-desktop-dark-live-system-store-left-reactor-right.png"
+        "src-tauri/src/architecture.rs"
       ]
     },
     {
@@ -450,6 +452,8 @@
       "summary": "Quick and Full scans execute through the UI-neutral native runtime with progress, results, cancellation, and stale-session protection; selection, persistence, export, and every production error path remain unfinished.",
       "evidence": [
         "crates/wfdiag-native-diagnostics/src/runtime.rs",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
         "reactor-spike/src/main.rs"
       ]
     },
@@ -458,22 +462,26 @@
       "status": "partial",
       "summary": "The canonical issue catalog and deterministic detectors now run through a UI-neutral nonblocking worker shared with Tauri; Reactor still needs to submit completed native scans and render the returned issues.",
       "evidence": [
-        "crates/wfdiag-native-issues/src/lib.rs",
         "crates/wfdiag-native-issues/README.md",
-        "src-tauri/src/issue_catalog.rs",
-        "reactor-spike/src/main.rs"
+        "crates/wfdiag-native-issues/src/lib.rs",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "reactor-spike/src/main.rs",
+        "src-tauri/src/issue_catalog.rs"
       ]
     },
     {
       "id": "remediation_and_action_broker",
       "status": "partial",
-      "summary": "Tiered remediation execution is live through the shared engine: maintenance and per-issue Run buttons execute authorized catalog entries off the WinUI thread; Repair requires the explicit confirmation dialog (preview from catalog constants only) and the engine tier gate re-checks; success re-runs issue detection. Open: the broker proposal state machine and AI fix-plan validation on this surface.",
+      "summary": "Tiered remediation execution, Repair confirmation dialog, and elevation relaunch are implemented through the shared engine; live candidate constructed the action worker without crashes. Interactive Run/confirm capture still open.",
       "evidence": [
         "crates/wfdiag-native-remediation/src/lib.rs",
         "crates/wfdiag-native-remediation/src/remediation.rs",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
         "reactor-spike/src/action_support.rs",
-        "src-tauri/src/remediation.rs",
-        "src-tauri/src/action_broker.rs"
+        "src-tauri/src/action_broker.rs",
+        "src-tauri/src/remediation.rs"
       ]
     },
     {
@@ -482,6 +490,8 @@
       "summary": "Live system samples flow directly into Reactor through a bounded native event bus; the complete lease, visibility, error, and network-connection behavior still needs parity validation.",
       "evidence": [
         "crates/wfdiag-native-monitor/src/runtime.rs",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
         "reactor-spike/src/main.rs"
       ]
     },
@@ -490,13 +500,15 @@
       "status": "partial",
       "summary": "The live Reactor screen queries the native monitor worker off the UI thread and renders real filtered, sortable, selectable, paged and virtualized process rows with stale-request protection. ARM64 expanded-desktop load, pause/resume, refresh, filter, sort, details, scroll, page 2, full-width row alignment, native-XAML module, zero-WebView, and zero-WER validation pass; compact/collapsed, x64 runtime, accessibility, and long-run soak coverage remain open.",
       "evidence": [
-        "crates/wfdiag-native-monitor/src/runtime.rs",
         "crates/wfdiag-native-monitor/examples/process_query.rs",
-        "reactor-spike/src/main.rs",
-        "reactor-spike/captures-2.5.8/live-process-validation/processes-populated-store-left-reactor-right.png",
+        "crates/wfdiag-native-monitor/src/runtime.rs",
         "reactor-spike/captures-2.5.8/live-process-validation/live-initial.png",
+        "reactor-spike/captures-2.5.8/live-process-validation/live-page2-top.png",
         "reactor-spike/captures-2.5.8/live-process-validation/live-selected-details.png",
-        "reactor-spike/captures-2.5.8/live-process-validation/live-page2-top.png"
+        "reactor-spike/captures-2.5.8/live-process-validation/processes-populated-store-left-reactor-right.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "reactor-spike/src/main.rs"
       ]
     },
     {
@@ -504,10 +516,12 @@
       "status": "partial",
       "summary": "Reactor now owns the UI-neutral history worker, reads the existing Store-compatible DPAPI v2 scan store off the UI thread, and renders live filtering, selection, refresh, and comparison summaries. Selecting the latest scan invalidates stale comparisons and identifies it as the baseline. Completed scans auto-save from the authoritative diagnostic session snapshot after the Store-matching cancellable 500 ms window, with explicit history-contract conversion and live retention/catalog providers; auto-save-off sends no request, retention-off acknowledges without a persistent scan, failures are nonfatal, and deterministic captures touch no storage. Detail/drill-down, tags and labels, trends, destructive clear confirmation, and the remaining loading/error/accessibility matrix remain unfinished.",
       "evidence": [
-        "crates/wfdiag-native-history/src/runtime.rs",
         "crates/wfdiag-native-history/README.md",
-        "src-tauri/src/results_storage.rs",
-        "reactor-spike/src/main.rs"
+        "crates/wfdiag-native-history/src/runtime.rs",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "reactor-spike/src/main.rs",
+        "src-tauri/src/results_storage.rs"
       ]
     },
     {
@@ -515,10 +529,12 @@
       "status": "partial",
       "summary": "A UI-neutral worker now generates the shipping JSON, text, HTML, WindowsForum, clipboard, and email payloads and is shared with Tauri; Reactor still needs native picker, save, clipboard, and allowlisted link delivery.",
       "evidence": [
-        "crates/wfdiag-native-export/src/lib.rs",
         "crates/wfdiag-native-export/README.md",
-        "src-tauri/src/commands/export.rs",
-        "reactor-spike/src/main.rs"
+        "crates/wfdiag-native-export/src/lib.rs",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "reactor-spike/src/main.rs",
+        "src-tauri/src/commands/export.rs"
       ]
     },
     {
@@ -526,12 +542,14 @@
       "status": "partial",
       "summary": "Reactor now owns the canonical settings worker and the Store-compatible JSON/DPAPI persistence service. The native dialog loads persisted values off the UI thread, edits all visible non-secret 2.5.8 fields, previews theme changes, restores the persisted snapshot on Cancel, commits only a matching successful Save response, and rejects stale worker completions. ARM64 self-contained automation passed cancel/reopen and save/restart persistence without changing the host Store settings file, loading WebView, or producing WER/Application Error evidence. Provider credential entry/clearing, live model discovery, subscription bridge setup, tray/startup/notification side effects, x64 runtime, accessibility, and the complete validation/error matrix remain unfinished.",
       "evidence": [
-        "crates/wfdiag-native-settings/src/lib.rs",
         "crates/wfdiag-native-settings/README.md",
-        "src-tauri/src/commands/settings.rs",
-        "src/components/SettingsDialog.tsx",
+        "crates/wfdiag-native-settings/src/lib.rs",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "reactor-spike/design-qa.md",
         "reactor-spike/src/main.rs",
-        "reactor-spike/design-qa.md"
+        "src-tauri/src/commands/settings.rs",
+        "src/components/SettingsDialog.tsx"
       ]
     },
     {
@@ -539,11 +557,13 @@
       "status": "partial",
       "summary": "A Tauri-free ProviderManagementService now composes the exact provider/preference/status contracts, capability and routing policy, Store-identity validation, shared response cache, shipping Ollama/custom network probes, and typed worker used by Tauri. Reactor can construct the same service from explicit settings, identity, Phi, Foundry, and subscription-CLI interfaces, but the latter three concrete probes still require UI-neutral extraction; Reactor has not instantiated or rendered the live state/error matrix, and fallback consent remains separate work.",
       "evidence": [
-        "crates/wfdiag-native-ai-provider/src/lib.rs",
-        "crates/wfdiag-native-ai-provider/src/composition.rs",
         "crates/wfdiag-native-ai-provider/README.md",
-        "src-tauri/src/ai_service.rs",
-        "src-tauri/src/ai_providers/ollama.rs"
+        "crates/wfdiag-native-ai-provider/src/composition.rs",
+        "crates/wfdiag-native-ai-provider/src/lib.rs",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "src-tauri/src/ai_providers/ollama.rs",
+        "src-tauri/src/ai_service.rs"
       ]
     },
     {
@@ -582,21 +602,25 @@
     {
       "id": "elevation_and_external_links",
       "status": "partial",
-      "summary": "Restart-as-administrator runs the shared runas relaunch (COM apartment handling; UAC dismissal is a deliberate no-op). Allowlisted external links run through the shared ShellExecute launchers (About download/forum/repository, WindowsForum share).",
+      "summary": "restart-as-administrator (runas relaunch) and allowlisted external links implemented through shared launchers; live candidate exercised process startup and graceful close without elevation prompts. Interactive UAC capture still open.",
       "evidence": [
         "crates/wfdiag-native-remediation/src/elevation.rs",
-        "reactor-spike/src/update_support.rs",
-        "reactor-spike/src/export_support.rs"
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "reactor-spike/src/export_support.rs",
+        "reactor-spike/src/update_support.rs"
       ]
     },
     {
       "id": "file_dialog_clipboard_notifications",
       "status": "partial",
-      "summary": "File export runs the owner-validated IFileSaveDialog save picker with Settings-selected format and background write; clipboard delivery covers WindowsForum share; scan-completion toasts use the Store AUMID and degrade silently when unpackaged. Open: unpackaged Start-menu shortcut for visible toasts.",
+      "summary": "Save picker, clipboard delivery, and AUMID-bound scan-completion toast are implemented; the toast module is constructed in the live candidate (unpackaged runs degrade silently by design). Interactive picker/toast capture still open.",
       "evidence": [
-        "reactor-spike/src/save_picker.rs",
+        "crates/wfdiag-native-export/src/renderer.rs",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
         "reactor-spike/src/notification_support.rs",
-        "crates/wfdiag-native-export/src/renderer.rs"
+        "reactor-spike/src/save_picker.rs"
       ]
     },
     {
@@ -604,29 +628,35 @@
       "status": "partial",
       "summary": "Reactor now owns the UI-neutral update worker plus the Store 2.5.8 five-second startup delay, once-per-24-hour fail-open throttle, five-second informational notice with exact hover pause/resume, native About dialog, stale-dialog protection, and an explicit typed action boundary that accepts only the exact WFDiag GitHub release tag for the returned semantic version. Throttle path/read work runs off the UI thread and timer completions are epoch- and generation-scoped. Store/debug/no-update/network/runtime failures remain silent and deterministic capture modes perform no update I/O. Packaged Store/direct x64 and ARM64 runtime, persistence, accessibility, and browser-launch validation remain open.",
       "evidence": [
-        "crates/wfdiag-native-update/src/lib.rs",
         "crates/wfdiag-native-update/README.md",
-        "src-tauri/src/update_check.rs",
-        "src/hooks/useUpdateCheck.ts",
-        "src/components/AboutDialog.tsx",
+        "crates/wfdiag-native-update/src/lib.rs",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "reactor-spike/src/main.rs",
         "reactor-spike/src/update_support.rs",
-        "reactor-spike/src/main.rs"
+        "src-tauri/src/update_check.rs",
+        "src/components/AboutDialog.tsx",
+        "src/hooks/useUpdateCheck.ts"
       ]
     },
     {
       "id": "tray_and_window_lifecycle",
       "status": "partial",
-      "summary": "Owner-approved Win32 interop: comctl32 subclass intercepts WM_CLOSE only while close-to-tray is enabled and the window is visible; Shell_NotifyIconW tray icon with Show/Hide, Quick Scan, Exit reaches the component through a polled command slot. Isolated in one file for a future Reactor-native swap. Open: live UIA validation of close-to-tray/restore.",
+      "summary": "Tray icon + close-to-tray + Show/Hide/Quick Scan/Exit via the isolated comctl32 subclass and Shell_NotifyIconW; the subclass was active during the live ARM64 validation run which still closed gracefully (no interference). Menu/close-to-tray interaction capture still open.",
       "evidence": [
-        "reactor-spike/src/window_support.rs",
-        "crates/wfdiag-native-remediation/src/elevation.rs"
+        "crates/wfdiag-native-remediation/src/elevation.rs",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "reactor-spike/src/window_support.rs"
       ]
     },
     {
       "id": "single_instance",
       "status": "partial",
-      "summary": "A Local\\ mutex decides primary/secondary before any WinUI work; secondaries signal a named activation event and exit; the primary restores and foregrounds its main window via the watch task.",
+      "summary": "Single-instance mutex decided primary/secondary at startup during every live run; second-launch handoff implemented via activation event + main-window restore. Interactive second-launch focus test still open.",
       "evidence": [
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
         "reactor-spike/src/instance_support.rs"
       ]
     },
