@@ -51,6 +51,7 @@ use wfdiag_native_export::{
 use wfdiag_native_history::{
     ComparisonSummary, DiagnosticTask as HistoryDiagnosticTask, HistoryReply, HistoryRuntimeConfig,
     NativeHistoryRuntime, ScanRecord, ScanStorage, ScanSummary, TaskResult as HistoryTaskResult,
+    TaskTrend,
     Timestamp,
 };
 use wfdiag_native_issues::{
@@ -885,6 +886,8 @@ enum Message {
         kind: HistoryAckKind,
         result: Result<(), String>,
     },
+    RequestHistoryTrends,
+    HistoryTrendsFinished(Box<Result<Vec<TaskTrend>, String>>),
     RepairDialogClosed {
         remediation_id: String,
         result: ContentDialogResult,
@@ -1287,6 +1290,8 @@ struct WfdiagSpike {
     history_tag_draft: String,
     history_ack_busy: bool,
     history_wait: Option<ComponentTask>,
+    history_trends: Option<Vec<TaskTrend>>,
+    history_trends_loading: bool,
     network_connections: Option<Vec<NetworkConnection>>,
     network_loading: bool,
     ai_mode: AiMode,
@@ -4431,6 +4436,8 @@ impl Component for WfdiagSpike {
             history_tag_draft: String::new(),
             history_ack_busy: false,
             history_wait: None,
+            history_trends: None,
+            history_trends_loading: false,
             network_connections: None,
             network_loading: false,
             ai_mode: AiMode::Assistant,
@@ -4620,6 +4627,61 @@ impl Component for WfdiagSpike {
             }
             Message::ToggleClearHistoryConfirm(open) => {
                 self.history_clear_confirm = open;
+            }
+            Message::RequestHistoryTrends => {
+                if self.deterministic_visual || self.history_trends_loading {
+                    return;
+                }
+                let Some(runtime) = self.history_runtime.as_ref().map(Arc::clone) else {
+                    self.status = "Native history is unavailable".to_string();
+                    return;
+                };
+                self.history_trends_loading = true;
+                match runtime.request_trends(20) {
+                    Ok(mut reply) => {
+                        context.spawn_background_with_rejection(
+                            move |cancellation| loop {
+                                if cancellation.is_cancelled() {
+                                    return Message::HistoryTrendsFinished(Box::new(Err(
+                                        "The Reactor background queue rejected trends".to_string(),
+                                    )));
+                                }
+                                match reply.try_recv() {
+                                    Ok(result) => {
+                                        return Message::HistoryTrendsFinished(Box::new(
+                                            result.map_err(|error| error.to_string()),
+                                        ));
+                                    }
+                                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                                        std::thread::sleep(Duration::from_millis(50));
+                                    }
+                                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                                        return Message::HistoryTrendsFinished(Box::new(Err(
+                                            "Native history worker stopped".to_string(),
+                                        )));
+                                    }
+                                }
+                            },
+                            Message::HistoryTrendsFinished(Box::new(Err(
+                                "The Reactor background queue rejected trends".to_string(),
+                            ))),
+                        );
+                    }
+                    Err(error) => {
+                        self.history_trends_loading = false;
+                        self.status = error.to_string();
+                    }
+                }
+            }
+            Message::HistoryTrendsFinished(result) => {
+                self.history_trends_loading = false;
+                match *result {
+                    Ok(trends) => {
+                        self.status = format!("Failure trends loaded for {} tasks", trends.len());
+                        self.history_trends = Some(trends);
+                    }
+                    Err(message) => self.status = message,
+                }
             }
             Message::ClearHistoryConfirmed => {
                 self.request_history_clear(context);
@@ -5449,8 +5511,27 @@ impl Component for WfdiagSpike {
                         match instance_support::main_window_hwnd() {
                             Some(window) if window_support::is_visible(window) => {
                                 window_support::hide(window);
+                                // Store parity: monitoring pauses while the
+                                // window is hidden (visibility cleanup).
+                                if !self.monitoring_paused
+                                    && self.native_monitor.as_ref().is_some_and(|runtime| {
+                                        runtime.pause()
+                                    })
+                                {
+                                    self.monitoring_paused = true;
+                                    self.status = "Hidden to tray · monitoring paused".to_string();
+                                }
                             }
-                            Some(window) => window_support::restore(window),
+                            Some(window) => {
+                                window_support::restore(window);
+                                if self.monitoring_paused
+                                    && self.native_monitor.as_ref().is_some_and(|runtime| {
+                                        runtime.resume()
+                                    })
+                                {
+                                    self.monitoring_paused = false;
+                                }
+                            }
                             None => instance_support::activate_main_window(),
                         }
                     }
@@ -5999,6 +6080,9 @@ impl Component for WfdiagSpike {
                 context.message(Message::ClearHistoryConfirmed),
                 context.message(Message::ToggleClearHistoryConfirm(false)),
                 self.history_clear_confirm,
+                self.history_trends.as_deref(),
+                self.history_trends_loading,
+                context.message(Message::RequestHistoryTrends),
             ),
         };
 
@@ -11790,6 +11874,9 @@ fn history_page(
     clear_confirmed: Callback<()>,
     clear_cancelled: Callback<()>,
     clear_confirm_open: bool,
+    trends: Option<&[TaskTrend]>,
+    trends_loading: bool,
+    load_trends: Callback<()>,
 ) -> View {
     if deterministic_visual {
         return history_fixture_page(palette, narrow, fixture_empty);
@@ -11815,6 +11902,9 @@ fn history_page(
         clear_confirmed,
         clear_cancelled,
         clear_confirm_open,
+        trends,
+        trends_loading,
+        load_trends,
     )
 }
 
@@ -11840,6 +11930,9 @@ fn history_live_page(
     clear_confirmed: Callback<()>,
     clear_cancelled: Callback<()>,
     clear_confirm_open: bool,
+    trends: Option<&[TaskTrend]>,
+    trends_loading: bool,
+    load_trends: Callback<()>,
 ) -> View {
     let needle = filter.trim().to_ascii_lowercase();
     let filtered = summaries
@@ -12003,6 +12096,72 @@ fn history_live_page(
                     )),
             )),
         body,
+        {
+            let load_trends_button = Button::new()
+                .height(32.0)
+                .is_enabled(!trends_loading)
+                .on_click(load_trends)
+                .content(if trends_loading {
+                    fa_icon_label(FaIcon::Refresh, "Loading…")
+                } else {
+                    fa_icon_label(FaIcon::ChartLine, "Failure trends")
+                });
+            let trends_panel: View = match trends {
+                None => View::from(
+                    TextBlock::new()
+                        .text("Load failure trends across recent scans.")
+                        .font_size(12.0)
+                        .foreground(palette.muted),
+                ),
+                Some(items) => {
+                    let mut sorted: Vec<&TaskTrend> = items.iter().collect();
+                    sorted.sort_by(|a, b| b.failed.cmp(&a.failed).then(a.task_id.cmp(&b.task_id)));
+                    let rows: Vec<KeyedView> = sorted
+                        .iter()
+                        .take(8)
+                        .filter(|trend| trend.failed > 0)
+                        .enumerate()
+                        .map(|(index, trend)| {
+                            KeyedView::new(
+                                index,
+                                Grid::new()
+                                    .columns([
+                                        GridLength::Star(1.0),
+                                        GridLength::Pixel(120.0),
+                                    ])
+                                    .children((
+                                        TextBlock::new()
+                                            .text(trend.task_id.clone())
+                                            .font_size(11.5)
+                                            .text_trimming(TextTrimming::CharacterEllipsis),
+                                        TextBlock::new()
+                                            .text(format!(
+                                                "{} failed / {} scans",
+                                                trend.failed, trend.scans_considered
+                                            ))
+                                            .grid_column(1)
+                                            .font_size(11.5)
+                                            .foreground(palette.err),
+                                    )),
+                            )
+                        })
+                        .collect();
+                    if rows.is_empty() {
+                        View::from(
+                            TextBlock::new()
+                                .text("No recurring failures in recent scans.")
+                                .font_size(12.0)
+                                .foreground(palette.muted),
+                        )
+                    } else {
+                        StackPanel::new().spacing(3.0).keyed_children(rows)
+                    }
+                }
+            };
+            StackPanel::new()
+                .spacing(6.0)
+                .children((load_trends_button, trends_panel))
+        },
         {
             let tags_editor: View = selected_id
                 .and_then(|id| summaries.iter().find(|scan| scan.id == id))
