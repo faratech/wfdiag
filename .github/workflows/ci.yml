@@ -68,7 +68,9 @@ jobs:
         shell: pwsh
         run: |
           $manifests = @(
+            "crates/wfdiag-native-ai-chat/Cargo.toml",
             "crates/wfdiag-native-ai-provider/Cargo.toml",
+            "crates/wfdiag-native-ai-report/Cargo.toml",
             "crates/wfdiag-native-diagnostics/Cargo.toml",
             "crates/wfdiag-native-export/Cargo.toml",
             "crates/wfdiag-native-history/Cargo.toml",

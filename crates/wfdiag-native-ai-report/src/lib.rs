@@ -324,7 +324,6 @@ impl ReportService {
             service: self.clone(),
             cache_key,
             report_id,
-            provider,
             caps,
             resolved,
             emitter,
@@ -364,7 +363,6 @@ struct ReportTask {
     service: ReportService,
     cache_key: String,
     report_id: String,
-    provider: AIProvider,
     caps: ProviderCaps,
     resolved: ResolvedReportProvider,
     emitter: Arc<dyn ReportEmitter>,
@@ -591,8 +589,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
-    use wfdiag_native_ai_chat::{ChatRequest, ChatTurn, FinishReason};
-    use wfdiag_native_ai_provider::ProviderExecutionClass;
+    use wfdiag_native_ai_chat::{ChatRequest, ChatTurn, FinishReason, ProviderExecutionClass};
     use wfdiag_native_issues::{IssueSeverity, IssueStatus};
 
     fn result(success: bool, output: &str, error: Option<&str>) -> TaskResult {
