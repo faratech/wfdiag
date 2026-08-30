@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod chat_support;
 mod export_support;
 mod icons;
 mod issue_support;
@@ -10,6 +11,7 @@ use export_support::{
     ExportExternalAction, current_export_date_strings, launch_export_external_action,
     write_text_to_clipboard,
 };
+use chat_support::{CHAT_WAIT_POLL, ChatWorkerEvent, NativeChatRuntime};
 use save_picker::{SavePickerOutcome, ValidatedExportPath};
 use icons::FaIcon;
 use issue_support::{
@@ -23,6 +25,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::time::{Duration, Instant};
 use wfdiag_native_ai_provider::{
+    ReqwestOllamaSource,
     AIProvider, AIProviderPreference, AIProviderStatus, FoundryCliEndpointSource,
     NativeAiProviderRuntime, PackageIdentitySource, ProcessSubscriptionCliStatusSource,
     ProviderManagementService, ProviderModelDefaults, ProviderPreferenceSettingsValidator,
@@ -834,6 +837,10 @@ enum Message {
     ChatInputChanged(String),
     UsePrompt(String),
     SendChat,
+    ChatWorkerEventReceived(Box<ChatWorkerEvent>),
+    ChatWorkerStopped,
+    ChatWaitCancelled,
+    ChatWaitRejected,
     BackendBatch {
         events: Vec<UiEvent>,
         terminated: bool,
@@ -1190,6 +1197,12 @@ struct WfdiagSpike {
     history_error: Option<String>,
     chat_input: String,
     chat_answer: Option<String>,
+    chat_runtime: Option<NativeChatRuntime>,
+    chat_receiver:
+        Option<Arc<Mutex<std::sync::mpsc::Receiver<ChatWorkerEvent>>>>,
+    chat_wait: Option<ComponentTask>,
+    chat_request_id: u64,
+    chat_pending: Option<u64>,
     ai_mode: AiMode,
     ai_provider_runtime: Option<NativeAiProviderRuntime>,
     ai_provider_status: Option<AIProviderStatus>,
@@ -1644,6 +1657,31 @@ fn spawn_issue_wait(
             }
         },
         Message::IssueWaitRejected,
+    )
+}
+
+fn spawn_chat_wait(
+    context: &ComponentContext<WfdiagSpike>,
+    receiver: Arc<Mutex<std::sync::mpsc::Receiver<ChatWorkerEvent>>>,
+) -> ComponentTask {
+    context.spawn_background_with_rejection(
+        move |cancellation| loop {
+            if cancellation.is_cancelled() {
+                return Message::ChatWaitCancelled;
+            }
+            let received = match receiver.lock() {
+                Ok(receiver) => receiver.recv_timeout(CHAT_WAIT_POLL),
+                Err(_) => return Message::ChatWorkerStopped,
+            };
+            match received {
+                Ok(event) => return Message::ChatWorkerEventReceived(Box::new(event)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Message::ChatWorkerStopped;
+                }
+            }
+        },
+        Message::ChatWaitRejected,
     )
 }
 
@@ -2179,6 +2217,15 @@ impl WfdiagSpike {
             return;
         };
         self.issue_wait = Some(spawn_issue_wait(context, receiver));
+    }
+
+    fn resume_chat_wait(&mut self, context: &ComponentContext<Self>) {
+        if self.chat_wait.is_some() {
+            return;
+        }
+        if let Some(receiver) = self.chat_receiver.as_ref() {
+            self.chat_wait = Some(spawn_chat_wait(context, Arc::clone(receiver)));
+        }
     }
 
     fn resume_export_wait(&mut self, context: &ComponentContext<Self>) {
@@ -3688,6 +3735,27 @@ impl Component for WfdiagSpike {
                 Err(error) => (None, None, None, 0, None, false, Some(error.to_string())),
             }
         };
+        let (chat_runtime, chat_receiver, chat_wait) = if deterministic_visual {
+            (None, None, None)
+        } else if let Some(settings) = settings_service.as_ref() {
+            match NativeChatRuntime::start(
+                settings.clone(),
+                Arc::new(FoundryCliEndpointSource::new()),
+                Arc::new(ReqwestOllamaSource),
+            ) {
+                Ok((runtime, receiver)) => {
+                    let receiver = Arc::new(Mutex::new(receiver));
+                    let wait = spawn_chat_wait(context, Arc::clone(&receiver));
+                    (Some(runtime), Some(receiver), Some(wait))
+                }
+                Err(error) => {
+                    status = format!("Native AI chat unavailable · {error}");
+                    (None, None, None)
+                }
+            }
+        } else {
+            (None, None, None)
+        };
         let (ai_provider_runtime, ai_status_error) = if deterministic_visual {
             (None, None)
         } else {
@@ -3801,6 +3869,11 @@ impl Component for WfdiagSpike {
             history_error,
             chat_input: String::new(),
             chat_answer: None,
+            chat_runtime,
+            chat_receiver,
+            chat_wait,
+            chat_request_id: 0,
+            chat_pending: None,
             ai_mode: AiMode::Assistant,
             ai_provider_runtime,
             ai_provider_status: None,
@@ -4403,6 +4476,58 @@ impl Component for WfdiagSpike {
                     );
                 }
             }
+            Message::ChatWorkerEventReceived(event) => {
+                let Some(pending) = self.chat_pending else {
+                    return;
+                };
+                if pending != event.request_id() {
+                    self.resume_chat_wait(context);
+                    return;
+                }
+                match *event {
+                    ChatWorkerEvent::Delta { text, .. } => {
+                        self.chat_answer
+                            .get_or_insert_with(String::new)
+                            .push_str(&text);
+                        self.resume_chat_wait(context);
+                    }
+                    ChatWorkerEvent::ToolActivity { summary, .. } => {
+                        self.status = summary;
+                        self.resume_chat_wait(context);
+                    }
+                    ChatWorkerEvent::Done { provider, .. } => {
+                        self.chat_pending = None;
+                        self.chat_wait = None;
+                        self.status = format!("AI response complete · {provider}");
+                    }
+                    ChatWorkerEvent::Failed { message, .. } => {
+                        self.chat_pending = None;
+                        self.chat_wait = None;
+                        self.chat_answer = None;
+                        self.status = message;
+                    }
+                    ChatWorkerEvent::Cancelled { .. } => {
+                        self.chat_pending = None;
+                        self.chat_wait = None;
+                        self.status = "AI response cancelled".to_string();
+                    }
+                }
+            }
+            Message::ChatWorkerStopped => {
+                self.chat_wait = None;
+                self.chat_pending = None;
+                self.chat_receiver = None;
+                self.chat_runtime = None;
+                self.status = "Native AI chat worker stopped".to_string();
+            }
+            Message::ChatWaitCancelled => {
+                self.chat_wait = None;
+            }
+            Message::ChatWaitRejected => {
+                self.chat_wait = None;
+                self.chat_pending = None;
+                self.status = "The native chat queue rejected a worker hand-off".to_string();
+            }
             Message::ExportRuntimeCompleted(completed) => {
                 self.export_wait = None;
                 let Some(pending) = self.export_pending.take() else {
@@ -4694,15 +4819,35 @@ impl Component for WfdiagSpike {
                     } else if !self.settings_snapshot.ai_enabled {
                         self.chat_answer = None;
                         self.status = "Enable AI insights in Settings before sending".to_string();
+                    } else if self.chat_pending.is_some() {
+                        self.status = "A response is already streaming…".to_string();
                     } else if self
                         .ai_provider_status
                         .as_ref()
                         .is_some_and(|status| status.active_provider != AIProvider::None)
+                        && self.chat_runtime.is_some()
                     {
+                        let provider = self
+                            .ai_provider_status
+                            .as_ref()
+                            .map(|status| status.active_provider)
+                            .expect("provider status was just checked");
+                        let Some(runtime) = self.chat_runtime.as_ref() else {
+                            return;
+                        };
+                        let Some(request_id) =
+                            advance_nonzero_generation(&mut self.chat_request_id)
+                        else {
+                            self.status = "Native chat request identity was exhausted".to_string();
+                            return;
+                        };
+                        let prompt = self.chat_input.trim().to_string();
                         self.chat_answer = None;
-                        self.status =
-                            "Native AI chat delivery is not connected yet; no prompt was sent"
-                                .to_string();
+                        self.chat_pending = Some(request_id);
+                        runtime.send(request_id, prompt, provider);
+                        self.chat_input.clear();
+                        self.status = "Asking the AI assistant…".to_string();
+                        self.resume_chat_wait(context);
                     } else {
                         self.chat_answer = None;
                         self.status = "Set up an available AI provider before sending".to_string();
