@@ -7,6 +7,7 @@ mod icons;
 mod instance_support;
 mod issue_support;
 mod notification_support;
+mod window_support;
 mod report_support;
 mod save_picker;
 mod update_support;
@@ -874,6 +875,7 @@ enum Message {
     RestartAsAdmin,
     RestartAsAdminFinished(Result<bool, String>),
     InstanceActivated,
+    TrayCommand(u8),
     BackendBatch {
         events: Vec<UiEvent>,
         terminated: bool,
@@ -1257,6 +1259,7 @@ struct WfdiagSpike {
     palette_open: bool,
     palette_query: String,
     shortcut_help_open: bool,
+    window_hook_installed: bool,
     ai_mode: AiMode,
     ai_provider_runtime: Option<NativeAiProviderRuntime>,
     ai_provider_status: Option<AIProviderStatus>,
@@ -1747,6 +1750,10 @@ fn spawn_instance_watch(context: &ComponentContext<WfdiagSpike>) -> ComponentTas
             }
             if instance_support::activation_requested() {
                 return Message::InstanceActivated;
+            }
+            let command = window_support::take_tray_command();
+            if command != window_support::TRAY_COMMAND_NONE {
+                return Message::TrayCommand(command);
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         },
@@ -2362,6 +2369,27 @@ impl WfdiagSpike {
         }
     }
 
+    /// Install the tray + close-to-tray hook once the WinUI window exists.
+    /// Runs on the UI thread (subclassing requires the owning thread); the
+    /// bool guard makes it a cheap no-op afterwards.
+    fn ensure_window_hook(&mut self) {
+        if self.window_hook_installed || self.deterministic_visual {
+            return;
+        }
+        let Some(window) = instance_support::main_window_hwnd() else {
+            return;
+        };
+        if let Err(error) =
+            window_support::install(window, "WindowsForum Diagnostics")
+        {
+            self.status = error;
+            self.window_hook_installed = true;
+            return;
+        }
+        window_support::set_close_to_tray(self.settings_snapshot.close_to_tray);
+        self.window_hook_installed = true;
+    }
+
     /// Execute one command-palette entry. Page tags reuse the navigation
     /// path; action tags mirror their titlebar/nav equivalents.
     fn handle_palette_command(&mut self, tag: String, context: &ComponentContext<Self>) {
@@ -2973,6 +3001,7 @@ impl WfdiagSpike {
             }
             SettingsDialogAction::CloseToTrayChanged(value) => {
                 self.settings_draft.close_to_tray = value;
+                window_support::set_close_to_tray(value);
             }
             SettingsDialogAction::MaxConcurrentTasksChanged(Some(value)) => {
                 if value.is_finite() {
@@ -4184,6 +4213,7 @@ impl Component for WfdiagSpike {
             palette_open: false,
             palette_query: String::new(),
             shortcut_help_open: false,
+            window_hook_installed: false,
             ai_mode: AiMode::Assistant,
             ai_provider_runtime,
             ai_provider_status: None,
@@ -4263,6 +4293,7 @@ impl Component for WfdiagSpike {
     }
 
     fn update(&mut self, message: Message, context: &ComponentContext<Self>) {
+        self.ensure_window_hook();
         match message {
             Message::Navigate(Some(tag)) => {
                 if let Some(page) = Page::from_tag(&tag) {
@@ -5101,6 +5132,35 @@ impl Component for WfdiagSpike {
                 // Another launch asked this instance to the foreground.
                 instance_support::activate_main_window();
                 self.instance_wait = Some(spawn_instance_watch(context));
+            }
+            Message::TrayCommand(command) => {
+                self.instance_wait = Some(spawn_instance_watch(context));
+                match command {
+                    window_support::TRAY_COMMAND_SHOW => {
+                        match instance_support::main_window_hwnd() {
+                            Some(window) if window_support::is_visible(window) => {
+                                window_support::hide(window);
+                            }
+                            Some(window) => window_support::restore(window),
+                            None => instance_support::activate_main_window(),
+                        }
+                    }
+                    window_support::TRAY_COMMAND_QUICK_SCAN => {
+                        self.page = Page::Diagnostics;
+                        self.begin_diagnostic_scan(ScanKind::Quick, context);
+                    }
+                    window_support::TRAY_COMMAND_EXIT => {
+                        window_support::request_forced_close();
+                        if !context.window().request_close() {
+                            // Reactor declined the close (never seen in
+                            // practice); at least drop the tray icon.
+                            if let Some(window) = instance_support::main_window_hwnd() {
+                                window_support::remove_tray_icon(window);
+                            }
+                        }
+                    }
+                    _ => (),
+                }
             }
             Message::RestartAsAdminFinished(result) => {
                 self.admin_relaunch_task = None;

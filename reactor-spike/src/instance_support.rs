@@ -90,8 +90,10 @@ pub fn activation_requested() -> bool {
 #[derive(Default)]
 pub struct InstanceWatch;
 
-/// Restore and foreground this process's main visible window.
-pub fn activate_main_window() {
+/// Find this process's main visible top-level window. Skips tool windows so
+/// transient popups never win.
+#[must_use]
+pub fn main_window_hwnd() -> Option<HWND> {
     struct Collector {
         current_process: u32,
         best: Option<HWND>,
@@ -128,7 +130,12 @@ pub fn activate_main_window() {
             LPARAM((&mut collector as *mut Collector) as isize),
         );
     }
-    if let Some(window) = collector.best {
+    collector.best
+}
+
+/// Restore and foreground this process's main visible window.
+pub fn activate_main_window() {
+    if let Some(window) = main_window_hwnd() {
         unsafe {
             if IsIconic(window).as_bool() {
                 let _ = ShowWindow(window, SW_RESTORE);
