@@ -189,17 +189,47 @@ native geometry and styling but are not production parity approvals: light/syste
 themes, DPI variants, accessibility modes, and x64 visual evidence still require matched review.
 See `design-qa.md` for the detailed assessment.
 
+## Live backend surfaces (wired, no Tauri IPC)
+
+Beyond the original monitor/diagnostics/process inventory, the following now run against the
+real backend through the framework-neutral crates:
+
+- **Export to file** — owner-validated `IFileSaveDialog` save picker, `SavedReport` rendering
+  (text metadata decoration, `include_raw`), background write, dialog-cancel as a silent no-op.
+- **AI chat** — streaming send over the shared chat-completions client (cloud OpenAI, Foundry
+  Local, Ollama, custom endpoints), per-turn provider resolution from live settings/DPAPI keys,
+  conversation context, stale-request rejection. Cancel button and the read-only tool registry
+  are follow-ups; Phi/CLI/Anthropic/Gemini/DeepSeek transports report a clear gap.
+- **AI scan report** — Generate/Cancel/streaming/cached/regenerate via the shared `ReportService`,
+  with provider attribution; comparison baselines arrive with a later increment.
+- **Issues & remediation** — maintenance and per-issue Run buttons execute through the shared
+  `wfdiag-native-remediation` engine; Repair requires the explicit confirmation dialog (preview
+  built from catalog constants only) and the engine's own tier gate re-checks. Ask AI / Propose
+  fix plan prefill the chat input; model output never reaches execution.
+- **Elevation** — restart-as-administrator via the shared `runas` relaunch (UAC dismissal is a
+  no-op, not an error).
+- **Desktop integration** — scan-completion toast (AUMID-bound; silent no-op unpackaged),
+  single-instance mutex + activation-event focus handoff, tray icon with Show/Hide, Quick Scan,
+  and Exit, close-to-tray honoring the settings toggle (comctl32 subclass, isolated in
+  `window_support.rs` for a future Reactor-native swap).
+- **Settings** — provider API key entry/clear per provider (DPAPI-backed, never settings.json)
+  and Quick Scan task customization persisted through the normal Save path.
+- **History** — tags editor and destructive clear behind an explicit confirmation, plus the
+  existing list/filter/select/compare.
+
 ## Known Phase 0 gates
 
 - Reactor must publish an official non-placeholder release before production adoption.
-- The current public accelerator enum cannot represent WFDiag's full shortcut set.
+- The current public accelerator enum cannot represent WFDiag's full shortcut set (no main-row
+  digits, `K`, `/`, or Shift; Control-only modifiers). The expressible subset is wired
+  (Ctrl+R, Ctrl+Numpad1..6); the palette and shortcut list stay reachable from the titlebar.
 - Window show/hide, close interception, tray restoration, and full `AppWindow` lifecycle APIs are
-  still missing from the public Reactor surface and must be supplied upstream.
-- Native diagnostics, monitor telemetry, and process inventory are connected without Tauri IPC.
-  Their remaining interaction/error/persistence work plus Issues, History, AI, Settings, export,
-  elevation, remediation, tray, notification, clipboard, update, and
-  single-instance workflows are tracked explicitly in `reactor-baselines/manifest.json`'s
-  `backend_parity` matrix.
+  not exposed by the pinned Reactor surface; the owner-approved interim path is the isolated
+  Win32 interop in `window_support.rs` (comctl32 subclass + `Shell_NotifyIconW`).
+- Remaining interaction/error/persistence depth — chat tools and cancel button, report comparison
+  baselines, Phi/CLI/cloud-native transports in the native chat, history trends and task-diff
+  drill-down, monitor lease/visibility parity and network connections view — is tracked in
+  `reactor-baselines/manifest.json`'s `backend_parity` matrix.
 - This host can launch and capture the Windows ARM64 executable through WSL interop. Cutover remains
   blocked on paired native reviews for the remaining 2.5.8 states,
   light/system/high-contrast and DPI coverage, accessibility validation, and x64 visual evidence.

@@ -49,7 +49,10 @@
         "state": "empty",
         "populated": false,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 1000 },
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
         "sha256": "d1c4ebaf6474e68a4f5d923e8c6cb9277323ea4cd278127342cb8b8ef6cc8fa3",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/diagnostics-empty-desktop-dark.capture.json",
@@ -64,7 +67,10 @@
         "state": "idle",
         "populated": false,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 1000 },
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
         "sha256": "075b745d4c754ce3228d581538b3f74f679c3e7bf42aa7d0a883e560b4ca3e4d",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/monitor-empty-desktop-dark.capture.json",
@@ -79,7 +85,10 @@
         "state": "empty",
         "populated": false,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 1000 },
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
         "sha256": "7970c3e93f095c604ab3480525bbbf0c256b4371238ea466504b7266d5179225",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/processes-empty-desktop-dark.capture.json",
@@ -94,7 +103,10 @@
         "state": "welcome",
         "populated": false,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 1000 },
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
         "sha256": "b035fbd4146a369eaaac01308a5d44f45280bcbdb20b9c8058a8227dcf9fb344",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/ai-empty-desktop-dark.capture.json",
@@ -109,7 +121,10 @@
         "state": "no-detected-issues",
         "populated": false,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 1000 },
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
         "sha256": "a3217000451a2949a18a2f9416890116cf5a00b30ad192aef0d76b9a2adf249e",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/issues-empty-desktop-dark.capture.json",
@@ -124,7 +139,10 @@
         "state": "empty",
         "populated": false,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 1000 },
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
         "sha256": "4062b6ec4bdeca7ccbdba5a7da2172ddd24fbd7b44d7092c3c665332ca162730",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/history-empty-desktop-dark.capture.json",
@@ -139,7 +157,10 @@
         "state": "welcome-compact",
         "populated": false,
         "theme": "dark",
-        "viewport": { "width": 900, "height": 800 },
+        "viewport": {
+          "width": 900,
+          "height": 800
+        },
         "sha256": "4b6df6560d1f997ed23c024d146e5a2480def582e8fd5ecbf4992e6cbf074abb",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/ai-empty-compact-dark.capture.json",
@@ -154,7 +175,10 @@
         "state": "completed-with-failures",
         "populated": true,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 900 },
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
         "sha256": "9bef15ebfcce4dd9ac871e5774e522fd49577f9ce8cd3556dc7490f03d824f83",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/diagnostics-populated-desktop-dark.capture.json",
@@ -169,7 +193,10 @@
         "state": "detected-issues",
         "populated": true,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 900 },
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
         "sha256": "269e1ffafb96da6bedae40baf9c9cd5420ff01a9f27cf0ae1867f48ab3d16291",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/issues-populated-desktop-dark.capture.json",
@@ -184,7 +211,10 @@
         "state": "issue-context-handoff",
         "populated": true,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 900 },
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
         "sha256": "6723c382194a60dae435c26e266392c2394630fc0cea8c7c8a3e5f487fd52ad4",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/issue-to-chat-desktop-dark.capture.json",
@@ -199,7 +229,10 @@
         "state": "inventory",
         "populated": true,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 900 },
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
         "sha256": "967260aeadb072426abe7e38fdaf81b53f7df07c0ab4d7346efeb13a2325b54c",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/processes-populated-desktop-dark.capture.json",
@@ -214,7 +247,10 @@
         "state": "comparison",
         "populated": true,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 900 },
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
         "sha256": "6a6290852499db70281b1f2186afac3003354a350c032551990e138fce5de95a",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/history-comparison-desktop-dark.capture.json",
@@ -229,7 +265,10 @@
         "state": "active-monitoring",
         "populated": true,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 900 },
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
         "sha256": "141af4c370542aa0c47d77eb760ffa71a3f1af796785908d6b609ea54060cffe",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/monitor-populated-desktop-dark.capture.json",
@@ -244,7 +283,10 @@
         "state": "conversation-scrolled",
         "populated": true,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 900 },
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
         "sha256": "7ecb974cf02c0ee6aa2735bb5bcaee8049381825f87d8cf89bd80a2c7d06027d",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/ai-conversation-desktop-dark.capture.json",
@@ -259,7 +301,10 @@
         "state": "conversation-top-compact",
         "populated": true,
         "theme": "dark",
-        "viewport": { "width": 900, "height": 800 },
+        "viewport": {
+          "width": 900,
+          "height": 800
+        },
         "sha256": "7b88a4f77381935d5ca11bde892d8b9e09fa53f5336536943439af69d0a7663d",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/ai-conversation-top-compact-dark.capture.json",
@@ -274,7 +319,10 @@
         "state": "conversation-bottom-compact",
         "populated": true,
         "theme": "dark",
-        "viewport": { "width": 900, "height": 800 },
+        "viewport": {
+          "width": 900,
+          "height": 800
+        },
         "sha256": "b6cfe1e962fa61d0bd791fd876798241fb289b9ffc49fcb0867a2ad5ec294a19",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/ai-conversation-bottom-compact-dark.capture.json",
@@ -289,7 +337,10 @@
         "state": "providers-top",
         "populated": true,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 900 },
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
         "sha256": "f863959f188d57b331cdcb2701b8e98d4532b99ec3f58da73921876e86e8718f",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/settings-top-desktop-dark.capture.json",
@@ -304,7 +355,10 @@
         "state": "behavior-bottom",
         "populated": true,
         "theme": "dark",
-        "viewport": { "width": 1440, "height": 900 },
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
         "sha256": "cee8294fcda122b8e1782ff08c1042995741a0ee2a234524000d0bb4b1404b91",
         "capture_metadata": {
           "path": "reactor-baselines/captures/store-2.5.8/settings-bottom-desktop-dark.capture.json",
@@ -412,11 +466,14 @@
     },
     {
       "id": "remediation_and_action_broker",
-      "status": "blocked",
-      "summary": "Native proposal, confirmation, execution, cancellation, and status rendering are not connected to the action broker and vetted remediation catalog.",
+      "status": "partial",
+      "summary": "Tiered remediation execution is live through the shared engine: maintenance and per-issue Run buttons execute authorized catalog entries off the WinUI thread; Repair requires the explicit confirmation dialog (preview from catalog constants only) and the engine tier gate re-checks; success re-runs issue detection. Open: the broker proposal state machine and AI fix-plan validation on this surface.",
       "evidence": [
-        "src-tauri/src/action_broker.rs",
-        "src-tauri/src/remediation.rs"
+        "crates/wfdiag-native-remediation/src/lib.rs",
+        "crates/wfdiag-native-remediation/src/remediation.rs",
+        "reactor-spike/src/action_support.rs",
+        "src-tauri/src/remediation.rs",
+        "src-tauri/src/action_broker.rs"
       ]
     },
     {
@@ -491,20 +548,25 @@
     },
     {
       "id": "ai_chat",
-      "status": "blocked",
-      "summary": "The native AI conversation is a visual fixture; session history, streaming, tool activity, cancellation, proposals, and fallback resolution are not connected.",
+      "status": "partial",
+      "summary": "Native streaming chat is live in the Reactor shell over the shared turn engine: per-turn provider resolution from DPAPI-backed settings, chat-completions transports for OpenAI/Foundry/Ollama/custom, conversation context, stale-request rejection. Open: cancel button, read-only tool registry, session history projection, and Phi/CLI/Anthropic/Gemini/DeepSeek transports.",
       "evidence": [
-        "src-tauri/src/ai_chat.rs",
-        "src/hooks/useAIChat.ts"
+        "reactor-spike/src/chat_support.rs",
+        "crates/wfdiag-native-ai-chat/src/engine.rs",
+        "crates/wfdiag-native-ai-chat/src/compat_provider.rs",
+        "crates/wfdiag-native-ai-provider/src/compat.rs",
+        "crates/wfdiag-native-ai-chat/src/openai_compat.rs",
+        "src-tauri/src/ai_chat.rs"
       ]
     },
     {
       "id": "ai_report",
-      "status": "blocked",
-      "summary": "Native Scan Report generation, streaming, caching, cancellation, provider attribution, and errors are not connected.",
+      "status": "partial",
+      "summary": "Native scan report generation is live through the shared ReportService: streaming, cache identity via the shared config fingerprint, duplicate suppression, cancel, provider attribution, cached/regenerate/error states. Open: comparison baselines for the changed-since-last-scan section and the compact reroute.",
       "evidence": [
-        "src-tauri/src/ai_report.rs",
-        "src/hooks/useScanReport.ts"
+        "reactor-spike/src/report_support.rs",
+        "crates/wfdiag-native-ai-report/src/lib.rs",
+        "src-tauri/src/ai_report.rs"
       ]
     },
     {
@@ -519,20 +581,22 @@
     },
     {
       "id": "elevation_and_external_links",
-      "status": "blocked",
-      "summary": "Restart-as-administrator and allowlisted external-link behavior are not connected to native commands.",
+      "status": "partial",
+      "summary": "Restart-as-administrator runs the shared runas relaunch (COM apartment handling; UAC dismissal is a deliberate no-op). Allowlisted external links run through the shared ShellExecute launchers (About download/forum/repository, WindowsForum share).",
       "evidence": [
-        "src-tauri/src/lib.rs",
-        "src-tauri/src/security.rs"
+        "crates/wfdiag-native-remediation/src/elevation.rs",
+        "reactor-spike/src/update_support.rs",
+        "reactor-spike/src/export_support.rs"
       ]
     },
     {
       "id": "file_dialog_clipboard_notifications",
-      "status": "blocked",
-      "summary": "Native file picking/saving, clipboard writes, and scan-completion notifications do not yet match the shipping workflow.",
+      "status": "partial",
+      "summary": "File export runs the owner-validated IFileSaveDialog save picker with Settings-selected format and background write; clipboard delivery covers WindowsForum share; scan-completion toasts use the Store AUMID and degrade silently when unpackaged. Open: unpackaged Start-menu shortcut for visible toasts.",
       "evidence": [
-        "src/hooks/useDiagnostics.ts",
-        "src-tauri/capabilities/default.json"
+        "reactor-spike/src/save_picker.rs",
+        "reactor-spike/src/notification_support.rs",
+        "crates/wfdiag-native-export/src/renderer.rs"
       ]
     },
     {
@@ -551,27 +615,28 @@
     },
     {
       "id": "tray_and_window_lifecycle",
-      "status": "blocked",
-      "summary": "Tray menu, close-to-tray, hide/show, quick scan, restore, and exit behavior remain unimplemented and also depend on missing official Reactor lifecycle APIs.",
+      "status": "partial",
+      "summary": "Owner-approved Win32 interop: comctl32 subclass intercepts WM_CLOSE only while close-to-tray is enabled and the window is visible; Shell_NotifyIconW tray icon with Show/Hide, Quick Scan, Exit reaches the component through a polled command slot. Isolated in one file for a future Reactor-native swap. Open: live UIA validation of close-to-tray/restore.",
       "evidence": [
-        "src-tauri/src/tray.rs"
+        "reactor-spike/src/window_support.rs",
+        "crates/wfdiag-native-remediation/src/elevation.rs"
       ]
     },
     {
       "id": "single_instance",
-      "status": "blocked",
-      "summary": "Second-launch argument handling and focus restoration are not implemented for the Reactor executable.",
+      "status": "partial",
+      "summary": "A Local\\ mutex decides primary/secondary before any WinUI work; secondaries signal a named activation event and exit; the primary restores and foregrounds its main window via the watch task.",
       "evidence": [
-        "src-tauri/src/lib.rs"
+        "reactor-spike/src/instance_support.rs"
       ]
     },
     {
       "id": "global_commands_and_shortcuts",
-      "status": "blocked",
-      "summary": "Command palette, shortcut help, global accelerators, text-focus behavior, and all app-wide commands are not implemented with official Reactor APIs.",
+      "status": "partial",
+      "summary": "Native command palette (filtered command list, titlebar entry) and shortcut help dialog parity; expressible accelerators are wired (Ctrl+R refresh, Ctrl+Numpad1..6 screens). The full shipping set (Ctrl+1..6 main row, Ctrl+K, Ctrl+/, Ctrl+Shift+Q/F) is not expressible in the pinned AcceleratorKey enum (Control-only modifiers; numpad digits, R, Enter, arithmetic keys only) \u2014 upstream gap.",
       "evidence": [
-        "src/hooks/useCommands.ts",
-        "src/hooks/useGlobalShortcuts.ts"
+        "reactor-spike/src/main.rs",
+        "reactor-spike/README.md"
       ]
     }
   ],

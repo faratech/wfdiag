@@ -202,6 +202,40 @@ a UI-neutral worker. These are also `partial`: Reactor has not yet submitted
 completed scans to Issues or delivered exports through native pickers,
 clipboard, filesystem, and allowlisted link operations.
 
+**Progress note (2026-08-30, desktop-integration pass).** The extraction and
+wiring frontier moved substantially in one reviewed series:
+
+- `wfdiag-native-ai-report` is authoritative: src-tauri's report command now
+  delegates to it (wire-identical events, pinned by tests), and the Reactor
+  shell generates native reports through the same service (streaming, cache,
+  cancel; comparison baselines and compact reroute still open).
+- The shared chat-completions client moved into `wfdiag-native-ai-chat`
+  (re-exported by src-tauri), with `resolve_compat_config` +
+  `CompatChatProvider` + `provider_config_fingerprint` in the compat layer.
+  The Reactor chat sends real streaming turns against live DPAPI-backed
+  settings; tools and the cancel button are follow-ups.
+- The save picker is wired end to end (format → owner-validated dialog →
+  `SavedReport` render → background write), closing the export/file-dialog
+  gap in both `backend_parity` surfaces.
+- Remediation execution extracted to `wfdiag-native-remediation` (with the
+  tier confirm gate and injectable runner); the shell's maintenance and
+  per-issue Run buttons execute through it, Repair behind an explicit
+  confirmation dialog whose preview is catalog-constants-only.
+- Elevation moved into the crate (`elevation::relaunch_self_elevated`) and
+  powers restart-as-administrator; single instance (mutex + activation
+  event) and scan-completion toasts (AUMID-bound, silent-unpackaged) are
+  live; tray + close-to-tray + Show/Hide/Quick Scan/Exit run through the
+  isolated Win32 subclass in `reactor-spike/src/window_support.rs` per the
+  owner-approved interop interpretation of the lifecycle gate.
+- Command palette and shortcut help render as native dialogs (titlebar
+  entry points); the accelerator set is expressible only up to
+  Ctrl+R/Ctrl+Numpad1..6 — the pinned `AcceleratorKey` enum lacks main-row
+  digits, `K`, `/`, and Shift, which is the concrete upstream evidence for
+  `upstream.global_accelerators`.
+- Settings gained DPAPI-backed provider key entry/clear and Quick Scan task
+  customization; History gained tags editing and a destructive clear behind
+  an explicit confirmation.
+
 `wfdiag-native-system` now owns the canonical machine, Windows-version,
 elevation, process/native architecture, emulation, page-size, and processor
 count projections behind a nonblocking worker. `wfdiag-native-update` owns the
