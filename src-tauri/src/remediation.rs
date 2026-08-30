@@ -496,7 +496,7 @@ async fn execute(
 /// Authorized catalog execution with cooperative cancellation. The action
 /// broker is the only production caller; model and frontend strings never
 /// become programs, arguments, or a confirmation boolean.
-pub(crate) async fn execute_authorized(
+pub async fn execute_authorized(
     remediation_id: &str,
     runner: &dyn CommandRunner,
     cancel: &CancellationToken,

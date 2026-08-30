@@ -14,7 +14,7 @@ pub mod error;
 mod issue_catalog;
 mod native_diagnostics;
 pub use wfdiag_native_monitor as native_monitor;
-mod remediation;
+pub use wfdiag_native_remediation::remediation;
 pub mod results_storage;
 mod security;
 #[cfg(windows)]

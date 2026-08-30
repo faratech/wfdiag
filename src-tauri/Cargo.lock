@@ -4779,6 +4779,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",
@@ -5574,6 +5575,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wfdiag-native-remediation"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "encoding_rs",
+ "serde",
+ "tokio",
+ "tokio-util",
+ "wfdiag-native-issues",
+ "wfdiag-remediation-catalog",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "wfdiag-native-settings"
 version = "0.1.0"
 dependencies = [
@@ -5649,6 +5664,7 @@ dependencies = [
  "wfdiag-native-issues",
  "wfdiag-native-monitor",
  "wfdiag-native-phi",
+ "wfdiag-native-remediation",
  "wfdiag-native-settings",
  "wfdiag-native-system",
  "wfdiag-native-update",

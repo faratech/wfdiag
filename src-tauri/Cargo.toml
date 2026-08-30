@@ -68,6 +68,7 @@ wfdiag-native-settings = { path = "../crates/wfdiag-native-settings" }
 wfdiag-native-system = { path = "../crates/wfdiag-native-system" }
 wfdiag-native-update = { path = "../crates/wfdiag-native-update" }
 wfdiag-remediation-catalog = { path = "../crates/wfdiag-remediation-catalog" }
+wfdiag-native-remediation = { path = "../crates/wfdiag-native-remediation" }
 
 # OpenAI integration — Responses API for cloud OpenAI/Foundry Local one-shot,
 # chat-completion for the generic OpenAI-compatible providers (OpenRouter,

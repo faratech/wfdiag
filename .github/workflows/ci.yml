@@ -76,6 +76,7 @@ jobs:
             "crates/wfdiag-native-history/Cargo.toml",
             "crates/wfdiag-native-issues/Cargo.toml",
             "crates/wfdiag-native-monitor/Cargo.toml",
+            "crates/wfdiag-native-remediation/Cargo.toml",
             "crates/wfdiag-native-phi/Cargo.toml",
             "crates/wfdiag-native-settings/Cargo.toml",
             "crates/wfdiag-native-system/Cargo.toml",

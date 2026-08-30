@@ -1,0 +1,34 @@
+[package]
+name = "wfdiag-native-remediation"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "UI-framework-neutral remediation execution: the vetted tiered catalog, injectable command runner, and confirm gate shared by both WFDiag shells"
+license-file = "../../LICENSE"
+publish = false
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1.52.0", features = ["process", "rt", "sync", "time", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+wfdiag-native-issues = { path = "../wfdiag-native-issues" }
+wfdiag-remediation-catalog = { path = "../wfdiag-remediation-catalog" }
+
+[target.'cfg(windows)'.dependencies]
+encoding_rs = "0.8"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }
+
+[dev-dependencies]
+tokio = { version = "1.52.0", features = ["macros", "rt", "sync", "time"] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
