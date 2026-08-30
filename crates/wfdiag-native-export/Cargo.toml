@@ -1,0 +1,22 @@
+[package]
+name = "wfdiag-native-export"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "UI-framework-neutral diagnostic export generation for WFDiag"
+license-file = "../../LICENSE"
+publish = false
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+# Shipping enables preserve_order transitively. Make it explicit here so a
+# standalone native shell preserves JSON object field order byte-for-byte.
+serde_json = { version = "1.0.145", features = ["preserve_order"] }
+wfdiag-native-issues = { path = "../wfdiag-native-issues" }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

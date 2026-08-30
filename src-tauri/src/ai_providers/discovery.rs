@@ -6,64 +6,26 @@ pub(crate) fn extract_http_base(text: &str) -> Option<String> {
     let start = text.find("http://").or_else(|| text.find("https://"))?;
     let url = &text[start..];
     let end = url
-        .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+        .find(|character: char| character.is_whitespace() || character == '"' || character == '\'')
         .unwrap_or(url.len());
     let url = &url[..end];
     let scheme_end = url.find("://")? + 3;
     if url.len() <= scheme_end {
         return None;
     }
-    // Cut any path component, keeping scheme://authority only
     let base_end = url[scheme_end..]
         .find('/')
-        .map(|i| scheme_end + i)
+        .map(|index| scheme_end + index)
         .unwrap_or(url.len());
     Some(url[..base_end].to_string())
 }
 
-/// Normalize a user-configured endpoint to a base URL: trim whitespace and
-/// trailing slashes, strip a `/v1` suffix (the API root is appended by the
-/// clients). Returns None for an effectively empty value.
 pub(crate) fn normalize_base_url(endpoint: &str) -> Option<String> {
-    let e = endpoint.trim().trim_end_matches('/');
-    let e = e.strip_suffix("/v1").unwrap_or(e);
-    if e.is_empty() {
-        None
-    } else {
-        Some(e.to_string())
-    }
-}
-
-/// TCP probe of an endpoint base URL (`scheme://host:port`).
-pub(crate) fn probe_endpoint(base: &str) -> bool {
-    use std::net::{TcpStream, ToSocketAddrs};
-    use std::time::Duration;
-
-    let Ok(url) = url::Url::parse(base) else {
-        return false;
-    };
-    if !matches!(url.scheme(), "http" | "https") {
-        return false;
-    };
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    let Some(port) = url.port_or_known_default() else {
-        return false;
-    };
-    match (host, port).to_socket_addrs() {
-        Ok(mut addrs) => {
-            addrs.any(|a| TcpStream::connect_timeout(&a, Duration::from_secs(2)).is_ok())
-        }
-        Err(_) => false,
-    }
+    wfdiag_native_ai_provider::normalize_base_url(endpoint)
 }
 
 pub(crate) async fn probe_endpoint_async(base: &str) -> bool {
-    let base = base.to_string();
-    tokio::task::spawn_blocking(move || probe_endpoint(&base))
-        .await
-        .unwrap_or(false)
+    wfdiag_native_ai_provider::probe_http_endpoint_async(base).await
 }
 
 #[cfg(test)]
@@ -72,9 +34,10 @@ mod tests {
 
     #[test]
     fn extracts_base_from_foundry_status_output() {
-        let out = "🟢 Model management service is running on http://127.0.0.1:55769/openai/status";
+        let output =
+            "🟢 Model management service is running on http://127.0.0.1:55769/openai/status";
         assert_eq!(
-            extract_http_base(out),
+            extract_http_base(output),
             Some("http://127.0.0.1:55769".to_string())
         );
     }

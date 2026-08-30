@@ -79,22 +79,24 @@ Tags control what gets released:
 
 | Tag Format | Example | GitHub Release | Store Publish |
 |------------|---------|----------------|---------------|
-| `v{major}.{minor}.{patch}` | `v2.5.4` | Yes | Yes |
+| `v{major}.{minor}.{patch}` | `v2.5.8` | Yes | Yes |
 
 The tag must match the version synchronized in `version.json` and every package/UI version source. CI and the release workflow enforce this before packaging.
 
 **Release to GitHub and Microsoft Store:**
 ```bash
-git tag v2.5.4
-git push origin v2.5.4
+VERSION="$(python3 -c 'import json; print(json.load(open("version.json"))["version"])')"
+git tag "v${VERSION}"
+git push origin "v${VERSION}"
 ```
 
 ### Manual Dispatch
 
 For releases without creating a tag:
 ```bash
+VERSION="$(python3 -c 'import json; print(json.load(open("version.json"))["version"])')"
 gh workflow run build-and-publish-store.yml \
-  -f version=2.5.4 \
+  -f version="${VERSION}" \
   -f publish_to_store=true \
   -f create_release=true
 ```
@@ -159,7 +161,8 @@ All artifacts are attested using GitHub's artifact attestation feature (Sigstore
 
 To verify an attestation:
 ```bash
-gh attestation verify WindowsForum_Diagnostics_2.5.4.msixbundle \
+VERSION="$(python3 -c 'import json; print(json.load(open("version.json"))["version"])')"
+gh attestation verify "WindowsForum_Diagnostics_${VERSION}.msixbundle" \
   --owner faratech
 ```
 

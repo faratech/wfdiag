@@ -5,126 +5,20 @@
 //! caching, and rate limiting.
 
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
-use crate::ai_cache::AICache;
 use crate::ai_prompts;
-
-/// AI Provider enumeration.
-///
-/// Wire strings are pinned EXPLICITLY per variant (not `rename_all`): serde's
-/// snake_case rule turns `OpenAI` into `"open_a_i"`, which the frontend union
-/// type never matched — a latent bug fixed in 2.5.0. The alias tolerates any
-/// legacy string still in flight.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum AIProvider {
-    #[default]
-    #[serde(rename = "none")]
-    None,
-    #[serde(rename = "openai", alias = "open_a_i")]
-    OpenAI,
-    /// On-device Phi Silica via the Windows AI APIs (needs package identity)
-    #[serde(rename = "phi_silica")]
-    PhiSilica,
-    /// Local OpenAI-compatible server (Foundry Local), no identity required
-    #[serde(rename = "foundry_local")]
-    FoundryLocal,
-    /// Local Ollama server (OpenAI-compatible API at /v1)
-    #[serde(rename = "ollama")]
-    Ollama,
-    /// User-configured OpenAI-compatible endpoint (OpenRouter, Groq, …)
-    #[serde(rename = "custom_openai")]
-    CustomOpenAI,
-    /// ChatGPT subscription via the user's installed Codex CLI (the CLI owns
-    /// sign-in; no API key — see `ai_providers/cli_bridge.rs`)
-    #[serde(rename = "codex_cli")]
-    CodexCli,
-    /// Claude subscription via the user's installed Claude Code CLI (same
-    /// bridge trust model as Codex — the CLI owns sign-in)
-    #[serde(rename = "claude_code")]
-    ClaudeCode,
-    /// Anthropic Claude via the native Messages API
-    #[serde(rename = "anthropic")]
-    Anthropic,
-    /// Google Gemini via the native generateContent API
-    #[serde(rename = "gemini")]
-    Gemini,
-    /// DeepSeek cloud (OpenAI-compatible chat completions)
-    #[serde(rename = "deepseek")]
-    DeepSeek,
-}
-
-impl std::fmt::Display for AIProvider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AIProvider::None => write!(f, "none"),
-            AIProvider::OpenAI => write!(f, "openai"),
-            AIProvider::PhiSilica => write!(f, "phi_silica"),
-            AIProvider::FoundryLocal => write!(f, "foundry_local"),
-            AIProvider::Ollama => write!(f, "ollama"),
-            AIProvider::CustomOpenAI => write!(f, "custom_openai"),
-            AIProvider::CodexCli => write!(f, "codex_cli"),
-            AIProvider::ClaudeCode => write!(f, "claude_code"),
-            AIProvider::Anthropic => write!(f, "anthropic"),
-            AIProvider::Gemini => write!(f, "gemini"),
-            AIProvider::DeepSeek => write!(f, "deepseek"),
-        }
-    }
-}
-
-/// User preference for AI provider
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum AIProviderPreference {
-    #[default]
-    #[serde(rename = "auto")]
-    Auto,
-    #[serde(rename = "openai", alias = "open_a_i")]
-    OpenAI,
-    #[serde(rename = "phi_silica")]
-    PhiSilica,
-    #[serde(rename = "foundry_local")]
-    FoundryLocal,
-    #[serde(rename = "ollama")]
-    Ollama,
-    #[serde(rename = "custom_openai")]
-    CustomOpenAI,
-    #[serde(rename = "codex_cli")]
-    CodexCli,
-    #[serde(rename = "claude_code")]
-    ClaudeCode,
-    #[serde(rename = "anthropic")]
-    Anthropic,
-    #[serde(rename = "gemini")]
-    Gemini,
-    #[serde(rename = "deepseek")]
-    DeepSeek,
-}
-
-/// Explicit Phi selection is meaningful only for a process with registered
-/// package identity. Keep this message shared by settings and request
-/// dispatch so an unpackaged build never degrades into a generic
-/// "no provider" error.
-pub const PHI_SILICA_STORE_REQUIRED: &str = "Phi Silica requires the Microsoft Store version of this app (registered package identity with the systemAIModels capability). Select Auto or another available provider in this build.";
-
-/// Parse the provider preference accepted by settings and the legacy
-/// `ai_set_preference` command. Unknown values retain the historical Auto
-/// fallback instead of making old settings files unreadable.
-pub(crate) fn parse_provider_preference(preference: &str) -> AIProviderPreference {
-    match preference.trim().to_ascii_lowercase().as_str() {
-        "openai" => AIProviderPreference::OpenAI,
-        "phi_silica" | "phisilica" => AIProviderPreference::PhiSilica,
-        "foundry_local" | "foundrylocal" => AIProviderPreference::FoundryLocal,
-        "ollama" => AIProviderPreference::Ollama,
-        "custom_openai" | "custom" => AIProviderPreference::CustomOpenAI,
-        "codex_cli" | "codexcli" | "codex" => AIProviderPreference::CodexCli,
-        "claude_code" | "claudecode" | "claude" => AIProviderPreference::ClaudeCode,
-        "anthropic" => AIProviderPreference::Anthropic,
-        "gemini" => AIProviderPreference::Gemini,
-        "deepseek" => AIProviderPreference::DeepSeek,
-        _ => AIProviderPreference::Auto,
-    }
-}
+pub use wfdiag_native_ai_provider::{
+    AIProvider, AIProviderPreference, AIProviderStatus, ProviderAvailability, route_provider,
+};
+use wfdiag_native_ai_provider::{
+    BackendFuture, CliProbeSnapshot, FoundryEndpointSource, NativeAiProviderRuntime,
+    PackageIdentitySource, PhiStatusSnapshot, PhiStatusSource, ProviderManagementService,
+    ProviderModelDefaults, ProviderPreferenceSettingsValidator, ProviderProbeBundle,
+    ProviderRuntimeError, ProviderSelectionState, SettingsServiceProviderConfigurationSource,
+    SharedAiCache, SubscriptionCli, SubscriptionCliStatusSource,
+};
 
 fn phi_package_identity_available() -> bool {
     #[cfg(windows)]
@@ -141,10 +35,7 @@ fn validate_provider_preference_with_identity(
     preference: AIProviderPreference,
     has_package_identity: bool,
 ) -> Result<AIProviderPreference, String> {
-    if preference == AIProviderPreference::PhiSilica && !has_package_identity {
-        return Err(PHI_SILICA_STORE_REQUIRED.to_string());
-    }
-    Ok(preference)
+    wfdiag_native_ai_provider::validate_provider_preference(preference, has_package_identity)
 }
 
 /// Reject a provider choice that can never run in the current process. This
@@ -159,7 +50,10 @@ pub(crate) fn validate_provider_preference(
 pub(crate) fn parse_and_validate_provider_preference(
     preference: &str,
 ) -> Result<AIProviderPreference, String> {
-    validate_provider_preference(parse_provider_preference(preference))
+    wfdiag_native_ai_provider::parse_and_validate_provider_preference(
+        preference,
+        phi_package_identity_available(),
+    )
 }
 
 /// Runtime migration for a stale settings file written by an older loose
@@ -173,11 +67,7 @@ fn provider_preference_for_runtime_with_identity(
     preference: &str,
     has_package_identity: bool,
 ) -> AIProviderPreference {
-    validate_provider_preference_with_identity(
-        parse_provider_preference(preference),
-        has_package_identity,
-    )
-    .unwrap_or(AIProviderPreference::Auto)
+    wfdiag_native_ai_provider::provider_preference_for_runtime(preference, has_package_identity)
 }
 
 /// Context type for different AI analysis scenarios
@@ -219,47 +109,12 @@ pub struct AIResponse {
     pub error: Option<String>,
 }
 
-/// Per-provider status row (settings badges, provider pickers).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderInfo {
-    pub id: AIProvider,
-    /// Usable right now (key stored / endpoint reachable)
-    pub available: bool,
-    /// User has done the setup (no network validation)
-    pub configured: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
-    pub supports_tools: bool,
-    pub supports_streaming: bool,
-}
-
-/// Full status of AI providers
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AIProviderStatus {
-    pub preferred_provider: AIProvider,
-    pub openai_available: bool,
-    pub openai_api_key_set: bool,
-    pub phi_silica_available: bool,
-    pub phi_silica_ready: bool,
-    pub phi_silica_message: Option<String>,
-    #[serde(default)]
-    pub foundry_local_available: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub foundry_local_endpoint: Option<String>,
-    pub active_provider: AIProvider,
-    /// One row per real provider, in Auto routing order
-    #[serde(default)]
-    pub providers: Vec<ProviderInfo>,
-}
-
 /// Global AI service state
 /// Note: These are initialized lazily via OnceLock, so explicit initialization is optional
 #[allow(dead_code)] // Used for tracking - cache/preference are initialized lazily
 static AI_SERVICE_INITIALIZED: AtomicBool = AtomicBool::new(false);
-static AI_CACHE: OnceLock<std::sync::Mutex<AICache>> = OnceLock::new();
-static USER_PREFERENCE: OnceLock<std::sync::Mutex<AIProviderPreference>> = OnceLock::new();
+static AI_CACHE: OnceLock<SharedAiCache> = OnceLock::new();
+static USER_PREFERENCE: OnceLock<ProviderSelectionState> = OnceLock::new();
 const ANALYSIS_CACHE_VERSION: &str = "rag-v2";
 
 /// Initialize the AI service (call once at startup)
@@ -270,34 +125,27 @@ pub fn init_ai_service() {
         return; // Already initialized
     }
 
-    // Initialize cache
-    AI_CACHE.get_or_init(|| std::sync::Mutex::new(AICache::new(100)));
-
-    // Initialize user preference
-    USER_PREFERENCE.get_or_init(|| std::sync::Mutex::new(AIProviderPreference::Auto));
+    AI_CACHE.get_or_init(|| SharedAiCache::new(100));
+    USER_PREFERENCE.get_or_init(ProviderSelectionState::default);
 }
 
 /// Get the AI cache
-fn get_cache() -> &'static std::sync::Mutex<AICache> {
-    AI_CACHE.get_or_init(|| std::sync::Mutex::new(AICache::new(100)))
+fn get_cache() -> &'static SharedAiCache {
+    AI_CACHE.get_or_init(|| SharedAiCache::new(100))
+}
+
+fn provider_selection() -> &'static ProviderSelectionState {
+    USER_PREFERENCE.get_or_init(ProviderSelectionState::default)
 }
 
 /// Get current user preference
 pub fn get_user_preference() -> AIProviderPreference {
-    USER_PREFERENCE
-        .get_or_init(|| std::sync::Mutex::new(AIProviderPreference::Auto))
-        .lock()
-        .map(|p| *p)
-        .unwrap_or(AIProviderPreference::Auto)
+    provider_selection().get()
 }
 
 /// Set user preference
 pub fn set_user_preference(pref: AIProviderPreference) {
-    // Use get_or_init to ensure the mutex is initialized before setting
-    let mutex = USER_PREFERENCE.get_or_init(|| std::sync::Mutex::new(AIProviderPreference::Auto));
-    if let Ok(mut p) = mutex.lock() {
-        *p = pref;
-    }
+    provider_selection().set(pref);
 }
 
 /// Check if OpenAI is available (API key is set)
@@ -387,78 +235,6 @@ pub async fn check_deepseek_available() -> bool {
     crate::commands::settings::load_provider_key_internal(crate::dpapi::ProviderKeyId::DeepSeek)
         .await
         .is_some()
-}
-
-/// Snapshot of which providers could serve a request right now.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ProviderAvailability {
-    pub phi: bool,
-    pub foundry: bool,
-    pub ollama: bool,
-    /// Custom endpoint configured (endpoint + model) AND reachable
-    pub custom: bool,
-    /// Codex CLI installed AND signed in (ChatGPT subscription bridge)
-    pub codex: bool,
-    /// Claude Code CLI installed AND signed in (Claude subscription bridge)
-    pub claude: bool,
-    pub openai: bool,
-    pub anthropic: bool,
-    pub gemini: bool,
-    pub deepseek: bool,
-}
-
-/// Pure routing decision: which provider serves a request given the user's
-/// preference and what's available.
-///
-/// Auto is local-first: on-device Phi Silica (NPU, no server), then Foundry
-/// Local (Microsoft's local server — before Ollama so pre-2.5 setups see no
-/// behavior change), then Ollama, then a configured custom endpoint
-/// (configuring one is a deliberate act), then a signed-in Codex CLI (a
-/// ChatGPT subscription has no marginal cost, so it beats metered API keys),
-/// then cloud keys in the order OpenAI → Anthropic → Gemini (OpenAI first
-/// strictly for backward compatibility; the cloud tiebreak is pinned by test
-/// and moot in practice — multiple-key users set an explicit preference).
-///
-/// An explicit preference never falls back to a different provider.
-pub fn route_provider(pref: AIProviderPreference, avail: ProviderAvailability) -> AIProvider {
-    match pref {
-        AIProviderPreference::Auto => {
-            if avail.phi {
-                AIProvider::PhiSilica
-            } else if avail.foundry {
-                AIProvider::FoundryLocal
-            } else if avail.ollama {
-                AIProvider::Ollama
-            } else if avail.custom {
-                AIProvider::CustomOpenAI
-            } else if avail.codex {
-                AIProvider::CodexCli
-            } else if avail.claude {
-                AIProvider::ClaudeCode
-            } else if avail.openai {
-                AIProvider::OpenAI
-            } else if avail.anthropic {
-                AIProvider::Anthropic
-            } else if avail.gemini {
-                AIProvider::Gemini
-            } else if avail.deepseek {
-                AIProvider::DeepSeek
-            } else {
-                AIProvider::None
-            }
-        }
-        AIProviderPreference::OpenAI if avail.openai => AIProvider::OpenAI,
-        AIProviderPreference::PhiSilica if avail.phi => AIProvider::PhiSilica,
-        AIProviderPreference::FoundryLocal if avail.foundry => AIProvider::FoundryLocal,
-        AIProviderPreference::Ollama if avail.ollama => AIProvider::Ollama,
-        AIProviderPreference::CustomOpenAI if avail.custom => AIProvider::CustomOpenAI,
-        AIProviderPreference::CodexCli if avail.codex => AIProvider::CodexCli,
-        AIProviderPreference::ClaudeCode if avail.claude => AIProvider::ClaudeCode,
-        AIProviderPreference::Anthropic if avail.anthropic => AIProvider::Anthropic,
-        AIProviderPreference::Gemini if avail.gemini => AIProvider::Gemini,
-        AIProviderPreference::DeepSeek if avail.deepseek => AIProvider::DeepSeek,
-        _ => AIProvider::None,
-    }
 }
 
 /// Determine the active provider based on preference and availability.
@@ -575,186 +351,128 @@ pub async fn next_auto_local_provider(
     None
 }
 
-fn provider_info(
-    id: AIProvider,
-    available: bool,
-    configured: bool,
-    model: Option<String>,
-    endpoint: Option<String>,
-) -> ProviderInfo {
-    let caps = crate::ai_providers::capabilities(id);
-    ProviderInfo {
-        id,
-        available,
-        configured,
-        model: model.filter(|m| !m.trim().is_empty()),
-        endpoint,
-        supports_tools: caps.supports_tools,
-        supports_streaming: caps.supports_streaming,
+#[derive(Debug, Default)]
+struct TauriPackageIdentitySource;
+
+impl PackageIdentitySource for TauriPackageIdentitySource {
+    fn has_package_identity(&self) -> bool {
+        phi_package_identity_available()
     }
 }
 
-/// Get current AI provider status
-pub async fn get_ai_status() -> AIProviderStatus {
-    let pref = get_user_preference();
-    let settings = crate::commands::settings::read_settings_from_disk().unwrap_or_default();
-    let openai_available = check_openai_available().await;
-    let (phi_available, phi_ready, phi_message) = check_phi_silica_available().await;
-    let foundry_endpoint = check_foundry_local_available().await;
-    let ollama_endpoint = check_ollama_available().await;
-    let custom_endpoint = check_custom_available().await;
-    let codex_probe = crate::ai_providers::cli_bridge::probe(AIProvider::CodexCli).await;
-    let claude_probe = crate::ai_providers::cli_bridge::probe(AIProvider::ClaudeCode).await;
-    let anthropic_available = check_anthropic_available().await;
-    let gemini_available = check_gemini_available().await;
-    let deepseek_available = check_deepseek_available().await;
-    // Status reports ALL providers, so every availability is gathered (no
-    // lazy short-circuit here) and routing reuses the same snapshot instead
-    // of re-probing via determine_active_provider
-    let avail = ProviderAvailability {
-        phi: phi_ready,
-        foundry: foundry_endpoint.is_some(),
-        ollama: ollama_endpoint.is_some(),
-        custom: custom_endpoint.is_some(),
-        codex: codex_probe.usable(),
-        claude: claude_probe.usable(),
-        openai: openai_available,
-        anthropic: anthropic_available,
-        gemini: gemini_available,
-        deepseek: deepseek_available,
-    };
-    let active = route_provider(pref, avail);
+#[derive(Debug, Default)]
+struct TauriPhiStatusSource;
 
-    let custom_configured = settings
-        .custom_endpoint
-        .as_deref()
-        .is_some_and(|e| !e.trim().is_empty())
-        && settings
-            .custom_model
-            .as_deref()
-            .is_some_and(|m| !m.trim().is_empty());
-
-    // In Auto routing order, which is also a sensible display order
-    let providers = vec![
-        provider_info(AIProvider::PhiSilica, phi_ready, phi_available, None, None),
-        provider_info(
-            AIProvider::FoundryLocal,
-            foundry_endpoint.is_some(),
-            foundry_endpoint.is_some(),
-            Some(
-                settings
-                    .local_ai_model
-                    .clone()
-                    .filter(|m| !m.trim().is_empty())
-                    .unwrap_or_else(|| {
-                        crate::ai_providers::foundry::FOUNDRY_LOCAL_MODEL.to_string()
-                    }),
-            ),
-            foundry_endpoint.clone(),
-        ),
-        provider_info(
-            AIProvider::Ollama,
-            ollama_endpoint.is_some(),
-            // Works with zero config when the default endpoint answers
-            true,
-            settings.ollama_model.clone(),
-            ollama_endpoint,
-        ),
-        provider_info(
-            AIProvider::CustomOpenAI,
-            custom_endpoint.is_some(),
-            custom_configured,
-            settings.custom_model.clone(),
-            custom_endpoint.or_else(|| settings.custom_endpoint.clone()),
-        ),
-        provider_info(
-            AIProvider::CodexCli,
-            // Usable = signed in; configured = installed, so the UI can show
-            // a Sign in action for the installed-but-signed-out state
-            codex_probe.usable(),
-            codex_probe.path.is_some(),
-            settings.codex_model.clone(),
-            codex_probe.path.map(|p| p.display().to_string()),
-        ),
-        provider_info(
-            AIProvider::ClaudeCode,
-            claude_probe.usable(),
-            claude_probe.path.is_some(),
-            settings.claude_model.clone(),
-            claude_probe.path.map(|p| p.display().to_string()),
-        ),
-        provider_info(
-            AIProvider::OpenAI,
-            openai_available,
-            openai_available,
-            Some(
-                settings
-                    .open_ai_model
-                    .clone()
-                    .filter(|m| !m.trim().is_empty())
-                    .unwrap_or_else(|| crate::ai_providers::openai::OPENAI_MODEL.to_string()),
-            ),
-            None,
-        ),
-        provider_info(
-            AIProvider::Anthropic,
-            anthropic_available,
-            anthropic_available,
-            Some(
-                settings
-                    .anthropic_model
-                    .clone()
-                    .filter(|m| !m.trim().is_empty())
-                    .unwrap_or_else(|| {
-                        crate::ai_providers::anthropic::ANTHROPIC_DEFAULT_MODEL.to_string()
-                    }),
-            ),
-            None,
-        ),
-        provider_info(
-            AIProvider::Gemini,
-            gemini_available,
-            gemini_available,
-            Some(
-                settings
-                    .gemini_model
-                    .clone()
-                    .filter(|m| !m.trim().is_empty())
-                    .unwrap_or_else(|| {
-                        crate::ai_providers::gemini::GEMINI_DEFAULT_MODEL.to_string()
-                    }),
-            ),
-            None,
-        ),
-        provider_info(
-            AIProvider::DeepSeek,
-            deepseek_available,
-            deepseek_available,
-            Some(
-                settings
-                    .deepseek_model
-                    .clone()
-                    .filter(|m| !m.trim().is_empty())
-                    .unwrap_or_else(|| {
-                        crate::ai_providers::deepseek::DEEPSEEK_DEFAULT_MODEL.to_string()
-                    }),
-            ),
-            None,
-        ),
-    ];
-
-    AIProviderStatus {
-        preferred_provider: active,
-        openai_available,
-        openai_api_key_set: openai_available,
-        phi_silica_available: phi_available,
-        phi_silica_ready: phi_ready,
-        phi_silica_message: phi_message,
-        foundry_local_available: foundry_endpoint.is_some(),
-        foundry_local_endpoint: foundry_endpoint,
-        active_provider: active,
-        providers,
+impl PhiStatusSource for TauriPhiStatusSource {
+    fn probe(&self) -> BackendFuture<'_, PhiStatusSnapshot> {
+        Box::pin(async {
+            let (available, ready, message) = check_phi_silica_available().await;
+            PhiStatusSnapshot {
+                available,
+                ready,
+                message,
+            }
+        })
     }
+}
+
+#[derive(Debug, Default)]
+struct TauriFoundryEndpointSource;
+
+impl FoundryEndpointSource for TauriFoundryEndpointSource {
+    fn probe(&self, _configured: Option<String>) -> BackendFuture<'_, Option<String>> {
+        // The existing provider implementation reads the same canonical
+        // setting before falling back to CLI discovery.
+        Box::pin(check_foundry_local_available())
+    }
+}
+
+#[derive(Debug, Default)]
+struct TauriSubscriptionCliStatusSource;
+
+impl SubscriptionCliStatusSource for TauriSubscriptionCliStatusSource {
+    fn probe(
+        &self,
+        provider: SubscriptionCli,
+        _configured_path: Option<String>,
+    ) -> BackendFuture<'_, CliProbeSnapshot> {
+        // The shipping bridge currently owns its short-lived probe cache and
+        // reads the same canonical path setting internally. The explicit path
+        // remains part of the shared boundary so a native adapter need not
+        // import or reread Tauri settings.
+        Box::pin(async move {
+            let provider = match provider {
+                SubscriptionCli::Codex => AIProvider::CodexCli,
+                SubscriptionCli::ClaudeCode => AIProvider::ClaudeCode,
+            };
+            let probe = crate::ai_providers::cli_bridge::probe(provider).await;
+            CliProbeSnapshot {
+                usable: probe.usable(),
+                installed: probe.path.is_some(),
+                path: probe.path.map(|path| path.display().to_string()),
+            }
+        })
+    }
+}
+
+pub(crate) fn provider_preference_settings_validator() -> ProviderPreferenceSettingsValidator {
+    ProviderPreferenceSettingsValidator::new(Arc::new(TauriPackageIdentitySource))
+}
+
+fn native_provider_service() -> ProviderManagementService {
+    let identity: Arc<dyn PackageIdentitySource> = Arc::new(TauriPackageIdentitySource);
+    let configuration = Arc::new(SettingsServiceProviderConfigurationSource::new(
+        crate::commands::settings::native_settings_service(),
+    ));
+    let probes = ProviderProbeBundle::shipping_networks(
+        configuration,
+        identity,
+        Arc::new(TauriPhiStatusSource),
+        Arc::new(TauriFoundryEndpointSource),
+        Arc::new(TauriSubscriptionCliStatusSource),
+    );
+    ProviderManagementService::new(
+        probes,
+        provider_selection().clone(),
+        Arc::new(get_cache().clone()),
+        ProviderModelDefaults {
+            foundry: crate::ai_providers::foundry::FOUNDRY_LOCAL_MODEL.to_string(),
+            openai: crate::ai_providers::openai::OPENAI_MODEL.to_string(),
+            anthropic: crate::ai_providers::anthropic::ANTHROPIC_DEFAULT_MODEL.to_string(),
+            gemini: crate::ai_providers::gemini::GEMINI_DEFAULT_MODEL.to_string(),
+            deepseek: crate::ai_providers::deepseek::DEEPSEEK_DEFAULT_MODEL.to_string(),
+        },
+    )
+}
+
+static NATIVE_PROVIDER_RUNTIME: OnceLock<Result<NativeAiProviderRuntime, ProviderRuntimeError>> =
+    OnceLock::new();
+
+fn native_provider_runtime() -> Result<&'static NativeAiProviderRuntime, String> {
+    match NATIVE_PROVIDER_RUNTIME
+        .get_or_init(|| NativeAiProviderRuntime::start(Arc::new(native_provider_service())))
+    {
+        Ok(runtime) => Ok(runtime),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+async fn managed_provider_status() -> Result<AIProviderStatus, String> {
+    let reply = native_provider_runtime()?
+        .request_status()
+        .map_err(|error| error.to_string())?;
+    reply
+        .await
+        .map_err(|_| ProviderRuntimeError::WorkerStopped.to_string())
+}
+
+pub(crate) async fn managed_ollama_models() -> Result<Vec<String>, String> {
+    let reply = native_provider_runtime()?
+        .request_ollama_models()
+        .map_err(|error| error.to_string())?;
+    reply
+        .await
+        .map_err(|_| ProviderRuntimeError::WorkerStopped.to_string())?
 }
 
 /// Generate cache key for a request. The provider is part of the key so a
@@ -905,10 +623,7 @@ pub async fn analyze(
                 let cached = if force_refresh {
                     None
                 } else {
-                    get_cache()
-                        .lock()
-                        .ok()
-                        .and_then(|mut cache| cache.get(&cache_key))
+                    get_cache().get(&cache_key)
                 };
                 if let Some(interpretation) = cached {
                     return Ok(AIResponse {
@@ -948,9 +663,7 @@ pub async fn analyze(
 
                 match crate::ai_providers::one_shot(provider, &cfg, SYSTEM_PROMPT, &prompt).await {
                     Ok(interpretation) if !interpretation.trim().is_empty() => {
-                        if let Ok(mut cache) = get_cache().lock() {
-                            cache.insert(cache_key, interpretation.clone());
-                        }
+                        get_cache().insert(cache_key, interpretation.clone());
                         Ok(AIResponse {
                             interpretation,
                             provider_used: provider,
@@ -1002,25 +715,12 @@ pub async fn analyze(
 
 /// Read the shared AI response cache (used by the scan report).
 pub(crate) fn cached_value(key: &str) -> Option<String> {
-    get_cache().lock().ok().and_then(|mut cache| cache.get(key))
+    get_cache().get(key)
 }
 
 /// Write to the shared AI response cache (used by the scan report).
 pub(crate) fn cache_value(key: String, value: String) {
-    if let Ok(mut cache) = get_cache().lock() {
-        cache.insert(key, value);
-    }
-}
-
-/// Clear AI cache for a session or all
-pub fn clear_cache(session_id: Option<&str>) {
-    if let Ok(mut cache) = get_cache().lock() {
-        if let Some(sid) = session_id {
-            cache.clear_session(sid);
-        } else {
-            cache.clear_all();
-        }
-    }
+    get_cache().insert(key, value);
 }
 
 // ============================================================================
@@ -1030,7 +730,7 @@ pub fn clear_cache(session_id: Option<&str>) {
 /// Get AI provider status
 #[tauri::command]
 pub async fn ai_get_status() -> Result<AIProviderStatus, String> {
-    Ok(get_ai_status().await)
+    managed_provider_status().await
 }
 
 /// Analyze a single diagnostic
@@ -1093,9 +793,12 @@ pub async fn ai_explain_health(
 /// Set AI provider preference
 #[tauri::command]
 pub async fn ai_set_preference(preference: String) -> Result<(), String> {
-    let pref = parse_and_validate_provider_preference(&preference)?;
-    set_user_preference(pref);
-    Ok(())
+    let reply = native_provider_runtime()?
+        .request_set_preference(preference)
+        .map_err(|error| error.to_string())?;
+    reply
+        .await
+        .map_err(|_| ProviderRuntimeError::WorkerStopped.to_string())?
 }
 
 /// Prioritize detected issues (the IssuePrioritization prompt finally gets a
@@ -1119,7 +822,12 @@ pub async fn ai_prioritize_issues(
 /// Clear AI cache
 #[tauri::command]
 pub async fn ai_clear_cache(session_id: Option<String>) -> Result<(), String> {
-    clear_cache(session_id.as_deref());
+    let reply = native_provider_runtime()?
+        .request_clear_cache(session_id)
+        .map_err(|error| error.to_string())?;
+    reply
+        .await
+        .map_err(|_| ProviderRuntimeError::WorkerStopped.to_string())?;
     Ok(())
 }
 
@@ -1148,15 +856,15 @@ mod tests {
     #[test]
     fn provider_preference_parser_is_shared_and_backwards_compatible() {
         assert_eq!(
-            parse_provider_preference(" PhiSilica "),
+            wfdiag_native_ai_provider::parse_provider_preference(" PhiSilica "),
             AIProviderPreference::PhiSilica
         );
         assert_eq!(
-            parse_provider_preference("codex"),
+            wfdiag_native_ai_provider::parse_provider_preference("codex"),
             AIProviderPreference::CodexCli
         );
         assert_eq!(
-            parse_provider_preference("future_provider"),
+            wfdiag_native_ai_provider::parse_provider_preference("future_provider"),
             AIProviderPreference::Auto
         );
     }
@@ -1166,7 +874,7 @@ mod tests {
         let error =
             validate_provider_preference_with_identity(AIProviderPreference::PhiSilica, false)
                 .unwrap_err();
-        assert_eq!(error, PHI_SILICA_STORE_REQUIRED);
+        assert_eq!(error, wfdiag_native_ai_provider::PHI_SILICA_STORE_REQUIRED);
         assert!(error.contains("Microsoft Store"));
         assert!(error.contains("registered package identity"));
     }

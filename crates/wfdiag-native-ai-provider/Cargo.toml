@@ -1,0 +1,30 @@
+[package]
+name = "wfdiag-native-ai-provider"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "UI-framework-neutral AI provider status and management service for WFDiag"
+license-file = "../../LICENSE"
+publish = false
+
+[dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1.52.0", features = ["macros", "net", "process", "rt", "sync", "time"] }
+url = "2.5"
+wfdiag-native-settings = { path = "../wfdiag-native-settings" }
+
+[target.'cfg(windows)'.dependencies]
+dirs = "6.0"
+
+[dev-dependencies]
+serde_json = "1.0.145"
+tokio = { version = "1.52.0", features = ["macros", "rt", "sync", "time"] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

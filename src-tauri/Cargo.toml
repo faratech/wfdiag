@@ -46,9 +46,8 @@ serde_json = "1.0"
 anyhow = "1.0"
 thiserror = "2.0"
 # Already in the tree transitively (async-openai, tauri) — direct use for the
-# GitHub update check, version comparison, and the native Anthropic/Gemini clients
+# MCP bridge and native AI provider clients.
 reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "stream"] }
-semver = "1"
 # SSE parsing for Anthropic/Gemini streaming (already in the tree via async-openai)
 eventsource-stream = "0.2"
 # CancellationToken for stoppable AI chat turns
@@ -56,6 +55,18 @@ tokio-util = { version = "0.7", features = ["compat"] }
 uuid = { version = "1.20.0", features = ["v4"] }
 url = "2.5"
 dirs = "6.0"
+wfdiag-ui-core = { path = "../crates/wfdiag-ui-core" }
+wfdiag-native-export = { path = "../crates/wfdiag-native-export" }
+wfdiag-native-history = { path = "../crates/wfdiag-native-history" }
+wfdiag-native-issues = { path = "../crates/wfdiag-native-issues" }
+wfdiag-native-monitor = { path = "../crates/wfdiag-native-monitor" }
+wfdiag-native-ai-provider = { path = "../crates/wfdiag-native-ai-provider" }
+wfdiag-native-ai-chat = { path = "../crates/wfdiag-native-ai-chat" }
+wfdiag-native-phi = { path = "../crates/wfdiag-native-phi" }
+wfdiag-native-settings = { path = "../crates/wfdiag-native-settings" }
+wfdiag-native-system = { path = "../crates/wfdiag-native-system" }
+wfdiag-native-update = { path = "../crates/wfdiag-native-update" }
+wfdiag-remediation-catalog = { path = "../crates/wfdiag-remediation-catalog" }
 
 # OpenAI integration — Responses API for cloud OpenAI/Foundry Local one-shot,
 # chat-completion for the generic OpenAI-compatible providers (OpenRouter,

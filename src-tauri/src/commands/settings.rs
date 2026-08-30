@@ -21,12 +21,17 @@
 
 use crate::dpapi::ProviderKeyId;
 use crate::error::DiagError;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU8, Ordering},
+};
+pub use wfdiag_native_settings::{AppSettings, CloudFallbackPolicy};
+use wfdiag_native_settings::{
+    CredentialStorage, SettingsError, SettingsService, SettingsStorage, ShippingSettingsStorage,
+};
 
 #[cfg(not(windows))]
-use keyring_core::{Entry, Error as KeyringError};
+use keyring_core::Entry;
 #[cfg(not(windows))]
 use std::sync::OnceLock;
 
@@ -37,203 +42,6 @@ static NETWORK_GROUNDING_ENABLED: AtomicBool = AtomicBool::new(false);
 // 0 = ask, 1 = allow, 2 = never
 static CLOUD_FALLBACK_POLICY: AtomicU8 = AtomicU8::new(0);
 
-/// Whether an automatic local-provider failure may cross the network trust
-/// boundary. `Ask` is deliberately the default for existing installs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CloudFallbackPolicy {
-    #[default]
-    Ask,
-    Allow,
-    Never,
-}
-
-/// Application settings that persist across sessions
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppSettings {
-    #[serde(default = "default_true")]
-    pub auto_save: bool,
-    #[serde(default)]
-    pub scan_on_startup: bool,
-    #[serde(default = "default_max_concurrent")]
-    pub max_concurrent_tasks: u32,
-    #[serde(default = "default_export_format")]
-    pub export_format: String,
-    #[serde(default = "default_theme")]
-    pub theme: String,
-    #[serde(default = "default_true")]
-    pub show_notifications: bool,
-    #[serde(default)]
-    pub custom_export_path: Option<String>,
-    #[serde(default = "default_true")]
-    pub retain_history: bool,
-    #[serde(default = "default_history_limit")]
-    pub history_limit: u32,
-    // AI settings
-    #[serde(default = "default_true")]
-    pub ai_enabled: bool,
-    #[serde(default = "default_ai_provider", rename = "preferredAIProvider")]
-    pub preferred_ai_provider: String,
-    /// Live WindowsForum/Microsoft grounding is a network request. It is
-    /// opt-in so selecting an on-device/local provider never silently sends
-    /// diagnostic context off the machine.
-    #[serde(default)]
-    pub network_grounding_enabled: bool,
-    /// Controls whether Auto may fall back from an on-device/local provider
-    /// to a subscription/API cloud provider.
-    #[serde(default)]
-    pub cloud_fallback_policy: CloudFallbackPolicy,
-    // API keys are write-only IPC inputs. They are accepted by save_settings
-    // and routed to DPAPI/keyring, but Serialize must never expose decrypted
-    // material back to the webview or settings file.
-    #[serde(default, skip_serializing)]
-    pub open_ai_api_key: Option<String>,
-    // OpenAI model override; empty falls back to openai::OPENAI_MODEL
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub open_ai_model: Option<String>,
-    #[serde(default, skip_serializing)]
-    pub anthropic_api_key: Option<String>,
-    #[serde(default, skip_serializing)]
-    pub gemini_api_key: Option<String>,
-    #[serde(default, skip_serializing)]
-    pub deepseek_api_key: Option<String>,
-    #[serde(default, skip_serializing)]
-    pub custom_api_key: Option<String>,
-    // Non-secret availability flags returned to the webview. They are never
-    // accepted from IPC and are reset when settings are read from disk.
-    #[serde(default, skip_deserializing)]
-    pub open_ai_api_key_set: bool,
-    #[serde(default, skip_deserializing)]
-    pub anthropic_api_key_set: bool,
-    #[serde(default, skip_deserializing)]
-    pub gemini_api_key_set: bool,
-    #[serde(default, skip_deserializing)]
-    pub deepseek_api_key_set: bool,
-    #[serde(default, skip_deserializing)]
-    pub custom_api_key_set: bool,
-    // Per-provider model overrides; empty falls back to the provider module's
-    // default constant (anthropic.rs / gemini.rs)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anthropic_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gemini_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deepseek_model: Option<String>,
-    // Generic OpenAI-compatible endpoint (OpenRouter, Groq, …): base URL,
-    // model is required for the provider to be usable
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_endpoint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_model: Option<String>,
-    // Ollama: empty endpoint auto-discovers http://127.0.0.1:11434, empty
-    // model resolves to the first entry from /api/tags
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ollama_endpoint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ollama_model: Option<String>,
-    // Codex CLI bridge (ChatGPT subscription — no API key, the CLI owns
-    // auth): empty path auto-detects the CLI on PATH, empty model uses the
-    // CLI's default
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_cli_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_model: Option<String>,
-    // Claude Code CLI bridge (Claude subscription — same trust model as the
-    // Codex bridge: the CLI owns auth, no key or token stored here)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_cli_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_model: Option<String>,
-    // User-customized Quick Scan task IDs. camelCase rename => "quickScanTasks" to match
-    // the TS SettingsData field; #[serde(default)] keeps old settings files loadable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quick_scan_tasks: Option<Vec<String>>,
-    // Optional base URL of a local OpenAI-compatible endpoint (e.g. Foundry
-    // Local). When unset, the endpoint is discovered via the foundry CLI —
-    // its port is dynamic by design and must not be hardcoded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local_ai_endpoint: Option<String>,
-    // Foundry Local model override; empty falls back to FOUNDRY_LOCAL_MODEL
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local_ai_model: Option<String>,
-    // Microsoft-issued Limited Access Feature token for Phi Silica
-    // (systemAIModels). When set, the supported WinRT activation path works
-    // without the bundled-DLL bypass. Empty uses the primary built-in token,
-    // with the previous built-in token retained only as an unlock fallback.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phi_silica_laf_token: Option<String>,
-    // Closing the main window hides to the system tray instead of exiting
-    #[serde(default)]
-    pub close_to_tray: bool,
-}
-
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            auto_save: true,
-            scan_on_startup: false,
-            max_concurrent_tasks: default_max_concurrent(),
-            export_format: default_export_format(),
-            theme: default_theme(),
-            show_notifications: true,
-            custom_export_path: None,
-            retain_history: true,
-            history_limit: default_history_limit(),
-            ai_enabled: true,
-            preferred_ai_provider: default_ai_provider(),
-            network_grounding_enabled: false,
-            cloud_fallback_policy: CloudFallbackPolicy::Ask,
-            open_ai_api_key: None,
-            open_ai_model: None,
-            anthropic_api_key: None,
-            gemini_api_key: None,
-            deepseek_api_key: None,
-            custom_api_key: None,
-            open_ai_api_key_set: false,
-            anthropic_api_key_set: false,
-            gemini_api_key_set: false,
-            deepseek_api_key_set: false,
-            custom_api_key_set: false,
-            anthropic_model: None,
-            gemini_model: None,
-            deepseek_model: None,
-            custom_endpoint: None,
-            custom_model: None,
-            ollama_endpoint: None,
-            ollama_model: None,
-            codex_cli_path: None,
-            codex_model: None,
-            claude_cli_path: None,
-            claude_model: None,
-            quick_scan_tasks: None,
-            local_ai_endpoint: None,
-            local_ai_model: None,
-            phi_silica_laf_token: None,
-            close_to_tray: false,
-        }
-    }
-}
-
-fn default_max_concurrent() -> u32 {
-    5
-}
-fn default_export_format() -> String {
-    "text".to_string()
-}
-fn default_theme() -> String {
-    "dark".to_string()
-}
-fn default_true() -> bool {
-    true
-}
-fn default_history_limit() -> u32 {
-    30
-}
-fn default_ai_provider() -> String {
-    "auto".to_string()
-}
-
 /// Read settings from disk without hydrating secrets. For backend code that
 /// needs provider configuration (endpoints, model names) on a hot path.
 pub(crate) fn read_settings_from_disk() -> Option<AppSettings> {
@@ -243,18 +51,131 @@ pub(crate) fn read_settings_from_disk() -> Option<AppSettings> {
 }
 
 /// Get the settings file path
-pub fn get_settings_path() -> Result<PathBuf, String> {
+pub fn get_settings_path() -> Result<std::path::PathBuf, String> {
     let app_data =
         dirs::config_dir().ok_or_else(|| DiagError::internal("Could not find config directory"))?;
-    let settings_dir = app_data.join("com.windowsforum.diagnostics");
+    let path = wfdiag_native_settings::settings_path_from_config_dir(&app_data);
+    let settings_dir = path.parent().ok_or_else(|| {
+        DiagError::internal("Settings path did not contain an application directory")
+    })?;
 
     // Create directory if it doesn't exist
     if !settings_dir.exists() {
-        std::fs::create_dir_all(&settings_dir)
+        std::fs::create_dir_all(settings_dir)
             .map_err(|e| DiagError::file(settings_dir.display().to_string(), e.to_string()))?;
     }
 
-    Ok(settings_dir.join("settings.json"))
+    Ok(path)
+}
+
+/// Preserve Tauri's structured file-error contract while delegating all path,
+/// load, and atomic-write mechanics to the shared shipping store.
+struct TauriSettingsStorage;
+
+impl SettingsStorage for TauriSettingsStorage {
+    fn load(&self) -> Result<Option<Vec<u8>>, SettingsError> {
+        let path = get_settings_path().map_err(SettingsError::Storage)?;
+        ShippingSettingsStorage::at_path(path.clone())
+            .load()
+            .map_err(|error| {
+                let reason = match error {
+                    SettingsError::Storage(detail) => detail,
+                    other => other.to_string(),
+                };
+                SettingsError::Storage(DiagError::file(path.display().to_string(), reason).into())
+            })
+    }
+
+    fn save(&self, serialized: &[u8]) -> Result<(), SettingsError> {
+        let path = get_settings_path().map_err(SettingsError::Storage)?;
+        ShippingSettingsStorage::at_path(path.clone())
+            .save(serialized)
+            .map_err(|error| {
+                let reason = match error {
+                    SettingsError::Storage(detail) => detail,
+                    other => other.to_string(),
+                };
+                SettingsError::Storage(DiagError::file(path.display().to_string(), reason).into())
+            })
+    }
+}
+
+struct TauriCredentialStorage;
+
+impl CredentialStorage for TauriCredentialStorage {
+    fn store(&self, provider: ProviderKeyId, key: &str) -> Result<(), SettingsError> {
+        #[cfg(windows)]
+        {
+            crate::dpapi::store_provider_key(provider, key).map_err(SettingsError::Credential)
+        }
+        #[cfg(not(windows))]
+        {
+            let entry = provider_keyring_entry(provider).map_err(SettingsError::Credential)?;
+            entry.set_password(key).map_err(|error| {
+                SettingsError::Credential(DiagError::api_key("store", error.to_string()).into())
+            })
+        }
+    }
+
+    fn load(&self, provider: ProviderKeyId) -> Result<Option<String>, SettingsError> {
+        #[cfg(windows)]
+        {
+            // Preserve the shipping read policy: unavailable/corrupt secrets
+            // are reported as "not configured" and never block Settings UI.
+            Ok(crate::dpapi::load_provider_key(provider).ok().flatten())
+        }
+        #[cfg(not(windows))]
+        {
+            let entry = provider_keyring_entry(provider).map_err(SettingsError::Credential)?;
+            match entry.get_password() {
+                Ok(value) if !value.is_empty() => Ok(Some(value)),
+                Ok(_) | Err(keyring_core::Error::NoEntry) => Ok(None),
+                Err(_) => Ok(None),
+            }
+        }
+    }
+
+    fn clear(&self, provider: ProviderKeyId) -> Result<(), SettingsError> {
+        #[cfg(windows)]
+        {
+            crate::dpapi::clear_provider_key(provider).map_err(SettingsError::Credential)
+        }
+        #[cfg(not(windows))]
+        {
+            let entry = provider_keyring_entry(provider).map_err(SettingsError::Credential)?;
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
+                Err(error) => Err(SettingsError::Credential(
+                    DiagError::api_key("clear", error.to_string()).into(),
+                )),
+            }
+        }
+    }
+}
+
+pub(crate) fn native_settings_service() -> SettingsService {
+    SettingsService::new(
+        Arc::new(TauriSettingsStorage),
+        Arc::new(TauriCredentialStorage),
+        Arc::new(crate::ai_service::provider_preference_settings_validator()),
+    )
+}
+
+fn map_native_settings_error(error: SettingsError) -> String {
+    match error {
+        SettingsError::Storage(detail)
+        | SettingsError::Credential(detail)
+        | SettingsError::Validation(detail) => detail,
+        SettingsError::Serialization(detail) => DiagError::serialization(detail).into(),
+        SettingsError::Runtime(detail) => DiagError::internal(detail).into(),
+    }
+}
+
+fn parse_provider_key_id(provider: &str) -> Result<ProviderKeyId, String> {
+    ProviderKeyId::parse(provider).map_err(|error| match error {
+        SettingsError::Credential(detail) => DiagError::api_key("store", detail).into(),
+        other => DiagError::api_key("store", other.to_string()).into(),
+    })
 }
 
 #[cfg(not(windows))]
@@ -301,91 +222,33 @@ fn provider_keyring_entry(id: ProviderKeyId) -> Result<Entry, String> {
 /// `Some("")` means "clear"; `None` means "not provided, leave untouched".
 fn persist_provider_key(id: ProviderKeyId, key: Option<&str>) -> Result<(), String> {
     let Some(key) = key else { return Ok(()) };
-    #[cfg(windows)]
-    {
-        // Propagate (don't swallow) failures: otherwise save_settings returns Ok,
-        // the UI believes the key persisted, and it silently vanishes on restart.
-        // store_provider_key treats an empty string as "clear".
-        crate::dpapi::store_provider_key(id, key)
-            .map_err(|e| DiagError::api_key("store", e.to_string()).into())
-    }
-    #[cfg(not(windows))]
-    {
-        if !key.is_empty() {
-            let entry = provider_keyring_entry(id)?;
-            entry
-                .set_password(key)
-                .map_err(|e| DiagError::api_key("store", e.to_string()).into())
-        } else {
-            if let Ok(entry) = provider_keyring_entry(id) {
-                let _ = entry.delete_credential();
-            }
-            Ok(())
-        }
-    }
+    native_settings_service()
+        .store_provider_key(id, key)
+        .map_err(map_native_settings_error)
 }
 
 /// Load one provider key from the platform secret store.
 pub async fn load_provider_key_internal(id: ProviderKeyId) -> Option<String> {
-    #[cfg(windows)]
-    {
-        crate::dpapi::load_provider_key(id).ok().flatten()
-    }
-    #[cfg(not(windows))]
-    {
-        let entry = provider_keyring_entry(id).ok()?;
-        match entry.get_password() {
-            Ok(pwd) if !pwd.is_empty() => Some(pwd),
-            _ => None,
-        }
-    }
+    native_settings_service()
+        .load_provider_key(id)
+        .ok()
+        .flatten()
 }
 
 /// Copy of the settings with every API key stripped — the only shape that may
 /// be serialized to the settings file. Keys live in DPAPI/keyring exclusively.
 fn settings_for_disk(settings: &AppSettings) -> AppSettings {
-    let mut s = settings.clone();
-    s.open_ai_api_key = None;
-    s.anthropic_api_key = None;
-    s.gemini_api_key = None;
-    s.deepseek_api_key = None;
-    s.custom_api_key = None;
-    // These are derived from the secret store at load time, not persisted.
-    s.open_ai_api_key_set = false;
-    s.anthropic_api_key_set = false;
-    s.gemini_api_key_set = false;
-    s.deepseek_api_key_set = false;
-    s.custom_api_key_set = false;
-    s
+    settings.for_disk()
 }
 
 #[tauri::command]
 pub async fn save_settings(settings: AppSettings) -> Result<(), String> {
-    // Validate provider admission before keyring/DPAPI writes or touching the
-    // settings file. In particular, a loose executable must never persist an
-    // explicit Phi preference that it cannot serve.
-    crate::ai_service::parse_and_validate_provider_preference(&settings.preferred_ai_provider)?;
+    // The native service preserves validation-before-secret-write ordering,
+    // write-only secret handling, and the existing atomic settings store.
+    native_settings_service()
+        .save(&settings)
+        .map_err(map_native_settings_error)?;
     let path = get_settings_path()?;
-
-    // Route any provided keys to secure storage (separate from settings file)
-    persist_provider_key(ProviderKeyId::OpenAI, settings.open_ai_api_key.as_deref())?;
-    persist_provider_key(
-        ProviderKeyId::Anthropic,
-        settings.anthropic_api_key.as_deref(),
-    )?;
-    persist_provider_key(ProviderKeyId::Gemini, settings.gemini_api_key.as_deref())?;
-    persist_provider_key(
-        ProviderKeyId::DeepSeek,
-        settings.deepseek_api_key.as_deref(),
-    )?;
-    persist_provider_key(ProviderKeyId::Custom, settings.custom_api_key.as_deref())?;
-
-    let json = serde_json::to_string_pretty(&settings_for_disk(&settings))
-        .map_err(|e| DiagError::serialization(e.to_string()))?;
-    // Atomic (temp + fsync + replace): a crash mid-write must never destroy
-    // the user's whole settings file.
-    crate::fs_atomic::write_file(&path, json.as_bytes())
-        .map_err(|e| DiagError::file(path.display().to_string(), e))?;
 
     // Sync settings the backend consults in memory
     sync_in_memory_state(&settings);
@@ -427,15 +290,9 @@ fn normalize_unavailable_provider_for_runtime(settings: &mut AppSettings) {
 #[tauri::command]
 pub async fn load_settings() -> Result<AppSettings, String> {
     let path = get_settings_path()?;
-
-    let mut settings = if !path.exists() {
-        println!("No settings file found, returning defaults");
-        AppSettings::default()
-    } else {
-        let json = std::fs::read_to_string(&path)
-            .map_err(|e| DiagError::file(path.display().to_string(), e.to_string()))?;
-        serde_json::from_str(&json).map_err(|e| DiagError::serialization(e.to_string()))?
-    };
+    let mut settings = native_settings_service()
+        .load()
+        .map_err(map_native_settings_error)?;
 
     // Older loose builds allowed `phi_silica` to be persisted even though
     // Windows AI cannot run without package identity. Normalize only the
@@ -446,24 +303,6 @@ pub async fn load_settings() -> Result<AppSettings, String> {
     // Sync loaded settings to in-memory state
     sync_in_memory_state(&settings);
 
-    // Return only configured/not-configured flags. Decrypted key material is
-    // backend-only and must never cross into the webview.
-    settings.open_ai_api_key_set = load_provider_key_internal(ProviderKeyId::OpenAI)
-        .await
-        .is_some();
-    settings.anthropic_api_key_set = load_provider_key_internal(ProviderKeyId::Anthropic)
-        .await
-        .is_some();
-    settings.gemini_api_key_set = load_provider_key_internal(ProviderKeyId::Gemini)
-        .await
-        .is_some();
-    settings.deepseek_api_key_set = load_provider_key_internal(ProviderKeyId::DeepSeek)
-        .await
-        .is_some();
-    settings.custom_api_key_set = load_provider_key_internal(ProviderKeyId::Custom)
-        .await
-        .is_some();
-
     println!("Settings loaded from {:?}", path);
     Ok(settings)
 }
@@ -472,13 +311,13 @@ pub async fn load_settings() -> Result<AppSettings, String> {
 /// custom_openai). An empty key clears the stored value.
 #[tauri::command]
 pub async fn store_provider_api_key(provider: String, key: String) -> Result<(), String> {
-    persist_provider_key(ProviderKeyId::parse(&provider)?, Some(&key))
+    persist_provider_key(parse_provider_key_id(&provider)?, Some(&key))
 }
 
 /// Clear the stored API key for a specific provider.
 #[tauri::command]
 pub async fn clear_provider_api_key(provider: String) -> Result<(), String> {
-    persist_provider_key(ProviderKeyId::parse(&provider)?, Some(""))
+    persist_provider_key(parse_provider_key_id(&provider)?, Some(""))
 }
 
 /// Legacy single-key command — stores the OpenAI key.
@@ -534,7 +373,7 @@ pub(crate) fn persist_cloud_fallback_policy(policy: CloudFallbackPolicy) -> Resu
     settings.cloud_fallback_policy = policy;
     let json = serde_json::to_string_pretty(&settings_for_disk(&settings))
         .map_err(|e| DiagError::serialization(e.to_string()))?;
-    crate::fs_atomic::write_file(&path, json.as_bytes())
+    wfdiag_native_settings::atomic_write_file(&path, json.as_bytes())
         .map_err(|e| DiagError::file(path.display().to_string(), e).to_string())?;
     CLOUD_FALLBACK_POLICY.store(
         match policy {
@@ -555,18 +394,7 @@ pub async fn load_api_key_internal() -> Option<String> {
 /// Legacy single-key command — clears the OpenAI key.
 #[tauri::command]
 pub async fn clear_api_key() -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        crate::dpapi::clear_api_key()
-    }
-    #[cfg(not(windows))]
-    {
-        let entry = provider_keyring_entry(ProviderKeyId::OpenAI)?;
-        match entry.delete_credential() {
-            Ok(_) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(e) => Err(DiagError::api_key("clear", e.to_string()).into()),
-        }
-    }
+    persist_provider_key(ProviderKeyId::OpenAI, Some(""))
 }
 
 #[cfg(test)]

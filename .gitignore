@@ -16,6 +16,7 @@ releases/
 msix_layout/
 
 # Tauri build outputs
+target/
 src-tauri/target/
 src-tauri/gen/
 src-tauri/bundle/
@@ -204,3 +205,14 @@ yarn.lock
 .pnp.*
 nul
 __pycache__/
+
+# =============================================================================
+# Native Reactor migration artifacts
+# =============================================================================
+# The full capture library (superseded QA iterations + per-state finals) stays
+# local. Only manifest/docs-referenced evidence PNGs are force-added to git.
+reactor-spike/*.png
+reactor-spike/captures-2.5.8/
+
+# Windows NTFS mark-of-the-web artifacts
+*:Zone.Identifier

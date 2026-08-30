@@ -12,18 +12,11 @@ use crate::native_monitor::SystemMonitor;
 use crate::results_storage::ScanStorage;
 use crate::state::{DiagnosticSession, ScanKind};
 use serde_json::{Value, json};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
-
-/// Executes tool calls. A trait so the chat loop is testable with a mock.
-pub trait ToolExecutor: Send + Sync {
-    fn execute<'a>(&'a self, call: &'a ToolCall, cancel: CancellationToken) -> ToolFuture<'a>;
-}
+pub use wfdiag_native_ai_chat::{ToolExecutor, ToolFuture};
 
 const MAX_REASON_CHARS: usize = 300;
 const MAX_GROUNDING_QUERY_CHARS: usize = 420;

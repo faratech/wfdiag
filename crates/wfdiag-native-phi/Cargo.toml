@@ -1,0 +1,33 @@
+[package]
+name = "wfdiag-native-phi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "UI-framework-neutral Windows AI/Phi Silica runtime for WFDiag"
+license-file = "../../LICENSE"
+publish = false
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1.52.0", features = ["rt", "sync"] }
+wfdiag-native-ai-provider = { path = "../wfdiag-native-ai-provider" }
+wfdiag-native-settings = { path = "../wfdiag-native-settings" }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+windows-core = "0.62"
+windows-future = "0.3"
+windows-collections = "0.3"
+windows = { version = "0.62", features = [
+    "ApplicationModel",
+    "Foundation",
+    "Foundation_Collections",
+    "Win32_Foundation",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_System_LibraryLoader",
+    "Win32_System_WinRT",
+] }
+
+[lints.clippy]
+all = "warn"

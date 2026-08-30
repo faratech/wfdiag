@@ -15,9 +15,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::future::Future;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use wfdiag_remediation_catalog as remediation_catalog;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixResult {
@@ -60,32 +62,9 @@ pub struct RemediationStepResult {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RemediationTier {
-    OpenTool,
-    AutoSafe,
-    Repair,
-}
-
-/// Wire form sent to the frontend (embedded in Issue + the Maintenance list)
-/// and included in AI prompts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemediationSummary {
-    pub id: String,
-    pub label: String,
-    pub description: String,
-    pub tier: RemediationTier,
-    pub admin_required: bool,
-    pub requires_restart: bool,
-    pub long_running: bool,
-    pub maintenance: bool,
-    /// Eligible for an exact, bounded batch authorization. Repair, elevated,
-    /// restart-requiring and long-running actions are deliberately excluded.
-    pub batch_eligible: bool,
-    /// Whether an in-flight action has a safe cancellation boundary.
-    pub cancellable: bool,
-}
+/// Wire forms shared with native issue detection. Execution remains in this
+/// module and is never exposed by the portable metadata crate.
+pub use wfdiag_remediation_catalog::{RemediationMetadata, RemediationSummary, RemediationTier};
 
 /// Test-only shape for the removed boolean confirmation path. Keeping this in
 /// regression tests proves repair commands are never constructed pre-approval
@@ -126,25 +105,22 @@ pub enum RunKind {
 }
 
 pub struct RemediationSpec {
-    pub id: &'static str,
-    pub label: &'static str,
-    /// EXACTLY what runs — shown verbatim in the confirm modal and AI prompts
-    pub description: &'static str,
-    pub tier: RemediationTier,
-    pub admin_required: bool,
-    pub requires_restart: bool,
-    pub long_running: bool,
-    /// Listed in the always-available Maintenance section
-    pub maintenance: bool,
+    /// Shared immutable UI/issue metadata. Execution-only data stays below.
+    pub metadata: &'static RemediationMetadata,
     pub run: RunKind,
+}
+
+impl Deref for RemediationSpec {
+    type Target = RemediationMetadata;
+
+    fn deref(&self) -> &Self::Target {
+        self.metadata
+    }
 }
 
 impl RemediationSpec {
     pub fn batch_eligible(&self) -> bool {
-        self.tier == RemediationTier::AutoSafe
-            && !self.admin_required
-            && !self.requires_restart
-            && !self.long_running
+        self.metadata.batch_eligible()
     }
 
     pub fn cancellable(&self) -> bool {
@@ -181,18 +157,10 @@ impl RemediationSpec {
     }
 
     pub fn summary(&self) -> RemediationSummary {
-        RemediationSummary {
-            id: self.id.to_string(),
-            label: self.label.to_string(),
-            description: self.description.to_string(),
-            tier: self.tier,
-            admin_required: self.admin_required,
-            requires_restart: self.requires_restart,
-            long_running: self.long_running,
-            maintenance: self.maintenance,
-            batch_eligible: self.batch_eligible(),
-            cancellable: self.cancellable(),
-        }
+        let summary = self.metadata.summary();
+        debug_assert_eq!(summary.batch_eligible, self.batch_eligible());
+        debug_assert_eq!(summary.cancellable, self.cancellable());
+        summary
     }
 }
 
@@ -300,99 +268,49 @@ pub fn remediations() -> &'static [RemediationSpec] {
     &[
         // ---- OpenTool ----
         RemediationSpec {
-            id: "open_defrag",
-            label: "Open Optimize Drives",
-            description: "Opens the Windows Optimize Drives tool (dfrgui.exe).",
-            tier: RemediationTier::OpenTool,
-            admin_required: false,
-            requires_restart: false,
-            long_running: false,
-            maintenance: false,
+            metadata: remediation_catalog::OPEN_DEFRAG,
             run: RunKind::Spawn {
                 program: "dfrgui.exe",
                 args: &[],
             },
         },
         RemediationSpec {
-            id: "open_disk_cleanup",
-            label: "Open Disk Cleanup",
-            description: "Opens Windows Disk Cleanup (cleanmgr.exe) to pick what to remove.",
-            tier: RemediationTier::OpenTool,
-            admin_required: false,
-            requires_restart: false,
-            long_running: false,
-            maintenance: false,
+            metadata: remediation_catalog::OPEN_DISK_CLEANUP,
             run: RunKind::Spawn {
                 program: "cleanmgr.exe",
                 args: &[],
             },
         },
         RemediationSpec {
-            id: "open_task_manager",
-            label: "Open Task Manager",
-            description: "Opens Task Manager (taskmgr.exe) to inspect processes and startup apps.",
-            tier: RemediationTier::OpenTool,
-            admin_required: false,
-            requires_restart: false,
-            long_running: false,
-            maintenance: false,
+            metadata: remediation_catalog::OPEN_TASK_MANAGER,
             run: RunKind::Spawn {
                 program: "taskmgr.exe",
                 args: &[],
             },
         },
         RemediationSpec {
-            id: "open_windows_update",
-            label: "Open Windows Update",
-            description: "Opens Settings > Windows Update (ms-settings:windowsupdate).",
-            tier: RemediationTier::OpenTool,
-            admin_required: false,
-            requires_restart: false,
-            long_running: false,
-            maintenance: false,
+            metadata: remediation_catalog::OPEN_WINDOWS_UPDATE,
             run: RunKind::Spawn {
                 program: "explorer.exe",
                 args: &["ms-settings:windowsupdate"],
             },
         },
         RemediationSpec {
-            id: "open_security_center",
-            label: "Open Windows Security",
-            description: "Opens the Windows Security app (windowsdefender://).",
-            tier: RemediationTier::OpenTool,
-            admin_required: false,
-            requires_restart: false,
-            long_running: false,
-            maintenance: false,
+            metadata: remediation_catalog::OPEN_SECURITY_CENTER,
             run: RunKind::Spawn {
                 program: "explorer.exe",
                 args: &["windowsdefender://"],
             },
         },
         RemediationSpec {
-            id: "open_device_manager",
-            label: "Open Device Manager",
-            description: "Opens Device Manager (devmgmt.msc) to inspect flagged devices.",
-            tier: RemediationTier::OpenTool,
-            admin_required: false,
-            requires_restart: false,
-            long_running: false,
-            maintenance: false,
+            metadata: remediation_catalog::OPEN_DEVICE_MANAGER,
             run: RunKind::Spawn {
                 program: "mmc.exe",
                 args: &["devmgmt.msc"],
             },
         },
         RemediationSpec {
-            id: "open_system_protection",
-            label: "Open System Protection",
-            description: "Opens System Protection settings (SystemPropertiesProtection.exe) to \
-                          manage restore points.",
-            tier: RemediationTier::OpenTool,
-            admin_required: false,
-            requires_restart: false,
-            long_running: false,
-            maintenance: false,
+            metadata: remediation_catalog::OPEN_SYSTEM_PROTECTION,
             run: RunKind::Spawn {
                 program: "SystemPropertiesProtection.exe",
                 args: &[],
@@ -400,14 +318,7 @@ pub fn remediations() -> &'static [RemediationSpec] {
         },
         // ---- AutoSafe ----
         RemediationSpec {
-            id: "flush_dns",
-            label: "Flush DNS cache",
-            description: "Runs 'ipconfig /flushdns' to clear cached DNS lookups.",
-            tier: RemediationTier::AutoSafe,
-            admin_required: false,
-            requires_restart: false,
-            long_running: false,
-            maintenance: true,
+            metadata: remediation_catalog::FLUSH_DNS,
             run: RunKind::Steps {
                 steps: &[CmdStep {
                     program: "ipconfig",
@@ -420,54 +331,25 @@ pub fn remediations() -> &'static [RemediationSpec] {
             },
         },
         RemediationSpec {
-            id: "clear_icon_cache",
-            label: "Rebuild icon & thumbnail cache",
-            description: "Deletes IconCache.db and Explorer thumbnail caches; they rebuild on \
-                          next sign-in.",
-            tier: RemediationTier::AutoSafe,
-            admin_required: false,
-            requires_restart: true,
-            long_running: false,
-            maintenance: true,
+            metadata: remediation_catalog::CLEAR_ICON_CACHE,
             run: RunKind::Custom {
                 f: clear_icon_cache,
             },
         },
         RemediationSpec {
-            id: "empty_recycle_bin",
-            label: "Empty Recycle Bin",
-            description: "Permanently removes the current contents of the Recycle Bin using the Windows Shell API.",
-            tier: RemediationTier::Repair,
-            admin_required: false,
-            requires_restart: false,
-            long_running: false,
-            maintenance: true,
+            metadata: remediation_catalog::EMPTY_RECYCLE_BIN,
             run: RunKind::Custom {
                 f: empty_recycle_bin,
             },
         },
         RemediationSpec {
-            id: "clear_temp_files",
-            label: "Clean temp files",
-            description: "Permanently deletes files and folders in the user temp directory; locked items are skipped.",
-            tier: RemediationTier::Repair,
-            admin_required: false,
-            requires_restart: false,
-            long_running: false,
-            maintenance: true,
+            metadata: remediation_catalog::CLEAR_TEMP_FILES,
             run: RunKind::Custom {
                 f: clear_temp_files,
             },
         },
         RemediationSpec {
-            id: "start_critical_services",
-            label: "Start stopped core services",
-            description: "Runs 'sc start' for wuauserv, BITS, Spooler, Themes and AudioSrv.",
-            tier: RemediationTier::AutoSafe,
-            admin_required: true,
-            requires_restart: false,
-            long_running: false,
-            maintenance: false,
+            metadata: remediation_catalog::START_CRITICAL_SERVICES,
             run: RunKind::Steps {
                 steps: &[
                     CmdStep {
@@ -508,29 +390,13 @@ pub fn remediations() -> &'static [RemediationSpec] {
         },
         // ---- Repair (confirm-gated) ----
         RemediationSpec {
-            id: "windows_update_reset",
-            label: "Reset Windows Update",
-            description: "Stops the Windows Update service, clears the SoftwareDistribution \
-                          download cache, and restarts the service.",
-            tier: RemediationTier::Repair,
-            admin_required: true,
-            requires_restart: false,
-            long_running: false,
-            maintenance: true,
+            metadata: remediation_catalog::WINDOWS_UPDATE_RESET,
             run: RunKind::Custom {
                 f: reset_windows_update,
             },
         },
         RemediationSpec {
-            id: "dism_restorehealth",
-            label: "Repair Windows image (DISM)",
-            description: "Runs 'DISM /Online /Cleanup-Image /RestoreHealth' to repair the \
-                          Windows component store. Can take 10-30 minutes.",
-            tier: RemediationTier::Repair,
-            admin_required: true,
-            requires_restart: false,
-            long_running: true,
-            maintenance: true,
+            metadata: remediation_catalog::DISM_RESTOREHEALTH,
             run: RunKind::Steps {
                 steps: &[CmdStep {
                     program: "dism",
@@ -543,15 +409,7 @@ pub fn remediations() -> &'static [RemediationSpec] {
             },
         },
         RemediationSpec {
-            id: "sfc_scannow",
-            label: "System File Checker",
-            description: "Runs 'sfc /scannow' to verify and repair protected system files. Can \
-                          take 5-15 minutes.",
-            tier: RemediationTier::Repair,
-            admin_required: true,
-            requires_restart: false,
-            long_running: true,
-            maintenance: true,
+            metadata: remediation_catalog::SFC_SCANNOW,
             run: RunKind::Steps {
                 steps: &[CmdStep {
                     program: "sfc",
@@ -564,15 +422,7 @@ pub fn remediations() -> &'static [RemediationSpec] {
             },
         },
         RemediationSpec {
-            id: "network_reset",
-            label: "Reset network stack",
-            description: "Runs 'netsh winsock reset' and 'netsh int ip reset'. Requires a \
-                          restart to take effect.",
-            tier: RemediationTier::Repair,
-            admin_required: true,
-            requires_restart: true,
-            long_running: false,
-            maintenance: true,
+            metadata: remediation_catalog::NETWORK_RESET,
             run: RunKind::Steps {
                 steps: &[
                     CmdStep {
@@ -593,15 +443,7 @@ pub fn remediations() -> &'static [RemediationSpec] {
             },
         },
         RemediationSpec {
-            id: "restart_system",
-            label: "Restart Windows (60s)",
-            description: "Schedules a restart in 60 seconds via 'shutdown /r /t 60'. Cancel with \
-                          'shutdown /a'.",
-            tier: RemediationTier::Repair,
-            admin_required: false,
-            requires_restart: true,
-            long_running: false,
-            maintenance: false,
+            metadata: remediation_catalog::RESTART_SYSTEM,
             run: RunKind::Steps {
                 steps: &[CmdStep {
                     program: "shutdown",
@@ -1324,12 +1166,59 @@ mod tests {
             );
         }
 
-        // Every issue's remediation_id resolves to a catalog entry
+        let metadata_catalog = remediation_catalog::catalog();
+        assert_eq!(
+            remediations().len(),
+            metadata_catalog.len(),
+            "every metadata entry must have one trusted execution entry"
+        );
+        for metadata in metadata_catalog {
+            let matches: Vec<_> = remediations()
+                .iter()
+                .filter(|spec| spec.id == metadata.id)
+                .collect();
+            assert_eq!(
+                matches.len(),
+                1,
+                "metadata '{}' must map to exactly one execution entry",
+                metadata.id
+            );
+            let spec = matches[0];
+            assert!(
+                std::ptr::eq(spec.metadata, metadata),
+                "execution '{}' must reference the canonical metadata object",
+                metadata.id
+            );
+            assert_eq!(spec.summary(), metadata.summary());
+            assert_eq!(
+                spec.cancellable(),
+                metadata.cancellable,
+                "execution cancellation policy drift for '{}'",
+                metadata.id
+            );
+        }
+
+        // Every issue's remediation_id resolves to exactly one metadata and
+        // trusted execution entry.
         for issue in crate::issue_catalog::catalog() {
             if let Some(remediation_id) = issue.remediation_id {
-                assert!(
-                    find(remediation_id).is_some(),
-                    "issue '{}' references unknown remediation '{}'",
+                assert_eq!(
+                    metadata_catalog
+                        .iter()
+                        .filter(|metadata| metadata.id == remediation_id)
+                        .count(),
+                    1,
+                    "issue '{}' must resolve canonical remediation '{}' exactly once",
+                    issue.id,
+                    remediation_id
+                );
+                assert_eq!(
+                    remediations()
+                        .iter()
+                        .filter(|spec| spec.id == remediation_id)
+                        .count(),
+                    1,
+                    "issue '{}' must resolve execution remediation '{}' exactly once",
                     issue.id,
                     remediation_id
                 );

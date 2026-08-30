@@ -10,7 +10,6 @@ use std::os::windows::ffi::OsStringExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use tokio::time::interval;
 use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation};
@@ -115,6 +114,27 @@ pub struct SystemStats {
     pub timestamp: i64,
 }
 
+/// UI-neutral sink for the live monitoring stream.
+///
+/// The current Tauri shell adapts this to its `system-stats` event while the
+/// native Reactor shell can publish the same samples into its UI event bus.
+/// Keeping the monitor unaware of either UI runtime also makes its lifetime
+/// and backpressure behavior independently testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorEmission {
+    Continue,
+    Stop,
+}
+
+pub trait MonitorEmitter: Send + Sync {
+    /// Cheap preflight used before collecting and projecting the next sample.
+    fn accepts_system_stats(&self) -> bool {
+        true
+    }
+
+    fn emit_system_stats(&self, stats: &SystemStats) -> MonitorEmission;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskInfo {
     pub name: String,
@@ -204,7 +224,7 @@ pub struct ProcessInfo {
 /// Fields supported by the on-demand process explorer. Monitoring continues
 /// to emit only `top_processes`; this query is used only while Processes is
 /// visible so the full list never rides the one-second stats event.
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessSortKey {
     Name,
@@ -219,7 +239,7 @@ pub enum ProcessSortKey {
     NpuPercent,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessSortDirection {
     Asc,
@@ -227,7 +247,7 @@ pub enum ProcessSortDirection {
     Desc,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ProcessQuery {
     #[serde(default)]
     pub search: String,
@@ -243,6 +263,18 @@ pub struct ProcessQuery {
 
 fn default_process_page_size() -> usize {
     100
+}
+
+impl Default for ProcessQuery {
+    fn default() -> Self {
+        Self {
+            search: String::new(),
+            sort_by: ProcessSortKey::default(),
+            sort_direction: ProcessSortDirection::default(),
+            offset: 0,
+            limit: default_process_page_size(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -458,7 +490,7 @@ struct NetworkState {
 }
 
 pub struct SystemMonitor {
-    app_handle: AppHandle,
+    emitter: Arc<dyn MonitorEmitter>,
     monitoring: Arc<Mutex<bool>>,
     pdh_state: Arc<std::sync::Mutex<PdhState>>,
     previous_network: Arc<Mutex<NetworkState>>,
@@ -484,7 +516,8 @@ pub struct SystemMonitor {
 }
 
 impl SystemMonitor {
-    pub fn new(app_handle: AppHandle) -> Self {
+    /// Construct a monitor for a non-Tauri shell.
+    pub fn with_emitter(emitter: Arc<dyn MonitorEmitter>) -> Self {
         // Initialize fast caches synchronously (< 1ms)
         CPU_COUNT.get_or_init(|| unsafe {
             let mut sys_info = SYSTEM_INFO::default();
@@ -515,7 +548,7 @@ impl SystemMonitor {
         });
 
         Self {
-            app_handle,
+            emitter,
             monitoring: Arc::new(Mutex::new(false)),
             pdh_state: Arc::new(std::sync::Mutex::new(PdhState::default())),
             previous_network: Arc::new(Mutex::new(NetworkState {
@@ -557,7 +590,7 @@ impl SystemMonitor {
         self.include_process_adapter_stats
             .store(include_process_adapter_stats, Ordering::Relaxed);
 
-        let app_handle = self.app_handle.clone();
+        let emitter = Arc::clone(&self.emitter);
         let monitoring_flag = Arc::clone(&self.monitoring);
         let generation = Arc::clone(&self.generation);
         let pdh_state = Arc::clone(&self.pdh_state);
@@ -665,6 +698,17 @@ impl SystemMonitor {
                     break;
                 }
 
+                // A native UI receiver owns the event bus lifetime. Stop before
+                // doing another expensive sample/projection once that receiver
+                // has gone away.
+                if !emitter.accepts_system_stats() {
+                    let mut monitoring = monitoring_flag.lock().await;
+                    if generation.load(Ordering::SeqCst) == my_gen {
+                        *monitoring = false;
+                    }
+                    break;
+                }
+
                 let tick = tick_count.fetch_add(1, Ordering::Relaxed);
 
                 let stats = collect_stats_optimized(
@@ -682,7 +726,13 @@ impl SystemMonitor {
                 )
                 .await;
 
-                let _ = app_handle.emit("system-stats", &stats);
+                if emitter.emit_system_stats(&stats) == MonitorEmission::Stop {
+                    let mut monitoring = monitoring_flag.lock().await;
+                    if generation.load(Ordering::SeqCst) == my_gen {
+                        *monitoring = false;
+                    }
+                    break;
+                }
             }
         });
 
@@ -1001,12 +1051,12 @@ fn compute_fast_stats(
     // 3. Network
     // Need to lock async mutex in blocking context - use block_on
     let (network_upload_kb, network_download_kb) =
-        tauri::async_runtime::block_on(async { get_network_stats(previous_network).await });
+        futures::executor::block_on(async { get_network_stats(previous_network).await });
 
     // 4. Adapter and process stats. Refreshing the D3DKMT adapter state first
     // lets per-process stats share the same detected adapter topology.
     let adapter_snapshot = crate::adapter_monitor::refresh();
-    let (all_procs, disk_read_bytes, disk_write_bytes) = tauri::async_runtime::block_on(async {
+    let (all_procs, disk_read_bytes, disk_write_bytes) = futures::executor::block_on(async {
         get_top_processes_optimized(
             memory_total,
             previous_processes,
@@ -1871,7 +1921,10 @@ fn paginate_processes(mut processes: Vec<ProcessInfo>, query: ProcessQuery) -> P
     let search = query.search.trim().to_lowercase();
     if !search.is_empty() {
         processes.retain(|process| {
-            process.name_lower.contains(&search) || process.command_lower.contains(&search)
+            process.name_lower.contains(&search)
+                || process.command_lower.contains(&search)
+                || process.pid.to_string().contains(&search)
+                || process.status.to_ascii_lowercase().contains(&search)
         });
     }
 
@@ -1922,7 +1975,9 @@ fn paginate_processes(mut processes: Vec<ProcessInfo>, query: ProcessQuery) -> P
         .collect();
 
     ProcessPage {
-        captured_at: crate::timestamp::Timestamp::now().secs,
+        captured_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs() as i64),
         total,
         offset,
         limit,
@@ -2612,6 +2667,15 @@ mod tests {
     }
 
     #[test]
+    fn programmatic_process_query_default_uses_the_ui_page_size() {
+        let query = ProcessQuery::default();
+
+        assert_eq!(query.offset, 0);
+        assert_eq!(query.limit, 100);
+        assert!(query.search.is_empty());
+    }
+
+    #[test]
     fn process_page_filters_sorts_and_clamps_page_size() {
         let page = paginate_processes(
             vec![
@@ -2632,6 +2696,33 @@ mod tests {
         assert_eq!(page.limit, 250);
         assert_eq!(page.items[0].pid, 2);
         assert_eq!(page.items[1].pid, 3);
+    }
+
+    #[test]
+    fn process_page_filter_matches_pid_and_status() {
+        let mut suspended = process(42, "alpha.exe", 5.0, 10.0);
+        suspended.status = "Suspended".to_string();
+        let running = process(9001, "beta.exe", 20.0, 30.0);
+
+        let by_pid = paginate_processes(
+            vec![suspended.clone(), running.clone()],
+            ProcessQuery {
+                search: "9001".to_string(),
+                ..ProcessQuery::default()
+            },
+        );
+        assert_eq!(by_pid.items.len(), 1);
+        assert_eq!(by_pid.items[0].pid, 9001);
+
+        let by_status = paginate_processes(
+            vec![suspended, running],
+            ProcessQuery {
+                search: "SUSPENDED".to_string(),
+                ..ProcessQuery::default()
+            },
+        );
+        assert_eq!(by_status.items.len(), 1);
+        assert_eq!(by_status.items[0].pid, 42);
     }
 
     #[test]

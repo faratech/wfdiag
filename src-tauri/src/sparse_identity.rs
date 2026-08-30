@@ -15,14 +15,6 @@
 #![cfg(windows)]
 
 /// True when the current process runs with package identity.
-pub fn has_package_identity() -> bool {
-    use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
-    use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
-
-    let mut length: u32 = 0;
-    // With no buffer: ERROR_INSUFFICIENT_BUFFER means "there IS a package
-    // name" (we only asked for its length); APPMODEL_ERROR_NO_PACKAGE (15700)
-    // means the process is unpackaged.
-    let result = unsafe { GetCurrentPackageFullName(&mut length, None) };
-    result == ERROR_INSUFFICIENT_BUFFER
-}
+///
+/// Keep every Phi caller on the same gate as the shared activation runtime.
+pub use wfdiag_native_phi::has_package_identity;

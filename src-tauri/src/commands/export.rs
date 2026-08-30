@@ -3,78 +3,12 @@
 //! This module handles exporting diagnostic results in various formats
 //! (JSON, text, HTML) and saving them to disk.
 
-use crate::diagnostics::{self, DiagnosticTask};
+use crate::diagnostics;
 use crate::error::DiagError;
 use crate::state::AppState;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tauri::State;
-
-/// Format JSON values into readable text with indentation
-pub fn format_json_value(value: &serde_json::Value, indent_level: usize) -> String {
-    let indent = "  ".repeat(indent_level);
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut result = String::new();
-            for (key, val) in map {
-                let formatted_key = key
-                    .replace('_', " ")
-                    .split_whitespace()
-                    .map(|word| {
-                        let mut chars = word.chars();
-                        match chars.next() {
-                            None => String::new(),
-                            Some(first) => first.to_uppercase().chain(chars).collect(),
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-
-                match val {
-                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                        result.push_str(&format!("{}{}:\n", indent, formatted_key));
-                        result.push_str(&format_json_value(val, indent_level + 1));
-                    }
-                    serde_json::Value::Null => {
-                        // Skip null values
-                    }
-                    _ => {
-                        result.push_str(&format!(
-                            "{}{} : {}\n",
-                            indent,
-                            formatted_key,
-                            val.as_str().unwrap_or(&val.to_string())
-                        ));
-                    }
-                }
-            }
-            result
-        }
-        serde_json::Value::Array(arr) => {
-            let mut result = String::new();
-            for (i, val) in arr.iter().enumerate() {
-                if i > 0 {
-                    result.push_str(&format!("{}---\n", indent));
-                }
-                result.push_str(&format_json_value(val, indent_level));
-            }
-            result
-        }
-        _ => format!(
-            "{}{}\n",
-            indent,
-            value.as_str().unwrap_or(&value.to_string())
-        ),
-    }
-}
-
-/// Escape HTML special characters
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
 
 /// Get list of allowed directories for file saves (matching Tauri capabilities)
 fn get_allowed_save_paths() -> Vec<std::path::PathBuf> {
@@ -264,187 +198,29 @@ pub async fn suggest_export_path(filename: String) -> Result<String, String> {
         .into_owned())
 }
 
-fn redacted_json_results(
-    results: &HashMap<String, diagnostics::TaskResult>,
-) -> HashMap<String, serde_json::Value> {
-    results
-        .iter()
-        .map(|(task_id, result)| {
-            let value = serde_json::json!({
-                "success": result.success,
-                "error": result.error,
-                "duration_ms": result.duration_ms,
-            });
-            (task_id.clone(), value)
-        })
-        .collect()
-}
-
-fn grouped_results<'a>(
-    results: &'a HashMap<String, diagnostics::TaskResult>,
-    task_map: &'a HashMap<String, &'a DiagnosticTask>,
-) -> HashMap<String, Vec<(&'a String, &'a diagnostics::TaskResult)>> {
-    let mut results_by_category: HashMap<String, Vec<(&String, &diagnostics::TaskResult)>> =
-        HashMap::new();
-
-    for (task_id, result) in results {
-        if let Some(task) = task_map.get(task_id) {
-            results_by_category
-                .entry(task.category.clone())
-                .or_default()
-                .push((task_id, result));
-        }
-    }
-
-    results_by_category
-}
-
-fn format_text_results(
-    results: &HashMap<String, diagnostics::TaskResult>,
-    task_map: &HashMap<String, &DiagnosticTask>,
-    include_raw: bool,
-) -> String {
-    let mut text = String::new();
-    let results_by_category = grouped_results(results, task_map);
-
-    let mut categories: Vec<_> = results_by_category.keys().cloned().collect();
-    categories.sort();
-
-    for category in categories {
-        text.push_str(&format!("\n=== {} ===\n\n", category));
-
-        if let Some(results) = results_by_category.get(&category) {
-            for (task_id, result) in results {
-                if let Some(task) = task_map.get(*task_id) {
-                    text.push_str(&format!("{}:\n", task.name));
-                    text.push_str(&format!(
-                        "  Status: {}\n",
-                        if result.success { "Passed" } else { "Failed" }
-                    ));
-                    text.push_str(&format!("  Duration: {} ms\n", result.duration_ms));
-
-                    if result.success {
-                        if include_raw {
-                            if let Ok(parsed) =
-                                serde_json::from_str::<serde_json::Value>(&result.output)
-                            {
-                                text.push_str(&format_json_value(&parsed, 1));
-                            } else {
-                                text.push_str(&result.output);
-                                if !result.output.ends_with('\n') {
-                                    text.push('\n');
-                                }
-                            }
-                        }
-                    } else if let Some(error) = &result.error {
-                        text.push_str(&format!("  Error: {}\n", error));
-                    }
-
-                    text.push('\n');
-                }
-            }
-        }
-    }
-
-    text
-}
-
-fn format_html_results(
-    results: &HashMap<String, diagnostics::TaskResult>,
-    task_map: &HashMap<String, &DiagnosticTask>,
-    include_raw: bool,
-) -> String {
-    let mut html = String::new();
-    html.push_str("<!DOCTYPE html>\n<html>\n<head>\n");
-    html.push_str("<meta charset=\"UTF-8\">\n");
-    html.push_str("<title>WindowsForum Diagnostic Report</title>\n");
-    html.push_str("<style>\n");
-    html.push_str("body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #1a1a2e; color: #eee; }\n");
-    html.push_str(
-        "h1 { color: #60a5fa; border-bottom: 2px solid #3b82f6; padding-bottom: 10px; }\n",
-    );
-    html.push_str("h2 { color: #93c5fd; margin-top: 30px; }\n");
-    html.push_str(".task { background: #16213e; border-radius: 8px; padding: 15px; margin: 10px 0; border-left: 4px solid #3b82f6; }\n");
-    html.push_str(".task.error { border-left-color: #ef4444; }\n");
-    html.push_str(".task-name { font-weight: bold; color: #60a5fa; margin-bottom: 8px; }\n");
-    html.push_str(".output { white-space: pre-wrap; font-family: 'Consolas', 'Monaco', monospace; font-size: 13px; background: #0f0f1a; padding: 10px; border-radius: 4px; overflow-x: auto; }\n");
-    html.push_str(".error-msg { color: #f87171; }\n");
-    html.push_str(".meta { color: #9ca3af; font-size: 12px; margin-top: 20px; }\n");
-    html.push_str("</style>\n</head>\n<body>\n");
-    html.push_str("<h1>WindowsForum Diagnostic Report</h1>\n");
-    html.push_str("<p class=\"meta\">Generated: <span id=\"gendate\"></span></p>\n");
-    html.push_str("<script>document.getElementById('gendate').textContent = new Date().toLocaleString();</script>\n");
-
-    let results_by_category = grouped_results(results, task_map);
-    let mut categories: Vec<_> = results_by_category.keys().cloned().collect();
-    categories.sort();
-
-    for category in categories {
-        html.push_str(&format!("<h2>{}</h2>\n", html_escape(&category)));
-
-        if let Some(results) = results_by_category.get(&category) {
-            for (task_id, result) in results {
-                if let Some(task) = task_map.get(*task_id) {
-                    let class = if result.success { "task" } else { "task error" };
-                    html.push_str(&format!("<div class=\"{}\">\n", class));
-                    html.push_str(&format!(
-                        "<div class=\"task-name\">{}</div>\n",
-                        html_escape(&task.name)
-                    ));
-                    html.push_str(&format!(
-                        "<div class=\"meta\">Status: {} - Duration: {} ms</div>\n",
-                        if result.success { "Passed" } else { "Failed" },
-                        result.duration_ms
-                    ));
-
-                    if result.success {
-                        if include_raw {
-                            html.push_str("<div class=\"output\">");
-                            if let Ok(parsed) =
-                                serde_json::from_str::<serde_json::Value>(&result.output)
-                            {
-                                html.push_str(&html_escape(&format_json_value(&parsed, 0)));
-                            } else {
-                                html.push_str(&html_escape(&result.output));
-                            }
-                            html.push_str("</div>\n");
-                        }
-                    } else if let Some(error) = &result.error {
-                        html.push_str(&format!(
-                            "<div class=\"error-msg\">Error: {}</div>\n",
-                            html_escape(error)
-                        ));
-                    }
-
-                    html.push_str("</div>\n");
-                }
-            }
-        }
-    }
-
-    html.push_str("<p class=\"meta\">Generated using WindowsForum Diagnostics Tool</p>\n");
-    html.push_str("</body>\n</html>");
-    html
-}
-
 fn export_results_content(
     format: String,
     include_raw: bool,
     results: &HashMap<String, diagnostics::TaskResult>,
 ) -> Result<String, String> {
-    let all_tasks = diagnostics::get_all_tasks();
-    let task_map: HashMap<String, &DiagnosticTask> =
-        all_tasks.iter().map(|t| (t.id.clone(), t)).collect();
-
-    match format.as_str() {
-        "json" if include_raw => serde_json::to_string_pretty(results)
-            .map_err(|e| DiagError::serialization(e.to_string()).into()),
-        "json" => serde_json::to_string_pretty(&redacted_json_results(results))
-            .map_err(|e| DiagError::serialization(e.to_string()).into()),
-        "text" => Ok(format_text_results(results, &task_map, include_raw)),
-        "html" => Ok(format_html_results(results, &task_map, include_raw)),
-        _ => Err(DiagError::UnsupportedFormat { format }.into()),
-    }
+    let report_format =
+        wfdiag_native_export::ReportFormat::try_from(format.as_str()).map_err(|_| {
+            DiagError::UnsupportedFormat {
+                format: format.clone(),
+            }
+        })?;
+    let tasks = diagnostics::get_all_tasks()
+        .into_iter()
+        .map(|task| wfdiag_native_export::ExportTask::new(task.id, task.name, task.category))
+        .collect::<Vec<_>>();
+    wfdiag_native_export::render_report(report_format, include_raw, results, &tasks).map_err(
+        |error| match error {
+            wfdiag_native_export::ExportError::Serialization(reason) => {
+                DiagError::serialization(reason).into()
+            }
+            other => DiagError::internal(other.to_string()).into(),
+        },
+    )
 }
 
 #[tauri::command]
@@ -454,11 +230,19 @@ pub async fn export_results(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let current = state.current_session.lock().await;
-    if let Some(ref session) = *current {
-        export_results_content(format, include_raw, &session.results)
-    } else {
-        Err(DiagError::NoActiveSession.into())
-    }
+    let results = current
+        .as_ref()
+        .map(|session| session.results.clone())
+        .ok_or_else(|| String::from(DiagError::NoActiveSession))?;
+    drop(current);
+
+    tokio::task::spawn_blocking(move || export_results_content(format, include_raw, &results))
+        .await
+        .map_err(|error| {
+            String::from(DiagError::internal(format!(
+                "Export generation task failed: {error}"
+            )))
+        })?
 }
 
 #[tauri::command]

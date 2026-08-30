@@ -12,144 +12,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::Mutex;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderExecutionClass {
-    OnDevice,
-    LocalServer,
-    SubscriptionCloud,
-    ApiCloud,
-}
+pub use wfdiag_native_system::SystemInfo;
 
-impl ProviderExecutionClass {
-    pub fn is_cloud(self) -> bool {
-        matches!(self, Self::SubscriptionCloud | Self::ApiCloud)
-    }
-}
-
-/// Trust metadata for the provider that actually handled a response.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderUse {
-    pub provider_id: String,
-    pub execution_class: ProviderExecutionClass,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fallback_from: Option<String>,
-    /// Model id or alias selected before dispatch. This is intentionally
-    /// distinct from `actual_models`: subscription CLIs may accept an alias
-    /// such as `opus` without revealing the concrete model until the turn
-    /// starts.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub requested_model: Option<String>,
-    /// Concrete model ids reported by the provider while handling the turn.
-    /// Most providers return one; subscription agents may report several.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub actual_models: Vec<String>,
-}
-
-impl ProviderUse {
-    pub fn for_provider(
-        provider: crate::ai_service::AIProvider,
-        fallback_from: Option<crate::ai_service::AIProvider>,
-    ) -> Self {
-        use crate::ai_service::AIProvider;
-        let execution_class = match provider {
-            AIProvider::PhiSilica => ProviderExecutionClass::OnDevice,
-            AIProvider::FoundryLocal | AIProvider::Ollama => ProviderExecutionClass::LocalServer,
-            AIProvider::CodexCli | AIProvider::ClaudeCode => {
-                ProviderExecutionClass::SubscriptionCloud
-            }
-            AIProvider::None
-            | AIProvider::OpenAI
-            | AIProvider::CustomOpenAI
-            | AIProvider::Anthropic
-            | AIProvider::Gemini
-            | AIProvider::DeepSeek => ProviderExecutionClass::ApiCloud,
-        };
-        Self {
-            provider_id: provider.to_string(),
-            execution_class,
-            fallback_from: fallback_from.map(|from| from.to_string()),
-            requested_model: None,
-            actual_models: Vec::new(),
-        }
-    }
-
-    pub fn with_requested_model(mut self, model: Option<&str>) -> Self {
-        self.requested_model = model
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .map(str::to_string);
-        self
-    }
-
-    pub fn set_actual_models(&mut self, models: impl IntoIterator<Item = String>) {
-        self.actual_models.clear();
-        self.merge_actual_models(models);
-    }
-
-    pub fn merge_actual_models(&mut self, models: impl IntoIterator<Item = String>) {
-        for model in models {
-            let model = model.trim();
-            if !model.is_empty() && !self.actual_models.iter().any(|seen| seen == model) {
-                self.actual_models.push(model.to_string());
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatTurnRecord {
-    pub message_id: String,
-    pub user_message_index: usize,
-    pub display_text: String,
-    /// Clean user query used to resume a paused fallback. Provider-only
-    /// context lives in the canonical ChatMessage, never in the projection.
-    pub query: String,
-    pub provider_use: Option<ProviderUse>,
-    pub finish_reason: Option<String>,
-    /// Provider-neutral terminal text used only by the render projection when
-    /// a failed or cancelled turn did not produce a canonical assistant
-    /// message. Keeping it outside provider history prevents synthetic error
-    /// text from being sent back to a later model turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_message: Option<String>,
-    /// Durable, provider-neutral activity records for truthful history
-    /// projection after the frontend remounts.
-    #[serde(default)]
-    pub tool_activities: Vec<ToolActivityRecord>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolActivityRecord {
-    pub call_id: String,
-    pub tool: String,
-    pub args_summary: String,
-    /// "queued" | "running" | "completed" | "failed" | "cancelled"
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_preview: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PendingChatFallback {
-    pub message_id: String,
-    pub from: ProviderUse,
-    pub to: ProviderUse,
-    pub tried: Vec<crate::ai_service::AIProvider>,
-    pub failed_message: String,
-}
-
-/// Information about the current system
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemInfo {
-    pub computer_name: String,
-    pub os_version: String,
-    pub is_admin: bool,
-}
+pub use wfdiag_native_ai_chat::{
+    ChatSession, ChatTurnRecord, PendingChatFallback, ProviderExecutionClass, ProviderUse,
+    ToolActivityRecord,
+};
 
 /// A diagnostic session containing task results
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,22 +42,6 @@ pub struct DiagnosticSession {
     pub results: HashMap<String, TaskResult>,
 }
 
-/// One AI chat conversation. Messages are the canonical provider-neutral
-/// history including tool calls/results — in-memory only (kept Serialize so
-/// persisting recent conversations later is mechanical).
-#[derive(Debug, Clone, Serialize)]
-pub struct ChatSession {
-    pub id: String,
-    pub created_at: std::time::SystemTime,
-    pub updated_at: std::time::SystemTime,
-    pub messages: Vec<crate::ai_providers::ChatMessage>,
-    pub turns: Vec<ChatTurnRecord>,
-    /// A turn is in flight; concurrent sends are rejected
-    pub busy: bool,
-    pub active_message_id: Option<String>,
-    pub pending_fallback: Option<PendingChatFallback>,
-}
-
 /// Control plane for one streaming scan report. `finished` is signalled only
 /// after the report's cache-key lock has been released, so a caller awaiting
 /// cancellation can safely start a replacement generation.
@@ -197,21 +49,6 @@ pub struct ChatSession {
 pub struct ReportControl {
     pub cancel: tokio_util::sync::CancellationToken,
     pub finished: tokio_util::sync::CancellationToken,
-}
-
-impl ChatSession {
-    pub fn new(id: String) -> Self {
-        Self {
-            id,
-            created_at: std::time::SystemTime::now(),
-            updated_at: std::time::SystemTime::now(),
-            messages: Vec::new(),
-            turns: Vec::new(),
-            busy: false,
-            active_message_id: None,
-            pending_fallback: None,
-        }
-    }
 }
 
 /// Main application state managed by Tauri

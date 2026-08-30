@@ -25,6 +25,36 @@ def extract(path: str, pattern: str, label: str) -> str:
     return match.group(1)
 
 
+def validate_reactor_version_source() -> None:
+    build_source = extract(
+        "reactor-spike/build.rs",
+        r'const\s+APP_VERSION_SOURCE:\s*&str\s*=\s*"([^"]+)"',
+        "Reactor build version source",
+    )
+    display_environment = extract(
+        "reactor-spike/src/main.rs",
+        r'const\s+APP_VERSION:\s*&str\s*=\s*env!\("([^"]+)"\)',
+        "Reactor UI version source",
+    )
+    build_script = (ROOT / "reactor-spike/build.rs").read_text(encoding="utf-8")
+
+    if build_source != "../version.json":
+        raise ValueError(
+            "Reactor build version source must point to canonical ../version.json; "
+            f"got {build_source!r}"
+        )
+    if display_environment != "WFDIAG_APP_VERSION":
+        raise ValueError(
+            "Reactor UI must read WFDIAG_APP_VERSION; "
+            f"got {display_environment!r}"
+        )
+    if "cargo:rustc-env=WFDIAG_APP_VERSION={version}" not in build_script:
+        raise ValueError(
+            "Reactor build script does not export the canonical version as "
+            "WFDIAG_APP_VERSION"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--expected", help="Expected tag/manual release version")
@@ -41,6 +71,12 @@ def main() -> int:
     appx_match = re.search(r'<Identity\b[^>]*\bVersion="([^"]+)"', appx, re.DOTALL)
     if not appx_match:
         print("ERROR: AppxManifest.xml has no Identity Version", file=sys.stderr)
+        return 1
+
+    try:
+        validate_reactor_version_source()
+    except ValueError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
     cargo_lock_version = next(

@@ -1,0 +1,20 @@
+﻿{
+    "state":  "issue-to-chat-desktop-dark",
+    "captured_at_utc":  "2026-08-30T10:53:06.4034845Z",
+    "package_full_name":  "32827MikeFara.WindowsForumDiagnostics_2.5.8.0_arm64__t6j5qexy2jpp2",
+    "package_family_name":  "32827MikeFara.WindowsForumDiagnostics_t6j5qexy2jpp2",
+    "package_version":  "2.5.8.0",
+    "architecture":  "Arm64",
+    "signature_kind":  "Store",
+    "aumid":  "32827MikeFara.WindowsForumDiagnostics_t6j5qexy2jpp2!App",
+    "executable":  "C:\\Program Files\\WindowsApps\\32827MikeFara.WindowsForumDiagnostics_2.5.8.0_arm64__t6j5qexy2jpp2\\WindowsForum_Diagnostics.exe",
+    "logical_width":  1440,
+    "logical_height":  900,
+    "dpi":  144,
+    "scale":  1.5,
+    "physical_visible_width":  2160,
+    "physical_visible_height":  1350,
+    "capture_method":  "CopyFromScreen (foreground DWM-visible frame)",
+    "requires_prepared_state":  true,
+    "requirement":  "Use Ask AI on a detected issue first. The script never sends a prompt or invokes a provider."
+}

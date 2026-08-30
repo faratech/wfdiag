@@ -1,0 +1,38 @@
+[package]
+name = "wfdiag-native-monitor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Tauri-independent native Windows telemetry runtime for WFDiag UI shells"
+license-file = "../../LICENSE"
+publish = false
+
+[dependencies]
+anyhow = "1.0"
+encoding_rs = "0.8"
+futures = "0.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1.52.0", features = ["rt-multi-thread", "sync", "time"] }
+wfdiag-ui-core = { path = "../wfdiag-ui-core" }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_Performance",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Storage_FileSystem",
+    "Win32_System_ProcessStatus",
+    "Win32_Graphics_DXCore",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_System_Wmi",
+    "Wdk_Graphics_Direct3D",
+    "Wdk_System_SystemInformation",
+] }

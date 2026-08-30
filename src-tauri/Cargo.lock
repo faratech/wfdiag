@@ -3488,6 +3488,7 @@ checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -5470,6 +5471,133 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
+name = "wfdiag-native-ai-chat"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "wfdiag-native-ai-provider",
+]
+
+[[package]]
+name = "wfdiag-native-ai-provider"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+ "wfdiag-native-settings",
+]
+
+[[package]]
+name = "wfdiag-native-export"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wfdiag-native-issues",
+]
+
+[[package]]
+name = "wfdiag-native-history"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "wfdiag-native-issues"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "wfdiag-remediation-catalog",
+]
+
+[[package]]
+name = "wfdiag-native-monitor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "encoding_rs",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wfdiag-ui-core",
+ "windows 0.62.2",
+ "winreg 0.56.0",
+]
+
+[[package]]
+name = "wfdiag-native-phi"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "wfdiag-native-ai-provider",
+ "wfdiag-native-settings",
+ "windows 0.62.2",
+ "windows-collections 0.3.2",
+ "windows-core 0.62.2",
+ "windows-future 0.3.2",
+ "winreg 0.56.0",
+]
+
+[[package]]
+name = "wfdiag-native-settings"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "wfdiag-native-system"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "windows 0.62.2",
+ "winreg 0.56.0",
+]
+
+[[package]]
+name = "wfdiag-native-update"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "tokio",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "wfdiag-remediation-catalog"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "wfdiag-tauri"
 version = "2.5.8"
 dependencies = [
@@ -5484,7 +5612,6 @@ dependencies = [
  "futures",
  "keyring-core",
  "reqwest",
- "semver",
  "serde",
  "serde_json",
  "tauri",
@@ -5498,12 +5625,33 @@ dependencies = [
  "tokio-util",
  "url",
  "uuid",
+ "wfdiag-native-ai-chat",
+ "wfdiag-native-ai-provider",
+ "wfdiag-native-export",
+ "wfdiag-native-history",
+ "wfdiag-native-issues",
+ "wfdiag-native-monitor",
+ "wfdiag-native-phi",
+ "wfdiag-native-settings",
+ "wfdiag-native-system",
+ "wfdiag-native-update",
+ "wfdiag-remediation-catalog",
+ "wfdiag-ui-core",
  "windows 0.62.2",
  "windows-collections 0.3.2",
  "windows-core 0.62.2",
  "windows-future 0.3.2",
  "winreg 0.56.0",
  "zbus-secret-service-keyring-store",
+]
+
+[[package]]
+name = "wfdiag-ui-core"
+version = "0.1.0"
+dependencies = [
+ "event-listener",
+ "serde",
+ "wfdiag-remediation-catalog",
 ]
 
 [[package]]

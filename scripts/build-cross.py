@@ -172,16 +172,16 @@ def build_frontend() -> bool:
 def generate_windows_ai_bindings() -> bool:
     """Explicitly regenerate the tracked Windows AI bindings.
 
-    Normal builds compile the reviewed file already in src/. Regeneration is
-    intentionally a separate action because it rewrites tracked source and
-    depends on locally installed WinMD metadata.
+    Normal builds compile the reviewed file already owned by the shared Phi
+    crate. Regeneration is intentionally a separate action because it rewrites
+    tracked source and depends on locally installed WinMD metadata.
     """
     print(f"\n{'='*60}")
     print("Generating Windows AI Bindings")
     print(f"{'='*60}")
 
     winmd_dir = SRC_TAURI / ".windows" / "winmd"
-    bindings_file = SRC_TAURI / "src" / "windows_ai_bindings.rs"
+    bindings_file = PROJECT_DIR / "crates" / "wfdiag-native-phi" / "src" / "windows_ai_bindings.rs"
 
     # Check if winmd files exist
     ai_text_winmd = winmd_dir / "Microsoft.Windows.AI.Text.winmd"

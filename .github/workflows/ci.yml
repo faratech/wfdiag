@@ -64,6 +64,33 @@ jobs:
         working-directory: src-tauri
       - run: cargo test --locked
         working-directory: src-tauri
+      - name: Test extracted native contracts
+        shell: pwsh
+        run: |
+          $manifests = @(
+            "crates/wfdiag-native-ai-provider/Cargo.toml",
+            "crates/wfdiag-native-diagnostics/Cargo.toml",
+            "crates/wfdiag-native-export/Cargo.toml",
+            "crates/wfdiag-native-history/Cargo.toml",
+            "crates/wfdiag-native-issues/Cargo.toml",
+            "crates/wfdiag-native-monitor/Cargo.toml",
+            "crates/wfdiag-native-phi/Cargo.toml",
+            "crates/wfdiag-native-settings/Cargo.toml",
+            "crates/wfdiag-native-system/Cargo.toml",
+            "crates/wfdiag-native-update/Cargo.toml",
+            "crates/wfdiag-remediation-catalog/Cargo.toml",
+            "crates/wfdiag-ui-core/Cargo.toml"
+          )
+          foreach ($manifest in $manifests) {
+            cargo test --locked --manifest-path $manifest
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
+      - name: Lint native Reactor shell
+        run: cargo clippy --locked --manifest-path reactor-spike/Cargo.toml --all-targets --features settings-test-path -- -D warnings
+      - name: Test native Reactor shell
+        run: cargo test --locked --manifest-path reactor-spike/Cargo.toml --features settings-test-path
 
   rust-arm64:
     runs-on: windows-latest
@@ -87,6 +114,10 @@ jobs:
         working-directory: src-tauri
       - run: cargo clippy --locked --all-targets --target aarch64-pc-windows-msvc -- -D warnings
         working-directory: src-tauri
+      - name: Check native Reactor shell for ARM64
+        run: cargo check --locked --manifest-path reactor-spike/Cargo.toml --all-targets --features settings-test-path --target aarch64-pc-windows-msvc
+      - name: Lint native Reactor shell for ARM64
+        run: cargo clippy --locked --manifest-path reactor-spike/Cargo.toml --all-targets --features settings-test-path --target aarch64-pc-windows-msvc -- -D warnings
 
   cargo-audit:
     runs-on: ubuntu-latest

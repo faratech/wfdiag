@@ -5,7 +5,8 @@ use crate::timestamp::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const SUMMARY_INDEX_ID: &str = "_scan_summary_index";
 
@@ -121,9 +122,10 @@ pub struct TaskChange {
 }
 
 pub struct ScanStorage {
-    #[allow(dead_code)]
     storage_dir: PathBuf,
     encrypted_storage: EncryptedStorage,
+    retention_provider: Arc<dyn Fn() -> (bool, u32) + Send + Sync>,
+    task_catalog_provider: Arc<dyn Fn() -> Vec<crate::diagnostics::DiagnosticTask> + Send + Sync>,
 }
 
 impl ScanStorage {
@@ -142,8 +144,29 @@ impl ScanStorage {
     }
 
     pub fn new() -> Result<Self, String> {
-        let storage_dir = Self::get_storage_directory()?;
+        Self::new_in(
+            Self::default_storage_directory()?,
+            crate::commands::settings::history_retention,
+            crate::diagnostics::get_all_tasks,
+        )
+    }
 
+    /// Open the existing scan-history format at an explicit directory.
+    ///
+    /// Providers are evaluated for every save/cleanup or comparison so a UI
+    /// shell can update settings and diagnostic metadata without recreating
+    /// the store. Keeping these policies injected is what lets both Tauri and
+    /// native WinUI use this implementation without either UI framework
+    /// leaking into the persistence layer.
+    pub fn new_in<R, C>(
+        storage_dir: PathBuf,
+        retention_provider: R,
+        task_catalog_provider: C,
+    ) -> Result<Self, String>
+    where
+        R: Fn() -> (bool, u32) + Send + Sync + 'static,
+        C: Fn() -> Vec<crate::diagnostics::DiagnosticTask> + Send + Sync + 'static,
+    {
         // Create directory if it doesn't exist
         if let Err(e) = fs::create_dir_all(&storage_dir) {
             return Err(DiagError::file(storage_dir.display().to_string(), e.to_string()).into());
@@ -158,20 +181,27 @@ impl ScanStorage {
         Ok(Self {
             storage_dir,
             encrypted_storage,
+            retention_provider: Arc::new(retention_provider),
+            task_catalog_provider: Arc::new(task_catalog_provider),
         })
     }
 
-    fn get_storage_directory() -> Result<PathBuf, String> {
+    pub fn default_storage_directory() -> Result<PathBuf, String> {
         let app_data = std::env::var("APPDATA")
             .map_err(|_| DiagError::internal("Failed to get APPDATA directory"))?;
 
         Ok(PathBuf::from(app_data).join("wfdiag-tauri").join("scans"))
     }
 
+    #[must_use]
+    pub fn storage_directory(&self) -> &Path {
+        &self.storage_dir
+    }
+
     pub fn save_scan(&self, scan: &ScanRecord) -> Result<(), String> {
         println!("Saving encrypted scan {}", scan.id);
 
-        let (retain_history, _) = crate::commands::settings::history_retention();
+        let (retain_history, _) = (self.retention_provider)();
         if !retain_history {
             println!("Scan history retention is disabled; skipping persistent save");
             return Ok(());
@@ -341,7 +371,10 @@ impl ScanStorage {
         println!("Loaded current scan: {} results", current.results.len());
         println!("Loaded previous scan: {} results", previous.results.len());
 
-        Ok(Self::compute_comparison(current, previous))
+        let tasks = (self.task_catalog_provider)();
+        Ok(Self::compute_comparison_with_catalog(
+            current, previous, &tasks,
+        ))
     }
 
     pub fn compare_scans_summary(
@@ -411,8 +444,19 @@ impl ScanStorage {
         current: ScanRecord,
         previous: ScanRecord,
     ) -> ComparisonResult {
-        // Get task metadata for proper names and categories
         let all_tasks = crate::diagnostics::get_all_tasks();
+        Self::compute_comparison_with_catalog(current, previous, &all_tasks)
+    }
+
+    /// Pure diff with injected diagnostic metadata. Native UI shells use this
+    /// form so comparison labels come from the same task catalog as the
+    /// executor driving their scans.
+    pub fn compute_comparison_with_catalog(
+        current: ScanRecord,
+        previous: ScanRecord,
+        all_tasks: &[crate::diagnostics::DiagnosticTask],
+    ) -> ComparisonResult {
+        // Get task metadata for proper names and categories
         let task_map: HashMap<String, &crate::diagnostics::DiagnosticTask> =
             all_tasks.iter().map(|t| (t.id.clone(), t)).collect();
 
@@ -796,7 +840,7 @@ impl ScanStorage {
 
     fn cleanup_old_scans(&self) -> Result<(), String> {
         let summaries = self.list_scans()?;
-        let (_, configured_limit) = crate::commands::settings::history_retention();
+        let (_, configured_limit) = (self.retention_provider)();
         let max_scans = configured_limit.clamp(1, 500) as usize;
 
         if summaries.len() > max_scans {

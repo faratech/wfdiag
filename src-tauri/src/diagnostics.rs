@@ -12,13 +12,7 @@ pub struct DiagnosticTask {
     pub admin_required: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskResult {
-    pub success: bool,
-    pub output: String,
-    pub error: Option<String>,
-    pub duration_ms: u64,
-}
+pub use wfdiag_native_issues::TaskResult;
 
 pub fn get_all_tasks() -> Vec<DiagnosticTask> {
     vec![

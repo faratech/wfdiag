@@ -1,0 +1,55 @@
+[package]
+name = "wfdiag-reactor-spike"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[features]
+default = []
+# Opt in only when validating a direct installer that carries the Windows App
+# Runtime beside the executable. The default remains framework-dependent.
+self-contained = []
+# Enables the exact-path settings store used by integration validation. Never
+# enable this feature for Store or direct-installer production artifacts.
+settings-test-path = []
+
+[dependencies]
+semver = "1"
+tokio = { version = "1.52.0", features = ["rt-multi-thread"] }
+wfdiag-native-ai-provider = { path = "../crates/wfdiag-native-ai-provider" }
+wfdiag-native-diagnostics = { path = "../crates/wfdiag-native-diagnostics" }
+wfdiag-native-export = { path = "../crates/wfdiag-native-export" }
+wfdiag-native-history = { path = "../crates/wfdiag-native-history" }
+wfdiag-native-issues = { path = "../crates/wfdiag-native-issues" }
+wfdiag-native-monitor = { path = "../crates/wfdiag-native-monitor" }
+wfdiag-native-phi = { path = "../crates/wfdiag-native-phi" }
+wfdiag-native-settings = { path = "../crates/wfdiag-native-settings" }
+wfdiag-native-system = { path = "../crates/wfdiag-native-system" }
+wfdiag-native-update = { path = "../crates/wfdiag-native-update" }
+wfdiag-ui-core = { path = "../crates/wfdiag-ui-core" }
+windows = { version = "0.62", features = [
+    "ApplicationModel_DataTransfer",
+    "Foundation_Collections",
+    "Globalization_DateTimeFormatting",
+    "System_UserProfile",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8" }
+
+[build-dependencies]
+serde_json = "1.0.151"
+windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8" }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = true

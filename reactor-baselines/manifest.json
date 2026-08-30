@@ -1,0 +1,651 @@
+{
+  "schema_version": 2,
+  "description": "Protected visual oracle and hard cutover gates for the browserless native WFDiag Windows Reactor migration.",
+  "store_manifest": "AppxManifest.xml",
+  "ui_architecture": {
+    "kind": "native_winui3_reactor",
+    "source_root": "reactor-spike/src",
+    "webview_ui_allowed": false
+  },
+  "reactor_pin": {
+    "repository": "https://github.com/microsoft/windows-rs",
+    "revision": "1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8",
+    "expected_crate_version": "0.100.0",
+    "prototype_manifest": "reactor-spike/Cargo.toml",
+    "windows_app_runtime_release": "2.4.0",
+    "windows_app_runtime_framework": "Microsoft.WindowsAppRuntime.2"
+  },
+  "store_identity": {
+    "name": "32827MikeFara.WindowsForumDiagnostics",
+    "publisher": "CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4",
+    "publisher_display_name": "WindowsForum.com",
+    "capabilities": [
+      "internetClient",
+      "internetClientServer",
+      "privateNetworkClientServer",
+      "runFullTrust",
+      "systemAIModels"
+    ]
+  },
+  "baseline": {
+    "application_version": "2.5.8",
+    "version_file": "version.json",
+    "capture_platform": "Microsoft Store-signed Windows Tauri application",
+    "capture_status": "all 18 dark-theme states captured from Store-signed 2.5.8 and paired at matching viewports with the final native ARM64 candidate; variant and acceptance review remains pending",
+    "source_package": {
+      "name": "32827MikeFara.WindowsForumDiagnostics",
+      "package_full_name": "32827MikeFara.WindowsForumDiagnostics_2.5.8.0_arm64__t6j5qexy2jpp2",
+      "package_family_name": "32827MikeFara.WindowsForumDiagnostics_t6j5qexy2jpp2",
+      "version": "2.5.8.0",
+      "architecture": "Arm64",
+      "signature_kind": "Store"
+    },
+    "screenshots": [
+      {
+        "id": "diagnostics-empty-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/diagnostics-empty-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "diagnostics",
+        "state": "empty",
+        "populated": false,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 1000 },
+        "sha256": "d1c4ebaf6474e68a4f5d923e8c6cb9277323ea4cd278127342cb8b8ef6cc8fa3",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/diagnostics-empty-desktop-dark.capture.json",
+          "sha256": "15bd364b86271a00d2fafad8bdaea0065a634458782c89d27c17f419adc04035"
+        }
+      },
+      {
+        "id": "monitor-empty-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/monitor-empty-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "monitor",
+        "state": "idle",
+        "populated": false,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 1000 },
+        "sha256": "075b745d4c754ce3228d581538b3f74f679c3e7bf42aa7d0a883e560b4ca3e4d",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/monitor-empty-desktop-dark.capture.json",
+          "sha256": "02db850128636118628ea81462af969b72498562c6819460e3f711e977aad2c5"
+        }
+      },
+      {
+        "id": "processes-empty-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/processes-empty-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "processes",
+        "state": "empty",
+        "populated": false,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 1000 },
+        "sha256": "7970c3e93f095c604ab3480525bbbf0c256b4371238ea466504b7266d5179225",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/processes-empty-desktop-dark.capture.json",
+          "sha256": "04304235daa8f587208eb6273dbf50b09458acd97d0a8f9f03f5cf35e453041f"
+        }
+      },
+      {
+        "id": "ai-empty-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/ai-empty-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "ai",
+        "state": "welcome",
+        "populated": false,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 1000 },
+        "sha256": "b035fbd4146a369eaaac01308a5d44f45280bcbdb20b9c8058a8227dcf9fb344",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/ai-empty-desktop-dark.capture.json",
+          "sha256": "57aebec390f0bcf76b7a683222f8eeca565dbe627d66e15a5fa21bcb3419d82f"
+        }
+      },
+      {
+        "id": "issues-empty-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/issues-empty-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "issues",
+        "state": "no-detected-issues",
+        "populated": false,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 1000 },
+        "sha256": "a3217000451a2949a18a2f9416890116cf5a00b30ad192aef0d76b9a2adf249e",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/issues-empty-desktop-dark.capture.json",
+          "sha256": "ebe08596d9fe9a0f48d49b6122546bd716df9e544d1a5f3f82583d12b047afeb"
+        }
+      },
+      {
+        "id": "history-empty-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/history-empty-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "history",
+        "state": "empty",
+        "populated": false,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 1000 },
+        "sha256": "4062b6ec4bdeca7ccbdba5a7da2172ddd24fbd7b44d7092c3c665332ca162730",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/history-empty-desktop-dark.capture.json",
+          "sha256": "f036943ffc2bbc3a6bbf76e9e9414535890b91cae83bf38b98c68f626c18538a"
+        }
+      },
+      {
+        "id": "ai-empty-compact-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/ai-empty-compact-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "ai",
+        "state": "welcome-compact",
+        "populated": false,
+        "theme": "dark",
+        "viewport": { "width": 900, "height": 800 },
+        "sha256": "4b6df6560d1f997ed23c024d146e5a2480def582e8fd5ecbf4992e6cbf074abb",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/ai-empty-compact-dark.capture.json",
+          "sha256": "37cd0b31e61d0b6caa65e264240381a8e0da3d6f4172da7b8eb24fe1ac033068"
+        }
+      },
+      {
+        "id": "diagnostics-populated-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/diagnostics-populated-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "diagnostics",
+        "state": "completed-with-failures",
+        "populated": true,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 900 },
+        "sha256": "9bef15ebfcce4dd9ac871e5774e522fd49577f9ce8cd3556dc7490f03d824f83",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/diagnostics-populated-desktop-dark.capture.json",
+          "sha256": "47b467b0769e72f1ce634943b96e44b4bf84d1cae969d9681f18334f03b3f133"
+        }
+      },
+      {
+        "id": "issues-populated-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/issues-populated-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "issues",
+        "state": "detected-issues",
+        "populated": true,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 900 },
+        "sha256": "269e1ffafb96da6bedae40baf9c9cd5420ff01a9f27cf0ae1867f48ab3d16291",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/issues-populated-desktop-dark.capture.json",
+          "sha256": "80c35a70c705f42637a262b5e23f9ef76397375e1c41a9be98c355a6b5375bc4"
+        }
+      },
+      {
+        "id": "issue-to-chat-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/issue-to-chat-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "ai",
+        "state": "issue-context-handoff",
+        "populated": true,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 900 },
+        "sha256": "6723c382194a60dae435c26e266392c2394630fc0cea8c7c8a3e5f487fd52ad4",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/issue-to-chat-desktop-dark.capture.json",
+          "sha256": "b9daa70b22cbe78dd260cdaa1eb91b0d69c69aba730dc770ea49cd8b46d1a4f6"
+        }
+      },
+      {
+        "id": "processes-populated-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/processes-populated-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "processes",
+        "state": "inventory",
+        "populated": true,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 900 },
+        "sha256": "967260aeadb072426abe7e38fdaf81b53f7df07c0ab4d7346efeb13a2325b54c",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/processes-populated-desktop-dark.capture.json",
+          "sha256": "82ccf35596f884ba46ecab78fe3fe237b89cb28dab8e3457b732bffae7d9f53b"
+        }
+      },
+      {
+        "id": "history-comparison-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/history-comparison-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "history",
+        "state": "comparison",
+        "populated": true,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 900 },
+        "sha256": "6a6290852499db70281b1f2186afac3003354a350c032551990e138fce5de95a",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/history-comparison-desktop-dark.capture.json",
+          "sha256": "3d53c0396a343cfb2920b00892fbf6580fd637ee5185e4357a76622db9390d1b"
+        }
+      },
+      {
+        "id": "monitor-populated-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/monitor-populated-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "monitor",
+        "state": "active-monitoring",
+        "populated": true,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 900 },
+        "sha256": "141af4c370542aa0c47d77eb760ffa71a3f1af796785908d6b609ea54060cffe",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/monitor-populated-desktop-dark.capture.json",
+          "sha256": "105c49932dcfe2d966823be76152bb2bb66b9780086bf96124f23d819324e53d"
+        }
+      },
+      {
+        "id": "ai-conversation-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/ai-conversation-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "ai",
+        "state": "conversation-scrolled",
+        "populated": true,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 900 },
+        "sha256": "7ecb974cf02c0ee6aa2735bb5bcaee8049381825f87d8cf89bd80a2c7d06027d",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/ai-conversation-desktop-dark.capture.json",
+          "sha256": "7d8834f2d4c62557ed7c21dce3aaa3f8b43bdb6c852e1fe28cbb21ddae1e7375"
+        }
+      },
+      {
+        "id": "ai-conversation-top-compact-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/ai-conversation-top-compact-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "ai",
+        "state": "conversation-top-compact",
+        "populated": true,
+        "theme": "dark",
+        "viewport": { "width": 900, "height": 800 },
+        "sha256": "7b88a4f77381935d5ca11bde892d8b9e09fa53f5336536943439af69d0a7663d",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/ai-conversation-top-compact-dark.capture.json",
+          "sha256": "4b8e366fbf811f671b96662bda0f47095bce37318233513c7f2c106cc505a209"
+        }
+      },
+      {
+        "id": "ai-conversation-bottom-compact-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/ai-conversation-bottom-compact-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "ai",
+        "state": "conversation-bottom-compact",
+        "populated": true,
+        "theme": "dark",
+        "viewport": { "width": 900, "height": 800 },
+        "sha256": "b6cfe1e962fa61d0bd791fd876798241fb289b9ffc49fcb0867a2ad5ec294a19",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/ai-conversation-bottom-compact-dark.capture.json",
+          "sha256": "df146c35d18c6ebd3399cf3c832b0bafd91f8d089514de37f004af8223d4d4ec"
+        }
+      },
+      {
+        "id": "settings-top-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/settings-top-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "settings",
+        "state": "providers-top",
+        "populated": true,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 900 },
+        "sha256": "f863959f188d57b331cdcb2701b8e98d4532b99ec3f58da73921876e86e8718f",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/settings-top-desktop-dark.capture.json",
+          "sha256": "e0351c8697d375d2afcf304b725137aa36031ba0c0b4514221397ed8836d8375"
+        }
+      },
+      {
+        "id": "settings-bottom-desktop-dark",
+        "path": "reactor-baselines/captures/store-2.5.8/settings-bottom-desktop-dark.png",
+        "source_application_version": "2.5.8",
+        "screen": "settings",
+        "state": "behavior-bottom",
+        "populated": true,
+        "theme": "dark",
+        "viewport": { "width": 1440, "height": 900 },
+        "sha256": "cee8294fcda122b8e1782ff08c1042995741a0ee2a234524000d0bb4b1404b91",
+        "capture_metadata": {
+          "path": "reactor-baselines/captures/store-2.5.8/settings-bottom-desktop-dark.capture.json",
+          "sha256": "aafb9988028da07198bde170278beb7c375c0d3980101b3fd9eef11772d008cb"
+        }
+      }
+    ],
+    "assets": [
+      {
+        "id": "app-badge",
+        "path": "public/wf-ds/app-badge.png",
+        "sha256": "9e46af509ec06d07e4aa4e69b4441bac53c5b2585be5e2363c258dae284cd38c"
+      },
+      {
+        "id": "wallpaper-light",
+        "path": "public/wf-ds/bg-24H4_50.webp",
+        "sha256": "547dfbb7fa9a7b4aa95697e7dd2516f9aeaad2ee68969ef2c6555ab20932afaf"
+      },
+      {
+        "id": "wallpaper-dark",
+        "path": "public/wf-ds/bg-24H4-oled_50.webp",
+        "sha256": "1c788d7d59aec858c37212d09ac07ce7703e0024edf063ea350e2e0b327b211d"
+      },
+      {
+        "id": "assistant-avatar",
+        "path": "public/wf-ds/chatgpt-bot-avatar.webp",
+        "sha256": "fd4323674d9ac42f7325a5d4715e48ccaa623bc9609181b4facf3f05a2ba116e"
+      },
+      {
+        "id": "app-icon",
+        "path": "public/wf-ds/icon-only.png",
+        "sha256": "7540d801b78233478d0b8d0ab7b21742e3fcac21926bab716cab0ca298811ac6"
+      }
+    ]
+  },
+  "visual_acceptance_categories": [
+    {
+      "id": "information_architecture",
+      "acceptance": "The same primary destinations, commands, overlays, hierarchy, and cross-screen transitions remain discoverable in the same context."
+    },
+    {
+      "id": "content_and_state",
+      "acceptance": "Labels, values, status semantics, empty/loading/error states, destructive confirmations, and streamed output preserve current behavior and meaning."
+    },
+    {
+      "id": "brand_and_materials",
+      "acceptance": "Protected logos, wallpapers, avatar, semantic colors, rounded-card hierarchy, and translucent visual character are retained using native WinUI materials."
+    },
+    {
+      "id": "layout_and_responsiveness",
+      "acceptance": "Default, minimum, desktop, and compact widths preserve reading order, visual hierarchy, usable density, and scroll behavior without clipping."
+    },
+    {
+      "id": "typography_and_iconography",
+      "acceptance": "Type hierarchy and icon meaning match the existing interface; native WinUI metrics and Fluent symbols are accepted where they improve platform fidelity."
+    },
+    {
+      "id": "motion_and_feedback",
+      "acceptance": "Progress, streaming, navigation, hover/press, success/error, and cancellation feedback remain timely and respect reduced-motion settings."
+    },
+    {
+      "id": "accessibility",
+      "acceptance": "Keyboard order and shortcuts, focus restoration, automation names/roles, Narrator announcements, text scaling, and high contrast pass native Windows testing."
+    },
+    {
+      "id": "data_visualization",
+      "acceptance": "Charts, scan rings, sparklines, tables, and status colors preserve the same data, scale, labels, and non-color text alternatives."
+    }
+  ],
+  "backend_parity": [
+    {
+      "id": "architecture_and_system_info",
+      "status": "partial",
+      "summary": "A UI-neutral nonblocking native worker owns the canonical architecture, Windows version, machine-name, and elevation contracts shared with Tauri. Reactor now starts that worker off the UI thread, renders the live host/OS/elevation result, exposes native/emulated architecture in the machine-card automation name, rejects stale completions, and blocks scan selection until elevation is known. A fixture-free native ARM64 run matched the Store 2.5.8 Diagnostics viewport at 1440x1000 logical / 2160x1500 physical, loaded local XAML, loaded no WebView module, closed gracefully, and produced no crash event. Elevated, error, emulated, x64, and full accessibility matrices remain open.",
+      "evidence": [
+        "crates/wfdiag-native-system/src/lib.rs",
+        "crates/wfdiag-native-system/src/runtime.rs",
+        "src-tauri/src/architecture.rs",
+        "reactor-spike/src/main.rs",
+        "scripts/test-reactor-live-system.ps1",
+        "reactor-spike/captures-2.5.8/live-system-validation/diagnostics-live-system-20260830-114311.uia.json",
+        "reactor-spike/captures-2.5.8/live-system-validation/diagnostics-live-system-20260830-114311.png",
+        "reactor-spike/captures-2.5.8/live-system-validation/diagnostics-empty-desktop-dark-live-system-store-left-reactor-right.png"
+      ]
+    },
+    {
+      "id": "diagnostics_scan",
+      "status": "partial",
+      "summary": "Quick and Full scans execute through the UI-neutral native runtime with progress, results, cancellation, and stale-session protection; selection, persistence, export, and every production error path remain unfinished.",
+      "evidence": [
+        "crates/wfdiag-native-diagnostics/src/runtime.rs",
+        "reactor-spike/src/main.rs"
+      ]
+    },
+    {
+      "id": "issue_detection",
+      "status": "partial",
+      "summary": "The canonical issue catalog and deterministic detectors now run through a UI-neutral nonblocking worker shared with Tauri; Reactor still needs to submit completed native scans and render the returned issues.",
+      "evidence": [
+        "crates/wfdiag-native-issues/src/lib.rs",
+        "crates/wfdiag-native-issues/README.md",
+        "src-tauri/src/issue_catalog.rs",
+        "reactor-spike/src/main.rs"
+      ]
+    },
+    {
+      "id": "remediation_and_action_broker",
+      "status": "blocked",
+      "summary": "Native proposal, confirmation, execution, cancellation, and status rendering are not connected to the action broker and vetted remediation catalog.",
+      "evidence": [
+        "src-tauri/src/action_broker.rs",
+        "src-tauri/src/remediation.rs"
+      ]
+    },
+    {
+      "id": "live_monitoring",
+      "status": "partial",
+      "summary": "Live system samples flow directly into Reactor through a bounded native event bus; the complete lease, visibility, error, and network-connection behavior still needs parity validation.",
+      "evidence": [
+        "crates/wfdiag-native-monitor/src/runtime.rs",
+        "reactor-spike/src/main.rs"
+      ]
+    },
+    {
+      "id": "process_inventory",
+      "status": "partial",
+      "summary": "The live Reactor screen queries the native monitor worker off the UI thread and renders real filtered, sortable, selectable, paged and virtualized process rows with stale-request protection. ARM64 expanded-desktop load, pause/resume, refresh, filter, sort, details, scroll, page 2, full-width row alignment, native-XAML module, zero-WebView, and zero-WER validation pass; compact/collapsed, x64 runtime, accessibility, and long-run soak coverage remain open.",
+      "evidence": [
+        "crates/wfdiag-native-monitor/src/runtime.rs",
+        "crates/wfdiag-native-monitor/examples/process_query.rs",
+        "reactor-spike/src/main.rs",
+        "reactor-spike/captures-2.5.8/live-process-validation/processes-populated-store-left-reactor-right.png",
+        "reactor-spike/captures-2.5.8/live-process-validation/live-initial.png",
+        "reactor-spike/captures-2.5.8/live-process-validation/live-selected-details.png",
+        "reactor-spike/captures-2.5.8/live-process-validation/live-page2-top.png"
+      ]
+    },
+    {
+      "id": "history_storage",
+      "status": "partial",
+      "summary": "Reactor now owns the UI-neutral history worker, reads the existing Store-compatible DPAPI v2 scan store off the UI thread, and renders live filtering, selection, refresh, and comparison summaries. Selecting the latest scan invalidates stale comparisons and identifies it as the baseline. Completed scans auto-save from the authoritative diagnostic session snapshot after the Store-matching cancellable 500 ms window, with explicit history-contract conversion and live retention/catalog providers; auto-save-off sends no request, retention-off acknowledges without a persistent scan, failures are nonfatal, and deterministic captures touch no storage. Detail/drill-down, tags and labels, trends, destructive clear confirmation, and the remaining loading/error/accessibility matrix remain unfinished.",
+      "evidence": [
+        "crates/wfdiag-native-history/src/runtime.rs",
+        "crates/wfdiag-native-history/README.md",
+        "src-tauri/src/results_storage.rs",
+        "reactor-spike/src/main.rs"
+      ]
+    },
+    {
+      "id": "export_and_share",
+      "status": "partial",
+      "summary": "A UI-neutral worker now generates the shipping JSON, text, HTML, WindowsForum, clipboard, and email payloads and is shared with Tauri; Reactor still needs native picker, save, clipboard, and allowlisted link delivery.",
+      "evidence": [
+        "crates/wfdiag-native-export/src/lib.rs",
+        "crates/wfdiag-native-export/README.md",
+        "src-tauri/src/commands/export.rs",
+        "reactor-spike/src/main.rs"
+      ]
+    },
+    {
+      "id": "settings_and_credentials",
+      "status": "partial",
+      "summary": "Reactor now owns the canonical settings worker and the Store-compatible JSON/DPAPI persistence service. The native dialog loads persisted values off the UI thread, edits all visible non-secret 2.5.8 fields, previews theme changes, restores the persisted snapshot on Cancel, commits only a matching successful Save response, and rejects stale worker completions. ARM64 self-contained automation passed cancel/reopen and save/restart persistence without changing the host Store settings file, loading WebView, or producing WER/Application Error evidence. Provider credential entry/clearing, live model discovery, subscription bridge setup, tray/startup/notification side effects, x64 runtime, accessibility, and the complete validation/error matrix remain unfinished.",
+      "evidence": [
+        "crates/wfdiag-native-settings/src/lib.rs",
+        "crates/wfdiag-native-settings/README.md",
+        "src-tauri/src/commands/settings.rs",
+        "src/components/SettingsDialog.tsx",
+        "reactor-spike/src/main.rs",
+        "reactor-spike/design-qa.md"
+      ]
+    },
+    {
+      "id": "ai_provider_management",
+      "status": "partial",
+      "summary": "A Tauri-free ProviderManagementService now composes the exact provider/preference/status contracts, capability and routing policy, Store-identity validation, shared response cache, shipping Ollama/custom network probes, and typed worker used by Tauri. Reactor can construct the same service from explicit settings, identity, Phi, Foundry, and subscription-CLI interfaces, but the latter three concrete probes still require UI-neutral extraction; Reactor has not instantiated or rendered the live state/error matrix, and fallback consent remains separate work.",
+      "evidence": [
+        "crates/wfdiag-native-ai-provider/src/lib.rs",
+        "crates/wfdiag-native-ai-provider/src/composition.rs",
+        "crates/wfdiag-native-ai-provider/README.md",
+        "src-tauri/src/ai_service.rs",
+        "src-tauri/src/ai_providers/ollama.rs"
+      ]
+    },
+    {
+      "id": "ai_chat",
+      "status": "blocked",
+      "summary": "The native AI conversation is a visual fixture; session history, streaming, tool activity, cancellation, proposals, and fallback resolution are not connected.",
+      "evidence": [
+        "src-tauri/src/ai_chat.rs",
+        "src/hooks/useAIChat.ts"
+      ]
+    },
+    {
+      "id": "ai_report",
+      "status": "blocked",
+      "summary": "Native Scan Report generation, streaming, caching, cancellation, provider attribution, and errors are not connected.",
+      "evidence": [
+        "src-tauri/src/ai_report.rs",
+        "src/hooks/useScanReport.ts"
+      ]
+    },
+    {
+      "id": "on_device_ai_and_package_identity",
+      "status": "blocked",
+      "summary": "Phi/Aion activation, Store identity, capability, runtime alignment, model readiness, and fallback behavior are not validated through the Reactor package.",
+      "evidence": [
+        "src-tauri/src/phi_silica.rs",
+        "src-tauri/src/sparse_identity.rs",
+        "AppxManifest.xml"
+      ]
+    },
+    {
+      "id": "elevation_and_external_links",
+      "status": "blocked",
+      "summary": "Restart-as-administrator and allowlisted external-link behavior are not connected to native commands.",
+      "evidence": [
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/security.rs"
+      ]
+    },
+    {
+      "id": "file_dialog_clipboard_notifications",
+      "status": "blocked",
+      "summary": "Native file picking/saving, clipboard writes, and scan-completion notifications do not yet match the shipping workflow.",
+      "evidence": [
+        "src/hooks/useDiagnostics.ts",
+        "src-tauri/capabilities/default.json"
+      ]
+    },
+    {
+      "id": "update_check",
+      "status": "partial",
+      "summary": "Reactor now owns the UI-neutral update worker plus the Store 2.5.8 five-second startup delay, once-per-24-hour fail-open throttle, five-second informational notice with exact hover pause/resume, native About dialog, stale-dialog protection, and an explicit typed action boundary that accepts only the exact WFDiag GitHub release tag for the returned semantic version. Throttle path/read work runs off the UI thread and timer completions are epoch- and generation-scoped. Store/debug/no-update/network/runtime failures remain silent and deterministic capture modes perform no update I/O. Packaged Store/direct x64 and ARM64 runtime, persistence, accessibility, and browser-launch validation remain open.",
+      "evidence": [
+        "crates/wfdiag-native-update/src/lib.rs",
+        "crates/wfdiag-native-update/README.md",
+        "src-tauri/src/update_check.rs",
+        "src/hooks/useUpdateCheck.ts",
+        "src/components/AboutDialog.tsx",
+        "reactor-spike/src/update_support.rs",
+        "reactor-spike/src/main.rs"
+      ]
+    },
+    {
+      "id": "tray_and_window_lifecycle",
+      "status": "blocked",
+      "summary": "Tray menu, close-to-tray, hide/show, quick scan, restore, and exit behavior remain unimplemented and also depend on missing official Reactor lifecycle APIs.",
+      "evidence": [
+        "src-tauri/src/tray.rs"
+      ]
+    },
+    {
+      "id": "single_instance",
+      "status": "blocked",
+      "summary": "Second-launch argument handling and focus restoration are not implemented for the Reactor executable.",
+      "evidence": [
+        "src-tauri/src/lib.rs"
+      ]
+    },
+    {
+      "id": "global_commands_and_shortcuts",
+      "status": "blocked",
+      "summary": "Command palette, shortcut help, global accelerators, text-focus behavior, and all app-wide commands are not implemented with official Reactor APIs.",
+      "evidence": [
+        "src/hooks/useCommands.ts",
+        "src/hooks/useGlobalShortcuts.ts"
+      ]
+    }
+  ],
+  "upstream_api_gates": [
+    {
+      "id": "window_lifecycle",
+      "status": "blocked",
+      "summary": "Official Reactor APIs do not yet cover the close interception and show/hide/minimize/maximize/restore behavior required for WFDiag tray parity.",
+      "evidence": [
+        "https://github.com/microsoft/windows-rs/blob/1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8/crates/libs/reactor/public-api.txt"
+      ]
+    },
+    {
+      "id": "global_accelerators",
+      "status": "blocked",
+      "summary": "The native spike must prove the complete application-wide shortcut set through an official Reactor accelerator or keyboard-event API.",
+      "evidence": [
+        "Ctrl+K, Ctrl+1..6, Ctrl+/, Ctrl+Shift+Q, Ctrl+Shift+F"
+      ]
+    }
+  ],
+  "cutover_gates": [
+    {
+      "id": "official_reactor_release",
+      "status": "blocked",
+      "summary": "The reviewed Reactor 0.100 source is not yet available as a non-placeholder crates.io release; the Git revision is prototype-only.",
+      "evidence": [
+        "https://github.com/microsoft/windows-rs/blob/1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8/crates/libs/reactor/Cargo.toml"
+      ]
+    },
+    {
+      "id": "current_baseline_capture",
+      "status": "blocked",
+      "summary": "All 18 core dark-theme baseline states are captured from the installed Microsoft Store WFDiag 2.5.8 build. The gate remains blocked until light, high-contrast, DPI, and reduced-motion variants are captured and the complete reference set receives parity review.",
+      "evidence": [
+        "reactor-baselines/manifest.json",
+        "reactor-baselines/captures/store-2.5.8",
+        "reactor-spike/design-qa.md",
+        "reactor-spike/captures-2.5.8/diagnostics-empty-desktop-dark-comparison-current.png",
+        "reactor-spike/captures-2.5.8/diagnostics-populated-desktop-dark-comparison-current.png",
+        "reactor-spike/captures-2.5.8/current-comparisons-contact-v2.png",
+        "reactor-spike/captures-2.5.8/final/all-18-comparisons-contact.png"
+      ]
+    },
+    {
+      "id": "native_control_parity",
+      "status": "blocked",
+      "summary": "All six screens and their interaction states have not yet passed parity review using Reactor-owned native WinUI controls only; WebView2 and browser-hosted UI are prohibited.",
+      "evidence": [
+        "reactor-spike/src/main.rs",
+        "reactor-spike/design-qa.md",
+        "scripts/check-reactor-readiness.py"
+      ]
+    },
+    {
+      "id": "aion_store_validation",
+      "status": "blocked",
+      "summary": "Aion/Phi behavior has not passed on real Copilot+ x64 and ARM64 devices with the preserved Store identity and Reactor runtime strategy.",
+      "evidence": []
+    },
+    {
+      "id": "store_packaging_validation",
+      "status": "blocked",
+      "summary": "The Reactor x64/ARM64 MSIX bundle has not passed clean-machine install, identity/capability readback, signing, and Store certification validation.",
+      "evidence": []
+    },
+    {
+      "id": "direct_distribution_validation",
+      "status": "blocked",
+      "summary": "Signed self-contained x64/ARM64 MSI, NSIS, and portable-directory distributions have not passed clean-machine install and uninstall tests.",
+      "evidence": [
+        "reactor-spike/README.md",
+        "docs/REACTOR_MIGRATION.md"
+      ]
+    }
+  ]
+}

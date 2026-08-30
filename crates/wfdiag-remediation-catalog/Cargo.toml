@@ -1,0 +1,21 @@
+[package]
+name = "wfdiag-remediation-catalog"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "UI-neutral read-only remediation metadata catalog for WFDiag"
+license-file = "../../LICENSE"
+publish = false
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0.145"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

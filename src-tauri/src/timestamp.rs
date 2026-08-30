@@ -14,6 +14,7 @@ pub struct Timestamp {
 /// Timestamp. The trailing signed value is the LOCAL-to-UTC offset in
 /// MINUTES; `+***` (offset unspecified) is treated as UTC. Returns None on
 /// anything malformed.
+#[allow(dead_code)]
 pub(crate) fn parse_wmi_datetime(s: &str) -> Option<Timestamp> {
     let s = s.trim();
     if s.len() < 14 || !s.as_bytes()[..14].iter().all(u8::is_ascii_digit) {
