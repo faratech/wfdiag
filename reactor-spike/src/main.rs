@@ -674,6 +674,14 @@ impl SettingsDialogAction {
     }
 }
 
+/// Which history maintenance operation an acknowledgement completes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HistoryAckKind {
+    Tags,
+    Label,
+    Clear,
+}
+
 #[derive(Clone)]
 enum Message {
     Navigate(Option<String>),
@@ -867,6 +875,14 @@ enum Message {
     ProviderKeyDraftChanged(usize, String),
     StoreProviderKey(usize),
     ClearProviderKey(usize),
+    ToggleClearHistoryConfirm(bool),
+    ClearHistoryConfirmed,
+    HistoryTagDraftChanged(String),
+    SaveHistoryTags,
+    HistoryAckFinished {
+        kind: HistoryAckKind,
+        result: Result<(), String>,
+    },
     RepairDialogClosed {
         remediation_id: String,
         result: ContentDialogResult,
@@ -1265,6 +1281,10 @@ struct WfdiagSpike {
     window_hook_installed: bool,
     provider_key_drafts: [String; 4],
     provider_key_busy: bool,
+    history_clear_confirm: bool,
+    history_tag_draft: String,
+    history_ack_busy: bool,
+    history_wait: Option<ComponentTask>,
     ai_mode: AiMode,
     ai_provider_runtime: Option<NativeAiProviderRuntime>,
     ai_provider_status: Option<AIProviderStatus>,
@@ -1601,6 +1621,44 @@ fn spawn_diagnostic_finalization_delay(
         },
         Message::DiagnosticFinalizationRejected {
             session_id: rejection_session_id,
+        },
+    )
+}
+
+fn spawn_history_ack_wait(
+    context: &ComponentContext<WfdiagSpike>,
+    kind: HistoryAckKind,
+    mut reply: HistoryReply<()>,
+) -> ComponentTask {
+    context.spawn_background_with_rejection(
+        move |cancellation| loop {
+            if cancellation.is_cancelled() {
+                return Message::HistoryAckFinished {
+                    kind,
+                    result: Err("The Reactor background queue rejected the request".to_string()),
+                };
+            }
+            match reply.try_recv() {
+                Ok(result) => {
+                    return Message::HistoryAckFinished {
+                        kind,
+                        result: result.map_err(|error| error.to_string()),
+                    };
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    return Message::HistoryAckFinished {
+                        kind,
+                        result: Err("Native history worker stopped".to_string()),
+                    };
+                }
+            }
+        },
+        Message::HistoryAckFinished {
+            kind,
+            result: Err("The Reactor background queue rejected the request".to_string()),
         },
     )
 }
@@ -2423,6 +2481,63 @@ impl WfdiagSpike {
         } else {
             "Clearing API key…".to_string()
         };
+    }
+
+    /// Save the tag draft for the selected scan through the history worker.
+    fn request_history_tags_save(&mut self, context: &ComponentContext<Self>) {
+        if self.deterministic_visual || self.history_ack_busy {
+            return;
+        }
+        let Some(runtime) = self.history_runtime.as_ref().map(Arc::clone) else {
+            self.status = "Native history is unavailable".to_string();
+            return;
+        };
+        let Some(scan_id) = self.selected_history_id.clone() else {
+            return;
+        };
+        let tags: Vec<String> = self
+            .history_tag_draft
+            .split(',')
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_string)
+            .collect();
+        match runtime.request_update_tags(scan_id, tags) {
+            Ok(reply) => {
+                self.history_ack_busy = true;
+                self.status = "Saving tags…".to_string();
+                self.history_wait = Some(spawn_history_ack_wait(
+                    context,
+                    HistoryAckKind::Tags,
+                    reply,
+                ));
+            }
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    /// Clear all stored scans after the explicit confirmation dialog.
+    fn request_history_clear(&mut self, context: &ComponentContext<Self>) {
+        if self.deterministic_visual || self.history_ack_busy {
+            return;
+        }
+        let Some(runtime) = self.history_runtime.as_ref().map(Arc::clone) else {
+            self.status = "Native history is unavailable".to_string();
+            return;
+        };
+        match runtime.request_clear() {
+            Ok(reply) => {
+                self.history_ack_busy = true;
+                self.history_clear_confirm = false;
+                self.status = "Clearing scan history…".to_string();
+                self.history_wait = Some(spawn_history_ack_wait(
+                    context,
+                    HistoryAckKind::Clear,
+                    reply,
+                ));
+            }
+            Err(error) => self.status = error.to_string(),
+        }
     }
 
     /// Install the tray + close-to-tray hook once the WinUI window exists.
@@ -4284,6 +4399,10 @@ impl Component for WfdiagSpike {
             window_hook_installed: false,
             provider_key_drafts: Default::default(),
             provider_key_busy: false,
+            history_clear_confirm: false,
+            history_tag_draft: String::new(),
+            history_ack_busy: false,
+            history_wait: None,
             ai_mode: AiMode::Assistant,
             ai_provider_runtime,
             ai_provider_status: None,
@@ -4420,6 +4539,40 @@ impl Component for WfdiagSpike {
             Message::ClearProviderKey(index) => {
                 self.provider_key_drafts[index] = String::new();
                 self.submit_provider_key(index, false);
+            }
+            Message::ToggleClearHistoryConfirm(open) => {
+                self.history_clear_confirm = open;
+            }
+            Message::ClearHistoryConfirmed => {
+                self.request_history_clear(context);
+            }
+            Message::HistoryTagDraftChanged(value) => {
+                self.history_tag_draft = value;
+            }
+            Message::SaveHistoryTags => {
+                self.request_history_tags_save(context);
+            }
+            Message::HistoryAckFinished { kind, result } => {
+                self.history_wait = None;
+                self.history_ack_busy = false;
+                match (kind, result) {
+                    (HistoryAckKind::Clear, Ok(())) => {
+                        self.history_summaries.clear();
+                        self.selected_history_id = None;
+                        self.history_comparison = None;
+                        self.history_tag_draft.clear();
+                        self.status = "Scan history cleared".to_string();
+                    }
+                    (HistoryAckKind::Tags, Ok(())) => {
+                        self.status = "Tags saved".to_string();
+                        self.request_history_list(context);
+                    }
+                    (HistoryAckKind::Label, Ok(())) => {
+                        self.status = "Label saved".to_string();
+                        self.request_history_list(context);
+                    }
+                    (_, Err(message)) => self.status = message,
+                }
             }
             Message::AboutClosed { epoch } => self.close_about(epoch),
             Message::AboutExternalRequested { epoch, action } => {
@@ -5754,13 +5907,21 @@ impl Component for WfdiagSpike {
                 &self.history_summaries,
                 &self.history_filter,
                 self.selected_history_id.as_deref(),
+                self.history_tag_draft.as_str(),
                 self.history_comparison.as_ref(),
                 self.history_compare_task.is_some(),
                 self.history_loading,
                 self.history_error.as_deref(),
+                self.history_ack_busy,
                 context.message(Message::RefreshHistory),
                 context.callback(Message::HistoryFilterChanged),
                 context.callback(Message::SelectHistory),
+                context.callback(Message::HistoryTagDraftChanged),
+                context.message(Message::SaveHistoryTags),
+                context.message(Message::ToggleClearHistoryConfirm(true)),
+                context.message(Message::ClearHistoryConfirmed),
+                context.message(Message::ToggleClearHistoryConfirm(false)),
+                self.history_clear_confirm,
             ),
         };
 
@@ -11458,13 +11619,21 @@ fn history_page(
     summaries: &[ScanSummary],
     filter: &str,
     selected_id: Option<&str>,
+    selected_tags: &str,
     comparison: Option<&ComparisonSummary>,
     comparison_loading: bool,
     loading: bool,
     error: Option<&str>,
+    ack_busy: bool,
     refresh: Callback<()>,
     filter_changed: Callback<String>,
     select_history: Callback<String>,
+    tag_changed: Callback<String>,
+    save_tags: Callback<()>,
+    clear_request: Callback<()>,
+    clear_confirmed: Callback<()>,
+    clear_cancelled: Callback<()>,
+    clear_confirm_open: bool,
 ) -> View {
     if deterministic_visual {
         return history_fixture_page(palette, narrow, fixture_empty);
@@ -11475,13 +11644,21 @@ fn history_page(
         summaries,
         filter,
         selected_id,
+        selected_tags,
         comparison,
         comparison_loading,
         loading,
         error,
+        ack_busy,
         refresh,
         filter_changed,
         select_history,
+        tag_changed,
+        save_tags,
+        clear_request,
+        clear_confirmed,
+        clear_cancelled,
+        clear_confirm_open,
     )
 }
 
@@ -11492,13 +11669,21 @@ fn history_live_page(
     summaries: &[ScanSummary],
     filter: &str,
     selected_id: Option<&str>,
+    selected_tags: &str,
     comparison: Option<&ComparisonSummary>,
     comparison_loading: bool,
     loading: bool,
     error: Option<&str>,
+    ack_busy: bool,
     refresh: Callback<()>,
     filter_changed: Callback<String>,
     select_history: Callback<String>,
+    tag_changed: Callback<String>,
+    save_tags: Callback<()>,
+    clear_request: Callback<()>,
+    clear_confirmed: Callback<()>,
+    clear_cancelled: Callback<()>,
+    clear_confirm_open: bool,
 ) -> View {
     let needle = filter.trim().to_ascii_lowercase();
     let filtered = summaries
@@ -11656,11 +11841,76 @@ fn history_live_page(
                             .content(fa_icon_label(FaIcon::Refresh, "Refresh")),
                         Button::new()
                             .width(147.0)
-                            .is_enabled(false)
+                            .is_enabled(!loading && !ack_busy && !summaries.is_empty())
+                            .on_click(clear_request)
                             .content(fa_icon_label(FaIcon::Trash, "Clear history")),
                     )),
             )),
         body,
+        {
+            let tags_editor: View = selected_id
+                .and_then(|id| summaries.iter().find(|scan| scan.id == id))
+                .map(|summary| {
+                    StackPanel::new()
+                        .orientation(Orientation::Horizontal)
+                        .spacing(8.0)
+                        .children((
+                            TextBlock::new()
+                                .text("Tags")
+                                .font_size(12.0)
+                                .vertical_alignment(VerticalAlignment::Center),
+                            TextBox::new()
+                                .width(320.0)
+                                .height(32.0)
+                                .text(if selected_tags.is_empty() {
+                                    summary.tags.join(", ")
+                                } else {
+                                    selected_tags.to_string()
+                                })
+                                .placeholder_text("comma-separated tags")
+                                .is_enabled(!ack_busy)
+                                .on_text_changed(tag_changed)
+                                .automation_name("Scan tags"),
+                            Button::new()
+                                .height(32.0)
+                                .is_enabled(!ack_busy)
+                                .on_click(save_tags)
+                                .content("Save tags"),
+                        ))
+                })
+                .unwrap_or_else(View::empty);
+            tags_editor
+        },
+        if clear_confirm_open {
+            let confirm = clear_confirmed.clone();
+            let cancel = clear_cancelled.clone();
+            ContentDialog::new()
+                .title("Clear scan history?")
+                .is_open(true)
+                .primary_button_text("Clear everything")
+                .secondary_button_text("Cancel")
+                .on_closed(move |result| {
+                    if result == ContentDialogResult::Primary {
+                        let _ = confirm.call(());
+                    } else {
+                        let _ = cancel.call(());
+                    }
+                })
+                .content(
+                    Border::new()
+                        .width(412.0)
+                        .background(palette.card_strong)
+                        .padding(Thickness::new(18.0, 14.0, 18.0, 14.0))
+                        .content(
+                            TextBlock::new()
+                                .text("Every stored scan, tag, and comparison baseline will be permanently deleted. This cannot be undone.")
+                                .font_size(12.5)
+                                .text_wrapping(TextWrapping::Wrap),
+                        ),
+                )
+        } else {
+            View::empty()
+        },
     ))
 }
 
