@@ -401,7 +401,42 @@ manifest:
 A gate may be changed to `passed` only with an official release/revision,
 links to the upstream API or change, and automated plus manual WFDiag evidence.
 
-## Validation commands
+## Validation system (2026-08-30)
+
+The remaining-gate evidence is produced by a dedicated harness (owner goal:
+1:1 functionality and rendering parity, measured rather than asserted):
+
+- `scripts/lib/ReactorUia.psm1` — shared UIA/process helpers (hermetic
+  launch, unique-button wait+invoke, status-text scanning, crash events,
+  graceful close, combined-image sheets, WebView guard).
+- `scripts/test-reactor-chat.ps1` / `-report.ps1` / `-remediation.ps1` —
+  tiered interactive suites over the live candidate (provider tiers degrade
+  to "skipped: no provider"). They target the validation automation surface
+  added to the shell: chat composer/Send/Stop, report
+  Generate/Cancel/Regenerate, per-row Run ("Run {label}"), the Repair
+  confirmation dialog, and the "Refresh processes" button. Chat cancel and
+  the read-only `get_system_overview` tool were implemented so they can be
+  validated (tool answers are grounded in the injected system snapshot).
+- `scripts/capture-reactor-variants.ps1` +
+  `reactor-baselines/variants.json` + `scripts/check-variants.py` — theme
+  and reduced-motion variant captures over deterministic fixture states,
+  plus the open rendering-defect list (seeded with the owner-reported
+  process-list refresh divergence).
+- `scripts/test-reactor-process-refresh-parity.ps1` — the defect target #1:
+  Processes-screen triptych (initial / mid-refresh / refreshed) with
+  Store-left/Reactor-right combined sheets.
+- `scripts/test-reactor-x64.ps1` +
+  `.github/workflows/reactor-validation.yml` — x64 evidence locally
+  (emulated) and on a clean windows-latest runner.
+- `scripts/check-external-gates.py` — crates.io release watch, runtime
+  alignment drift, packaging pre-flight (exit 1 when an external change
+  becomes actionable).
+- `scripts/validate-reactor.ps1 -Suite flows|visual|x64|gates|all` —
+  orchestrator; reports land under `validation-reports/`.
+- `docs/validation/clean-machine-protocol.md` — the manual protocol for
+  clean-machine and Store certification gates, with a sign-off table.
+
+`wfdiag-native-system` now owns the canonical machine, Windows-version,
 
 The checker tests use only temporary fixtures and verify that evaluation does
 not change the inspected tree:

@@ -1,0 +1,108 @@
+# Reactor validation lane: clean x64 Windows runner.
+#
+# Manual dispatch (plus an optional weekly schedule) builds the native
+# WinUI candidate for x64 on a clean windows-latest runner and runs the
+# live-system + flow validation scripts against it. WinUI/UIA needs an
+# interactive desktop; runner support is recent enough to attempt, and the
+# UIA-specific steps keep continue-on-error until proven stable there.
+#
+# Evidence (logs + captures) is uploaded as workflow artifacts.
+
+name: reactor-validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      run-ui-suites:
+        description: "Run the UIA flow suites (experimental on runners)"
+        type: boolean
+        default: true
+      run-external-gates:
+        description: "Run the external-gates watcher"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate-x64:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build self-contained candidate
+        run: cargo build --locked --target x86_64-pc-windows-msvc --features self-contained --manifest-path reactor-spike/Cargo.toml
+
+      - name: Version probe
+        shell: pwsh
+        run: |
+          $exe = "reactor-spike\target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe"
+          $env:WFDIAG_REACTOR_VERSION_PROBE_FILE = "${{ runner.temp }}\version.json"
+          & $exe --wfdiag-version-probe
+          if ($LASTEXITCODE -ne 0) { throw "version probe failed" }
+          Get-Content $env:WFDIAG_REACTOR_VERSION_PROBE_FILE
+
+      - name: Live-system validation
+        continue-on-error: true
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass `
+            -File scripts/test-reactor-live-system.ps1 `
+            -Executable "reactor-spike\target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -OutputDirectory "validation-reports\live-system" `
+            -HoldSeconds 2
+
+      - name: Chat flow validation
+        if: ${{ inputs.run-ui-suites }}
+        continue-on-error: true
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass `
+            -File scripts/test-reactor-chat.ps1 `
+            -Executable "reactor-spike\target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -OutputDirectory "validation-reports\chat"
+
+      - name: Report flow validation
+        if: ${{ inputs.run-ui-suites }}
+        continue-on-error: true
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass `
+            -File scripts/test-reactor-report.ps1 `
+            -Executable "reactor-spike\target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -OutputDirectory "validation-reports\report" `
+            -ScanWaitSeconds 300
+
+      - name: Remediation flow validation
+        if: ${{ inputs.run-ui-suites }}
+        continue-on-error: true
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass `
+            -File scripts/test-reactor-remediation.ps1 `
+            -Executable "reactor-spike\target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -OutputDirectory "validation-reports\remediation" `
+            -ScanWaitSeconds 300
+
+      - name: External gates watcher
+        if: ${{ inputs.run-external-gates }}
+        shell: pwsh
+        run: |
+          python scripts/check-external-gates.py --json
+          # Informational: actionable findings are reviewed, not gating.
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reactor-validation-evidence
+          path: |
+            validation-reports/
+            reactor-spike/captures-2.5.8/validation-*/
+          if-no-files-found: warn
