@@ -70,7 +70,8 @@ function Start-ReactorCandidate {
     param(
         [Parameter(Mandatory = $true)][string]$Executable,
         [hashtable]$Variables = @{},
-        [ValidateRange(0, 60)][int]$Seconds = 4
+        [ValidateRange(0, 60)][int]$Seconds = 4,
+        [string]$StderrFile
     )
 
     $saved = @{}
@@ -82,7 +83,12 @@ function Start-ReactorCandidate {
         [Environment]::SetEnvironmentVariable($key, [string]$Variables[$key], "Process")
     }
 
-    $process = Start-Process -FilePath $Executable -PassThru
+    $process = if ($StderrFile) {
+        Start-Process -FilePath $Executable -PassThru -RedirectStandardError $StderrFile
+    }
+    else {
+        Start-Process -FilePath $Executable -PassThru
+    }
     $null = $process.WaitForExit(0)
 
     foreach ($name in $script:ReactorEnvVars) {

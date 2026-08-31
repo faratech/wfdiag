@@ -44,8 +44,13 @@ pub fn acquire(identifier: &str) -> SingleInstanceDecision {
     let event_name = wide(&format!("Local\\{identifier}-activate"));
 
     // SAFETY: names are NUL-terminated UTF-16; no attributes needed.
+    // GetLastError is read against a cleared state: a stale error left by an
+    // earlier call (the version probe's file IO) would misread a fresh mutex
+    // as already-existing and make every launch exit instantly.
+    unsafe { windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(0)) };
     let mutex = unsafe { CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr())) };
-    let already_exists = unsafe { windows::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS };
+    let already_exists =
+        unsafe { windows::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS };
     let _mutex_guard = mutex; // released on drop of the process handle wrapper
 
     if already_exists {

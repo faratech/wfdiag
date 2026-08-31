@@ -72,8 +72,12 @@ $settingsPath = Join-Path $settingsDirectory "settings.json"
     (New-Object System.Text.UTF8Encoding($false)))
 
 # --- Mock provider ---------------------------------------------------------
+# The Store python alias cannot execute scripts from UNC paths; stage the
+# mock next to the candidate executable (always on a local drive).
+$mockScript = Join-Path (Split-Path -Parent $resolvedExecutable) "mock-provider.py"
+Copy-Item (Join-Path $PSScriptRoot "lib\mock-provider.py") $mockScript -Force
 $mock = Start-Process -FilePath "python" `
-    -ArgumentList "`"$(Join-Path $PSScriptRoot 'lib\mock-provider.py')`"" `
+    -ArgumentList "`"$mockScript`"" `
     -WindowStyle Hidden -PassThru
 Start-Sleep -Seconds 1
 if ($mock.HasExited) {
@@ -129,7 +133,26 @@ try {
     $process.Refresh()
     Assert-NoWebViewModules -Process $process
     $root = Get-ReactorUiaRoot -Process $process
-    Start-Sleep -Seconds 3
+
+    # Wait for the async provider probe to publish the ready pill (the same
+    # signal a user waits for before sending).
+    $providerReadyDeadline = (Get-Date).AddSeconds(30)
+    do {
+        $elements = $root.FindAll(
+            [Windows.Automation.TreeScope]::Descendants,
+            [Windows.Automation.Condition]::TrueCondition)
+        $ready = $false
+        for ($index = 0; $index -lt $elements.Count; $index++) {
+            $name = $null
+            try { $name = [string]$elements.Item($index).Current.Name } catch { continue }
+            if ($name.StartsWith("AI provider ready", [StringComparison]::Ordinal)) {
+                $ready = $true
+                break
+            }
+        }
+        if ($ready) { break }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $providerReadyDeadline)
 
     # --- 1. Streaming chat round-trip ---------------------------------------
     Send-ComposerText -Root $root -Value "hello there"

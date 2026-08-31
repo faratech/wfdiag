@@ -5859,6 +5859,11 @@ impl Component for WfdiagSpike {
             Message::ChatInputChanged(value) => self.chat_input = value,
             Message::UsePrompt(value) => self.chat_input = value,
             Message::SendChat => {
+                eprintln!("[trace] SendChat: ai_enabled={} chat_pending={:?} chat_runtime={} provider_status={:?}",
+                    self.settings_snapshot.ai_enabled,
+                    self.chat_pending,
+                    self.chat_runtime.is_some(),
+                    self.ai_provider_status.as_ref().map(|s| s.active_provider));
                 if !self.chat_input.trim().is_empty() {
                     if self.deterministic_visual {
                         self.chat_answer = Some(format!(
@@ -5872,11 +5877,12 @@ impl Component for WfdiagSpike {
                         self.status = "Enable AI insights in Settings before sending".to_string();
                     } else if self.chat_pending.is_some() {
                         self.status = "A response is already streaming…".to_string();
+                    } else if self.chat_runtime.is_none() {
+                        self.status = "Native AI chat worker is unavailable".to_string();
                     } else if self
                         .ai_provider_status
                         .as_ref()
                         .is_some_and(|status| status.active_provider != AIProvider::None)
-                        && self.chat_runtime.is_some()
                     {
                         let provider = self
                             .ai_provider_status
