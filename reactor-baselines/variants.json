@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "applicationVersion": "2.5.8",
+  "defects": [
+    {
+      "id": "processes-refresh-rendering",
+      "status": "open",
+      "reported": "2026-08-30",
+      "note": "Owner-reported: the process list refresh rendering diverges badly from the Store build. Triptych captures feed the fix."
+    }
+  ],
+  "variants": []
+}

@@ -9536,6 +9536,7 @@ fn processes_page(
         .children((
             Button::new()
                 .on_click(refresh)
+                .automation_name("Refresh processes")
                 .content(fa_icon_label(FaIcon::Refresh, "Refresh")),
             Button::new().on_click(toggle).content(fa_icon_label(
                 if paused { FaIcon::Play } else { FaIcon::Pause },
@@ -13089,7 +13090,6 @@ fn settings_dialog(
             .children((
                 TextBlock::new()
                     .text(status)
-                    .automation_name("Status bar")
                     .font_size(10.5)
                     .foreground(if is_error { palette.err } else { palette.muted })
                     .text_wrapping(TextWrapping::Wrap)
