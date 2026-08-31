@@ -29,6 +29,8 @@ use wfdiag_native_ai_provider::{
 };
 use wfdiag_native_settings::{ProviderKeyId, SettingsService};
 
+use serde_json::json;
+
 /// Stable engine session id. The Reactor shell keeps one conversation.
 pub const CHAT_SESSION_ID: &str = "reactor-chat";
 
@@ -78,7 +80,10 @@ pub enum ChatCommand {
         request_id: u64,
         prompt: String,
         provider: AIProvider,
+        /// System snapshot for the read-only `get_system_overview` tool.
+        overview: Option<String>,
     },
+    Cancel,
 }
 
 /// Typed worker events drained by the component.
@@ -169,10 +174,54 @@ struct WorkerState {
     events: std_mpsc::Sender<ChatWorkerEvent>,
     messages: Vec<ChatMessage>,
     cancel: Option<CancellationToken>,
+    overview: Option<String>,
+    overview_executor: SystemOverviewExecutor,
+}
+
+/// The first read-only tool: returns the shell-provided system snapshot.
+/// The model can only ever read this text — it never reaches an argv.
+struct SystemOverviewExecutor {
+    overview: Option<String>,
+}
+
+impl ToolExecutor for SystemOverviewExecutor {
+    fn execute<'a>(&'a self, call: &'a wfdiag_native_ai_chat::ToolCall, _cancel: CancellationToken)
+    -> ToolFuture<'a> {
+        Box::pin(async move {
+            if call.name != "get_system_overview" {
+                return Err(format!("Unknown tool '{}'", call.name));
+            }
+            Ok(self.overview.clone().unwrap_or_else(|| {
+                "System information is not available in this session.".to_string()
+            }))
+        })
+    }
+}
+
+/// Tool contract exposed to tool-capable providers when a snapshot exists.
+#[must_use]
+pub fn system_overview_spec() -> wfdiag_native_ai_chat::ToolSpec {
+    wfdiag_native_ai_chat::ToolSpec {
+        name: "get_system_overview".to_string(),
+        description: "Return a snapshot of this PC's identity and operating system:                       computer name, Windows edition/version, CPU architecture, and                       elevation. Use it whenever the answer depends on the user's                       hardware or Windows version."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        }),
+    }
 }
 
 impl WorkerState {
-    async fn run_turn(&mut self, request_id: u64, prompt: String, provider: AIProvider) {
+    async fn run_turn(
+        &mut self,
+        request_id: u64,
+        prompt: String,
+        provider: AIProvider,
+        overview: Option<String>,
+    ) {
+        let _ = &self.overview_executor;
         let ports = self.source.ports();
         let cfg = match resolve_compat_config(provider, &ports).await {
             Ok(cfg) => cfg,
@@ -181,11 +230,11 @@ impl WorkerState {
                 return;
             }
         };
+        self.overview = overview;
         let caps = compat_caps(provider);
         let plan = plan_context(caps.context_budget_chars);
-        // No tools in this increment: the plain persona keeps the whole
-        // budget for the answer.
-        let system = build_system_prompt(false, false, None, &plan);
+        let tools_enabled = caps.supports_tools && self.overview.is_some();
+        let system = build_system_prompt(tools_enabled, false, None, &plan);
         let message_id = format!("chat_{request_id}");
         let chat = CompatChatProvider { provider, cfg };
         let mut provider_use = ProviderUse::for_provider(provider, None);
@@ -212,8 +261,15 @@ impl WorkerState {
             &message_id,
             &mut self.messages,
             &system,
-            &[],
-            &NoTools,
+            &if tools_enabled {
+                vec![system_overview_spec()]
+            } else {
+                Vec::new()
+            },
+            match tools_enabled {
+                true => &self.overview_executor,
+                false => &NoTools as &dyn ToolExecutor,
+            },
             &emitter,
             cancel,
             false,
@@ -256,8 +312,7 @@ pub struct NativeChatRuntime {
 }
 
 impl NativeChatRuntime {
-    /// Start the worker. Returns the runtime handle and the event receiver
-    /// the component drains from a background wait task.
+    /// Prepare the worker channel pair and spawn the OS thread.
     ///
     /// # Errors
     /// When the worker thread cannot be spawned.
@@ -271,21 +326,13 @@ impl NativeChatRuntime {
         let worker = std::thread::Builder::new()
             .name("wfdiag-reactor-chat".to_string())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build();
-                let Ok(runtime) = runtime else {
-                    return;
-                };
                 let mut state = WorkerState {
-                    source: ShellChatSource {
-                        settings,
-                        foundry,
-                        ollama,
-                    },
+                    source: ShellChatSource::new(settings, foundry, ollama),
                     events,
                     messages: Vec::new(),
                     cancel: None,
+                    overview: None,
+                    overview_executor: SystemOverviewExecutor { overview: None },
                 };
                 while let Ok(command) = command_rx.recv() {
                     match command {
@@ -293,8 +340,22 @@ impl NativeChatRuntime {
                             request_id,
                             prompt,
                             provider,
+                            overview,
                         } => {
-                            runtime.block_on(state.run_turn(request_id, prompt, provider));
+                            // The Tokio runtime exists only while a turn runs; an
+                            // idle runtime's IO/time drivers were observed to keep
+                            // the WinUI dispatcher from finishing window teardown.
+                            let runtime = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build();
+                            if let Ok(runtime) = runtime {
+                                runtime.block_on(state.run_turn(request_id, prompt, provider, overview));
+                            }
+                        }
+                        ChatCommand::Cancel => {
+                            if let Some(cancel) = state.cancel.as_ref() {
+                                cancel.cancel();
+                            }
                         }
                     }
                 }
@@ -308,22 +369,37 @@ impl NativeChatRuntime {
         ))
     }
 
-    pub fn send(&self, request_id: u64, prompt: String, provider: AIProvider) {
+    pub fn send(
+        &self,
+        request_id: u64,
+        prompt: String,
+        provider: AIProvider,
+        overview: Option<String>,
+    ) {
         if let Some(commands) = self.commands.as_ref() {
             let _ = commands.send(ChatCommand::Send {
                 request_id,
                 prompt,
                 provider,
+                overview,
             });
         }
     }
 
+    #[must_use]
+    pub fn cancel(&self) -> bool {
+        self.commands
+            .as_ref()
+            .is_some_and(|commands| commands.send(ChatCommand::Cancel).is_ok())
+    }
 }
 
 impl Drop for NativeChatRuntime {
     fn drop(&mut self) {
-        // Dropping the command sender disconnects the loop; the worker then
-        // exits and the join handle is reaped here.
+        // Release the command sender first so the worker's recv()
+        // disconnects; joining before that deadlocks the shutting-down UI
+        // thread (the graceful-close hang root cause).
+        self.commands = None;
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -356,6 +432,8 @@ mod tests {
                 ollama: unreachable_ollama(),
             },
             events,
+            overview: None,
+            overview_executor: SystemOverviewExecutor { overview: None },
             messages: vec![ChatMessage {
                 role: ChatRole::User,
                 content: "why is disk full?".to_string(),

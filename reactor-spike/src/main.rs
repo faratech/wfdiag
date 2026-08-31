@@ -866,6 +866,7 @@ enum Message {
     RunRemediation(String),
     AskAiAboutIssue(String),
     ProposeFixPlan,
+    CancelChat,
     TogglePalette,
     ClosePalette,
     PaletteQueryChanged(String),
@@ -4323,7 +4324,11 @@ impl Component for WfdiagSpike {
 
         let mut component = Self {
             page: initial_page,
-            theme: WindowTheme::Dark,
+            // Validation knob: WFDIAG_REACTOR_THEME=light|dark|system selects
+            // the startup theme (default dark, the Store 2.5.8 baseline).
+            theme: window_theme_from_setting(
+                &std::env::var("WFDIAG_REACTOR_THEME").unwrap_or_default(),
+            ),
             window_size: WindowSize { width, height },
             requested_client_width: width,
             requested_client_height: height,
@@ -5200,6 +5205,11 @@ impl Component for WfdiagSpike {
                     );
                 }
             }
+            Message::CancelChat => {
+                if self.chat_runtime.as_ref().is_some_and(NativeChatRuntime::cancel) {
+                    self.status = "Cancelling the AI response…".to_string();
+                }
+            }
             Message::ChatWorkerEventReceived(event) => {
                 let Some(pending) = self.chat_pending else {
                     return;
@@ -5875,9 +5885,21 @@ impl Component for WfdiagSpike {
                             return;
                         };
                         let prompt = self.chat_input.trim().to_string();
+                        let arch = self
+                            .architecture
+                            .as_ref()
+                            .map(|snapshot| snapshot.emulation_status.clone())
+                            .unwrap_or_else(|| "Unknown".to_string());
+                        let overview = format!(
+                            "Computer name: {}\nOperating system: {}\nArchitecture: {}\nElevated: {}",
+                            self.system_info.computer_name,
+                            self.system_info.os_version,
+                            arch,
+                            if self.is_admin { "yes" } else { "no" }
+                        );
                         self.chat_answer = None;
                         self.chat_pending = Some(request_id);
-                        runtime.send(request_id, prompt, provider);
+                        runtime.send(request_id, prompt, provider, Some(overview));
                         self.chat_input.clear();
                         self.status = "Asking the AI assistant…".to_string();
                         self.resume_chat_wait(context);
@@ -6040,6 +6062,8 @@ impl Component for WfdiagSpike {
                 !self.diagnostic_results.is_empty(),
                 context.message(Message::GenerateReport),
                 context.message(Message::CancelReport),
+                self.chat_pending.is_some(),
+                context.message(Message::CancelChat),
             ),
             Page::Issues => issues_page(
                 palette,
@@ -10196,6 +10220,8 @@ fn ai_page(
     report_has_scan: bool,
     generate_report: Callback<()>,
     cancel_report: Callback<()>,
+    chat_pending: bool,
+    cancel_chat: Callback<()>,
 ) -> View {
     let prompts = [
         "Summarize my latest scan",
@@ -10366,6 +10392,8 @@ fn ai_page(
             provider_ready || deterministic_visual,
             configure_ai,
             send,
+            chat_pending,
+            cancel_chat,
         )
     } else {
         ai_scan_report_workspace(
@@ -10456,6 +10484,8 @@ fn ai_assistant_workspace(
     provider_ready: bool,
     open_settings: Callback<()>,
     send: Callback<()>,
+    chat_pending: bool,
+    cancel_chat: Callback<()>,
 ) -> View {
     let body: View = if visual_state == VisualState::IssueToChat {
         ai_issue_to_chat_body(palette)
@@ -10684,15 +10714,28 @@ fn ai_assistant_workspace(
                                                     && provider_ready
                                                     && !provider_loading),
                                         )
-                                        .on_text_changed(input_changed),
-                                    Button::new()
-                                        .grid_column(1)
-                                        .width(83.0)
-                                        .height(32.0)
-                                        .resource_overrides(primary_button_resources())
-                                        .is_enabled(provider_ready && !input.trim().is_empty())
-                                        .on_click(send)
-                                        .content(fa_icon_label(FaIcon::PaperPlane, "Send")),
+                                        .on_text_changed(input_changed)
+                                        .automation_name("Chat message"),
+                                    if chat_pending {
+                                        Button::new()
+                                            .grid_column(1)
+                                            .width(83.0)
+                                            .height(32.0)
+                                            .resource_overrides(primary_button_resources())
+                                            .on_click(cancel_chat)
+                                            .automation_name("Stop generating")
+                                            .content(fa_icon_label(FaIcon::Xmark, "Stop"))
+                                    } else {
+                                        Button::new()
+                                            .grid_column(1)
+                                            .width(83.0)
+                                            .height(32.0)
+                                            .resource_overrides(primary_button_resources())
+                                            .is_enabled(provider_ready && !input.trim().is_empty())
+                                            .on_click(send)
+                                            .automation_name("Send chat message")
+                                            .content(fa_icon_label(FaIcon::PaperPlane, "Send"))
+                                    },
                                 )),
                         ),
                 )),
@@ -11076,7 +11119,10 @@ fn ai_scan_report_workspace(
                     .text("The AI assistant is reviewing the latest scan.")
                     .font_size(12.5)
                     .foreground(palette.muted),
-                Button::new().on_click(cancel).content("Cancel"),
+                Button::new()
+                    .on_click(cancel)
+                    .automation_name("Cancel report")
+                    .content("Cancel"),
             ))
     } else if let Some(text) = report_text {
         ScrollViewer::new()
@@ -11093,7 +11139,10 @@ fn ai_scan_report_workspace(
                                         .text("Scan health report")
                                         .font_size(17.0)
                                         .font_weight(FontWeight::BOLD),
-                                    Button::new().on_click(generate).content("Regenerate"),
+                                    Button::new()
+                                        .on_click(generate)
+                                        .automation_name("Regenerate report")
+                                        .content("Regenerate"),
                                 )),
                             TextBlock::new()
                                 .text(report_provider
@@ -11131,7 +11180,10 @@ fn ai_scan_report_workspace(
                     .text_wrapping(TextWrapping::Wrap)
                     .max_width(470.0)
                     .horizontal_alignment(HorizontalAlignment::Center),
-                Button::new().on_click(generate).content("Generate report"),
+                Button::new()
+                    .on_click(generate)
+                    .automation_name("Generate report")
+                    .content("Generate report"),
             ))
     };
     Border::new()
@@ -11559,6 +11611,7 @@ fn maintenance_row(palette: Palette, remediation: &RemediationSummary, run: impl
     if remediation.admin_required {
         title.push_str(" admin");
     }
+    let run_automation = format!("Run {}", remediation.label);
 
     Border::new()
         .min_height(54.0)
@@ -11588,6 +11641,7 @@ fn maintenance_row(palette: Palette, remediation: &RemediationSummary, run: impl
                         .width(58.0)
                         .height(31.0)
                         .on_click(run)
+                        .automation_name(run_automation)
                         .resource_overrides(
                             ResourceOverrides::new().set("ButtonForegroundDisabled", palette.text),
                         )
@@ -11692,10 +11746,12 @@ fn issue_card(
         View::empty()
     };
     let primary_action: View = if let Some((label, icon, on_click)) = primary_action {
+        let automation = format!("Run {label}");
         Button::new()
             .width(action_width)
             .height(32.0)
             .on_click(on_click)
+            .automation_name(automation)
             .resource_overrides(issue_primary_button_resources())
             .content(fa_icon_label(icon, label))
     } else {
@@ -12092,6 +12148,7 @@ fn history_live_page(
                             .width(147.0)
                             .is_enabled(!loading && !ack_busy && !summaries.is_empty())
                             .on_click(clear_request)
+                            .automation_name("Clear history")
                             .content(fa_icon_label(FaIcon::Trash, "Clear history")),
                     )),
             )),
@@ -13032,6 +13089,7 @@ fn settings_dialog(
             .children((
                 TextBlock::new()
                     .text(status)
+                    .automation_name("Status bar")
                     .font_size(10.5)
                     .foreground(if is_error { palette.err } else { palette.muted })
                     .text_wrapping(TextWrapping::Wrap)
