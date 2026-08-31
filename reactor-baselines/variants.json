@@ -7,6 +7,18 @@
       "status": "open",
       "reported": "2026-08-30",
       "note": "Owner-reported: the process list refresh rendering diverges badly from the Store build. Triptych captures feed the fix."
+    },
+    {
+      "id": "maintenance-rows-unreachable-standard-user",
+      "status": "open",
+      "reported": "2026-08-30",
+      "note": "Found by the remediation validation suite: after a live non-admin scan the Issues page renders only 3 of the 8 maintenance rows (Restart as administrator / Clean temp files / Open Device Manager). Repair-tier rows (SFC, DISM) and the service-restart rows are never realized in the UIA tree even after scrolling \u2014 the Repair confirmation gate is therefore untestable as a standard user. Expected: all 8 canonical maintenance rows render (admin rows marked, execution gated by elevation)."
+    },
+    {
+      "id": "remediation-suite-found-close-defect-20260830",
+      "status": "fixed",
+      "reported": "2026-08-30",
+      "note": "First harness run exposed the graceful-close deadlock (worker Drop joined before releasing the command sender); fixed in commit 701648f and re-validated."
     }
   ],
   "variants": []

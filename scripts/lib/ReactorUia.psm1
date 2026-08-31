@@ -38,9 +38,13 @@ function Get-ReactorApplicationVersion {
 
     $env:WFDIAG_REACTOR_VERSION_PROBE_FILE = $ProbeFile
     try {
-        $output = & $Executable "--wfdiag-version-probe" 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "Version probe exit code $LASTEXITCODE."
+        # The candidate is a GUI-subsystem executable: PowerShell does not
+        # populate $LASTEXITCODE for it, so read the exit code off the
+        # process object instead.
+        $probe = Start-Process -FilePath $Executable `
+            -ArgumentList "--wfdiag-version-probe" -Wait -PassThru
+        if ($probe.ExitCode -ne 0) {
+            throw "Version probe exit code $($probe.ExitCode)."
         }
         $document = Get-Content -LiteralPath $ProbeFile -Raw | ConvertFrom-Json
         if ($document.schema -ne 1 -or
@@ -207,7 +211,8 @@ function Get-UiaButtonCandidates {
     param(
         [Parameter(Mandatory = $true)]$Root,
         [string]$Name,
-        [string]$AutomationId
+        [string]$AutomationId,
+        [switch]$AllowOffscreen
     )
 
     $matchName = $PSBoundParameters.ContainsKey("Name")
@@ -225,10 +230,63 @@ function Get-UiaButtonCandidates {
         try {
             $current = $element.Current
             if ($current.ControlType -ne [Windows.Automation.ControlType]::Button -or
-                $current.IsOffscreen -or
                 -not $current.IsEnabled -or
                 ($matchName -and $current.Name -cne $Name) -or
                 ($matchAutomationId -and $current.AutomationId -cne $AutomationId)) {
+                continue
+            }
+            if ($current.IsOffscreen) {
+                if (-not $AllowOffscreen) {
+                    continue
+                }
+                # Scroll virtualized/off-viewport rows into view so Invoke
+                # reaches a realized element.
+                try {
+                    $scrollItem = $element.GetCurrentPattern(
+                        [Windows.Automation.ScrollItemPattern]::Pattern)
+                    $scrollItem.ScrollIntoView()
+                    Start-Sleep -Milliseconds 200
+                    $current = $element.Current
+                }
+                catch {
+                    continue
+                }
+            }
+            [void]$element.GetCurrentPattern(
+                [Windows.Automation.InvokePattern]::Pattern)
+            $candidates += [pscustomobject]@{
+                element = $element
+                record = Get-UiaElementRecord -Element $element
+            }
+        }
+        catch {
+            continue
+        }
+    }
+    return $candidates
+}
+
+function Get-UiaButtonCandidatesByPrefix {
+    param(
+        [Parameter(Mandatory = $true)]$Root,
+        [Parameter(Mandatory = $true)][string]$Prefix,
+        [switch]$AllowOffscreen
+    )
+
+    $elements = $Root.FindAll(
+        [Windows.Automation.TreeScope]::Descendants,
+        [Windows.Automation.Condition]::TrueCondition)
+    $candidates = @()
+    for ($index = 0; $index -lt $elements.Count; $index++) {
+        $element = $elements.Item($index)
+        try {
+            $current = $element.Current
+            if ($current.ControlType -ne [Windows.Automation.ControlType]::Button -or
+                -not $current.IsEnabled -or
+                -not $current.Name.StartsWith($Prefix, [StringComparison]::Ordinal)) {
+                continue
+            }
+            if ($current.IsOffscreen -and -not $AllowOffscreen) {
                 continue
             }
             [void]$element.GetCurrentPattern(
@@ -250,7 +308,8 @@ function Wait-UniqueUiaButton {
         [Parameter(Mandatory = $true)]$Root,
         [Parameter(Mandatory = $true)][datetime]$Deadline,
         [string]$Name,
-        [string]$AutomationId
+        [string]$AutomationId,
+        [switch]$AllowOffscreen
     )
 
     $lookup = @{}
@@ -264,6 +323,9 @@ function Wait-UniqueUiaButton {
     }
     else {
         throw "Wait-UniqueUiaButton requires Name or AutomationId."
+    }
+    if ($AllowOffscreen) {
+        $lookup.AllowOffscreen = $true
     }
 
     $lastCandidates = @()
@@ -383,6 +445,35 @@ function Set-UiaTextValue {
     throw "Text control with automation name '$AutomationName' was not found."
 }
 
+<#
+.SYNOPSIS
+Scroll the window under the cursor with the mouse wheel (the UIA tree only
+realizes virtualized rows that enter the viewport).
+#>
+function Send-WheelScroll {
+    param([ValidateRange(1, 30)][int]$Notches = 3)
+
+    if (-not ("WfWheelNative" -as [type])) {
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class WfWheelNative {
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extra);
+}
+'@
+    }
+    $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+    $x = [int]($screen.WorkingArea.Width / 2)
+    $y = [int]($screen.WorkingArea.Height / 2)
+    $null = [WfWheelNative]::SetCursorPos($x, $y)
+    for ($i = 0; $i -lt $Notches; $i++) {
+        [WfWheelNative]::mouse_event(0x080A, 0, 0, -120, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 80
+    }
+}
+
 function Get-CrashEvents {
     param(
         [Parameter(Mandatory = $true)][string[]]$ExecutablePaths,
@@ -488,9 +579,11 @@ Export-ModuleMember -Function @(
     "Wait-UniqueUiaButton",
     "Invoke-UiaButtonElement",
     "Invoke-UiaButtonByName",
+    "Get-UiaButtonCandidatesByPrefix",
     "Wait-StatusText",
     "Set-UiaTextValue",
     "Get-CrashEvents",
     "Assert-NoWebViewModules",
-    "New-CombinedImage"
+    "New-CombinedImage",
+    "Send-WheelScroll"
 )

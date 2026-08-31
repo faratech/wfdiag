@@ -102,8 +102,39 @@ try {
     Start-Sleep -Seconds 2
 
     # --- Repair confirmation gate ------------------------------------------
-    $repairButton = Wait-UniqueUiaButton -Root $root -Deadline (Get-Date).AddSeconds(30) `
-        -Name "Run System File Checker"
+    # The maintenance list virtualizes: only viewport rows exist in the UIA
+    # tree. Walk the list by scrolling (wheel + ScrollItem on the last
+    # realized Run button) until the SFC Repair row is realized. Invoking it
+    # opens the Repair confirm dialog without executing anything.
+    $repairButton = $null
+    $deadline = (Get-Date).AddSeconds(90)
+    do {
+        $runButtons = @(Get-UiaButtonCandidatesByPrefix -Root $root `
+            -Prefix "Run " -AllowOffscreen)
+        $sfc = @($runButtons | Where-Object {
+            $_.record.name -ceq "Run System File Checker" })
+        if ($sfc.Count -eq 1) {
+            $repairButton = $sfc[0]
+            break
+        }
+        if ($runButtons.Count -gt 0) {
+            try {
+                $last = $runButtons[$runButtons.Count - 1].element
+                ([Windows.Automation.ScrollItemPattern]$last.GetCurrentPattern(
+                    [Windows.Automation.ScrollItemPattern]::Pattern)).ScrollIntoView()
+            }
+            catch {
+                Send-WheelScroll -Notches 3
+            }
+        }
+        else {
+            Send-WheelScroll -Notches 3
+        }
+        Start-Sleep -Milliseconds 300
+    } while ((Get-Date) -lt $deadline)
+    if (-not $repairButton) {
+        throw "The 'Run System File Checker' maintenance row never appeared under scroll."
+    }
     Invoke-UiaButtonElement -Element $repairButton.element
 
     # The confirmation dialog's buttons carry implicit text names.
