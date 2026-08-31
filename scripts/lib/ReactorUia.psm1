@@ -474,6 +474,66 @@ public static class WfWheelNative {
     }
 }
 
+<#
+.SYNOPSIS
+Click the physical center of a UIA element with a real mouse event — for
+elements (Border rows) that respond to pointer input but expose no
+InvokePattern.
+#>
+function Invoke-UiaElementByMouseClick {
+    param([Parameter(Mandatory = $true)]$Record)
+
+    if (-not ("WfClickNative" -as [type])) {
+        Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class WfClickNative {
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extra);
+}
+'@
+    }
+    $x = [int]($Record.bounds.x + ($Record.bounds.width / 2))
+    $y = [int]($Record.bounds.y + ($Record.bounds.height / 2))
+    $null = [WfClickNative]::SetCursorPos($x, $y)
+    Start-Sleep -Milliseconds 80
+    [WfClickNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)  # LEFTDOWN
+    [WfClickNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)  # LEFTUP
+}
+
+function Find-UiaElementsByNamePrefix {
+    param(
+        [Parameter(Mandatory = $true)]$Root,
+        [Parameter(Mandatory = $true)][string]$Prefix,
+        [switch]$AllowOffscreen
+    )
+
+    $elements = $Root.FindAll(
+        [Windows.Automation.TreeScope]::Descendants,
+        [Windows.Automation.Condition]::TrueCondition)
+    $records = @()
+    for ($index = 0; $index -lt $elements.Count; $index++) {
+        $element = $elements.Item($index)
+        try {
+            $current = $element.Current
+            if (-not $current.Name.StartsWith($Prefix, [StringComparison]::Ordinal)) {
+                continue
+            }
+            if ($current.IsOffscreen -and -not $AllowOffscreen) {
+                continue
+            }
+            $records += [pscustomobject]@{
+                element = $element
+                record = (Get-UiaElementRecord -Element $element)
+            }
+        }
+        catch {
+            continue
+        }
+    }
+    return $records
+}
+
 function Get-CrashEvents {
     param(
         [Parameter(Mandatory = $true)][string[]]$ExecutablePaths,
@@ -585,5 +645,7 @@ Export-ModuleMember -Function @(
     "Get-CrashEvents",
     "Assert-NoWebViewModules",
     "New-CombinedImage",
-    "Send-WheelScroll"
+    "Send-WheelScroll",
+    "Invoke-UiaElementByMouseClick",
+    "Find-UiaElementsByNamePrefix"
 )

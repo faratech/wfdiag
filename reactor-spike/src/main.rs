@@ -878,6 +878,7 @@ enum Message {
     ClearProviderKey(usize),
     ToggleQuickScanTask(String),
     RequestNetworkConnections,
+    SelectDiagnosticResult(String),
     NetworkConnectionsFinished(Box<Result<Vec<NetworkConnection>, String>>),
     ToggleClearHistoryConfirm(bool),
     ClearHistoryConfirmed,
@@ -1293,6 +1294,7 @@ struct WfdiagSpike {
     history_wait: Option<ComponentTask>,
     history_trends: Option<Vec<TaskTrend>>,
     history_trends_loading: bool,
+    selected_result_task_id: Option<String>,
     network_connections: Option<Vec<NetworkConnection>>,
     network_loading: bool,
     ai_mode: AiMode,
@@ -4443,6 +4445,7 @@ impl Component for WfdiagSpike {
             history_wait: None,
             history_trends: None,
             history_trends_loading: false,
+            selected_result_task_id: None,
             network_connections: None,
             network_loading: false,
             ai_mode: AiMode::Assistant,
@@ -4577,6 +4580,11 @@ impl Component for WfdiagSpike {
             }
             Message::StoreProviderKey(index) => {
                 self.submit_provider_key(index, true);
+            }
+            Message::SelectDiagnosticResult(task_id) => {
+                eprintln!("[trace] SelectDiagnosticResult message: {task_id}");
+                self.selected_result_task_id = Some(task_id.clone());
+                self.status = format!("Selected diagnostic: {task_id}");
             }
             Message::RequestNetworkConnections => {
                 if self.deterministic_visual || self.network_loading {
@@ -6001,6 +6009,8 @@ impl Component for WfdiagSpike {
                 context.message(Message::RequestQuickScan),
                 context.message(Message::RequestFullScan),
                 context.message(Message::CancelScan),
+                self.selected_result_task_id.clone(),
+                context.callback(Message::SelectDiagnosticResult),
             ),
             Page::Monitor => monitor_page(
                 palette,
@@ -7695,6 +7705,159 @@ fn live_collected_statistic(palette: Palette, collected: usize, completed: usize
     ))
 }
 
+/// Mirror of the shipping detail view's output conversion: JSON objects
+/// flatten into human-facing key/value rows ("group · key"); non-JSON
+/// output stays raw text.
+fn format_output_key_values(
+    task_id: &str,
+    output: &str,
+) -> Option<Vec<(String, String)>> {
+    // Collector output decoded from PowerShell may carry a leading BOM
+    // (U+FEFF), which str::trim does not remove; strip it explicitly.
+    let trimmed = output.trim().trim_start_matches('\u{feff}').trim();
+    eprintln!(
+        "[trace] kv format for {task_id}: len={} starts={:?} parse={}",
+        trimmed.len(),
+        trimmed.chars().take(12).collect::<String>(),
+        serde_json::from_str::<serde_json::Value>(trimmed).is_ok()
+    );
+    let value: serde_json::Value = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        serde_json::from_str(trimmed).ok()?
+    } else {
+        return None;
+    };
+    let mut rows: Vec<(String, String)> = Vec::new();
+    fn flatten(prefix: &str, value: &serde_json::Value, rows: &mut Vec<(String, String)>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, entry) in map {
+                    let path = if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{prefix} · {key}")
+                    };
+                    flatten(&path, entry, rows);
+                }
+            }
+            // Mirror the shipping detail view: arrays flatten through
+            // Object.entries semantics — each item gets an index path
+            // ("0 · key"), scalars join inline.
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    let path = if prefix.is_empty() {
+                        index.to_string()
+                    } else {
+                        format!("{prefix} · {index}")
+                    };
+                    match item {
+                        serde_json::Value::String(text) => {
+                            rows.push((path, text.clone()));
+                        }
+                        serde_json::Value::Number(number) => {
+                            rows.push((path, number.to_string()));
+                        }
+                        serde_json::Value::Bool(flag) => {
+                            rows.push((path, flag.to_string()));
+                        }
+                        other => flatten(&path, other, rows),
+                    }
+                }
+            }
+            serde_json::Value::Null => {
+                rows.push((prefix.to_string(), String::new()));
+            }
+            serde_json::Value::String(text) => {
+                rows.push((prefix.to_string(), text.clone()));
+            }
+            other => rows.push((prefix.to_string(), other.to_string())),
+        }
+    }
+    // pending_reboot's raw schema needs the same explanation as the
+    // shipping detail view: expose restart state instead of raw flags.
+    if task_id == "pending_reboot" {
+        let serde_json::Value::Object(map) = &value else {
+            return Some(Vec::new());
+        };
+        let reasons: Vec<String> = map
+            .get("reasons")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        let high_confidence = reasons
+            .iter()
+            .any(|reason| reason == "windows_update" || reason == "component_based_servicing");
+        let legacy_deferred = reasons.iter().any(|reason| {
+            reason == "pending_file_rename" || reason == "pending_file_operations"
+        });
+        let explicit = map.get("restart_required").and_then(|value| value.as_bool());
+        let legacy = map.get("pending").and_then(|value| value.as_bool());
+        let restart_required = explicit.unwrap_or(match legacy {
+            Some(legacy_pending) => {
+                (legacy_pending && high_confidence)
+                    || (legacy_pending && legacy_deferred && !high_confidence)
+            }
+            None => false,
+        });
+        rows.push((
+            "Restart required".to_string(),
+                if restart_required { "Yes" } else { "No" }.to_string(),
+            ));
+        if !reasons.is_empty() {
+            let required_by: Vec<&str> = reasons
+                .iter()
+                .flat_map(|reason| match reason.as_str() {
+                    "windows_update" => vec!["Windows Update"],
+                    "component_based_servicing" => vec!["Windows component servicing"],
+                    _ => Vec::new(),
+                })
+                .collect();
+            if !required_by.is_empty() {
+                rows.push(("Required by".to_string(), required_by.join(", ")));
+            }
+        }
+        for (key, entry) in map {
+            if key == "restart_required" || key == "pending" || key == "reasons" {
+                continue;
+            }
+            let path = key.clone();
+            flatten(&path, entry, &mut rows);
+        }
+        return Some(rows);
+    }
+    flatten("", &value, &mut rows);
+    (!rows.is_empty()).then_some(rows)
+}
+
+#[cfg(test)]
+mod output_format_tests {
+    use super::*;
+
+    #[test]
+    fn json_output_flattens_to_key_values() {
+        let rows = format_output_key_values(
+            "processor",
+            r#"{"Name":"Snapdragon X","NumberOfCores":12,"_DERIVATION":["A","B"]}"#,
+        );
+        let rows = rows.expect("JSON object must produce rows");
+        assert!(
+            rows.contains(&("Name".to_string(), "Snapdragon X".to_string())),
+            "rows were: {rows:?}"
+        );
+        assert!(rows.contains(&("NumberOfCores".to_string(), "12".to_string())));
+    }
+
+    #[test]
+    fn json_output_with_bom_still_parses() {
+        let with_bom = format!("\u{feff}{{\"Name\":\"X\"}}");
+        let rows = format_output_key_values("os_info", &with_bom);
+        assert!(rows.is_some());
+    }
+
+    #[test]
+    fn non_json_output_stays_raw() {
+        assert!(format_output_key_values("os_info", "plain text output").is_none());
+    }
+}
+
 fn diagnostic_output_preview(result: &DiagnosticTaskResult) -> String {
     let output = result
         .error
@@ -7714,6 +7877,7 @@ fn diagnostic_output_preview(result: &DiagnosticTaskResult) -> String {
     preview
 }
 
+#[allow(clippy::too_many_arguments)]
 fn diagnostics_live_results_page(
     palette: Palette,
     theme: WindowTheme,
@@ -7721,7 +7885,12 @@ fn diagnostics_live_results_page(
     results: &[DiagnosticTaskResult],
     catalog: &[DiagnosticTask],
     duration_ms: u64,
+    selected_task_id: Option<&str>,
+    select_result: Callback<String>,
 ) -> View {
+    let selected_task_id_effective = selected_task_id.filter(|id| {
+        results.iter().any(|result| result.task_id == *id)
+    }).unwrap_or_else(|| results[0].task_id.as_str());
     let collected = results.iter().filter(|result| result.success).count();
     let errors = results.len().saturating_sub(collected);
     let duration = format_diagnostic_duration(duration_ms);
@@ -7755,16 +7924,31 @@ fn diagnostics_live_results_page(
             )
         })
         .collect::<Vec<_>>();
-    let task_rows = rows
+
+    // Precompute grouping before the rows are consumed by the view build.
+    let first_in_group_flags: Vec<bool> = rows
         .iter()
         .enumerate()
+        .map(|(index, (_, _, category, _, _))| {
+            index == 0 || rows[index - 1].2 != *category
+        })
+        .collect();
+    let group_counts: std::collections::HashMap<String, usize> = rows.iter().fold(
+        std::collections::HashMap::new(),
+        |mut counts, (_, _, category, _, _)| {
+            *counts.entry(category.clone()).or_insert(0) += 1;
+            counts
+        },
+    );
+
+    let task_rows = rows
+        .into_iter()
+        .enumerate()
         .map(|(index, (task_id, name, category, passed, duration_ms))| {
-            let first_in_group = index == 0 || rows[index - 1].2 != *category;
+            let select_result = select_result.clone();
+            let first_in_group = first_in_group_flags[index];
+            let group_count = group_counts.get(&category).copied().unwrap_or(0);
             let group_header: View = if first_in_group {
-                let group_count = rows
-                    .iter()
-                    .filter(|(_, _, row_category, _, _)| row_category == category)
-                    .count();
                 Border::new()
                     .padding(Thickness::new(8.0, 11.0, 8.0, 5.0))
                     .content(
@@ -7787,16 +7971,35 @@ fn diagnostics_live_results_page(
             } else {
                 View::empty()
             };
-            let duration = format_diagnostic_duration(*duration_ms);
-            let task_row = Border::new()
+            let duration = format_diagnostic_duration(duration_ms);
+            let is_selected = selected_task_id_effective == task_id;
+            let row_background = if is_selected {
+                palette.active
+            } else {
+                Color::transparent()
+            };
+            let name_weight = if is_selected {
+                FontWeight::SEMI_BOLD
+            } else {
+                FontWeight::NORMAL
+            };
+            let task_row = Button::new()
                 .height(32.0)
-                .background(if index == 0 {
-                    palette.active
-                } else {
-                    Color::transparent()
+                .resource_overrides(
+                    ResourceOverrides::new()
+                        .set("ButtonBackground", row_background)
+                        .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
+                        .set("ButtonBackgroundPointerOver", row_background)
+                        .set("ButtonBackgroundPressed", row_background),
+                )
+                .on_click({
+                    let task_id = task_id.clone();
+                    let select_result = select_result.clone();
+                    move || {
+                        let _ = select_result.call(task_id.clone());
+                    }
                 })
-                .corner_radius(6.0)
-                .padding(Thickness::xy(9.0, 0.0))
+                .automation_name(format!("Diagnostic result: {name}"))
                 .content(
                     Grid::new()
                         .columns([
@@ -7809,18 +8012,14 @@ fn diagnostics_live_results_page(
                             Border::new()
                                 .width(7.0)
                                 .height(7.0)
-                                .background(if *passed { palette.accent } else { palette.err })
+                                .background(if passed { palette.accent } else { palette.err })
                                 .corner_radius(999.0)
                                 .vertical_alignment(VerticalAlignment::Center),
                             TextBlock::new()
                                 .text(name.clone())
                                 .grid_column(1)
                                 .font_size(12.5)
-                                .font_weight(if index == 0 {
-                                    FontWeight::SEMI_BOLD
-                                } else {
-                                    FontWeight::NORMAL
-                                })
+                                .font_weight(name_weight)
                                 .text_trimming(TextTrimming::CharacterEllipsis)
                                 .vertical_alignment(VerticalAlignment::Center),
                             TextBlock::new()
@@ -7832,7 +8031,7 @@ fn diagnostics_live_results_page(
                         )),
                 );
             KeyedView::new(
-                task_id.clone(),
+                task_id,
                 StackPanel::new().children((group_header, task_row)),
             )
         })
@@ -7892,13 +8091,25 @@ fn diagnostics_live_results_page(
                 )),
         );
 
-    let selected = &results[0];
+    let selected = results
+        .iter()
+        .find(|result| result.task_id == selected_task_id_effective)
+        .unwrap_or(&results[0]);
     let selected_task = catalog.iter().find(|task| task.id == selected.task_id);
     let selected_name =
         selected_task.map_or_else(|| selected.task_id.clone(), |task| task.name.clone());
     let selected_category = selected_task.map_or("Other", |task| task.category.as_str());
     let selected_duration = format_diagnostic_duration(selected.duration_ms);
-    let selected_output = diagnostic_output_preview(selected);
+    let selected_output_rows = format_output_key_values(&selected.task_id, &selected.output);
+    let selected_output = selected_output_rows.as_ref().map_or_else(
+        || diagnostic_output_preview(selected),
+        |rows| {
+            rows.iter()
+                .map(|(key, value)| format!("{key}: {value}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
+    );
     let desktop_icon = if theme == WindowTheme::Light {
         DESKTOP_LIGHT
     } else {
@@ -7995,7 +8206,56 @@ fn diagnostics_live_results_page(
                         .content(
                             Border::new()
                                 .padding(Thickness::uniform(16.0))
-                                .content(
+                                .content(if let Some(rows) = selected_output_rows.as_ref() {
+                                    let grid_rows: Vec<KeyedView> = rows
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(index, (key, value))| {
+                                            KeyedView::new(
+                                                index,
+                                                Border::new()
+                                                    .padding(Thickness::new(0.0, 4.0, 0.0, 4.0))
+                                                    .border_brush(palette.border)
+                                                    .border_thickness(Thickness::new(
+                                                        0.0, 0.0, 0.0, 0.5,
+                                                    ))
+                                                    .content(
+                                                        Grid::new()
+                                                            .columns([
+                                                                GridLength::Pixel(240.0),
+                                                                GridLength::Star(1.0),
+                                                            ])
+                                                            .children((
+                                                                TextBlock::new()
+                                                                    .text(key.clone())
+                                                                    .font_size(12.0)
+                                                                    .font_weight(
+                                                                        FontWeight::SEMI_BOLD,
+                                                                    )
+                                                                    .text_wrapping(
+                                                                        TextWrapping::Wrap,
+                                                                    )
+                                                                    .vertical_alignment(
+                                                                        VerticalAlignment::Top,
+                                                                    ),
+                                                                TextBlock::new()
+                                                                    .text(value.clone())
+                                                                    .grid_column(1)
+                                                                    .font_size(12.0)
+                                                                    .foreground(palette.muted)
+                                                                    .is_text_selection_enabled(
+                                                                        true,
+                                                                    )
+                                                                    .text_wrapping(
+                                                                        TextWrapping::Wrap,
+                                                                    ),
+                                                            )),
+                                                    ),
+                                            )
+                                        })
+                                        .collect();
+                                    StackPanel::new().keyed_children(grid_rows)
+                                } else {
                                     TextBlock::new()
                                         .text(selected_output)
                                         .font_size(12.0)
@@ -8005,8 +8265,9 @@ fn diagnostics_live_results_page(
                                             palette.err
                                         })
                                         .is_text_selection_enabled(true)
-                                        .text_wrapping(TextWrapping::Wrap),
-                                ),
+                                        .text_wrapping(TextWrapping::Wrap)
+                                        .into()
+                                }),
                         ),
                 )),
         );
@@ -8116,6 +8377,8 @@ fn diagnostics_page(
     quick_scan: Callback<()>,
     full_scan: Callback<()>,
     cancel_scan: Callback<()>,
+    selected_result_task_id: Option<String>,
+    select_result: Callback<String>,
 ) -> View {
     if scan_active {
         return diagnostics_scanning_page(
@@ -8141,6 +8404,8 @@ fn diagnostics_page(
             results,
             catalog,
             duration_ms,
+            selected_result_task_id.as_deref(),
+            select_result,
         );
     }
 
@@ -11373,10 +11638,14 @@ fn issues_page(
     }
     children.push(KeyedView::new(
         "maintenance",
-        compact_issue_row(palette, "Maintenance", false),
+        maintenance_card(palette, maintenance, run_remediation),
     ));
 
-    StackPanel::new().spacing(12.0).keyed_children(children)
+    // The page content overflows the viewport (issue cards + 8 maintenance
+    // rows); without the viewer the tail is clipped and unreachable.
+    ScrollViewer::new()
+        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+        .content(StackPanel::new().spacing(12.0).keyed_children(children))
 }
 
 #[allow(clippy::too_many_arguments)]
