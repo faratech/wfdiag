@@ -21,5 +21,118 @@
       "note": "First harness run exposed the graceful-close deadlock (worker Drop joined before releasing the command sender); fixed in commit 701648f and re-validated."
     }
   ],
-  "variants": []
+  "variants": [
+    {
+      "id": "diagnostics-populated-dark-normal",
+      "theme": "dark",
+      "highContrast": false,
+      "reducedMotion": false,
+      "scale": 1,
+      "experimental": false,
+      "state": "diagnostics-populated",
+      "applicationVersion": "2.5.8",
+      "executable": "C:\\Temp\\claude\\wfdiag\\reactor-spike\\target\\aarch64-pc-windows-msvc\\debug\\wfdiag-reactor-spike.exe",
+      "capturedAtUtc": "2026-08-31T00:48:15.3169232Z",
+      "png": "reactor-spike/captures-2.5.8/variants/diagnostics-populated-dark-normal.png",
+      "sha256": "6B35EEFCC92AE8A161F499FC9259D29C3659255CDFD1A94A792997F66B913675"
+    },
+    {
+      "id": "monitor-empty-dark-normal",
+      "theme": "dark",
+      "highContrast": false,
+      "reducedMotion": false,
+      "scale": 1,
+      "experimental": false,
+      "state": "monitor-empty",
+      "applicationVersion": "2.5.8",
+      "executable": "C:\\Temp\\claude\\wfdiag\\reactor-spike\\target\\aarch64-pc-windows-msvc\\debug\\wfdiag-reactor-spike.exe",
+      "capturedAtUtc": "2026-08-31T00:48:16.7365548Z",
+      "png": "reactor-spike/captures-2.5.8/variants/monitor-empty-dark-normal.png",
+      "sha256": "AEC6C80E16A8B9FF17E5B44DB3D8332896D13D3A897F1ECF49AB52E9E39DE98C"
+    },
+    {
+      "id": "processes-empty-dark-normal",
+      "theme": "dark",
+      "highContrast": false,
+      "reducedMotion": false,
+      "scale": 1,
+      "experimental": false,
+      "state": "processes-empty",
+      "applicationVersion": "2.5.8",
+      "executable": "C:\\Temp\\claude\\wfdiag\\reactor-spike\\target\\aarch64-pc-windows-msvc\\debug\\wfdiag-reactor-spike.exe",
+      "capturedAtUtc": "2026-08-31T00:48:18.1653100Z",
+      "png": "reactor-spike/captures-2.5.8/variants/processes-empty-dark-normal.png",
+      "sha256": "0DBAE6EFA6856B1D04AF4712D74A1B036C87474D5D91B419B748B5F36EAE654E"
+    },
+    {
+      "id": "settings-bottom-dark-normal",
+      "theme": "dark",
+      "highContrast": false,
+      "reducedMotion": false,
+      "scale": 1,
+      "experimental": false,
+      "state": "settings-bottom",
+      "applicationVersion": "2.5.8",
+      "executable": "C:\\Temp\\claude\\wfdiag\\reactor-spike\\target\\aarch64-pc-windows-msvc\\debug\\wfdiag-reactor-spike.exe",
+      "capturedAtUtc": "2026-08-31T00:48:19.5979611Z",
+      "png": "reactor-spike/captures-2.5.8/variants/settings-bottom-dark-normal.png",
+      "sha256": "1D5A13E8F9FF94268E561C9DEBA5021565137E529118D0866EDF238CE6E63B50"
+    },
+    {
+      "id": "diagnostics-populated-light-normal",
+      "theme": "light",
+      "highContrast": false,
+      "reducedMotion": false,
+      "scale": 1,
+      "experimental": false,
+      "state": "diagnostics-populated",
+      "applicationVersion": "2.5.8",
+      "executable": "C:\\Temp\\claude\\wfdiag\\reactor-spike\\target\\aarch64-pc-windows-msvc\\debug\\wfdiag-reactor-spike.exe",
+      "capturedAtUtc": "2026-08-31T00:48:20.9598106Z",
+      "png": "reactor-spike/captures-2.5.8/variants/diagnostics-populated-light-normal.png",
+      "sha256": "C1CAF4B06175077970B3C8FC7CF79E1E6702643758FC84D9293C34D9EC4B2191"
+    },
+    {
+      "id": "monitor-empty-light-normal",
+      "theme": "light",
+      "highContrast": false,
+      "reducedMotion": false,
+      "scale": 1,
+      "experimental": false,
+      "state": "monitor-empty",
+      "applicationVersion": "2.5.8",
+      "executable": "C:\\Temp\\claude\\wfdiag\\reactor-spike\\target\\aarch64-pc-windows-msvc\\debug\\wfdiag-reactor-spike.exe",
+      "capturedAtUtc": "2026-08-31T00:48:22.3277669Z",
+      "png": "reactor-spike/captures-2.5.8/variants/monitor-empty-light-normal.png",
+      "sha256": "F1BD0D6B7D044E3DBB079D31F4BB66B70872A5114CD60375AC9F3C42D625F657"
+    },
+    {
+      "id": "processes-empty-light-normal",
+      "theme": "light",
+      "highContrast": false,
+      "reducedMotion": false,
+      "scale": 1,
+      "experimental": false,
+      "state": "processes-empty",
+      "applicationVersion": "2.5.8",
+      "executable": "C:\\Temp\\claude\\wfdiag\\reactor-spike\\target\\aarch64-pc-windows-msvc\\debug\\wfdiag-reactor-spike.exe",
+      "capturedAtUtc": "2026-08-31T00:48:23.7039865Z",
+      "png": "reactor-spike/captures-2.5.8/variants/processes-empty-light-normal.png",
+      "sha256": "C80AF7EEACB4100C5ABC9AB293B432A318CB48287CBE7D7AB0E684517A81942B"
+    },
+    {
+      "id": "settings-bottom-light-normal",
+      "theme": "light",
+      "highContrast": false,
+      "reducedMotion": false,
+      "scale": 1,
+      "experimental": false,
+      "state": "settings-bottom",
+      "applicationVersion": "2.5.8",
+      "executable": "C:\\Temp\\claude\\wfdiag\\reactor-spike\\target\\aarch64-pc-windows-msvc\\debug\\wfdiag-reactor-spike.exe",
+      "capturedAtUtc": "2026-08-31T00:48:25.1364895Z",
+      "png": "reactor-spike/captures-2.5.8/variants/settings-bottom-light-normal.png",
+      "sha256": "B2443FA467959ABCFE24E800953B999CD62307F505423A917E29BF02A6AD292B"
+    }
+  ]
 }

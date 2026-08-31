@@ -115,7 +115,8 @@ def main() -> int:
         }, indent=2))
         return 1
 
-    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # PowerShell Set-Content writes a UTF-8 BOM; tolerate it.
+    document = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     findings = evaluate(document, root)
     blockers = sum(1 for item in findings if item["severity"] == "blocker")
     errors = sum(1 for item in findings if item["severity"] == "error")

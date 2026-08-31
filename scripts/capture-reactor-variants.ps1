@@ -62,7 +62,7 @@ $stateCatalog = @{
 $motionSaved = $false
 try {
     $motionValue = $false
-    $motionSaved = WfVariantNative::SystemParametersInfo(
+    $motionSaved = [WfVariantNative]::SystemParametersInfo(
         $SPI_GETCLIENTAREAANIMATION, 0, [ref]$motionValue, 0)
     if (-not $motionSaved) {
         Write-Warning "Could not read the client-area animation setting; reduced-motion restore will be skipped."
@@ -80,7 +80,7 @@ try {
                 $motionReduced = $true
                 $motionLabel = "reduced"
                 $off = $false
-                $null = WfVariantNative::SystemParametersInfo(
+                $null = [WfVariantNative]::SystemParametersInfo(
                     $SPI_SETCLIENTAREAANIMATION, 0, [ref]$off,
                     $SPIF_UPDATEINIFILE -bor $SPIF_SENDCHANGE)
                 Start-Sleep -Milliseconds 300
@@ -91,12 +91,12 @@ try {
                 WFDIAG_REACTOR_WIDTH = [string]$configuration.Width
                 WFDIAG_REACTOR_HEIGHT = [string]$configuration.Height
             }
-            if ($configuration.Fixture) {
-                $variables.WFDIAG_REACTOR_FIXTURE = $configuration.Fixture
-                $variables.WFDIAG_REACTOR_PAGE = $configuration.Page
+            if ($configuration.Contains("Fixture")) {
+                $variables.WFDIAG_REACTOR_FIXTURE = $configuration["Fixture"]
+                $variables.WFDIAG_REACTOR_PAGE = $configuration["Page"]
             }
             else {
-                $variables.WFDIAG_REACTOR_VISUAL_STATE = $configuration.Visual
+                $variables.WFDIAG_REACTOR_VISUAL_STATE = $configuration["Visual"]
             }
 
             $session = Start-ReactorCandidate -Executable $resolvedExecutable `
@@ -104,6 +104,9 @@ try {
             try {
                 $captureName = "$state-$theme-$motionLabel"
                 $capturePath = Join-Path $outputDirectory "$captureName.png"
+                # Record the repo-relative form passed via -OutputDirectory.
+                $captureRecordPath = (Join-Path $OutputDirectory "$captureName.png") `
+                    -replace '\\', '/' 
                 $null = & (Join-Path $PSScriptRoot "capture-window.ps1") `
                     -ProcessId $session.process.Id `
                     -OutputPath $capturePath `
@@ -121,7 +124,7 @@ try {
                     applicationVersion = $version
                     executable = $resolvedExecutable
                     capturedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
-                    png = $capturePath
+                    png = $captureRecordPath
                     sha256 = $sha256
                 }
                 Write-Host "Captured $captureName"
@@ -133,7 +136,7 @@ try {
 
             if ($IncludeReducedMotion -and $motionSaved) {
                 $restore = [bool]$motionValue
-                $null = WfVariantNative::SystemParametersInfo(
+                $null = [WfVariantNative]::SystemParametersInfo(
                     $SPI_SETCLIENTAREAANIMATION, 0, [ref]$restore,
                     $SPIF_UPDATEINIFILE -bor $SPIF_SENDCHANGE)
             }
@@ -173,7 +176,7 @@ try {
 finally {
     if ($motionSaved) {
         $restore = [bool]$motionValue
-        $null = WfVariantNative::SystemParametersInfo(
+        $null = [WfVariantNative]::SystemParametersInfo(
             $SPI_SETCLIENTAREAANIMATION, 0, [ref]$restore,
             $SPIF_UPDATEINIFILE -bor $SPIF_SENDCHANGE)
     }

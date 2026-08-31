@@ -96,9 +96,13 @@ try {
     $evidence.quickScan = $scanStatus
     Write-Host $scanStatus
 
-    # --- Report mode -------------------------------------------------------
+    # --- AI page, Report mode ----------------------------------------------
+    $aiNav = Wait-UniqueUiaButton -Root $root -Deadline (Get-Date).AddSeconds(10) `
+        -Name "AI Analysis"
+    Invoke-UiaButtonElement -Element $aiNav.element
+    Start-Sleep -Milliseconds 500
     $reportTab = Wait-UniqueUiaButton -Root $root -Deadline (Get-Date).AddSeconds(10) `
-        -Name "Report"
+        -Name "Scan Report"
     Invoke-UiaButtonElement -Element $reportTab.element
     Start-Sleep -Milliseconds 500
 
