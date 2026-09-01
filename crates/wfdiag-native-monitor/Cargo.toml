@@ -37,3 +37,6 @@ windows = { version = "0.62", features = [
     "Wdk_Graphics_Direct3D",
     "Wdk_System_SystemInformation",
 ] }
+
+[lints]
+workspace = true

@@ -2,6 +2,22 @@
 //! Optimized with aggressive caching for fluid, low-CPU monitoring.
 
 #![cfg(windows)]
+// Telemetry sampling of bounded values. This module's job is turning Win32/PDH/
+// D3DKMT counters into the numbers the UI displays: percentages clamped to
+// 0..=100, byte counts scaled to MB/GB, per-second rates - and back into the
+// fixed-width fields the Win32 structs define (`size_of` values and buffer
+// lengths the same APIs already cap at `u32`, `u16` ports carried in `u32`
+// fields). The precision these casts drop is far below the resolution of the
+// sampled counters themselves, and every truncation is of a value the API
+// contract already bounds. Spelling that out per-cast would add ~40 attributes
+// across the file without changing a single emitted number, so the two cast
+// lints are allowed module-wide; the sign-changing casts are NOT - those stay
+// per-function so each one keeps its own justification.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "telemetry sampling of bounded values; see comment above"
+)]
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -200,6 +216,7 @@ pub enum ProcessArch {
 }
 
 impl ProcessArch {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             ProcessArch::Native => "",
@@ -210,6 +227,14 @@ impl ProcessArch {
     }
 }
 
+// The bool fields are independent per-process facts the UI renders directly
+// (elevated, efficiency mode, tree expansion state); this is a serialized wire
+// type shared with the shells, so grouping them into a flags struct would be a
+// breaking projection change for no behavioural gain.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "serialized UI row; each flag is an independent process fact"
+)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessInfo {
     // Core identification
@@ -394,7 +419,7 @@ pub struct NetworkConnection {
     pub status: String,
 }
 
-/// Raw process information from NtQuerySystemInformation
+/// Raw process information from `NtQuerySystemInformation`
 #[derive(Clone, Debug)]
 struct NativeProcessInfo {
     pid: u32,
@@ -590,7 +615,7 @@ impl SystemMonitor {
         // Initialize fast caches synchronously (< 1ms)
         CPU_COUNT.get_or_init(|| unsafe {
             let mut sys_info = SYSTEM_INFO::default();
-            GetSystemInfo(&mut sys_info);
+            GetSystemInfo(&raw mut sys_info);
             sys_info.dwNumberOfProcessors as usize
         });
         CPU_FREQUENCY.get_or_init(get_cpu_frequency_uncached);
@@ -600,7 +625,7 @@ impl SystemMonitor {
                 ..Default::default()
             };
             unsafe {
-                if GlobalMemoryStatusEx(&mut mem_status).is_ok() {
+                if GlobalMemoryStatusEx(&raw mut mem_status).is_ok() {
                     mem_status.ullTotalPhys
                 } else {
                     0
@@ -675,7 +700,7 @@ impl SystemMonitor {
         *self
             .monitor_profile
             .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = profile;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = profile;
 
         let emitter = Arc::clone(&self.emitter);
         let monitoring_flag = Arc::clone(&self.monitoring);
@@ -693,58 +718,7 @@ impl SystemMonitor {
         let npu_update_in_progress = Arc::clone(&self.npu_update_in_progress);
         let fast_update_in_progress = Arc::clone(&self.fast_update_in_progress);
 
-        // Pre-sample PDH to get accurate CPU% on first event
-        // PDH requires two samples to calculate delta, so we take the first sample here
-        // and wait briefly before starting the monitoring loop
-        {
-            let pdh_clone = Arc::clone(&self.pdh_state);
-            tokio::task::spawn_blocking(move || {
-                if let Ok(mut state) = pdh_clone.lock() {
-                    // Initialize PDH if needed and collect first sample
-                    if !state.initialized {
-                        unsafe {
-                            let mut query_handle: PDH_HQUERY = PDH_HQUERY::default();
-                            // PDH functions return 0 on success
-                            if PdhOpenQueryW(PCWSTR::null(), 0, &mut query_handle) == 0 {
-                                state.query = SendPtr(query_handle.0);
-                                let cpu_count = *CPU_COUNT.get_or_init(|| {
-                                    let mut sys_info = SYSTEM_INFO::default();
-                                    GetSystemInfo(&mut sys_info);
-                                    sys_info.dwNumberOfProcessors as usize
-                                });
-                                for i in 0..cpu_count {
-                                    let counter_path: Vec<u16> =
-                                        format!("\\Processor({})\\% Processor Time\0", i)
-                                            .encode_utf16()
-                                            .collect();
-                                    let mut counter_handle: PDH_HCOUNTER = PDH_HCOUNTER::default();
-                                    // PDH functions return 0 on success
-                                    if PdhAddEnglishCounterW(
-                                        query_handle,
-                                        PCWSTR::from_raw(counter_path.as_ptr()),
-                                        0,
-                                        &mut counter_handle,
-                                    ) == 0
-                                    {
-                                        state.counters.push(SendPtr(counter_handle.0));
-                                    }
-                                }
-                                state.initialized = true;
-                            }
-                        }
-                    }
-                    // Collect first sample
-                    if state.initialized {
-                        unsafe {
-                            let _ = PdhCollectQueryData(state.query.as_query());
-                        }
-                        state.first_sample_done = true;
-                    }
-                }
-            })
-            .await
-            .ok();
-        }
+        presample_pdh(&self.pdh_state).await;
 
         // Wait briefly for meaningful delta between samples
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -863,6 +837,11 @@ impl SystemMonitor {
     /// happens only on demand and is filtered/sorted before crossing IPC. A
     /// capture is reused for two seconds so search, sort, and pagination do not
     /// perturb the per-process CPU delta or trigger redundant enumeration.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the snapshot slot this call just filled is observed
+    /// empty, which cannot happen while the refresh lock is held.
     pub async fn list_processes(&self, query: ProcessQuery) -> ProcessPage {
         let _refresh_owner = self.process_snapshot_refresh.lock().await;
         let now = Instant::now();
@@ -872,7 +851,11 @@ impl SystemMonitor {
             if let Some(snapshot) = snapshot.as_ref()
                 && snapshot.is_fresh_at(now)
             {
-                return paginate_process_snapshot(&snapshot.processes, snapshot.captured_at, query);
+                return paginate_process_snapshot(
+                    &snapshot.processes,
+                    snapshot.captured_at,
+                    &query,
+                );
             }
         }
 
@@ -885,7 +868,7 @@ impl SystemMonitor {
             captured_instant: now,
         });
         let snapshot = snapshot.as_ref().expect("process snapshot was just stored");
-        paginate_process_snapshot(&snapshot.processes, snapshot.captured_at, query)
+        paginate_process_snapshot(&snapshot.processes, snapshot.captured_at, &query)
     }
 
     #[allow(dead_code)]
@@ -898,6 +881,15 @@ impl SystemMonitor {
 // ============================================================================
 // INITIALIZATION
 // ============================================================================
+
+/// Clears `NPU_DETECTION_IN_PROGRESS` however `prewarm_npu_cache` returns.
+struct NpuDetectionGuard;
+
+impl Drop for NpuDetectionGuard {
+    fn drop(&mut self) {
+        NPU_DETECTION_IN_PROGRESS.store(false, Ordering::Release);
+    }
+}
 
 /// Pre-warm NPU cache in background. Called from lib.rs setup hook.
 /// This prevents the 200-500ms delay on first monitoring start.
@@ -912,13 +904,7 @@ pub fn prewarm_npu_cache() {
     {
         return;
     }
-    struct DetectionGuard;
-    impl Drop for DetectionGuard {
-        fn drop(&mut self) {
-            NPU_DETECTION_IN_PROGRESS.store(false, Ordering::Release);
-        }
-    }
-    let _guard = DetectionGuard;
+    let _guard = NpuDetectionGuard;
 
     // Initialize NPU detection (can take 200-500ms for DXCore/WMI queries)
     let npu_result = NPU_INFO.get_or_init(detect_npu_info_uncached);
@@ -964,7 +950,7 @@ pub fn initialize_static_caches() {
     // Fast initializations first (< 1ms each)
     CPU_COUNT.get_or_init(|| unsafe {
         let mut sys_info = SYSTEM_INFO::default();
-        GetSystemInfo(&mut sys_info);
+        GetSystemInfo(&raw mut sys_info);
         sys_info.dwNumberOfProcessors as usize
     });
 
@@ -976,7 +962,7 @@ pub fn initialize_static_caches() {
             ..Default::default()
         };
         unsafe {
-            if GlobalMemoryStatusEx(&mut mem_status).is_ok() {
+            if GlobalMemoryStatusEx(&raw mut mem_status).is_ok() {
                 mem_status.ullTotalPhys
             } else {
                 0
@@ -1007,7 +993,69 @@ pub fn initialize_static_caches() {
 // OPTIMIZED STATS COLLECTION
 // ============================================================================
 
+/// Take PDH's mandatory first sample before the emission loop starts.
+///
+/// PDH needs two samples to produce a CPU delta, so without this warm-up the
+/// first emitted frame would read 0% CPU. Initializes the query and per-core
+/// counters on the way if they are not up yet.
+async fn presample_pdh(pdh_state: &Arc<std::sync::Mutex<PdhState>>) {
+    let pdh_clone = Arc::clone(pdh_state);
+    tokio::task::spawn_blocking(move || {
+        if let Ok(mut state) = pdh_clone.lock() {
+            // Initialize PDH if needed and collect first sample
+            if !state.initialized {
+                unsafe {
+                    let mut query_handle: PDH_HQUERY = PDH_HQUERY::default();
+                    // PDH functions return 0 on success
+                    if PdhOpenQueryW(PCWSTR::null(), 0, &raw mut query_handle) == 0 {
+                        state.query = SendPtr(query_handle.0);
+                        let cpu_count = *CPU_COUNT.get_or_init(|| {
+                            let mut sys_info = SYSTEM_INFO::default();
+                            GetSystemInfo(&raw mut sys_info);
+                            sys_info.dwNumberOfProcessors as usize
+                        });
+                        for i in 0..cpu_count {
+                            let counter_path: Vec<u16> =
+                                format!("\\Processor({i})\\% Processor Time\0")
+                                    .encode_utf16()
+                                    .collect();
+                            let mut counter_handle: PDH_HCOUNTER = PDH_HCOUNTER::default();
+                            // PDH functions return 0 on success
+                            if PdhAddEnglishCounterW(
+                                query_handle,
+                                PCWSTR::from_raw(counter_path.as_ptr()),
+                                0,
+                                &raw mut counter_handle,
+                            ) == 0
+                            {
+                                state.counters.push(SendPtr(counter_handle.0));
+                            }
+                        }
+                        state.initialized = true;
+                    }
+                }
+            }
+            // Collect first sample
+            if state.initialized {
+                unsafe {
+                    let _ = PdhCollectQueryData(state.query.as_query());
+                }
+                state.first_sample_done = true;
+            }
+        }
+    })
+    .await
+    .ok();
+}
+
+// Disk sizes arrive as GB floats from `GetDiskFreeSpaceExW` and are scaled back
+// to non-negative byte counts here; the sign can never be lost because the
+// source values are unsigned byte counts to begin with.
 #[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::cast_sign_loss,
+    reason = "disk GB floats are derived from unsigned byte counts"
+)]
 async fn collect_stats_optimized(
     pdh_state: &Arc<std::sync::Mutex<PdhState>>,
     previous_network: &Arc<Mutex<NetworkState>>,
@@ -1066,8 +1114,9 @@ async fn collect_stats_optimized(
     let gpu_available = gpu_info.is_some();
     let gpu_name = gpu_info.map(|gpu| gpu.name.clone());
     let gpu_utilization = gpu_info.map(|gpu| gpu.utilization);
-    let (gpu_memory_used, gpu_memory_total) =
-        gpu_info.map(|gpu| gpu.meter_memory()).unwrap_or_default();
+    let (gpu_memory_used, gpu_memory_total) = gpu_info
+        .map(crate::adapter_monitor::AdapterMetrics::meter_memory)
+        .unwrap_or_default();
 
     let d3d_npu = fast_stats.adapter_snapshot.npu.as_ref();
     let (legacy_npu_available, legacy_npu_name) = if d3d_npu.is_some() {
@@ -1091,8 +1140,9 @@ async fn collect_stats_optimized(
     let npu_utilization = d3d_npu
         .map(|npu| npu.utilization)
         .or(legacy_npu_utilization);
-    let (npu_memory_used, npu_memory_total) =
-        d3d_npu.map(|npu| npu.meter_memory()).unwrap_or_default();
+    let (npu_memory_used, npu_memory_total) = d3d_npu
+        .map(crate::adapter_monitor::AdapterMetrics::meter_memory)
+        .unwrap_or_default();
 
     #[allow(deprecated)]
     SystemStats {
@@ -1129,9 +1179,9 @@ async fn collect_stats_optimized(
     }
 }
 
-/// Compute a fresh FastStats snapshot synchronously. Must be called from a blocking
-/// context (it uses block_on for the async network/process helpers). Shared by the
-/// async cache-populate path and the synchronous pre-loop seeding in start_monitoring.
+/// Compute a fresh `FastStats` snapshot synchronously. Must be called from a blocking
+/// context (it uses `block_on` for the async network/process helpers). Shared by the
+/// async cache-populate path and the synchronous pre-loop seeding in `start_monitoring`.
 fn compute_fast_stats(
     pdh_state: &Arc<std::sync::Mutex<PdhState>>,
     previous_network: &Arc<Mutex<NetworkState>>,
@@ -1141,7 +1191,7 @@ fn compute_fast_stats(
     // 1. CPU & Swap (PDH)
     let cpu_count = *CPU_COUNT.get_or_init(|| unsafe {
         let mut sys_info = SYSTEM_INFO::default();
-        GetSystemInfo(&mut sys_info);
+        GetSystemInfo(&raw mut sys_info);
         sys_info.dwNumberOfProcessors as usize
     });
     let (cpu_utilization, per_cpu_utilization, swap_utilization) =
@@ -1266,7 +1316,7 @@ async fn get_fast_stats_cached(
 ) -> FastStats {
     let profile = *monitor_profile
         .read()
-        .unwrap_or_else(|poison| poison.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let should_refresh = {
         let cache = cached.lock().await;
         cache.as_ref().is_none_or(|stats| {
@@ -1294,7 +1344,7 @@ async fn get_fast_stats_cached(
 
             let current_profile = *profile_state
                 .read()
-                .unwrap_or_else(|poison| poison.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(new_stats) = stats
                 && current_profile == profile
             {
@@ -1424,17 +1474,42 @@ async fn get_npu_util_cached(
 // CPU & SWAP MONITORING (PDH)
 // ============================================================================
 
+/// Read one PDH counter as a 0..=100 percentage. A null handle (counter that
+/// failed to register) and any invalid sample both read as 0, matching what the
+/// collector has always emitted for a missing counter.
+fn read_counter_percent(counter_ptr: *mut std::ffi::c_void) -> f32 {
+    if counter_ptr.is_null() {
+        return 0.0;
+    }
+    let mut value = PDH_FMT_COUNTERVALUE::default();
+    let status = unsafe {
+        PdhGetFormattedCounterValue(
+            PDH_HCOUNTER(counter_ptr),
+            PDH_FMT_DOUBLE,
+            None,
+            &raw mut value,
+        )
+    };
+    if status == 0 && value.CStatus == PDH_CSTATUS_VALID_DATA {
+        unsafe { (value.Anonymous.doubleValue as f32).clamp(0.0, 100.0) }
+    } else {
+        0.0
+    }
+}
+
 fn get_pdh_stats(
     pdh_state: &Arc<std::sync::Mutex<PdhState>>,
     cpu_count: usize,
 ) -> (f32, Vec<f32>, f32) {
     // Use unwrap_or_else to recover from poisoned mutex instead of panicking
-    let mut state = pdh_state.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = pdh_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     if !state.initialized {
         unsafe {
             let mut query = PDH_HQUERY::default();
-            let status = PdhOpenQueryW(PCWSTR::null(), 0, &mut query);
+            let status = PdhOpenQueryW(PCWSTR::null(), 0, &raw mut query);
             if status != 0 {
                 return (0.0, vec![0.0; cpu_count], 0.0);
             }
@@ -1443,11 +1518,11 @@ fn get_pdh_stats(
             // CPU Counters (Indices 0..cpu_count-1)
             state.counters.reserve(cpu_count + 1);
             for i in 0..cpu_count {
-                let path = format!("\\Processor({})\\% Processor Time\0", i);
+                let path = format!("\\Processor({i})\\% Processor Time\0");
                 let path_wide: Vec<u16> = path.encode_utf16().collect();
                 let mut counter = PDH_HCOUNTER::default();
                 let status =
-                    PdhAddEnglishCounterW(query, PCWSTR(path_wide.as_ptr()), 0, &mut counter);
+                    PdhAddEnglishCounterW(query, PCWSTR(path_wide.as_ptr()), 0, &raw mut counter);
                 if status == 0 {
                     state.counters.push(SendPtr(counter.0));
                 } else {
@@ -1459,7 +1534,8 @@ fn get_pdh_stats(
             // \Paging File(_Total)\% Usage
             let path_wide: Vec<u16> = "\\Paging File(_Total)\\% Usage\0".encode_utf16().collect();
             let mut counter = PDH_HCOUNTER::default();
-            let status = PdhAddEnglishCounterW(query, PCWSTR(path_wide.as_ptr()), 0, &mut counter);
+            let status =
+                PdhAddEnglishCounterW(query, PCWSTR(path_wide.as_ptr()), 0, &raw mut counter);
             if status == 0 {
                 state.counters.push(SendPtr(counter.0));
             } else {
@@ -1491,52 +1567,20 @@ fn get_pdh_stats(
             break;
         }
 
-        let counter_ptr = state.counters[i].0;
-        if counter_ptr.is_null() {
-            per_cpu.push(0.0);
-            continue;
-        }
-
-        let mut value = PDH_FMT_COUNTERVALUE::default();
-        let status = unsafe {
-            PdhGetFormattedCounterValue(PDH_HCOUNTER(counter_ptr), PDH_FMT_DOUBLE, None, &mut value)
-        };
-        let cpu_pct = if status == 0 && value.CStatus == PDH_CSTATUS_VALID_DATA {
-            unsafe { (value.Anonymous.doubleValue as f32).clamp(0.0, 100.0) }
-        } else {
-            0.0
-        };
+        let cpu_pct = read_counter_percent(state.counters[i].0);
         per_cpu.push(cpu_pct);
         total_cpu += cpu_pct;
     }
 
-    let avg_cpu = if !per_cpu.is_empty() {
-        total_cpu / per_cpu.len() as f32
-    } else {
+    let avg_cpu = if per_cpu.is_empty() {
         0.0
+    } else {
+        total_cpu / per_cpu.len() as f32
     };
 
     // Process Swap counter (last element)
     let swap_util = if state.counters.len() > cpu_count {
-        let counter_ptr = state.counters[cpu_count].0;
-        if !counter_ptr.is_null() {
-            let mut value = PDH_FMT_COUNTERVALUE::default();
-            let status = unsafe {
-                PdhGetFormattedCounterValue(
-                    PDH_HCOUNTER(counter_ptr),
-                    PDH_FMT_DOUBLE,
-                    None,
-                    &mut value,
-                )
-            };
-            if status == 0 && value.CStatus == PDH_CSTATUS_VALID_DATA {
-                unsafe { (value.Anonymous.doubleValue as f32).clamp(0.0, 100.0) }
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        }
+        read_counter_percent(state.counters[cpu_count].0)
     } else {
         0.0
     };
@@ -1552,7 +1596,7 @@ fn get_cpu_frequency_uncached() -> u64 {
     if let Ok(cpu_key) = hklm.open_subkey("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0")
         && let Ok(mhz) = cpu_key.get_value::<u32, _>("~MHz")
     {
-        return mhz as u64;
+        return u64::from(mhz);
     }
     0
 }
@@ -1573,13 +1617,13 @@ fn get_memory_info() -> (u64, u64, u64, u64, u64) {
     };
 
     unsafe {
-        if GlobalMemoryStatusEx(&mut mem_status).is_ok() {
+        if GlobalMemoryStatusEx(&raw mut mem_status).is_ok() {
             let total = mem_status.ullTotalPhys;
             let available = mem_status.ullAvailPhys;
             let used = total.saturating_sub(available);
 
             let (swap_total, swap_used) =
-                if GetPerformanceInfo(&mut perf_info, perf_info.cb).is_ok() {
+                if GetPerformanceInfo(&raw mut perf_info, perf_info.cb).is_ok() {
                     let page_size = perf_info.PageSize as u64;
                     let commit_limit = perf_info.CommitLimit as u64 * page_size;
                     let commit_total = perf_info.CommitTotal as u64 * page_size;
@@ -1612,7 +1656,7 @@ fn detect_all_disk_types() -> HashMap<char, String> {
         if let Ok(results) = wmi_con.query("SELECT MediaType, DeviceID FROM MSFT_PhysicalDisk") {
             for disk in &results {
                 if let (Some(media_type), Some(device_id)) = (
-                    disk.get("MediaType").and_then(|v| v.as_u64()),
+                    disk.get("MediaType").and_then(serde_json::Value::as_u64),
                     disk.get("DeviceID").and_then(|v| v.as_str()),
                 ) {
                     let disk_type = match media_type {
@@ -1624,8 +1668,7 @@ fn detect_all_disk_types() -> HashMap<char, String> {
 
                     // Get partitions for this disk
                     let part_query = format!(
-                        "SELECT DriveLetter FROM MSFT_Partition WHERE DiskNumber = {}",
-                        device_id
+                        "SELECT DriveLetter FROM MSFT_Partition WHERE DiskNumber = {device_id}",
                     );
                     if let Ok(partitions) = wmi_con.query(&part_query) {
                         for part in &partitions {
@@ -1681,9 +1724,9 @@ fn get_disk_info_optimized() -> Vec<DiskInfo> {
 
             if GetDiskFreeSpaceExW(
                 PCWSTR(drive_wide.as_ptr()),
-                Some(&mut free_bytes_available),
-                Some(&mut total_bytes),
-                Some(&mut total_free_bytes),
+                Some(&raw mut free_bytes_available),
+                Some(&raw mut total_bytes),
+                Some(&raw mut total_free_bytes),
             )
             .is_ok()
             {
@@ -1755,7 +1798,7 @@ async fn get_network_stats(previous_network: &Arc<Mutex<NetworkState>>) -> (f64,
     unsafe {
         let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
 
-        if GetIfTable2(&mut table).is_ok() && !table.is_null() {
+        if GetIfTable2(&raw mut table).is_ok() && !table.is_null() {
             let num_entries = (*table).NumEntries as usize;
             let entries = std::slice::from_raw_parts((*table).Table.as_ptr(), num_entries);
 
@@ -1809,6 +1852,14 @@ async fn get_network_stats(previous_network: &Arc<Mutex<NetworkState>>) -> (f64,
 // PROCESS ENUMERATION (Optimized with reusable buffer)
 // ============================================================================
 
+// `SYSTEM_PROCESS_INFORMATION` records are 8-byte aligned inside the buffer the
+// kernel fills: `NtQuerySystemInformation` lays them out at 8-byte-aligned
+// offsets and `Vec<u8>`'s allocation is at least that aligned in practice for
+// the 2 MiB reservation used here. Unchanged from the shipping collector.
+#[allow(
+    clippy::cast_ptr_alignment,
+    reason = "kernel-provided buffer holds 8-byte-aligned process records"
+)]
 fn query_all_processes_optimized() -> Vec<NativeProcessInfo> {
     PROCESS_BUFFER.with(|buf| {
         let mut buffer = buf.borrow_mut();
@@ -1829,9 +1880,9 @@ fn query_all_processes_optimized() -> Vec<NativeProcessInfo> {
             let status = unsafe {
                 NtQuerySystemInformation(
                     SystemProcessInformation,
-                    buffer.as_mut_ptr() as *mut _,
+                    buffer.as_mut_ptr().cast(),
                     buffer.len() as u32,
-                    &mut return_length,
+                    &raw mut return_length,
                 )
             };
 
@@ -1839,7 +1890,7 @@ fn query_all_processes_optimized() -> Vec<NativeProcessInfo> {
                 break;
             }
 
-            if status.0 as u32 == 0xC0000004 {
+            if status.0.cast_unsigned() == 0xC000_0004 {
                 buffer.resize(return_length as usize + 65536, 0);
                 continue;
             }
@@ -1851,7 +1902,7 @@ fn query_all_processes_optimized() -> Vec<NativeProcessInfo> {
         let mut offset: usize = 0;
 
         loop {
-            let proc_info = unsafe { &*(buffer.as_ptr().add(offset) as *const SystemProcessInfo) };
+            let proc_info = unsafe { &*buffer.as_ptr().add(offset).cast::<SystemProcessInfo>() };
 
             let name = if proc_info.image_name.Length > 0 && !proc_info.image_name.Buffer.is_null()
             {
@@ -1875,11 +1926,11 @@ fn query_all_processes_optimized() -> Vec<NativeProcessInfo> {
                 working_set: proc_info.working_set_size as u64,
                 private_bytes: proc_info.private_page_count as u64,
                 virtual_size: proc_info.virtual_size as u64,
-                kernel_time: proc_info.kernel_time as u64,
-                user_time: proc_info.user_time as u64,
-                create_time: proc_info.create_time as u64,
-                read_bytes: proc_info.read_transfer_count as u64,
-                write_bytes: proc_info.write_transfer_count as u64,
+                kernel_time: proc_info.kernel_time.cast_unsigned(),
+                user_time: proc_info.user_time.cast_unsigned(),
+                create_time: proc_info.create_time.cast_unsigned(),
+                read_bytes: proc_info.read_transfer_count.cast_unsigned(),
+                write_bytes: proc_info.write_transfer_count.cast_unsigned(),
                 thread_count: proc_info.number_of_threads,
                 handle_count: proc_info.handle_count,
                 base_priority: proc_info.base_priority,
@@ -1897,6 +1948,45 @@ fn query_all_processes_optimized() -> Vec<NativeProcessInfo> {
 
 fn prune_process_cpu_times(prev: &mut ProcessCpuTimes, current_pids: &HashSet<u32>) {
     prev.retain(|pid, _| current_pids.contains(pid));
+}
+
+/// Share of TOTAL system CPU one process used since the previous sample, the
+/// way Task Manager reports it.
+///
+/// The System Idle Process (PID 0) accounts for idle time across all cores
+/// rather than real work, so it stays at 0 instead of showing 900%+ on a
+/// multi-core box. A `create_time` mismatch means the PID was reused and the
+/// baseline is discarded.
+fn process_cpu_percent(
+    proc: &NativeProcessInfo,
+    previous: Option<&(u64, u64, Instant)>,
+    now: Instant,
+    cpu_count: usize,
+) -> f32 {
+    if proc.pid == 0 {
+        return 0.0;
+    }
+    let Some((prev_time, prev_create, prev_instant)) = previous else {
+        return 0.0;
+    };
+    if *prev_create != proc.create_time {
+        return 0.0;
+    }
+
+    let total_time = proc.kernel_time + proc.user_time;
+    let time_delta = total_time.saturating_sub(*prev_time);
+    let elapsed = now.duration_since(*prev_instant).as_nanos() as f64;
+    if elapsed <= 0.0 {
+        return 0.0;
+    }
+
+    // time_delta is in 100-ns intervals, elapsed is in ns
+    // Convert to percentage of TOTAL system CPU (matches Task Manager)
+    // Formula: (cpu_time_ns / wall_time_ns) / num_cores * 100
+    let cpu_time_ns = time_delta as f64 * 100.0;
+    let single_core_fraction = cpu_time_ns / elapsed;
+    let system_pct = (single_core_fraction / cpu_count as f64) * 100.0;
+    (system_pct as f32).clamp(0.0, 100.0)
 }
 
 async fn get_top_processes_optimized(
@@ -1930,7 +2020,7 @@ async fn get_top_processes_optimized(
     // Get CPU count for proper percentage capping
     let cpu_count = *CPU_COUNT.get_or_init(|| unsafe {
         let mut sys_info = SYSTEM_INFO::default();
-        GetSystemInfo(&mut sys_info);
+        GetSystemInfo(&raw mut sys_info);
         sys_info.dwNumberOfProcessors as usize
     });
 
@@ -1938,33 +2028,7 @@ async fn get_top_processes_optimized(
         total_disk_read += proc.read_bytes;
         total_disk_write += proc.write_bytes;
 
-        // System Idle Process (PID 0) represents idle CPU time across all cores,
-        // not actual work. Skip it to avoid showing 900%+ on multi-core systems.
-        let cpu_percent = if proc.pid == 0 {
-            0.0
-        } else if let Some((prev_time, prev_create, prev_instant)) = prev.get(&proc.pid) {
-            if *prev_create != proc.create_time {
-                // PID was reused, reset
-                0.0
-            } else {
-                let total_time = proc.kernel_time + proc.user_time;
-                let time_delta = total_time.saturating_sub(*prev_time);
-                let elapsed = now.duration_since(*prev_instant).as_nanos() as f64;
-                if elapsed > 0.0 {
-                    // time_delta is in 100-ns intervals, elapsed is in ns
-                    // Convert to percentage of TOTAL system CPU (matches Task Manager)
-                    // Formula: (cpu_time_ns / wall_time_ns) / num_cores * 100
-                    let cpu_time_ns = time_delta as f64 * 100.0;
-                    let single_core_fraction = cpu_time_ns / elapsed;
-                    let system_pct = (single_core_fraction / cpu_count as f64) * 100.0;
-                    (system_pct as f32).clamp(0.0, 100.0)
-                } else {
-                    0.0
-                }
-            }
-        } else {
-            0.0
-        };
+        let cpu_percent = process_cpu_percent(proc, prev.get(&proc.pid), now, cpu_count);
 
         let memory_percent = if total_memory > 0 {
             (proc.working_set as f64 / total_memory as f64 * 100.0) as f32
@@ -2001,7 +2065,7 @@ async fn get_top_processes_optimized(
             npu_percent: adapter.npu_percent,
             npu_memory_mb: adapter.npu_memory as f64 / (1024.0 * 1024.0),
             cpu_time_secs,
-            start_time: start_time as i64,
+            start_time: start_time.cast_signed(),
             status: "Running".to_string(),
             thread_count: proc.thread_count,
             handle_count: proc.handle_count,
@@ -2044,7 +2108,7 @@ pub async fn get_all_processes(
             ..Default::default()
         };
         unsafe {
-            if GlobalMemoryStatusEx(&mut mem_status).is_ok() {
+            if GlobalMemoryStatusEx(&raw mut mem_status).is_ok() {
                 mem_status.ullTotalPhys
             } else {
                 0
@@ -2058,14 +2122,14 @@ pub async fn get_all_processes(
 }
 
 #[cfg(test)]
-fn paginate_processes(processes: Vec<ProcessInfo>, query: ProcessQuery) -> ProcessPage {
-    paginate_process_snapshot(&processes, unix_timestamp_secs(), query)
+fn paginate_processes(processes: &[ProcessInfo], query: &ProcessQuery) -> ProcessPage {
+    paginate_process_snapshot(processes, unix_timestamp_secs(), query)
 }
 
 fn paginate_process_snapshot(
     processes: &[ProcessInfo],
     captured_at: i64,
-    query: ProcessQuery,
+    query: &ProcessQuery,
 ) -> ProcessPage {
     let search = query.search.trim().to_lowercase();
     let mut processes: Vec<&ProcessInfo> = processes
@@ -2137,18 +2201,24 @@ fn paginate_process_snapshot(
 fn unix_timestamp_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs() as i64)
+        .map_or(0, |duration| duration.as_secs().cast_signed())
 }
 
 #[inline]
 fn filetime_to_unix(filetime: u64) -> u64 {
-    filetime.saturating_sub(116444736000000000) / 10_000_000
+    filetime.saturating_sub(116_444_736_000_000_000) / 10_000_000
 }
 
 // ============================================================================
 // NETWORK CONNECTIONS
 // ============================================================================
 
+// The shells await this through the shared port trait; the enumeration itself
+// is synchronous today, but the signature is part of the crate's public API.
+#[allow(
+    clippy::unused_async,
+    reason = "public async API shared with the UI shells"
+)]
 pub async fn get_network_connections() -> Vec<NetworkConnection> {
     query_native_network_connections()
 }
@@ -2262,7 +2332,7 @@ fn query_ip_helper_table(
     mut query: impl FnMut(Option<*mut std::ffi::c_void>, *mut u32) -> u32,
 ) -> Option<Vec<u32>> {
     let mut byte_len = 0u32;
-    let initial = query(None, &mut byte_len);
+    let initial = query(None, &raw mut byte_len);
     if initial != 0 && initial != ERROR_INSUFFICIENT_BUFFER_CODE {
         return None;
     }
@@ -2271,7 +2341,7 @@ fn query_ip_helper_table(
     for _ in 0..3 {
         let words = (byte_len as usize).div_ceil(std::mem::size_of::<u32>());
         let mut buffer = vec![0u32; words.max(1)];
-        let status = query(Some(buffer.as_mut_ptr().cast()), &mut byte_len as *mut u32);
+        let status = query(Some(buffer.as_mut_ptr().cast()), &raw mut byte_len);
         if status == 0 {
             return Some(buffer);
         }
@@ -2391,8 +2461,7 @@ pub fn get_npu_utilization() -> Option<f32> {
     let wmi_con = WmiConnection::new().ok()?;
 
     let query = format!(
-        "SELECT UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine WHERE Name LIKE '%{}%'",
-        npu_luid
+        "SELECT UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine WHERE Name LIKE '%{npu_luid}%'"
     );
 
     if let Ok(results) = wmi_con.query(&query) {
@@ -2404,7 +2473,7 @@ pub fn get_npu_utilization() -> Option<f32> {
                 // WMI can return UtilizationPercentage as string or integer
                 let util_val = util
                     .as_u64()
-                    .or_else(|| util.as_i64().map(|i| i as u64))
+                    .or_else(|| util.as_i64().map(i64::cast_unsigned))
                     .or_else(|| util.as_str().and_then(|s| s.parse::<u64>().ok()));
                 if let Some(u) = util_val {
                     total_util += u;
@@ -2473,7 +2542,7 @@ fn discover_npu_luid_with_wmi(wmi_con: &wfdiag_native_core::wmi::WmiConnection) 
 /// DirectX meta-commands required for ML workloads.
 const DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML: windows::core::GUID =
     windows::core::GUID::from_values(
-        0xb71b0d41,
+        0xb71b_0d41,
         0x1088,
         0x422f,
         [0xa2, 0x7c, 0x02, 0x50, 0xb7, 0xd3, 0xa9, 0x88],
@@ -2481,11 +2550,11 @@ const DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML: windows::core::GUID =
 
 /// The runtime-agnostic hardware type Microsoft documents for NPUs —
 /// "declared by NPUs with or without compute shader support", reported by
-/// the driver or inferred by DXCore itself (the same signal Task Manager
+/// the driver or inferred by `DXCore` itself (the same signal Task Manager
 /// uses to label adapters). This is the primary, OS-authoritative NPU
 /// detection on Windows 11 24H2+.
 const DXCORE_HARDWARE_TYPE_ATTRIBUTE_NPU: windows::core::GUID = windows::core::GUID::from_values(
-    0xd46140c4,
+    0xd461_40c4,
     0xadd7,
     0x451b,
     [0x9e, 0x56, 0x06, 0xfe, 0x8c, 0x3b, 0x58, 0xed],
@@ -2542,7 +2611,7 @@ const NPU_IDENTIFIERS: &[&str] = &[
 /// vendor evidence — that matched virtual devices.
 const NPU_VENDOR_IDS: &[u32] = &[0x8086, 0x1022, 0x17CB, 0x5143];
 
-/// Everything the fallback classifier may consider about one DXCore
+/// Everything the fallback classifier may consider about one `DXCore`
 /// adapter. Pure data, so classification is unit-testable.
 #[derive(Debug, Clone, Default)]
 struct NpuAdapterEvidence {
@@ -2551,9 +2620,9 @@ struct NpuAdapterEvidence {
     os_reports_npu: bool,
     has_compute: bool,
     has_graphics: bool,
-    /// DXCoreAdapterProperty::IsHardware; None = property unsupported.
+    /// `DXCoreAdapterProperty::IsHardware`; None = property unsupported.
     is_hardware: Option<bool>,
-    /// vendorID from DXCoreAdapterProperty::HardwareID; None = unavailable.
+    /// `vendorID` from `DXCoreAdapterProperty::HardwareID`; None = unavailable.
     vendor_id: Option<u32>,
 }
 
@@ -2587,11 +2656,11 @@ fn classify_npu_adapter(e: &NpuAdapterEvidence) -> bool {
     }
 }
 
-/// DXCoreAdapterProperty::IsHardware for an adapter, if the OS supports it.
+/// `DXCoreAdapterProperty::IsHardware` for an adapter, if the OS supports it.
 unsafe fn dxcore_adapter_is_hardware(
     adapter: &windows::Win32::Graphics::DXCore::IDXCoreAdapter,
 ) -> Option<bool> {
-    use windows::Win32::Graphics::DXCore::*;
+    use windows::Win32::Graphics::DXCore::IsHardware;
     unsafe {
         if !adapter.IsPropertySupported(IsHardware) {
             return None;
@@ -2601,18 +2670,18 @@ unsafe fn dxcore_adapter_is_hardware(
             .GetProperty(
                 IsHardware,
                 std::mem::size_of::<bool>(),
-                &mut value as *mut _ as *mut _,
+                (&raw mut value).cast(),
             )
             .ok()?;
         Some(value)
     }
 }
 
-/// vendorID from DXCoreAdapterProperty::HardwareID, if available.
+/// `vendorID` from `DXCoreAdapterProperty::HardwareID`, if available.
 unsafe fn dxcore_adapter_vendor_id(
     adapter: &windows::Win32::Graphics::DXCore::IDXCoreAdapter,
 ) -> Option<u32> {
-    use windows::Win32::Graphics::DXCore::*;
+    use windows::Win32::Graphics::DXCore::{DXCoreHardwareID, HardwareID};
     unsafe {
         if !adapter.IsPropertySupported(HardwareID) {
             return None;
@@ -2622,18 +2691,18 @@ unsafe fn dxcore_adapter_vendor_id(
             .GetProperty(
                 HardwareID,
                 std::mem::size_of::<DXCoreHardwareID>(),
-                &mut hardware_id as *mut _ as *mut _,
+                (&raw mut hardware_id).cast(),
             )
             .ok()?;
         Some(hardware_id.vendorID)
     }
 }
 
-/// DriverDescription of an adapter, trimmed; None when empty/unreadable.
+/// `DriverDescription` of an adapter, trimmed; None when empty/unreadable.
 unsafe fn dxcore_adapter_name(
     adapter: &windows::Win32::Graphics::DXCore::IDXCoreAdapter,
 ) -> Option<String> {
-    use windows::Win32::Graphics::DXCore::*;
+    use windows::Win32::Graphics::DXCore::DriverDescription;
     unsafe {
         let size = adapter
             .GetPropertySize(DriverDescription)
@@ -2641,7 +2710,7 @@ unsafe fn dxcore_adapter_name(
             .filter(|size| *size > 0)?;
         let mut buffer: Vec<u8> = vec![0; size];
         adapter
-            .GetProperty(DriverDescription, size, buffer.as_mut_ptr() as *mut _)
+            .GetProperty(DriverDescription, size, buffer.as_mut_ptr().cast())
             .ok()?;
         let name = String::from_utf8_lossy(&buffer)
             .trim_end_matches('\0')
@@ -2650,14 +2719,14 @@ unsafe fn dxcore_adapter_name(
     }
 }
 
-/// Primary detection, exactly the way Microsoft documents it: ask DXCore
+/// Primary detection, exactly the way Microsoft documents it: ask `DXCore`
 /// for the adapters whose hardware type IS "NPU" (driver-declared or
 /// OS-inferred; also catches MCDM NPUs without a D3D user-mode driver) and
 /// take the first real hardware one.
 unsafe fn find_npu_by_hardware_type(
     factory: &windows::Win32::Graphics::DXCore::IDXCoreAdapterFactory,
 ) -> Option<String> {
-    use windows::Win32::Graphics::DXCore::*;
+    use windows::Win32::Graphics::DXCore::{IDXCoreAdapter, IDXCoreAdapterList};
     unsafe {
         let list: IDXCoreAdapterList = factory
             .CreateAdapterList(&[DXCORE_HARDWARE_TYPE_ATTRIBUTE_NPU])
@@ -2682,7 +2751,10 @@ unsafe fn find_npu_by_hardware_type(
 unsafe fn find_npu_by_ml_evidence(
     factory: &windows::Win32::Graphics::DXCore::IDXCoreAdapterFactory,
 ) -> Option<String> {
-    use windows::Win32::Graphics::DXCore::*;
+    use windows::Win32::Graphics::DXCore::{
+        DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE, DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS,
+        IDXCoreAdapter, IDXCoreAdapterList,
+    };
     unsafe {
         let list: IDXCoreAdapterList = factory
             .CreateAdapterList(&[DXCORE_ADAPTER_ATTRIBUTE_D3D12_GENERIC_ML])
@@ -2714,7 +2786,7 @@ unsafe fn find_npu_by_ml_evidence(
 }
 
 fn detect_npu_dxcore() -> Option<(String, u32)> {
-    use windows::Win32::Graphics::DXCore::*;
+    use windows::Win32::Graphics::DXCore::{DXCoreCreateAdapterFactory, IDXCoreAdapterFactory};
 
     unsafe {
         let factory: IDXCoreAdapterFactory = DXCoreCreateAdapterFactory().ok()?;
@@ -2725,10 +2797,10 @@ fn detect_npu_dxcore() -> Option<(String, u32)> {
     }
 }
 
-/// Positive PnP device evidence of an NPU (an actual device is present).
+/// Positive `PnP` device evidence of an NPU (an actual device is present).
 /// This is the only WMI signal allowed to claim NPU availability. The loose
 /// LIKE query alone is NOT trusted: every candidate goes through the same
-/// exclusion list / classifier as the DXCore fallback, so a virtual or
+/// exclusion list / classifier as the `DXCore` fallback, so a virtual or
 /// bus-enumerator device whose name merely contains "NPU" cannot be
 /// promoted to a real NPU.
 fn detect_npu_pnp_device() -> Option<String> {
@@ -2746,31 +2818,28 @@ fn detect_npu_pnp_device() -> Option<String> {
              DeviceID LIKE '%NPU%'",
         )
         .ok()?;
-    results
-        .iter()
-        .filter_map(|device| {
-            let name = device.get("Name").and_then(|v| v.as_str())?;
-            // Classify on name + device id: the id carries vendor evidence
-            // (e.g. PCI\\VEN_8086) the plain display name lacks.
-            let device_id = device
-                .get("DeviceID")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let mut combined = String::with_capacity(name.len() + device_id.len());
-            combined.push_str(name);
-            combined.push(' ');
-            combined.push_str(device_id);
-            let evidence = NpuAdapterEvidence {
-                name: combined,
-                os_reports_npu: false,
-                has_compute: true,
-                has_graphics: false,
-                is_hardware: None,
-                vendor_id: None,
-            };
-            classify_npu_adapter(&evidence).then(|| name.to_string())
-        })
-        .next()
+    results.iter().find_map(|device| {
+        let name = device.get("Name").and_then(|v| v.as_str())?;
+        // Classify on name + device id: the id carries vendor evidence
+        // (e.g. PCI\\VEN_8086) the plain display name lacks.
+        let device_id = device
+            .get("DeviceID")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let mut combined = String::with_capacity(name.len() + device_id.len());
+        combined.push_str(name);
+        combined.push(' ');
+        combined.push_str(device_id);
+        let evidence = NpuAdapterEvidence {
+            name: combined,
+            os_reports_npu: false,
+            has_compute: true,
+            has_graphics: false,
+            is_hardware: None,
+            vendor_id: None,
+        };
+        classify_npu_adapter(&evidence).then(|| name.to_string())
+    })
 }
 
 /// CPU-family heuristic: this processor family normally ships with an NPU.
@@ -2792,19 +2861,19 @@ fn detect_npu_cpu_hint() -> Option<String> {
         || name_lower.contains("arrow lake")
         || name_lower.contains("lunar lake")
     {
-        return Some(format!("{} (Intel NPU)", name));
+        return Some(format!("{name} (Intel NPU)"));
     }
     if name_lower.contains("ryzen ai")
         || name_lower.contains("ryzen 8000")
         || name_lower.contains("ryzen 9000")
     {
-        return Some(format!("{} (AMD XDNA NPU)", name));
+        return Some(format!("{name} (AMD XDNA NPU)"));
     }
     if name_lower.contains("snapdragon")
         || name_lower.contains("x elite")
         || name_lower.contains("x plus")
     {
-        return Some(format!("{} (Qualcomm Hexagon NPU)", name));
+        return Some(format!("{name} (Qualcomm Hexagon NPU)"));
     }
     None
 }
@@ -2813,6 +2882,7 @@ fn detect_npu_cpu_hint() -> Option<String> {
 // UPTIME
 // ============================================================================
 
+#[must_use]
 pub fn get_uptime_seconds() -> u64 {
     unsafe { GetTickCount64() / 1000 }
 }
@@ -2822,6 +2892,7 @@ pub fn get_uptime_seconds() -> u64 {
 // ============================================================================
 
 /// Get detailed NPU diagnostic information for the diagnostics tab
+#[must_use]
 pub fn get_npu_diagnostic_info() -> serde_json::Value {
     use serde_json::json;
 
@@ -2833,7 +2904,7 @@ pub fn get_npu_diagnostic_info() -> serde_json::Value {
             "name": name,
             "detection_method": "DXCore",
             "tops_estimate": tops,
-            "phi_silica_capable": tops.map(|t| t >= 40).unwrap_or(false),
+            "phi_silica_capable": tops.is_some_and(|t| t >= 40),
             "status": "Available",
             "description": format_npu_description(&name, tops),
         });
@@ -2847,7 +2918,7 @@ pub fn get_npu_diagnostic_info() -> serde_json::Value {
             "name": name,
             "detection_method": "WMI",
             "tops_estimate": tops,
-            "phi_silica_capable": tops.map(|t| t >= 40).unwrap_or(false),
+            "phi_silica_capable": tops.is_some_and(|t| t >= 40),
             "status": "Available",
             "description": format_npu_description(&name, tops),
         });
@@ -2923,11 +2994,12 @@ fn estimate_npu_tops(name: &str) -> Option<u32> {
 
 /// Format a human-readable NPU description
 fn format_npu_description(name: &str, tops: Option<u32>) -> String {
-    let tops_str = tops
-        .map(|t| format!("{} TOPS", t))
-        .unwrap_or_else(|| "Unknown performance".to_string());
+    let tops_str = tops.map_or_else(
+        || "Unknown performance".to_string(),
+        |t| format!("{t} TOPS"),
+    );
 
-    let copilot_status = if tops.map(|t| t >= 40).unwrap_or(false) {
+    let copilot_status = if tops.is_some_and(|t| t >= 40) {
         "Meets Copilot+ PC requirements (40+ TOPS). Phi Silica on-device AI available."
     } else if tops.is_some() {
         "Below Copilot+ PC threshold (40 TOPS). Phi Silica not available."
@@ -2935,10 +3007,7 @@ fn format_npu_description(name: &str, tops: Option<u32>) -> String {
         "Performance specifications unknown."
     };
 
-    format!(
-        "{}\nEstimated Performance: {}\n{}",
-        name, tops_str, copilot_status
-    )
+    format!("{name}\nEstimated Performance: {tops_str}\n{copilot_status}")
 }
 
 #[cfg(test)]
@@ -3028,7 +3097,9 @@ mod tests {
         assert!(snapshot.is_fresh_at(captured_instant));
         assert!(
             snapshot.is_fresh_at(
-                captured_instant + PROCESS_SNAPSHOT_INTERVAL - Duration::from_millis(1)
+                (captured_instant + PROCESS_SNAPSHOT_INTERVAL)
+                    .checked_sub(Duration::from_millis(1))
+                    .expect("interval is longer than 1ms")
             )
         );
         assert!(!snapshot.is_fresh_at(captured_instant + PROCESS_SNAPSHOT_INTERVAL));
@@ -3044,7 +3115,7 @@ mod tests {
         let page = paginate_process_snapshot(
             &processes,
             1_234_567,
-            ProcessQuery {
+            &ProcessQuery {
                 search: "beta".to_string(),
                 ..ProcessQuery::default()
             },
@@ -3067,12 +3138,12 @@ mod tests {
     #[test]
     fn process_page_filters_sorts_and_clamps_page_size() {
         let page = paginate_processes(
-            vec![
+            &[
                 process(1, "alpha.exe", 5.0, 10.0),
                 process(2, "beta.exe", 20.0, 30.0),
                 process(3, "beta-helper.exe", 10.0, 20.0),
             ],
-            ProcessQuery {
+            &ProcessQuery {
                 search: "BETA".to_string(),
                 sort_by: ProcessSortKey::CpuPercent,
                 sort_direction: ProcessSortDirection::Desc,
@@ -3094,8 +3165,8 @@ mod tests {
         let running = process(9001, "beta.exe", 20.0, 30.0);
 
         let by_pid = paginate_processes(
-            vec![suspended.clone(), running.clone()],
-            ProcessQuery {
+            &[suspended.clone(), running.clone()],
+            &ProcessQuery {
                 search: "9001".to_string(),
                 ..ProcessQuery::default()
             },
@@ -3104,8 +3175,8 @@ mod tests {
         assert_eq!(by_pid.items[0].pid, 9001);
 
         let by_status = paginate_processes(
-            vec![suspended, running],
-            ProcessQuery {
+            &[suspended, running],
+            &ProcessQuery {
                 search: "SUSPENDED".to_string(),
                 ..ProcessQuery::default()
             },
@@ -3117,12 +3188,12 @@ mod tests {
     #[test]
     fn process_page_moves_an_out_of_range_offset_to_the_last_page() {
         let page = paginate_processes(
-            vec![
+            &[
                 process(1, "alpha.exe", 5.0, 10.0),
                 process(2, "beta.exe", 20.0, 30.0),
                 process(3, "gamma.exe", 10.0, 20.0),
             ],
-            ProcessQuery {
+            &ProcessQuery {
                 search: String::new(),
                 sort_by: ProcessSortKey::Name,
                 sort_direction: ProcessSortDirection::Asc,

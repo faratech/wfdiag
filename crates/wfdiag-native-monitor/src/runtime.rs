@@ -214,7 +214,7 @@ impl LatestProcessRequest {
         let previous = self
             .latest
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .replace(request);
         if let Some(previous) = previous {
             let _ = previous.reply.send(ProcessQueryOutcome::Superseded);
@@ -229,7 +229,7 @@ impl LatestProcessRequest {
         self.wake_pending.store(false, Ordering::Release);
         self.latest
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
     }
 
@@ -237,7 +237,7 @@ impl LatestProcessRequest {
         self.wake_pending.store(false, Ordering::Release);
         self.latest
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
     }
 }
@@ -280,6 +280,11 @@ impl NativeMonitorRuntime {
     /// Native shells should use `MonitorProfile::SystemOnly`; that profile
     /// guarantees that one-second telemetry performs no process enumeration.
     /// `start` remains the legacy Tauri-compatible behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the event bus capacity is invalid or if the
+    /// monitor worker thread cannot be spawned or fails to start.
     pub fn start_with_profile(profile: MonitorProfile) -> io::Result<(Self, UiEventReceiver)> {
         let capacity = NonZeroUsize::try_from(32usize)
             .map_err(|_| io::Error::other("native monitoring event capacity must be non-zero"))?;
@@ -427,7 +432,7 @@ impl NativeMonitorRuntime {
     /// Queue an on-demand full process query on the monitor worker.
     ///
     /// The returned receiver is awaitable from a Reactor `ComponentTask` and
-    /// never blocks the WinUI thread. Process enumeration stays off the
+    /// never blocks the `WinUI` thread. Process enumeration stays off the
     /// one-second telemetry event path and reuses the collector's CPU history.
     ///
     /// # Errors

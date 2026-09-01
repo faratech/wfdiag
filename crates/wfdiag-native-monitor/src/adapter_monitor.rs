@@ -6,6 +6,7 @@
 #![cfg(windows)]
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,7 @@ pub struct AdapterMetrics {
 }
 
 impl AdapterMetrics {
+    #[must_use]
     pub fn meter_memory(&self) -> (u64, u64) {
         const DISCRETE_VRAM_MIN: u64 = 1 << 30;
         if self.dedicated_total >= DISCRETE_VRAM_MIN {
@@ -115,6 +117,14 @@ fn classify_adapter(adapter_type_value: u32) -> Option<AdapterClass> {
     None
 }
 
+// Telemetry math: the delta is a 100ns running-time counter over a ~1s window
+// and the result is a 0..=100 percentage, so neither the i64 -> f64 widening nor
+// the clamped f64 -> f32 narrowing can lose meaningful precision.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "bounded percentage telemetry; see comment above"
+)]
 #[inline]
 fn running_time_to_percent(prev: i64, cur: i64, wall_elapsed_secs: f64) -> f32 {
     if wall_elapsed_secs <= 0.0 {
@@ -131,7 +141,9 @@ fn utf16_to_string(buf: &[u16]) -> String {
 
 #[inline]
 fn query_statistics(query: &mut D3DKMT_QUERYSTATISTICS) -> bool {
-    unsafe { D3DKMTQueryStatistics(query as *mut D3DKMT_QUERYSTATISTICS as *const _).is_ok() }
+    // Keep the `*mut` provenance: the kernel writes `QueryResult` back through
+    // this pointer even though the API signature is `*const`.
+    unsafe { D3DKMTQueryStatistics(std::ptr::from_mut(query).cast_const()).is_ok() }
 }
 
 fn open_process_query(pid: u32) -> Option<HANDLE> {
@@ -145,13 +157,13 @@ fn open_process_query(pid: u32) -> Option<HANDLE> {
 fn for_each_enumerated_adapter(mut f: impl FnMut(&D3DKMT_ADAPTERINFO)) {
     unsafe {
         let mut enum2 = D3DKMT_ENUMADAPTERS2::default();
-        if D3DKMTEnumAdapters2(&mut enum2).is_err() || enum2.NumAdapters == 0 {
+        if D3DKMTEnumAdapters2(&raw mut enum2).is_err() || enum2.NumAdapters == 0 {
             return;
         }
 
         let mut infos = vec![D3DKMT_ADAPTERINFO::default(); enum2.NumAdapters as usize];
         enum2.pAdapters = infos.as_mut_ptr();
-        if D3DKMTEnumAdapters2(&mut enum2).is_err() {
+        if D3DKMTEnumAdapters2(&raw mut enum2).is_err() {
             return;
         }
 
@@ -202,16 +214,22 @@ fn enumerate_luids() -> Vec<LuidKey> {
     luids
 }
 
+// `size_of::<T>()` for these fixed D3DKMT structs is a compile-time constant of
+// a few hundred bytes, far below `u32::MAX`.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "struct sizes are small compile-time constants"
+)]
 fn build_adapter(info: &D3DKMT_ADAPTERINFO) -> AdapterProbe {
     unsafe {
         let mut adapter_type = D3DKMT_ADAPTERTYPE::default();
         let mut query = D3DKMT_QUERYADAPTERINFO {
             hAdapter: info.hAdapter,
             Type: KMTQAITYPE_ADAPTERTYPE,
-            pPrivateDriverData: &mut adapter_type as *mut _ as *mut std::ffi::c_void,
+            pPrivateDriverData: (&raw mut adapter_type).cast::<std::ffi::c_void>(),
             PrivateDriverDataSize: std::mem::size_of::<D3DKMT_ADAPTERTYPE>() as u32,
         };
-        if D3DKMTQueryAdapterInfo(&mut query).is_err() {
+        if D3DKMTQueryAdapterInfo(&raw mut query).is_err() {
             return AdapterProbe::Untrackable;
         }
 
@@ -227,10 +245,10 @@ fn build_adapter(info: &D3DKMT_ADAPTERINFO) -> AdapterProbe {
         let mut query = D3DKMT_QUERYADAPTERINFO {
             hAdapter: info.hAdapter,
             Type: KMTQAITYPE_ADAPTERREGISTRYINFO,
-            pPrivateDriverData: &mut registry_info as *mut _ as *mut std::ffi::c_void,
+            pPrivateDriverData: (&raw mut registry_info).cast::<std::ffi::c_void>(),
             PrivateDriverDataSize: std::mem::size_of::<D3DKMT_ADAPTERREGISTRYINFO>() as u32,
         };
-        let name = if D3DKMTQueryAdapterInfo(&mut query).is_ok() {
+        let name = if D3DKMTQueryAdapterInfo(&raw mut query).is_ok() {
             let name = utf16_to_string(&registry_info.AdapterString);
             if name.is_empty() {
                 fallback_name.to_string()
@@ -375,7 +393,7 @@ fn aggregate_gpus(per_adapter: &[(AdapterClass, AdapterMetrics)]) -> Option<Adap
 
     let mut info = primary?.clone();
     if count > 1 {
-        info.name.push_str(&format!(" (+{})", count - 1));
+        let _ = write!(info.name, " (+{})", count - 1);
     }
     Some(info)
 }
@@ -399,11 +417,17 @@ fn aggregate_npus(per_adapter: &[(AdapterClass, AdapterMetrics)]) -> Option<Adap
     }
 
     if extra > 0 {
-        info.name.push_str(&format!(" (+{})", extra));
+        let _ = write!(info.name, " (+{extra})");
     }
     Some(info)
 }
 
+/// Samples every tracked GPU/NPU adapter and returns the aggregated snapshot.
+///
+/// # Panics
+///
+/// Panics if the process-wide adapter-state mutex has been poisoned by a
+/// previous panic inside this module.
 pub fn refresh() -> AdapterSnapshot {
     let mut guard = ADAPTER_STATE.lock().unwrap();
     let state = guard.get_or_insert_with(AdapterState::default);
@@ -480,6 +504,84 @@ pub fn refresh() -> AdapterSnapshot {
     snapshot
 }
 
+/// Samples one adapter's per-node running time for a single process and folds
+/// the deltas into `entry`. Returns `true` when at least one node answered.
+fn sample_process_nodes(
+    adapter: &TrackedAdapter,
+    handle: HANDLE,
+    prev: &mut [i64],
+    node_index: &mut usize,
+    elapsed: Option<f64>,
+    fresh: bool,
+    entry: &mut ProcAdapterStats,
+) -> bool {
+    let mut sampled = false;
+    for node_id in 0..adapter.node_count {
+        let mut node_stats = D3DKMT_QUERYSTATISTICS {
+            Type: D3DKMT_QUERYSTATISTICS_PROCESS_NODE,
+            AdapterLuid: adapter.luid,
+            hProcess: handle,
+            ..Default::default()
+        };
+        node_stats.Anonymous.QueryProcessNode =
+            D3DKMT_QUERYSTATISTICS_QUERY_NODE { NodeId: node_id };
+
+        if query_statistics(&mut node_stats) {
+            sampled = true;
+            let running = unsafe { node_stats.QueryResult.ProcessNodeInformation.RunningTime };
+            if !fresh && let Some(secs) = elapsed {
+                let pct = running_time_to_percent(prev[*node_index], running, secs);
+                match adapter.class {
+                    AdapterClass::Gpu => entry.gpu_percent = entry.gpu_percent.max(pct),
+                    AdapterClass::Npu => entry.npu_percent = entry.npu_percent.max(pct),
+                }
+            }
+            prev[*node_index] = running;
+        }
+        *node_index += 1;
+    }
+    sampled
+}
+
+/// Adds one adapter's per-segment committed bytes for a single process.
+fn sample_process_segments(adapter: &TrackedAdapter, handle: HANDLE, entry: &mut ProcAdapterStats) {
+    for segment_id in 0..adapter.segment_count {
+        let mut segment_stats = D3DKMT_QUERYSTATISTICS {
+            Type: D3DKMT_QUERYSTATISTICS_PROCESS_SEGMENT,
+            AdapterLuid: adapter.luid,
+            hProcess: handle,
+            ..Default::default()
+        };
+        segment_stats.Anonymous.QueryProcessSegment = D3DKMT_QUERYSTATISTICS_QUERY_SEGMENT {
+            SegmentId: segment_id,
+        };
+
+        if query_statistics(&mut segment_stats) {
+            let committed = unsafe {
+                segment_stats
+                    .QueryResult
+                    .ProcessSegmentInformation
+                    .BytesCommitted
+            };
+            let committed = if committed == u64::MAX { 0 } else { committed };
+            match adapter.class {
+                AdapterClass::Gpu => {
+                    entry.gpu_memory = entry.gpu_memory.saturating_add(committed);
+                }
+                AdapterClass::Npu => {
+                    entry.npu_memory = entry.npu_memory.saturating_add(committed);
+                }
+            }
+        }
+    }
+}
+
+/// Returns per-process GPU/NPU utilization and committed memory.
+///
+/// # Panics
+///
+/// Panics if the process-wide adapter-state mutex has been poisoned by a
+/// previous panic inside this module.
 pub fn process_stats(processes: &[(u32, u64)], enabled: bool) -> HashMap<u32, ProcAdapterStats> {
     let mut guard = ADAPTER_STATE.lock().unwrap();
     let Some(state) = guard.as_mut() else {
@@ -539,56 +641,16 @@ pub fn process_stats(processes: &[(u32, u64)], enabled: bool) -> HashMap<u32, Pr
         let mut sampled_running_time = false;
 
         for adapter in adapters.iter() {
-            for node_id in 0..adapter.node_count {
-                let mut stats = D3DKMT_QUERYSTATISTICS {
-                    Type: D3DKMT_QUERYSTATISTICS_PROCESS_NODE,
-                    AdapterLuid: adapter.luid,
-                    hProcess: handle,
-                    ..Default::default()
-                };
-                stats.Anonymous.QueryProcessNode =
-                    D3DKMT_QUERYSTATISTICS_QUERY_NODE { NodeId: node_id };
-
-                if query_statistics(&mut stats) {
-                    sampled_running_time = true;
-                    let running = unsafe { stats.QueryResult.ProcessNodeInformation.RunningTime };
-                    if !fresh && let Some(secs) = elapsed {
-                        let pct = running_time_to_percent(prev[node_index], running, secs);
-                        match adapter.class {
-                            AdapterClass::Gpu => entry.gpu_percent = entry.gpu_percent.max(pct),
-                            AdapterClass::Npu => entry.npu_percent = entry.npu_percent.max(pct),
-                        }
-                    }
-                    prev[node_index] = running;
-                }
-                node_index += 1;
-            }
-
-            for segment_id in 0..adapter.segment_count {
-                let mut stats = D3DKMT_QUERYSTATISTICS {
-                    Type: D3DKMT_QUERYSTATISTICS_PROCESS_SEGMENT,
-                    AdapterLuid: adapter.luid,
-                    hProcess: handle,
-                    ..Default::default()
-                };
-                stats.Anonymous.QueryProcessSegment = D3DKMT_QUERYSTATISTICS_QUERY_SEGMENT {
-                    SegmentId: segment_id,
-                };
-
-                if query_statistics(&mut stats) {
-                    let committed =
-                        unsafe { stats.QueryResult.ProcessSegmentInformation.BytesCommitted };
-                    let committed = if committed == u64::MAX { 0 } else { committed };
-                    match adapter.class {
-                        AdapterClass::Gpu => {
-                            entry.gpu_memory = entry.gpu_memory.saturating_add(committed)
-                        }
-                        AdapterClass::Npu => {
-                            entry.npu_memory = entry.npu_memory.saturating_add(committed)
-                        }
-                    }
-                }
-            }
+            sampled_running_time |= sample_process_nodes(
+                adapter,
+                handle,
+                prev,
+                &mut node_index,
+                elapsed,
+                fresh,
+                &mut entry,
+            );
+            sample_process_segments(adapter, handle, &mut entry);
         }
 
         unsafe {
@@ -655,6 +717,9 @@ mod tests {
         assert_eq!(integrated.meter_memory(), (1_739_767_808, 8_722_055_168));
     }
 
+    // Exact equality is intended: these fixtures use values that are exactly
+    // representable in f32 and flow through `max`/clone without arithmetic.
+    #[allow(clippy::float_cmp, reason = "exact fixture values, no arithmetic")]
     #[test]
     fn aggregates_gpus_by_largest_dedicated_pool() {
         let per_adapter = vec![
@@ -667,6 +732,7 @@ mod tests {
         assert_eq!(gpu.utilization, 10.0);
     }
 
+    #[allow(clippy::float_cmp, reason = "exact fixture values, no arithmetic")]
     #[test]
     fn aggregates_npus_by_max_utilization_and_summed_memory() {
         let per_adapter = vec![
@@ -681,6 +747,9 @@ mod tests {
         assert_eq!(npu.mem_total, 400);
     }
 
+    // The percentages here (50.0/0.0/100.0) are exactly representable in f32, so
+    // the existing exact-equality assertions are kept as-is.
+    #[allow(clippy::float_cmp, reason = "exactly representable percentages")]
     #[test]
     fn converts_running_time_delta_to_percent() {
         let half_sec_100ns = 5_000_000;
