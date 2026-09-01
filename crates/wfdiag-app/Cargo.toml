@@ -8,6 +8,19 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
+wfdiag-native-diagnostics = { workspace = true }
+wfdiag-native-export = { workspace = true }
+wfdiag-native-history = { workspace = true }
+wfdiag-native-issues = { workspace = true }
+wfdiag-native-settings = { workspace = true }
+wfdiag-native-system = { workspace = true }
+wfdiag-native-update = { workspace = true }
+wfdiag-native-ai-provider = { workspace = true }
+wfdiag-ui-core = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+wfdiag-native-monitor = { workspace = true }
 
 [lints]
 workspace = true

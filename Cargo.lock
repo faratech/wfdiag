@@ -5600,6 +5600,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+ "wfdiag-native-ai-analysis",
  "wfdiag-native-ai-chat",
  "wfdiag-native-ai-provider",
  "wfdiag-native-ai-report",
@@ -5641,6 +5642,16 @@ dependencies = [
 [[package]]
 name = "wfdiag-native-ai-analysis"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "wfdiag-native-ai-chat",
+ "wfdiag-native-ai-provider",
+ "wfdiag-native-issues",
+ "wfdiag-native-phi",
+ "wfdiag-native-settings",
+]
 
 [[package]]
 name = "wfdiag-native-ai-chat"
@@ -5886,6 +5897,7 @@ dependencies = [
  "tokio-util",
  "url",
  "uuid",
+ "wfdiag-native-ai-analysis",
  "wfdiag-native-ai-chat",
  "wfdiag-native-ai-provider",
  "wfdiag-native-ai-report",
