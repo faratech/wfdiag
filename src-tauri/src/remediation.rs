@@ -2,8 +2,8 @@
 //! run to fix a detected issue.
 //!
 //! Tiers:
-//! - **OpenTool** — launches a Windows GUI (Task Manager, Disk Cleanup, …).
-//! - **AutoSafe** — non-destructive commands/cleanups, one click.
+//! - **`OpenTool`** — launches a Windows GUI (Task Manager, Disk Cleanup, …).
+//! - **`AutoSafe`** — non-destructive commands/cleanups, one click.
 //! - **Repair**  — admin and/or system-altering (DISM, SFC, network reset,
 //!   restart). Production execution is reachable only after the action broker
 //!   atomically consumes an unexpired, exact catalog proposal approved by the
@@ -119,10 +119,12 @@ impl Deref for RemediationSpec {
 }
 
 impl RemediationSpec {
+    #[must_use]
     pub fn batch_eligible(&self) -> bool {
         self.metadata.batch_eligible()
     }
 
+    #[must_use]
     pub fn cancellable(&self) -> bool {
         match &self.run {
             // Do not terminate integrity-repair tools midway through a write.
@@ -133,15 +135,16 @@ impl RemediationSpec {
     }
 
     /// Human-facing, immutable preview derived only from catalog constants.
+    #[must_use]
     pub fn preview_steps(&self) -> Vec<String> {
         match &self.run {
             RunKind::Spawn { program, args } => vec![format!(
                 "Open {}{}",
                 program,
-                if !args.is_empty() {
-                    format!(" {}", args.join(" "))
-                } else {
+                if args.is_empty() {
                     String::new()
+                } else {
+                    format!(" {}", args.join(" "))
                 }
             )],
             RunKind::Steps { steps, .. } => steps
@@ -156,6 +159,7 @@ impl RemediationSpec {
         }
     }
 
+    #[must_use]
     pub fn summary(&self) -> RemediationSummary {
         let summary = self.metadata.summary();
         debug_assert_eq!(summary.batch_eligible, self.batch_eligible());
@@ -228,7 +232,7 @@ impl CommandRunner for RealRunner {
             let child = cmd.spawn()?;
             let output = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => {
+                () = cancel.cancelled() => {
                     return Err(anyhow::anyhow!("Remediation cancelled"));
                 }
                 result = tokio::time::timeout(timeout, child.wait_with_output()) => {
@@ -264,6 +268,7 @@ impl CommandRunner for RealRunner {
 // The catalog
 // ============================================================================
 
+#[must_use]
 pub fn remediations() -> &'static [RemediationSpec] {
     &[
         // ---- OpenTool ----
@@ -463,13 +468,15 @@ pub fn remediations() -> &'static [RemediationSpec] {
     ]
 }
 
+#[must_use]
 pub fn find(remediation_id: &str) -> Option<&'static RemediationSpec> {
     remediations().iter().find(|r| r.id == remediation_id)
 }
 
-/// Wire summary for an id (used by issue_catalog to embed in Issues).
+/// Wire summary for an id (used by `issue_catalog` to embed in Issues).
+#[must_use]
 pub fn summary(remediation_id: &str) -> Option<RemediationSummary> {
-    find(remediation_id).map(|spec| spec.summary())
+    find(remediation_id).map(RemediationSpec::summary)
 }
 
 // ============================================================================
@@ -486,7 +493,7 @@ async fn execute(
     runner: &dyn CommandRunner,
 ) -> Result<FixOutcome, String> {
     let spec =
-        find(remediation_id).ok_or_else(|| format!("Unknown remediation '{}'", remediation_id))?;
+        find(remediation_id).ok_or_else(|| format!("Unknown remediation '{remediation_id}'"))?;
     if spec.tier == RemediationTier::Repair && !confirmed {
         return Ok(FixOutcome::NeedsConfirmation {
             remediation: spec.summary(),
@@ -506,7 +513,7 @@ pub async fn execute_authorized(
     cancel: &CancellationToken,
 ) -> Result<FixResult, String> {
     let spec =
-        find(remediation_id).ok_or_else(|| format!("Unknown remediation '{}'", remediation_id))?;
+        find(remediation_id).ok_or_else(|| format!("Unknown remediation '{remediation_id}'"))?;
 
     let result = if cancel.is_cancelled() {
         cancelled_result("Remediation cancelled before it started")
@@ -520,19 +527,19 @@ pub async fn execute_authorized(
                     requires_restart: false,
                     completion_status: FixCompletionStatus::Succeeded,
                     steps: vec![RemediationStepResult {
-                        action: format!("Launch {}", program),
+                        action: format!("Launch {program}"),
                         status: RemediationStepStatus::Succeeded,
                         detail: None,
                     }],
                 },
                 Err(e) => FixResult {
                     success: false,
-                    message: format!("Could not launch {}: {}", program, e),
+                    message: format!("Could not launch {program}: {e}"),
                     actions_taken: vec![],
                     requires_restart: false,
                     completion_status: FixCompletionStatus::Failed,
                     steps: vec![RemediationStepResult {
-                        action: format!("Launch {}", program),
+                        action: format!("Launch {program}"),
                         status: RemediationStepStatus::Failed,
                         detail: Some(e.to_string()),
                     }],
@@ -652,7 +659,7 @@ pub async fn execute_authorized(
                 match tokio::task::spawn_blocking(move || custom(&cancel)).await {
                     Ok(Ok(result)) => result,
                     Ok(Err(e)) => failed_result(e.to_string()),
-                    Err(e) => failed_result(format!("Remediation worker failed: {}", e)),
+                    Err(e) => failed_result(format!("Remediation worker failed: {e}")),
                 }
             }
         }
@@ -739,7 +746,7 @@ fn clear_icon_cache(cancel: &CancellationToken) -> anyhow::Result<FixResult> {
     if icon_cache.exists() {
         match std::fs::remove_file(&icon_cache) {
             Ok(()) => actions_taken.push("Deleted IconCache.db".to_string()),
-            Err(error) => failures.push(format!("IconCache.db: {}", error)),
+            Err(error) => failures.push(format!("IconCache.db: {error}")),
         }
     }
     let explorer_dir =
@@ -760,15 +767,15 @@ fn clear_icon_cache(cancel: &CancellationToken) -> anyhow::Result<FixResult> {
                     if name.starts_with("thumbcache") {
                         match std::fs::remove_file(entry.path()) {
                             Ok(()) => removed += 1,
-                            Err(error) => failures.push(format!("{}: {}", name, error)),
+                            Err(error) => failures.push(format!("{name}: {error}")),
                         }
                     }
                 }
                 if removed > 0 {
-                    actions_taken.push(format!("Deleted {} thumbnail cache file(s)", removed));
+                    actions_taken.push(format!("Deleted {removed} thumbnail cache file(s)"));
                 }
             }
-            Err(error) => failures.push(format!("Thumbnail cache directory: {}", error)),
+            Err(error) => failures.push(format!("Thumbnail cache directory: {error}")),
         }
     }
     let completion_status = if failures.is_empty() {
@@ -851,8 +858,7 @@ fn clear_temp_files(cancel: &CancellationToken) -> anyhow::Result<FixResult> {
     for entry in entries {
         if cancel.is_cancelled() {
             return Ok(cancelled_result(&format!(
-                "Temp cleanup cancelled after removing {} item(s)",
-                removed
+                "Temp cleanup cancelled after removing {removed} item(s)"
             )));
         }
         let Ok(entry) = entry else {
@@ -872,10 +878,7 @@ fn clear_temp_files(cancel: &CancellationToken) -> anyhow::Result<FixResult> {
     }
     Ok(FixResult {
         success: skipped == 0,
-        message: format!(
-            "Removed {} temp item(s); {} in use were skipped.",
-            removed, skipped
-        ),
+        message: format!("Removed {removed} temp item(s); {skipped} in use were skipped."),
         actions_taken: (removed > 0)
             .then(|| format!("Removed {} item(s) from {}", removed, temp.display()))
             .into_iter()
@@ -895,8 +898,7 @@ fn clear_temp_files(cancel: &CancellationToken) -> anyhow::Result<FixResult> {
             } else {
                 RemediationStepStatus::Failed
             },
-            detail: (skipped > 0)
-                .then(|| format!("{} locked item(s) could not be removed", skipped)),
+            detail: (skipped > 0).then(|| format!("{skipped} locked item(s) could not be removed")),
         }],
     })
 }
@@ -1023,7 +1025,7 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
                     failed += 1;
                 }
             }
-            actions_taken.push(format!("Cleared {} item(s) from the update cache", removed));
+            actions_taken.push(format!("Cleared {removed} item(s) from the update cache"));
             steps.push(RemediationStepResult {
                 action: "Clear Windows Update download cache".to_string(),
                 status: if failed == 0 {
@@ -1032,7 +1034,7 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
                     RemediationStepStatus::Failed
                 },
                 detail: (failed > 0)
-                    .then(|| format!("{} cache item(s) could not be removed", failed)),
+                    .then(|| format!("{failed} cache item(s) could not be removed")),
             });
         }
         Err(error) => steps.push(RemediationStepResult {

@@ -557,7 +557,7 @@ mod tests {
     use super::*;
 
     /// The hand-written serde impl re-declares the shipping `task-result`
-    /// payload; a new TaskResult field must fail HERE (field count / shape)
+    /// payload; a new `TaskResult` field must fail HERE (field count / shape)
     /// rather than silently changing the wire contract consumers pin on.
     #[test]
     fn task_result_wire_payload_stays_flat_and_field_counted() {

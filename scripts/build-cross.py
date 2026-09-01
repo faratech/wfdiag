@@ -16,7 +16,8 @@ from pathlib import Path
 # Go up from scripts/ to project root
 PROJECT_DIR = Path(__file__).parent.parent.resolve()
 SRC_TAURI = PROJECT_DIR / "src-tauri"
-TARGET_DIR = SRC_TAURI / "target"
+# Cargo workspace: every member builds into the root target directory.
+TARGET_DIR = PROJECT_DIR / "target"
 OUTPUT_DIR = Path("/mnt/c/code")  # Always output to Windows drive
 MSIX_DIR = PROJECT_DIR / "msix-build"
 

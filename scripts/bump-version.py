@@ -132,7 +132,7 @@ def refresh_cargo_lock(cargo_dir: Path, dry_run: bool) -> None:
     [package].version changes — otherwise the next build leaves the tree
     dirty (or fails outright under --locked)."""
     if dry_run:
-        print("  [DRY RUN] Would refresh src-tauri/Cargo.lock to match the new version")
+        print("  [DRY RUN] Would refresh Cargo.lock to match the new version")
         return
     try:
         subprocess.run(
@@ -142,7 +142,7 @@ def refresh_cargo_lock(cargo_dir: Path, dry_run: bool) -> None:
             capture_output=True,
             text=True,
         )
-        print("  Refreshed: src-tauri/Cargo.lock")
+        print("  Refreshed: Cargo.lock")
     except FileNotFoundError:
         print("  Warning: cargo not found on PATH — Cargo.lock was not refreshed; run "
               "'cargo update -p wfdiag-tauri' manually before committing")
@@ -348,7 +348,7 @@ def main():
     total_count += 1
     if update_cargo_toml(script_dir / 'src-tauri' / 'Cargo.toml', new_version, dry_run):
         success_count += 1
-        refresh_cargo_lock(script_dir / 'src-tauri', dry_run)
+        refresh_cargo_lock(script_dir, dry_run)
 
     # 5. src-tauri/tauri.conf.json
     total_count += 1

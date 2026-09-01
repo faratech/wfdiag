@@ -54,7 +54,14 @@ pub struct CommandConfig {
     pub max_args: usize,
 }
 
+impl Default for SecureCommandExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SecureCommandExecutor {
+    #[must_use]
     pub fn new() -> Self {
         let mut allowed_commands = HashMap::new();
 
@@ -172,7 +179,7 @@ impl SecureCommandExecutor {
         let config = self
             .allowed_commands
             .get(cmd)
-            .ok_or_else(|| anyhow::anyhow!("Command '{}' not in whitelist", cmd))?;
+            .ok_or_else(|| anyhow::anyhow!("Command '{cmd}' not in whitelist"))?;
 
         // Check argument count
         if args.len() > config.max_args {
@@ -269,11 +276,7 @@ impl SecureCommandExecutor {
                     if !config.allowed_args.contains(&arg.to_string())
                         && !self.is_safe_argument(arg)
                     {
-                        return Err(anyhow::anyhow!(
-                            "Argument '{}' not allowed for '{}'",
-                            arg,
-                            cmd
-                        ));
+                        return Err(anyhow::anyhow!("Argument '{arg}' not allowed for '{cmd}'"));
                     }
                 }
                 Ok(())
@@ -383,13 +386,13 @@ impl SecureCommandExecutor {
 
         let mut child = command
             .spawn()
-            .map_err(|e| anyhow::anyhow!("Failed to execute command '{}': {}", label, e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to execute command '{label}': {e}"))?;
         let deadline = Instant::now() + timeout;
 
         loop {
             if let Some(status) = child
                 .try_wait()
-                .map_err(|e| anyhow::anyhow!("Failed while waiting for '{}': {}", label, e))?
+                .map_err(|e| anyhow::anyhow!("Failed while waiting for '{label}': {e}"))?
             {
                 let stdout = fs::read(&temp_files.stdout_path).unwrap_or_default();
                 let stderr = fs::read(&temp_files.stderr_path).unwrap_or_default();
@@ -469,8 +472,7 @@ fn with_exe_extension(program: &str) -> String {
 pub(crate) fn trusted_system_program(program: &str) -> Result<PathBuf> {
     if program.contains('\\') || program.contains('/') || Path::new(program).is_absolute() {
         return Err(anyhow::anyhow!(
-            "Trusted command names must not include paths: {}",
-            program
+            "Trusted command names must not include paths: {program}"
         ));
     }
 

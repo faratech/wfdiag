@@ -36,7 +36,7 @@ pub trait TaskResultLookup {
     fn get_task_result(&self, task_id: &str) -> Option<&TaskResult>;
 }
 
-impl TaskResultLookup for HashMap<String, TaskResult> {
+impl<S: std::hash::BuildHasher> TaskResultLookup for HashMap<String, TaskResult, S> {
     fn get_task_result(&self, task_id: &str) -> Option<&TaskResult> {
         self.get(task_id)
     }

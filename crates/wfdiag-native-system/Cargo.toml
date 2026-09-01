@@ -1,19 +1,19 @@
 [package]
 name = "wfdiag-native-system"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.98"
+edition.workspace = true
+rust-version.workspace = true
 description = "UI-framework-neutral architecture and host system information for WFDiag"
-license-file = "../../LICENSE"
-publish = false
+license-file.workspace = true
+publish.workspace = true
 
 [dependencies]
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.145", features = ["preserve_order"] }
-thiserror = "2.0"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-winreg = "0.56"
+winreg = { workspace = true }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -21,9 +21,5 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemInformation",
 ] }
 
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-all = "warn"
-pedantic = "warn"
+[lints]
+workspace = true

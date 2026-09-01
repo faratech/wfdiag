@@ -1,22 +1,22 @@
 [package]
 name = "wfdiag-native-remediation"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.98"
+edition.workspace = true
+rust-version.workspace = true
 description = "UI-framework-neutral remediation execution: the vetted tiered catalog, injectable command runner, and confirm gate shared by both WFDiag shells"
-license-file = "../../LICENSE"
-publish = false
+license-file.workspace = true
+publish.workspace = true
 
 [dependencies]
-anyhow = "1.0"
-serde = { version = "1.0.229", features = ["derive"] }
-tokio = { version = "1.52.0", features = ["process", "rt", "sync", "time", "macros"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-wfdiag-native-issues = { path = "../wfdiag-native-issues" }
-wfdiag-remediation-catalog = { path = "../wfdiag-remediation-catalog" }
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["process", "rt", "sync", "time", "macros"] }
+tokio-util = { workspace = true, features = ["rt"] }
+wfdiag-native-issues = { workspace = true }
+wfdiag-remediation-catalog = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-encoding_rs = "0.8"
+encoding_rs = { workspace = true }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",
@@ -27,11 +27,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-tokio = { version = "1.52.0", features = ["macros", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-all = "warn"
-pedantic = "warn"
+[lints]
+workspace = true

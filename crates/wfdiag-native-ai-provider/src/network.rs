@@ -123,7 +123,7 @@ pub async fn discover_ollama_endpoint(configured: Option<&str>) -> Option<String
 /// a five-minute TTL keeps a multi-round tool conversation from issuing one
 /// `POST /api/show` per round inside the shared turn deadline. Only successful
 /// probes are cached; errors keep propagating.
-const OLLAMA_CAPABILITY_TTL: Duration = Duration::from_secs(5 * 60);
+const OLLAMA_CAPABILITY_TTL: Duration = Duration::from_mins(5);
 
 type OllamaCapabilityCache = Arc<Mutex<HashMap<(String, String), (Instant, bool)>>>;
 

@@ -858,7 +858,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--cargo-target-dir",
         type=Path,
-        default=PROJECT_ROOT / "reactor-spike" / "target" / "framework-dependent-probe",
+        default=PROJECT_ROOT / "target" / "framework-dependent-probe",
         help="dedicated Cargo target directory for the framework-dependent build",
     )
     parser.add_argument(

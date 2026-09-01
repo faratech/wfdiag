@@ -17,8 +17,8 @@
 param(
     [ValidateSet("startup", "live-system", "about", "flows", "visual", "x64", "readiness", "gates", "all")]
     [string[]]$Suite = @("all"),
-    [string]$Executable = "C:\Temp\claude\wfdiag\reactor-spike\target\aarch64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe",
-    [string]$BuildRoot = "C:\Temp\claude\wfdiag\reactor-spike",
+    [string]$Executable = "C:\Temp\claude\wfdiag\target\aarch64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe",
+    [string]$BuildRoot = "C:\Temp\claude\wfdiag",
     [string]$ReportsRoot = "validation-reports"
 )
 

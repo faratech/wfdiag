@@ -2,8 +2,8 @@ name: CI
 
 on:
   # No branch filter on pull_request: stacked PRs (feature -> feature) must
-  # run the same gates as PRs into main — cargo test only ever executes here
-  # (windows-latest), never on the Linux dev box.
+  # run the same gates as PRs into main — cargo test only ever executes on
+  # windows-latest for the shells; the engine crates also test on Linux.
   pull_request:
   push:
     branches: [main]
@@ -39,8 +39,26 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
 
+  rust-portable:
+    # The engine crates must build and test with no GUI and no Windows: this
+    # job is the headless guarantee. Only the two shells (WinUI / Tauri) are
+    # excluded; wfdiag-native-monitor compiles to an empty library off-Windows.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: portable
+      - run: cargo check --locked --workspace --all-targets --exclude wfdiag-reactor-spike --exclude wfdiag-tauri
+      - run: cargo clippy --locked --workspace --all-targets --exclude wfdiag-reactor-spike --exclude wfdiag-tauri -- -D warnings
+      - run: cargo test --locked --workspace --exclude wfdiag-reactor-spike --exclude wfdiag-tauri
+
   rust:
-    # The crate is cfg(windows) end to end; clippy and tests need a Windows runner
+    # Windows: the whole workspace (engine crates, native Reactor shell, and the
+    # Tauri rollback shell) formats, lints, and tests together.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,44 +75,10 @@ jobs:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
           key: ci
-      - run: cargo fmt --check
-        working-directory: src-tauri
-      - run: cargo clippy --locked --all-targets -- -D warnings
-        working-directory: src-tauri
-      - run: cargo test --locked
-        working-directory: src-tauri
-      - name: Test extracted native contracts
-        shell: pwsh
-        run: |
-          $manifests = @(
-            "crates/wfdiag-native-ai-chat/Cargo.toml",
-            "crates/wfdiag-native-ai-provider/Cargo.toml",
-            "crates/wfdiag-native-ai-report/Cargo.toml",
-            "crates/wfdiag-native-diagnostics/Cargo.toml",
-            "crates/wfdiag-native-export/Cargo.toml",
-            "crates/wfdiag-native-history/Cargo.toml",
-            "crates/wfdiag-native-issues/Cargo.toml",
-            "crates/wfdiag-native-monitor/Cargo.toml",
-            "crates/wfdiag-native-remediation/Cargo.toml",
-            "crates/wfdiag-native-phi/Cargo.toml",
-            "crates/wfdiag-native-settings/Cargo.toml",
-            "crates/wfdiag-native-system/Cargo.toml",
-            "crates/wfdiag-native-update/Cargo.toml",
-            "crates/wfdiag-remediation-catalog/Cargo.toml",
-            "crates/wfdiag-ui-core/Cargo.toml"
-          )
-          foreach ($manifest in $manifests) {
-            cargo test --locked --manifest-path $manifest
-            if ($LASTEXITCODE -ne 0) {
-              exit $LASTEXITCODE
-            }
-          }
-      - name: Lint native Reactor shell
-        run: cargo clippy --locked --manifest-path reactor-spike/Cargo.toml --all-targets --features settings-test-path -- -D warnings
-      - name: Test native Reactor shell
-        run: cargo test --locked --manifest-path reactor-spike/Cargo.toml --features settings-test-path
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets --features wfdiag-reactor-spike/settings-test-path -- -D warnings
+      - run: cargo test --locked --workspace --features wfdiag-reactor-spike/settings-test-path
 
   rust-arm64:
     runs-on: windows-latest
@@ -112,22 +96,14 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
           key: ci-arm64
-      - run: cargo check --locked --all-targets --target aarch64-pc-windows-msvc
-        working-directory: src-tauri
-      - run: cargo clippy --locked --all-targets --target aarch64-pc-windows-msvc -- -D warnings
-        working-directory: src-tauri
-      - name: Check native Reactor shell for ARM64
-        run: cargo check --locked --manifest-path reactor-spike/Cargo.toml --all-targets --features settings-test-path --target aarch64-pc-windows-msvc
-      - name: Lint native Reactor shell for ARM64
-        run: cargo clippy --locked --manifest-path reactor-spike/Cargo.toml --all-targets --features settings-test-path --target aarch64-pc-windows-msvc -- -D warnings
+      - run: cargo check --locked --workspace --all-targets --features wfdiag-reactor-spike/settings-test-path --target aarch64-pc-windows-msvc
+      - run: cargo clippy --locked --workspace --all-targets --features wfdiag-reactor-spike/settings-test-path --target aarch64-pc-windows-msvc -- -D warnings
 
   cargo-audit:
     runs-on: ubuntu-latest
-    continue-on-error: true # advisory only
+    continue-on-error: true # advisory for one release; covers the whole workspace lock
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@cargo-audit
       - run: cargo audit
-        working-directory: src-tauri

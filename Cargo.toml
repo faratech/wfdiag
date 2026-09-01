@@ -1,0 +1,70 @@
+# WFDiag workspace: engine crates (`crates/*`), the native WinUI 3 shell
+# (`reactor-spike`, becoming `apps/wfdiag`), and the Tauri shell kept as a
+# rollback (`src-tauri`). `cargo test` defaults to the engine + native shell.
+[workspace]
+resolver = "3"
+members = ["crates/*", "reactor-spike", "src-tauri"]
+default-members = ["crates/*", "reactor-spike"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+license-file = "LICENSE"
+publish = false
+
+[workspace.dependencies]
+# Third-party (one version per dependency; members add their own `features`).
+agent-client-protocol = "1"
+anyhow = "1.0"
+async-openai = { version = "0.41", default-features = false }
+dirs = "6.0"
+encoding_rs = "0.8"
+event-listener = "5.4.2"
+eventsource-stream = "0.2"
+futures = "0.3"
+process-wrap = { version = "10.0.0", default-features = false }
+reqwest = { version = "0.13", default-features = false }
+semver = "1"
+serde = "1.0.229"
+serde_json = "1.0.151"
+thiserror = "2.0"
+tokio = "1.52.0"
+tokio-util = "0.7"
+url = "2.5"
+uuid = "1.20.0"
+winreg = "0.56"
+
+# Workspace crates.
+wfdiag-native-ai-chat = { path = "crates/wfdiag-native-ai-chat" }
+wfdiag-native-ai-provider = { path = "crates/wfdiag-native-ai-provider" }
+wfdiag-native-ai-report = { path = "crates/wfdiag-native-ai-report" }
+wfdiag-native-diagnostics = { path = "crates/wfdiag-native-diagnostics" }
+wfdiag-native-export = { path = "crates/wfdiag-native-export" }
+wfdiag-native-history = { path = "crates/wfdiag-native-history" }
+wfdiag-native-issues = { path = "crates/wfdiag-native-issues" }
+wfdiag-native-monitor = { path = "crates/wfdiag-native-monitor" }
+wfdiag-native-phi = { path = "crates/wfdiag-native-phi" }
+wfdiag-native-remediation = { path = "crates/wfdiag-native-remediation" }
+wfdiag-native-settings = { path = "crates/wfdiag-native-settings" }
+wfdiag-native-system = { path = "crates/wfdiag-native-system" }
+wfdiag-native-update = { path = "crates/wfdiag-native-update" }
+wfdiag-remediation-catalog = { path = "crates/wfdiag-remediation-catalog" }
+wfdiag-ui-core = { path = "crates/wfdiag-ui-core" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+# Profiles only apply from the workspace root; both shells used these values.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1

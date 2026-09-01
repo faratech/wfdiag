@@ -1,9 +1,9 @@
 [package]
 name = "wfdiag-reactor-spike"
 version = "0.0.1"
-edition = "2024"
-publish = false
-
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
 [features]
 default = []
 # Opt in only when validating a direct installer that carries the Windows App
@@ -14,24 +14,24 @@ self-contained = []
 settings-test-path = []
 
 [dependencies]
-serde_json = { version = "1.0.151", features = ["preserve_order"] }
-semver = "1"
-tokio = { version = "1.52.0", features = ["rt-multi-thread"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-wfdiag-native-ai-chat = { path = "../crates/wfdiag-native-ai-chat" }
-wfdiag-native-ai-report = { path = "../crates/wfdiag-native-ai-report" }
-wfdiag-native-remediation = { path = "../crates/wfdiag-native-remediation" }
-wfdiag-native-ai-provider = { path = "../crates/wfdiag-native-ai-provider" }
-wfdiag-native-diagnostics = { path = "../crates/wfdiag-native-diagnostics" }
-wfdiag-native-export = { path = "../crates/wfdiag-native-export" }
-wfdiag-native-history = { path = "../crates/wfdiag-native-history" }
-wfdiag-native-issues = { path = "../crates/wfdiag-native-issues" }
-wfdiag-native-monitor = { path = "../crates/wfdiag-native-monitor" }
-wfdiag-native-phi = { path = "../crates/wfdiag-native-phi" }
-wfdiag-native-settings = { path = "../crates/wfdiag-native-settings" }
-wfdiag-native-system = { path = "../crates/wfdiag-native-system" }
-wfdiag-native-update = { path = "../crates/wfdiag-native-update" }
-wfdiag-ui-core = { path = "../crates/wfdiag-ui-core" }
+serde_json = { workspace = true, features = ["preserve_order"] }
+semver = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio-util = { workspace = true, features = ["rt"] }
+wfdiag-native-ai-chat = { workspace = true }
+wfdiag-native-ai-report = { workspace = true }
+wfdiag-native-remediation = { workspace = true }
+wfdiag-native-ai-provider = { workspace = true }
+wfdiag-native-diagnostics = { workspace = true }
+wfdiag-native-export = { workspace = true }
+wfdiag-native-history = { workspace = true }
+wfdiag-native-issues = { workspace = true }
+wfdiag-native-monitor = { workspace = true }
+wfdiag-native-phi = { workspace = true }
+wfdiag-native-settings = { workspace = true }
+wfdiag-native-system = { workspace = true }
+wfdiag-native-update = { workspace = true }
+wfdiag-ui-core = { workspace = true }
 windows = { version = "0.62", features = [
     "ApplicationModel_DataTransfer",
     "Data_Xml_Dom",
@@ -54,12 +54,5 @@ windows-core = { git = "https://github.com/microsoft/windows-rs", rev = "1be5649
 windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8" }
 
 [build-dependencies]
-serde_json = "1.0.151"
+serde_json = { workspace = true }
 windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8" }
-
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = "z"
-panic = "abort"
-strip = true

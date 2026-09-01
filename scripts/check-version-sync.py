@@ -66,7 +66,7 @@ def main() -> int:
         return 1
     package_lock = read_json("package-lock.json")
     cargo_toml = tomllib.loads((ROOT / "src-tauri/Cargo.toml").read_text(encoding="utf-8"))
-    cargo_lock = tomllib.loads((ROOT / "src-tauri/Cargo.lock").read_text(encoding="utf-8"))
+    cargo_lock = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
     appx = (ROOT / "AppxManifest.xml").read_text(encoding="utf-8")
     appx_match = re.search(r'<Identity\b[^>]*\bVersion="([^"]+)"', appx, re.DOTALL)
     if not appx_match:
@@ -114,7 +114,7 @@ def main() -> int:
         "package-lock.json (root)": package_lock["version"],
         "package-lock.json": package_lock["packages"][""]["version"],
         "src-tauri/Cargo.toml": cargo_toml["package"]["version"],
-        "src-tauri/Cargo.lock": cargo_lock_version,
+        "Cargo.lock": cargo_lock_version,
         "src-tauri/tauri.conf.json": read_json("src-tauri/tauri.conf.json")["version"],
         "src/App.tsx": extract(
             "src/App.tsx", r"const\s+APP_VERSION\s*=\s*['\"]([\d.]+)['\"]", "App UI"

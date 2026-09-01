@@ -19,7 +19,7 @@ pub const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1b
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Whole-catalog budget. MUST stay below the callers' 10s model-resolve
-/// deadline (and below REQUEST_TIMEOUT per page) so a slow catalog surfaces
+/// deadline (and below `REQUEST_TIMEOUT` per page) so a slow catalog surfaces
 /// its own timeout and falls back to the default model instead of being cut
 /// off by the outer resolve limit.
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(8);

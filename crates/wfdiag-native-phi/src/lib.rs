@@ -1,9 +1,9 @@
 //! UI-framework-neutral Windows AI/Phi Silica runtime.
 //!
-//! This crate is the single owner of WFDiag's package-identity gate, Limited
+//! This crate is the single owner of `WFDiag`'s package-identity gate, Limited
 //! Access Feature handling, Windows AI activation fallback, model cache, and
 //! generation path. UI shells consume the typed provider-status adapter or
-//! the explicit runtime functions; neither path depends on Tauri or WebView2.
+//! the explicit runtime functions; neither path depends on Tauri or `WebView2`.
 
 #![allow(clippy::missing_errors_doc)]
 
@@ -13,8 +13,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
 #[rustfmt::skip]
+#[allow(unsafe_code)]
 mod windows_ai_bindings;
 
+// WinRT/COM work lives here; unsafe is scoped to this module and the
+// package-identity probe below.
+#[allow(unsafe_code)]
 mod runtime;
 
 pub use runtime::{
@@ -120,7 +124,7 @@ impl PhiStatusSource for WindowsPhiStatusSource {
     }
 }
 
-/// Run the blocking WinRT availability probe off the async runtime worker.
+/// Run the blocking `WinRT` availability probe off the async runtime worker.
 pub async fn probe_phi_silica_status() -> Result<PhiSilicaStatus, String> {
     tokio::task::spawn_blocking(is_phi_silica_available)
         .await
@@ -134,6 +138,7 @@ pub async fn probe_phi_silica_status() -> Result<PhiSilicaStatus, String> {
 /// the Windows AI activation path.
 #[cfg(windows)]
 #[must_use]
+#[allow(unsafe_code)] // one Win32 call: package identity probe
 pub fn has_package_identity() -> bool {
     use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
     use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;

@@ -1,7 +1,7 @@
 //! Phi Silica integration for on-device AI inference on Copilot+ PCs.
 //!
 //! This module provides detection and wrapper for the Microsoft.Windows.AI.Text
-//! WinRT APIs to enable local AI analysis using Phi Silica.
+//! `WinRT` APIs to enable local AI analysis using Phi Silica.
 //!
 //! Note: This requires:
 //! - A Copilot+ PC with NPU hardware (40+ TOPS)
@@ -13,7 +13,7 @@
 //!   package family name)
 //!
 //! Loose/portable builds cannot use Phi Silica; the AI service routes them
-//! to Foundry Local or OpenAI instead.
+//! to Foundry Local or `OpenAI` instead.
 
 use serde::{Deserialize, Serialize};
 
@@ -1176,6 +1176,7 @@ pub fn is_phi_silica_available() -> PhiSilicaStatus {
 }
 
 #[cfg(not(windows))]
+#[must_use]
 pub fn is_phi_silica_available() -> PhiSilicaStatus {
     PhiSilicaStatus {
         available: false,

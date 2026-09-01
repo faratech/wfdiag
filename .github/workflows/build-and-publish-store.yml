@@ -107,7 +107,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: .
           key: x64
 
       - name: Install dependencies
@@ -129,7 +129,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: exe-x64
-          path: src-tauri/target/x86_64-pc-windows-msvc/release/wfdiag-tauri.exe
+          path: target/x86_64-pc-windows-msvc/release/wfdiag-tauri.exe
 
       - name: Upload frontend dist
         uses: actions/upload-artifact@v4
@@ -159,7 +159,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: .
           key: arm64
 
       - name: Check ARM64 build tools
@@ -202,7 +202,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: exe-arm64
-          path: src-tauri/target/aarch64-pc-windows-msvc/release/wfdiag-tauri.exe
+          path: target/aarch64-pc-windows-msvc/release/wfdiag-tauri.exe
 
   # =============================================================================
   # Create MSIX Bundle with AI DLLs

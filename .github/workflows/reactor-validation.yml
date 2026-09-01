@@ -55,7 +55,7 @@ jobs:
       - name: Version probe
         shell: pwsh
         run: |
-          $exe = "reactor-spike\target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe"
+          $exe = "target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe"
           $env:WFDIAG_REACTOR_VERSION_PROBE_FILE = "${{ runner.temp }}\version.json"
           & $exe --wfdiag-version-probe
           if ($LASTEXITCODE -ne 0) { throw "version probe failed" }
@@ -66,7 +66,7 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-ai-flows.ps1 `
-            -Executable "reactor-spike\target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
             -OutputDirectory "validation-reports\ai-flows"
 
       - name: Live-system validation
@@ -75,7 +75,7 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-live-system.ps1 `
-            -Executable "reactor-spike\target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
             -OutputDirectory "validation-reports\live-system" `
             -HoldSeconds 2
 
@@ -86,7 +86,7 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-chat.ps1 `
-            -Executable "reactor-spike\target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
             -OutputDirectory "validation-reports\chat"
 
       - name: Report flow validation
@@ -96,7 +96,7 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-report.ps1 `
-            -Executable "reactor-spike\target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
             -OutputDirectory "validation-reports\report" `
             -ScanWaitSeconds 300
 
@@ -107,7 +107,7 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-remediation.ps1 `
-            -Executable "reactor-spike\target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
             -OutputDirectory "validation-reports\remediation" `
             -ScanWaitSeconds 300
 

@@ -508,8 +508,11 @@ pub struct ProcessSubscriptionCliStatusSource {
     /// of spawning one child process per caller. Entries live for the
     /// process lifetime but are bounded by the key space (2 providers × the
     /// few configured paths a user can set).
-    in_flight: Arc<Mutex<HashMap<(SubscriptionCli, String), Arc<tokio::sync::Mutex<()>>>>>,
+    in_flight: InFlightProbes,
 }
+
+/// Per-`(cli, path)` single-flight guards for concurrent cache misses.
+type InFlightProbes = Arc<Mutex<HashMap<(SubscriptionCli, String), Arc<tokio::sync::Mutex<()>>>>>;
 
 type SubscriptionProbeCache =
     Arc<Mutex<HashMap<(SubscriptionCli, String), (Instant, CliProbeSnapshot)>>>;

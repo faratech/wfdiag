@@ -150,6 +150,10 @@ coverage/
 *.orig
 Cargo.lock.orig
 src-tauri/.cargo/
+# Machine-specific cargo config (cross-compile paths) is never committed.
+/.cargo/
+# WSL `> NUL` accidents
+NUL
 
 # =============================================================================
 # Temporary and Cache Files

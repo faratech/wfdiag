@@ -1,19 +1,19 @@
 [package]
 name = "wfdiag-native-history"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.98"
+edition.workspace = true
+rust-version.workspace = true
 description = "UI-framework-neutral encrypted scan history and Tokio runtime for WFDiag"
-license-file = "../../LICENSE"
-publish = false
+license-file.workspace = true
+publish.workspace = true
 
 [dependencies]
-anyhow = "1.0"
-serde = { version = "1.0.229", features = ["derive", "rc"] }
-serde_json = "1.0.145"
-thiserror = "2.0"
-tokio = { version = "1.52.0", features = ["rt", "sync", "time"] }
-wfdiag-native-issues = { path = "../wfdiag-native-issues" }
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive", "rc"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+wfdiag-native-issues = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -23,11 +23,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-tokio = { version = "1.52.0", features = ["macros", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-all = "warn"
-pedantic = "warn"
+[lints]
+workspace = true

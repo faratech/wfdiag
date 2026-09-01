@@ -31,6 +31,7 @@ pub mod diagnostics {
     pub type TaskResult = wfdiag_native_issues::SharedTaskResult;
 
     #[cfg(test)]
+    #[must_use]
     pub fn task_result(success: bool, output: String, duration_ms: u64) -> TaskResult {
         std::sync::Arc::new(wfdiag_native_issues::TaskResult {
             success,

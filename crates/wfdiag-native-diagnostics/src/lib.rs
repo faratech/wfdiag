@@ -19,7 +19,7 @@ mod error;
 #[path = "../../../src-tauri/src/native_diagnostics.rs"]
 mod native_diagnostics;
 #[cfg(windows)]
-#[allow(unsafe_code)]
+#[allow(unsafe_code, clippy::unused_self, clippy::unnecessary_wraps)]
 #[path = "../../../src-tauri/src/security.rs"]
 mod security;
 #[cfg(windows)]

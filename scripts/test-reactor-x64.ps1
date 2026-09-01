@@ -8,9 +8,11 @@
 #
 # Requires the host's native cargo with the x86_64-pc-windows-msvc target and
 # a staged build tree (see docs/validation/clean-machine-protocol.md).
+# $BuildRoot is the repository (Cargo workspace) root; the executable lands
+# in the shared workspace target directory.
 
 param(
-    [string]$BuildRoot = "C:\Temp\claude\wfdiag\reactor-spike",
+    [string]$BuildRoot = "C:\Temp\claude\wfdiag",
     [string]$OutputDirectory = "reactor-spike\captures-2.5.8\validation-x64",
     [string[]]$Suites = @("live-system", "chat", "report", "remediation"),
     [ValidateRange(30, 600)][int]$ScanWaitSeconds = 240
@@ -28,7 +30,7 @@ $buildArgs = @(
     "build", "--target", "x86_64-pc-windows-msvc", "--features", "self-contained"
 )
 Write-Host "Building x64 self-contained candidate..."
-& $cargo @buildArgs --manifest-path (Join-Path $BuildRoot "Cargo.toml") 2>&1 |
+& $cargo @buildArgs --manifest-path (Join-Path $BuildRoot "reactor-spike\Cargo.toml") 2>&1 |
     Select-Object -Last 3
 if ($LASTEXITCODE -ne 0) {
     throw "x64 build failed with exit code $LASTEXITCODE."
