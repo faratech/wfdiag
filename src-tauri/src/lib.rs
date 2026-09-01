@@ -1143,6 +1143,7 @@ pub fn run() {
             // Subscription CLI bridge (Codex): the CLI owns sign-in
             ai_providers::cli_bridge::ai_bridge_status,
             ai_providers::cli_bridge::ai_bridge_install,
+            ai_providers::cli_bridge::ai_bridge_install_cancel,
             ai_providers::cli_bridge::ai_bridge_sign_in,
             ai_providers::cli_bridge::ai_bridge_sign_in_cancel,
             ai_providers::cli_bridge::ai_bridge_sign_out,

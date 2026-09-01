@@ -2,9 +2,13 @@
 #
 # Manual dispatch (plus an optional weekly schedule) builds the native
 # WinUI candidate for x64 on a clean windows-latest runner and runs the
-# live-system + flow validation scripts against it. WinUI/UIA needs an
-# interactive desktop; runner support is recent enough to attempt, and the
-# UIA-specific steps keep continue-on-error until proven stable there.
+# live-system + flow validation scripts against it. The hermetic AI suite is
+# release-gating: it owns its provider and settings and must complete chat,
+# cancel, exact-ten tool-contract, native-catalog, report, and
+# forced-regeneration flows. Shared chat tests pin the closed parser; shared
+# report tests separately pin cache hits and full-body rehydration.
+# Hardware/live-provider suites remain informational while hosted-runner UIA
+# stability is still being proven.
 #
 # Evidence (logs + captures) is uploaded as workflow artifacts.
 
@@ -36,8 +40,17 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Build self-contained candidate
-        run: cargo build --locked --target x86_64-pc-windows-msvc --features self-contained --manifest-path reactor-spike/Cargo.toml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Test hermetic AI engine and report cache
+        run: |
+          cargo test --locked --manifest-path crates/wfdiag-native-ai-chat/Cargo.toml --all-targets
+          cargo test --locked --manifest-path crates/wfdiag-native-ai-report/Cargo.toml --all-targets
+
+      - name: Build self-contained validation candidate
+        run: cargo build --locked --target x86_64-pc-windows-msvc --features self-contained,settings-test-path --manifest-path reactor-spike/Cargo.toml
 
       - name: Version probe
         shell: pwsh
@@ -47,6 +60,14 @@ jobs:
           & $exe --wfdiag-version-probe
           if ($LASTEXITCODE -ne 0) { throw "version probe failed" }
           Get-Content $env:WFDIAG_REACTOR_VERSION_PROBE_FILE
+
+      - name: Hermetic AI flow validation
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass `
+            -File scripts/test-reactor-ai-flows.ps1 `
+            -Executable "reactor-spike\target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -OutputDirectory "validation-reports\ai-flows"
 
       - name: Live-system validation
         continue-on-error: true

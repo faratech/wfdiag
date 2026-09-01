@@ -67,11 +67,11 @@ export interface SettingsData {
   openAiModel?: string
   /** Anthropic (Claude) API key — stored in the OS secret store, never the settings file */
   anthropicApiKey?: string
-  /** Anthropic model override; empty uses the app default (claude-sonnet-4-6) */
+  /** Anthropic model override; empty uses the app default (claude-sonnet-5) */
   anthropicModel?: string
   /** Google Gemini API key */
   geminiApiKey?: string
-  /** Gemini model override; empty uses the app default (gemini-3.5-flash) */
+  /** Gemini model override; empty uses the app default (gemini-3.6-flash) */
   geminiModel?: string
   /** DeepSeek API key */
   deepseekApiKey?: string

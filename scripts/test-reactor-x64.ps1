@@ -68,7 +68,11 @@ foreach ($suite in $Suites) {
         Executable = $executable
         OutputDirectory = $outputDirectory
     }
-    if ($suite -ne "live-system") {
+    # Only scan-driven suites declare this parameter. In particular, the
+    # chat suite accepts ProviderWaitSeconds/HoldSeconds and Windows
+    # PowerShell rejects an unknown -ScanWaitSeconds argument before it can
+    # launch the test.
+    if (@("report", "remediation") -contains $suite) {
         $arguments.ScanWaitSeconds = $ScanWaitSeconds
     }
 

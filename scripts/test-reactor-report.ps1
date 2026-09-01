@@ -1,14 +1,12 @@
-# Reactor validation: AI scan report generation, cache, and provider tiers.
+# Reactor validation: AI scan report generation, regeneration, and provider tiers.
 #
 # Flow: run a live Quick Scan ("Quick Scan" automation button), wait for the
 # completion status, switch to the AI page's Report mode, and generate the
 # one-click report.
 #
-# Tiers:
-# - Tier 0 (always): the full scan -> Report tab -> Generate round-trip. With
-#   no provider the shipping no-provider status appears.
-# - Provider tier: "AI report ready · {provider}", then a regenerate asserts
-#   the cached path ("AI report ready · {provider} · cached").
+# Requires a configured provider. A no-provider status is a validation
+# failure, never a successful report round-trip. CI uses the hermetic custom
+# provider suite so this live-provider suite remains supplemental.
 #
 # Output: JSON evidence under -OutputDirectory. Exit 1 on failure.
 
@@ -44,7 +42,7 @@ $evidence = [ordered]@{
     quickScan = $null
     tier0RoundTrip = $null
     providerTier = $null
-    cachedCheck = $null
+    regenerateCheck = $null
     gracefulClose = $null
     crashEvents = @()
     failures = $failures
@@ -140,36 +138,36 @@ try {
         $evidence.tier0RoundTrip = "failed"
     }
     elseif ($observed -eq "no-provider") {
-        $evidence.tier0RoundTrip = "passed"
-        $evidence.providerTier = "skipped: no provider"
-        $evidence.cachedCheck = "skipped: no provider"
-        Write-Host "Tier 0 passed; provider tier skipped (no provider configured)."
+        $evidence.tier0RoundTrip = "failed: no provider"
+        $evidence.providerTier = "failed: no provider"
+        $evidence.regenerateCheck = "failed: no provider"
+        $failures.Add("Report validation requires an executable AI provider; the candidate reported no provider.")
     }
     else {
         $evidence.tier0RoundTrip = "passed"
         $evidence.providerTier = "passed"
         Write-Host "Report ready."
 
-        # --- Cached regenerate ------------------------------------------
+        # --- Force-refresh Regenerate ----------------------------------
         $regenerateButton = Wait-UniqueUiaButton -Root $root `
             -Deadline (Get-Date).AddSeconds(10) -Name "Regenerate report"
         Invoke-UiaButtonElement -Element $regenerateButton.element
         try {
-            $cached = Find-StatusText -Root $root `
+            $regenerated = Find-StatusText -Root $root `
                 -Deadline (Get-Date).AddSeconds($ProviderWaitSeconds) `
                 -AcceptedPrefix "AI report ready"
-            if ($cached -like "*cached") {
-                $evidence.cachedCheck = "passed"
-                Write-Host "Cached regenerate passed."
+            if ($regenerated -notlike "*cached*") {
+                $evidence.regenerateCheck = "passed"
+                Write-Host "Fresh report regeneration passed."
             }
             else {
-                $evidence.cachedCheck = "failed: '$cached' is not a cache hit"
-                $failures.Add("Regenerate did not hit the cache: '$cached'.")
+                $evidence.regenerateCheck = "failed: '$regenerated' reused the cache"
+                $failures.Add("Regenerate did not force a fresh report: '$regenerated'.")
             }
         }
         catch {
-            $evidence.cachedCheck = "failed: $($_.Exception.Message)"
-            $failures.Add("Cached regenerate did not complete in time.")
+            $evidence.regenerateCheck = "failed: $($_.Exception.Message)"
+            $failures.Add("Fresh report regeneration did not complete in time.")
         }
     }
 }

@@ -1,14 +1,13 @@
 # Reactor validation: AI chat round-trip, cancel, and tool use.
 #
-# Tiered by provider availability:
-# - Tier 0 (always): the composer -> send -> status round-trip. With no
-#   provider the shipping no-provider status appears; with a provider the
-#   turn streams to a terminal status.
+# Requires a configured provider. A no-provider status is recorded as a
+# validation failure, never as a successful round-trip. CI uses the hermetic
+# custom-provider suite so this live-provider suite remains supplemental.
 # - Cancel: press "Stop generating" while streaming; assert the cancelled
 #   status. Skipped when the provider answered too fast.
-# - Tool tier (tool-capable provider): "What hardware am I running?" must
-#   return an answer containing this machine's computer name, which only the
-#   get_system_overview tool can supply.
+# - Tool tier (tool-capable provider): ask for the vetted remediation catalog,
+#   then require both list_remediations activity and the known
+#   open_disk_cleanup ID in the answer.
 #
 # Output: JSON evidence under -OutputDirectory. Exit 1 on failure.
 
@@ -98,9 +97,9 @@ try {
         $evidence.tier0RoundTrip = "failed"
     }
     elseif ($observed -ceq $noProviderStatus) {
-        $evidence.tier0RoundTrip = "passed"
-        $evidence.providerTier = "skipped: no provider"
-        Write-Host "Tier 0 passed; provider tier skipped (no provider configured)."
+        $evidence.tier0RoundTrip = "failed: no provider"
+        $evidence.providerTier = "failed: no provider"
+        $failures.Add("Chat validation requires an executable AI provider; the candidate reported no provider.")
     }
     else {
         $evidence.tier0RoundTrip = "passed"
@@ -179,17 +178,17 @@ try {
             Write-Host "Cancel check passed."
         }
 
-        # --- Tool check: grounded hardware answer -----------------------
+        # --- Tool check: bounded remediation-catalog answer -------------
         Set-UiaTextValue -Root $root -AutomationName "Chat message" `
-            -Value "What hardware am I running? Use the system overview tool." `
+            -Value "Use the list remediations tool and name a vetted remediation ID." `
             -Deadline (Get-Date).AddSeconds(10)
         $sendButton = Wait-UniqueUiaButton -Root $root -Deadline (Get-Date).AddSeconds(10) `
             -Name "Send chat message"
         Invoke-UiaButtonElement -Element $sendButton.element
 
-        $computerName = $env:COMPUTERNAME
         $toolDeadline = (Get-Date).AddSeconds($ProviderWaitSeconds)
         $toolAnswered = $false
+        $toolActivity = $false
         do {
             $elements = $root.FindAll(
                 [Windows.Automation.TreeScope]::Descendants,
@@ -197,23 +196,24 @@ try {
             for ($index = 0; $index -lt $elements.Count; $index++) {
                 $name = $null
                 try { $name = [string]$elements.Item($index).Current.Name } catch { continue }
-                if ($name -and
-                    $name.Contains($computerName) -and
-                    $name -notlike "*wfdiag*WindowsForum*") {
+                if ($name -and $name.Contains("open_disk_cleanup")) {
                     $toolAnswered = $true
-                    break
+                }
+                if ($name -and $name.Contains("list_remediations") -and
+                    $name.Contains("completed")) {
+                    $toolActivity = $true
                 }
             }
-            if ($toolAnswered) { break }
+            if ($toolAnswered -and $toolActivity) { break }
             Start-Sleep -Milliseconds 250
         } while ((Get-Date) -lt $toolDeadline)
 
-        if ($toolAnswered) {
-            $evidence.toolCheck = "passed (answer contains '$computerName')"
-            Write-Host "Tool check passed (answer grounded in the system overview)."
+        if ($toolAnswered -and $toolActivity) {
+            $evidence.toolCheck = "passed (list_remediations returned 'open_disk_cleanup')"
+            Write-Host "Tool check passed (answer grounded in the native remediation catalog)."
         }
         else {
-            $failures.Add("Tool check failed: no answer mentioning '$computerName' within $ProviderWaitSeconds seconds.")
+            $failures.Add("Tool check failed: list_remediations activity and an answer containing 'open_disk_cleanup' were not both observed within $ProviderWaitSeconds seconds.")
             $evidence.toolCheck = "failed"
         }
     }

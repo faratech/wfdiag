@@ -81,6 +81,13 @@ interface BridgeStatus {
   path?: string
 }
 
+type BridgeInstallResponse =
+  | { kind: 'installed'; status: BridgeStatus }
+  | {
+      kind: 'vendorFallbackConfirmationRequired'
+      reason: 'explicit_approval_missing' | 'winget_unavailable' | 'winget_failed'
+    }
+
 /**
  * Sign-in row for a subscription CLI bridge (Codex, Claude Code). The
  * buttons only drive the CLI's own login/logout commands — the CLI opens
@@ -99,6 +106,9 @@ const BridgeAuthRow: React.FC<{
   const [status, setStatus] = useState<BridgeStatus | null>(null)
   const [busy, setBusy] = useState<'sign-in' | 'sign-out' | 'install' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [installConfirmation, setInstallConfirmation] = useState<'winget' | 'vendor' | null>(null)
+  const [installMethod, setInstallMethod] = useState<'winget' | 'vendor' | null>(null)
+  const installActiveRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -108,25 +118,50 @@ const BridgeAuthRow: React.FC<{
     return () => { cancelled = true }
   }, [provider])
 
-  // Installs the vendor's own CLI through winget or their official
-  // PowerShell bootstrap — no Node.js required. Can take a few minutes on a
-  // cold link; the returned status carries the binary path even when this
-  // process's PATH predates the install.
-  const install = async () => {
+  useEffect(() => () => {
+    // Changing provider panes or closing Settings must not leave a detached
+    // installer running. The native cancellation closes its Job Object.
+    if (installActiveRef.current) {
+      void invoke('ai_bridge_install_cancel', { provider }).catch(() => {})
+    }
+  }, [provider])
+
+  // Every process-producing request carries explicit approval. Winget is the
+  // only first attempt; the mutable vendor bootstrap is a separate request
+  // after a separate confirmation and is never an automatic fallback.
+  const install = async (method: 'winget' | 'vendor') => {
+    setInstallConfirmation(null)
+    setInstallMethod(method)
+    installActiveRef.current = true
     setBusy('install')
     setError(null)
     try {
-      const installed = await invoke<BridgeStatus>('ai_bridge_install', { provider })
-      setStatus(installed)
-      if (installed.path && onInstalledPath) onInstalledPath(installed.path)
-      if (!installed.installed) {
-        setError('The installer finished but the CLI was not detected yet — restart the app and refresh.')
+      const response = await invoke<BridgeInstallResponse>('ai_bridge_install', {
+        provider,
+        method: method === 'winget' ? 'winget' : 'vendor_power_shell',
+        confirmed: true,
+        fallbackConfirmed: method === 'vendor',
+      })
+      if (response.kind === 'vendorFallbackConfirmationRequired') {
+        setInstallConfirmation('vendor')
+        return
       }
+      const installed = response.status
+      setStatus(installed)
+      // The backend only returns an absolute path after it exists and its
+      // allowlisted status command has run. Persist no speculative path.
+      if (installed.path && onInstalledPath) onInstalledPath(installed.path)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
+      installActiveRef.current = false
       setBusy(null)
+      setInstallMethod(null)
     }
+  }
+
+  const cancelInstall = () => {
+    void invoke('ai_bridge_install_cancel', { provider }).catch(() => {})
   }
 
   const signIn = async () => {
@@ -174,12 +209,15 @@ const BridgeAuthRow: React.FC<{
               <span className="hint">{notDetectedText}</span>
               <Button
                 variant="primary"
-                onClick={install}
+                onClick={() => setInstallConfirmation('winget')}
                 loading={busy === 'install'}
                 disabled={busy !== null}
               >
-                {busy === 'install' ? 'Installing…' : 'Install CLI'}
+                {busy === 'install'
+                  ? installMethod === 'vendor' ? 'Running vendor installer…' : 'Installing with winget…'
+                  : 'Install CLI'}
               </Button>
+              {busy === 'install' && <Button onClick={cancelInstall}>Cancel</Button>}
             </>
           )}
           {status?.installed && status.signedIn && (
@@ -211,6 +249,49 @@ const BridgeAuthRow: React.FC<{
           Local / Ollama.
         </div>
       )}
+      <Modal
+        open={installConfirmation === 'winget'}
+        onClose={() => setInstallConfirmation(null)}
+        title={`Install ${provider === 'codex_cli' ? 'Codex CLI' : 'Claude Code'}`}
+        width={500}
+        footer={(
+          <>
+            <Button onClick={() => setInstallConfirmation(null)}>Cancel</Button>
+            <Button variant="primary" onClick={() => void install('winget')}>Install with winget</Button>
+          </>
+        )}
+      >
+        <p>
+          Windows Package Manager will download and install the official{' '}
+          <strong>{provider === 'codex_cli' ? 'OpenAI.Codex' : 'Anthropic.ClaudeCode'}</strong>{' '}
+          package from the winget source. The operation can take several minutes.
+        </p>
+        <p className="hint">
+          This installs the CLI only. It will not open a login flow or access subscription credentials.
+        </p>
+      </Modal>
+      <Modal
+        open={installConfirmation === 'vendor'}
+        onClose={() => setInstallConfirmation(null)}
+        title="Confirm vendor installer fallback"
+        width={540}
+        footer={(
+          <>
+            <Button onClick={() => setInstallConfirmation(null)}>Cancel</Button>
+            <Button variant="primary" onClick={() => void install('vendor')}>Run vendor installer</Button>
+          </>
+        )}
+      >
+        <p>
+          Winget could not complete this installation. The fallback downloads and executes the
+          vendor&apos;s current PowerShell bootstrap from{' '}
+          <strong>{provider === 'codex_cli' ? 'chatgpt.com' : 'claude.ai'}</strong>.
+        </p>
+        <p className="hint">
+          The remotely hosted script can change after this app is released. It runs only after this
+          separate approval, is time-bounded and cancellable, and does not sign you in.
+        </p>
+      </Modal>
     </>
   )
 }

@@ -4,7 +4,9 @@
 # Variants are captured with the deterministic fixture environment so the
 # only difference between two captures of one state is the requested system
 # rendering variable (theme via WFDIAG_REACTOR_THEME, animation via
-# SPI_SETCLIENTAREAANIMATION). System personalization is saved and restored.
+# SPI_SETCLIENTAREAANIMATION). Reduced-motion capture first snapshots the
+# setting before Windows applies the temporary personalization change, then
+# restores and verifies that exact value in a finally block.
 #
 # Output: PNG captures under -OutputDirectory plus one variants.json record
 # per capture (validated by scripts/check-variants.py).
@@ -28,8 +30,13 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public static class WfVariantNative {
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool SystemParametersInfo(uint action, uint uiParam, ref bool pvParam, uint fWinIni);
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetSystemParametersInfo(uint action, uint uiParam, out int pvParam, uint fWinIni);
+
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetSystemParametersInfo(uint action, uint uiParam, IntPtr pvParam, uint fWinIni);
 }
 '@
 
@@ -37,6 +44,48 @@ $SPI_GETCLIENTAREAANIMATION = 0x1042
 $SPI_SETCLIENTAREAANIMATION = 0x1043
 $SPIF_UPDATEINIFILE = 0x01
 $SPIF_SENDCHANGE = 0x02
+
+function Get-ClientAreaAnimation {
+    $value = 0
+    if (-not [WfVariantNative]::GetSystemParametersInfo(
+            $SPI_GETCLIENTAREAANIMATION, 0, [ref]$value, 0)) {
+        $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "Could not read the client-area animation setting (Win32 error $code)."
+    }
+    return $value -ne 0
+}
+
+function Set-ClientAreaAnimation {
+    param([Parameter(Mandatory = $true)][bool]$Enabled)
+
+    # For this SET action pvParam carries the BOOL value in the pointer-sized
+    # argument; passing ref bool (as the old harness did) reports success but
+    # leaves the setting unchanged.
+    $value = if ($Enabled) { [IntPtr]1 } else { [IntPtr]0 }
+    # Windows does not apply SPI_SETCLIENTAREAANIMATION when fWinIni is zero.
+    # Snapshot-before-mutation plus the verified outer finally makes this
+    # temporary profile-backed change non-destructive.
+    if (-not [WfVariantNative]::SetSystemParametersInfo(
+            $SPI_SETCLIENTAREAANIMATION, 0, $value,
+            $SPIF_UPDATEINIFILE -bor $SPIF_SENDCHANGE)) {
+        $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "Could not set client-area animation to '$Enabled' (Win32 error $code)."
+    }
+
+    $observed = Get-ClientAreaAnimation
+    if ($observed -ne $Enabled) {
+        throw "Client-area animation verification failed: requested '$Enabled', observed '$observed'."
+    }
+}
+
+function Get-AbsolutePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if ([IO.Path]::IsPathRooted($Path)) {
+        return [IO.Path]::GetFullPath($Path)
+    }
+    return [IO.Path]::GetFullPath((Join-Path (Get-Location).ProviderPath $Path))
+}
 
 $resolvedExecutable = (Resolve-Path -LiteralPath $Executable).Path
 if (-not (Test-Path -LiteralPath $OutputDirectory)) {
@@ -59,13 +108,19 @@ $stateCatalog = @{
     "settings-bottom" = @{ Page = "ai"; Visual = "settings-bottom"; Width = 1440; Height = 900 }
 }
 
-$motionSaved = $false
+$motionSnapshotTaken = $false
+$motionMutationAttempted = $false
+$originalMotionValue = $false
 try {
-    $motionValue = $false
-    $motionSaved = [WfVariantNative]::SystemParametersInfo(
-        $SPI_GETCLIENTAREAANIMATION, 0, [ref]$motionValue, 0)
-    if (-not $motionSaved) {
-        Write-Warning "Could not read the client-area animation setting; reduced-motion restore will be skipped."
+    if ($IncludeReducedMotion) {
+        # Never attempt the mutation unless the exact original value is known.
+        $originalMotionValue = Get-ClientAreaAnimation
+        $motionSnapshotTaken = $true
+        # Mark the attempt before calling SET so even a partial Win32 failure
+        # takes the restoration path.
+        $motionMutationAttempted = $true
+        Set-ClientAreaAnimation -Enabled $false
+        Start-Sleep -Milliseconds 300
     }
 
     $records = @()
@@ -79,11 +134,6 @@ try {
             if ($IncludeReducedMotion) {
                 $motionReduced = $true
                 $motionLabel = "reduced"
-                $off = $false
-                $null = [WfVariantNative]::SystemParametersInfo(
-                    $SPI_SETCLIENTAREAANIMATION, 0, [ref]$off,
-                    $SPIF_UPDATEINIFILE -bor $SPIF_SENDCHANGE)
-                Start-Sleep -Milliseconds 300
             }
 
             $variables = @{
@@ -133,18 +183,11 @@ try {
                 Stop-ReactorCandidate -Session $session `
                     -ExecutablePaths @($resolvedExecutable) -GraceSeconds 8 | Out-Null
             }
-
-            if ($IncludeReducedMotion -and $motionSaved) {
-                $restore = [bool]$motionValue
-                $null = [WfVariantNative]::SystemParametersInfo(
-                    $SPI_SETCLIENTAREAANIMATION, 0, [ref]$restore,
-                    $SPIF_UPDATEINIFILE -bor $SPIF_SENDCHANGE)
-            }
         }
     }
 
     # Merge into variants.json
-    $variantsPath = Join-Path (Get-Location) $VariantsJson
+    $variantsPath = Get-AbsolutePath -Path $VariantsJson
     $document = if (Test-Path -LiteralPath $variantsPath) {
         Get-Content -LiteralPath $variantsPath -Raw | ConvertFrom-Json
     }
@@ -174,10 +217,7 @@ try {
     Write-Host "Variants document updated: $variantsPath ($($records.Count) new records)."
 }
 finally {
-    if ($motionSaved) {
-        $restore = [bool]$motionValue
-        $null = [WfVariantNative]::SystemParametersInfo(
-            $SPI_SETCLIENTAREAANIMATION, 0, [ref]$restore,
-            $SPIF_UPDATEINIFILE -bor $SPIF_SENDCHANGE)
+    if ($motionSnapshotTaken -and $motionMutationAttempted) {
+        Set-ClientAreaAnimation -Enabled $originalMotionValue
     }
 }

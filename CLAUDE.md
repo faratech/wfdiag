@@ -659,7 +659,8 @@ Provider gotchas encoded in the clients (don't relearn these):
   cap goes on the wire (current OpenAI models reject `max_tokens`, compat
   servers don't all know `max_completion_tokens`).
 - The Foundry Local port is dynamic by design; it is discovered via
-  `foundry service status` or the `localAiEndpoint` setting — never hardcode
+  `foundry status --output json` (with legacy `service status` fallback) or the
+  `localAiEndpoint` setting — never hardcode
   it (resolution lives in `ai_providers/foundry.rs`).
 - Ollama has no default model: the `ollamaModel` setting, else the first
   entry from `/api/tags`, else an error telling the user to pull a model.

@@ -376,6 +376,88 @@ describe('SettingsDialog provider setup seeding', () => {
     })
   })
 
+  it('requires separate winget and mutable vendor-bootstrap approvals before installing', async () => {
+    invokeMock.mockImplementation(async (cmd: unknown, args?: unknown) => {
+      const request = args as { provider?: string; method?: string } | undefined
+      if (cmd === 'ai_bridge_status') return { installed: false, signedIn: false }
+      if (cmd === 'ai_bridge_install' && request?.method === 'winget') {
+        return { kind: 'vendorFallbackConfirmationRequired', reason: 'winget_failed' }
+      }
+      if (cmd === 'ai_bridge_install' && request?.method === 'vendor_power_shell') {
+        return {
+          kind: 'installed',
+          status: { installed: true, signedIn: false, path: 'C:\\Verified\\codex.exe' },
+        }
+      }
+      return { models: [] }
+    })
+    render(
+      <SettingsDialog
+        open
+        onOpenChange={vi.fn()}
+        onSave={vi.fn()}
+        settings={{ preferredAIProvider: 'codex_cli' }}
+      />
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Install CLI' }))
+    expect(screen.getByRole('dialog', { name: 'Install Codex CLI' })).toBeInTheDocument()
+    expect(invokeMock).not.toHaveBeenCalledWith('ai_bridge_install', expect.anything())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Install with winget' }))
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('ai_bridge_install', {
+      provider: 'codex_cli',
+      method: 'winget',
+      confirmed: true,
+      fallbackConfirmed: false,
+    }))
+    expect(await screen.findByRole('dialog', { name: 'Confirm vendor installer fallback' })).toBeInTheDocument()
+    expect(invokeMock).not.toHaveBeenCalledWith('ai_bridge_install', expect.objectContaining({
+      method: 'vendor_power_shell',
+    }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run vendor installer' }))
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('ai_bridge_install', {
+      provider: 'codex_cli',
+      method: 'vendor_power_shell',
+      confirmed: true,
+      fallbackConfirmed: true,
+    }))
+    await waitFor(() => expect(screen.getByLabelText('Codex CLI path')).toHaveValue('C:\\Verified\\codex.exe'))
+    expect(screen.getByRole('button', { name: /sign in with chatgpt/i })).toBeInTheDocument()
+  })
+
+  it('exposes cancellation while a contained CLI install is running', async () => {
+    let finishInstall: ((value: unknown) => void) | undefined
+    invokeMock.mockImplementation(async (cmd: unknown) => {
+      if (cmd === 'ai_bridge_status') return { installed: false, signedIn: false }
+      if (cmd === 'ai_bridge_install') {
+        return new Promise(resolve => { finishInstall = resolve })
+      }
+      return { models: [] }
+    })
+    render(
+      <SettingsDialog
+        open
+        onOpenChange={vi.fn()}
+        onSave={vi.fn()}
+        settings={{ preferredAIProvider: 'claude_code' }}
+      />
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Install CLI' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Install with winget' }))
+    const cancelButtons = await screen.findAllByRole('button', { name: 'Cancel' })
+    fireEvent.click(cancelButtons[0])
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('ai_bridge_install_cancel', {
+      provider: 'claude_code',
+    }))
+    finishInstall?.({
+      kind: 'installed',
+      status: { installed: true, signedIn: false, path: 'C:\\Verified\\claude.exe' },
+    })
+  })
+
   it('shows an inline error when settings fail to save', async () => {
     render(
       <SettingsDialog

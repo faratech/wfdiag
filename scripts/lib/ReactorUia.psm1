@@ -17,9 +17,13 @@ $script:ReactorEnvVars = @(
     "WFDIAG_REACTOR_VISUAL_STATE",
     "WFDIAG_REACTOR_FIXTURE",
     "WFDIAG_REACTOR_SETTINGS",
+    "WFDIAG_REACTOR_SETTINGS_TEST_PATH",
+    "WFDIAG_REACTOR_LIVE_TEST_FIXTURE",
     "WFDIAG_REACTOR_WIDTH",
     "WFDIAG_REACTOR_HEIGHT",
-    "WFDIAG_REACTOR_THEME"
+    "WFDIAG_REACTOR_THEME",
+    "WFDIAG_NO_TRAY",
+    "WFDIAG_NO_WORKERS"
 )
 
 function Write-JsonFile {
@@ -74,25 +78,30 @@ function Start-ReactorCandidate {
         [string]$StderrFile
     )
 
+    $environmentNames = @($script:ReactorEnvVars) + @($Variables.Keys)
+    $environmentNames = @($environmentNames | Sort-Object -Unique)
     $saved = @{}
-    foreach ($name in $script:ReactorEnvVars) {
+    foreach ($name in $environmentNames) {
         $saved[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
         [Environment]::SetEnvironmentVariable($name, $null, "Process")
     }
-    foreach ($key in $Variables.Keys) {
-        [Environment]::SetEnvironmentVariable($key, [string]$Variables[$key], "Process")
-    }
+    try {
+        foreach ($key in $Variables.Keys) {
+            [Environment]::SetEnvironmentVariable($key, [string]$Variables[$key], "Process")
+        }
 
-    $process = if ($StderrFile) {
-        Start-Process -FilePath $Executable -PassThru -RedirectStandardError $StderrFile
+        $process = if ($StderrFile) {
+            Start-Process -FilePath $Executable -PassThru -RedirectStandardError $StderrFile
+        }
+        else {
+            Start-Process -FilePath $Executable -PassThru
+        }
+        $null = $process.WaitForExit(0)
     }
-    else {
-        Start-Process -FilePath $Executable -PassThru
-    }
-    $null = $process.WaitForExit(0)
-
-    foreach ($name in $script:ReactorEnvVars) {
-        [Environment]::SetEnvironmentVariable($name, $saved[$name], "Process")
+    finally {
+        foreach ($name in $environmentNames) {
+            [Environment]::SetEnvironmentVariable($name, $saved[$name], "Process")
+        }
     }
 
     $deadline = (Get-Date).AddSeconds($Seconds)
