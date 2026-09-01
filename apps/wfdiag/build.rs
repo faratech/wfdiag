@@ -178,12 +178,19 @@ fn remove_unused_webview_projection() {
 }
 
 fn find_case_insensitive(base: &Path, name: &str) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(base).unwrap_or_else(|error| {
-        panic!(
-            "failed to inspect staged runtime {}: {error}",
-            base.display()
-        )
-    });
+    // #226: on a clean machine the staged runtime directory does not exist
+    // yet, which is a legitimate "no match" rather than a build abort. Any
+    // other read failure is still fatal, but names the directory and the
+    // error kind so the first-build message is actionable.
+    let entries = match std::fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!(
+            "failed to inspect staged runtime {} ({:?}): {error}",
+            base.display(),
+            error.kind()
+        ),
+    };
     for entry in entries {
         let entry = entry.unwrap_or_else(|error| {
             panic!(

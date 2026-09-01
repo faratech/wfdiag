@@ -10,9 +10,18 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Byte caps on what a bridge child's pipes may add to the heap (#204).
+///
+/// `wait_with_output` grew an unbounded `Vec` per pipe, so a vendor CLI stuck
+/// in a print loop could exhaust memory before the timeout fired. A completed
+/// Codex/Claude answer is far below the stdout cap, and diagnostics only ever
+/// use the tail of stderr, so the caps are invisible in normal operation.
+pub const HEADLESS_STDOUT_LIMIT: usize = 8 * 1024 * 1024;
+pub const HEADLESS_STDERR_LIMIT: usize = 256 * 1024;
 #[cfg(windows)]
 const WORKDIR_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -197,11 +206,57 @@ pub(super) fn pick_lookup_candidate(stdout: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Read `reader` to end-of-stream, retaining at most `limit` bytes.
+///
+/// Draining always continues to EOF so the child never blocks on a full pipe;
+/// only the retained buffer is bounded. This mirrors (and is shared with) the
+/// installer runner in `subscription_install.rs` (#204).
+pub(super) async fn drain_bounded<R: AsyncRead + Unpin>(
+    reader: Option<R>,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut retained = Vec::new();
+    // Heap buffer, not a stack array: this future is held across `.await` by
+    // every bridge call, and an inline 8 KiB array would bloat all of them.
+    let mut buffer = vec![0_u8; 8 * 1024];
+    let Some(mut reader) = reader else {
+        return Ok(retained);
+    };
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(retained);
+        }
+        let remaining = limit.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..read.min(remaining)]);
+    }
+}
+
 pub async fn run_headless(
+    command: tokio::process::Command,
+    stdin_payload: Option<&str>,
+    timeout: Duration,
+    what: &str,
+) -> Result<std::process::Output, String> {
+    run_headless_bounded(
+        command,
+        stdin_payload,
+        timeout,
+        what,
+        HEADLESS_STDOUT_LIMIT,
+        HEADLESS_STDERR_LIMIT,
+    )
+    .await
+}
+
+/// [`run_headless`] with explicit output caps, so the bound itself is testable.
+pub async fn run_headless_bounded(
     mut command: tokio::process::Command,
     stdin_payload: Option<&str>,
     timeout: Duration,
     what: &str,
+    stdout_limit: usize,
+    stderr_limit: usize,
 ) -> Result<std::process::Output, String> {
     #[cfg(windows)]
     {
@@ -254,19 +309,41 @@ Install the native executable (for example via the official installer) and retry
         None => None,
     };
 
+    // #204: drain both pipes concurrently with a byte cap instead of
+    // `wait_with_output`, whose per-pipe `Vec` grew without limit. Both pipes
+    // are still read to EOF, so a chatty child can never deadlock on a full
+    // pipe; the process exit status and the retained text are unchanged for
+    // every output that fits, including the "not logged in" markers callers
+    // match on.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
     tokio::time::timeout(timeout, async {
         let write = async {
             if let Some(payload) = stdin_payload
                 && let Some(mut input) = stdin.take()
             {
-                input.write_all(payload.as_bytes()).await
+                let result = input.write_all(payload.as_bytes()).await;
+                // Closing stdin is what tells the child no more input is
+                // coming; `wait_with_output` used to do this by dropping it.
+                drop(input);
+                result
             } else {
                 Ok(())
             }
         };
-        let (write_result, output) = tokio::join!(write, child.wait_with_output());
+        let (write_result, status, stdout, stderr) = tokio::join!(
+            write,
+            child.wait(),
+            drain_bounded(stdout, stdout_limit),
+            drain_bounded(stderr, stderr_limit),
+        );
         write_result.map_err(|error| format!("Could not send input to {what}: {error}"))?;
-        output.map_err(|error| format!("{what} failed to run: {error}"))
+        let read_failed = |error: std::io::Error| format!("{what} failed to run: {error}");
+        Ok(std::process::Output {
+            status: status.map_err(|error| format!("{what} failed to run: {error}"))?,
+            stdout: stdout.map_err(read_failed)?,
+            stderr: stderr.map_err(read_failed)?,
+        })
     })
     .await
     .map_err(|_| format!("{what} did not answer within {} seconds", timeout.as_secs()))?
@@ -308,6 +385,61 @@ mod tests {
         assert_eq!(
             pick_lookup_candidate(output),
             Some(PathBuf::from("C:\\Tools\\codex.exe"))
+        );
+    }
+
+    /// #204: a runaway child must not be able to grow the app's heap through
+    /// its pipes; both streams are still read to EOF so the child can finish.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runaway_child_output_is_capped_without_breaking_completion() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("yes abcdefghij | head -c 200000; yes 1234567890 | head -c 40000 >&2; exit 0");
+        let output = run_headless_bounded(
+            command,
+            None,
+            Duration::from_secs(30),
+            "runaway child",
+            4096,
+            1024,
+        )
+        .await
+        .expect("the child still runs to completion");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 4096);
+        assert_eq!(output.stderr.len(), 1024);
+    }
+
+    /// The caps must not disturb ordinary probe output: the signed-out markers
+    /// callers match on are only ever a few bytes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn short_output_and_stdin_payloads_are_preserved_verbatim() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("cat; echo 'Not logged in'; echo 'please run /login' >&2");
+        let output = run_headless_bounded(
+            command,
+            Some("prompt over stdin"),
+            Duration::from_secs(30),
+            "status probe",
+            HEADLESS_STDOUT_LIMIT,
+            HEADLESS_STDERR_LIMIT,
+        )
+        .await
+        .expect("probe runs");
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("prompt over stdin"), "{stdout}");
+        assert!(stdout.to_lowercase().contains("not logged in"), "{stdout}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("please run /login"),
+            "stderr was not preserved"
         );
     }
 

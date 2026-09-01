@@ -11,6 +11,9 @@ publish.workspace = true
 dirs = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+# Wipes decrypted API-key bytes/strings from memory as soon as they go out of
+# scope (#218).
+zeroize = { workspace = true, features = ["alloc"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

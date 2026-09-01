@@ -150,14 +150,116 @@ fn get_windows_ubr() -> Option<u32> {
     key.get_value("UBR").ok()
 }
 
-/// Initialize WinRT runtime (required before using WinRT APIs)
+/// Keeps the process multi-threaded apartment alive for the whole run (#191).
+///
+/// Every successful `RoInitialize` now has a matching `RoUninitialize` (see
+/// [`WinRtApartment`]), which means the apartment would otherwise be torn down
+/// the moment the last blocking-pool thread finished — taking the cached
+/// `LanguageModel` and the loaded AI DLLs with it. One dedicated, named thread
+/// initializes the MTA once and parks forever, so the apartment outlives every
+/// worker without serializing Phi work onto a single thread (status probes
+/// deliberately must not queue behind an in-flight generation).
 #[cfg(windows)]
-fn ensure_winrt_initialized() {
+fn ensure_mta_anchor() {
     use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
-    // RoInitialize is safe to call multiple times - it will return S_FALSE if already initialized
-    // Use multi-threaded apartment for Windows App SDK AI APIs
-    let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
+
+    static ANCHOR: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ANCHOR.get_or_init(|| {
+        let started = std::thread::Builder::new()
+            .name("wfdiag-phi-mta".to_string())
+            .stack_size(64 * 1024)
+            .spawn(|| {
+                match unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
+                    Ok(()) => log_phi_silica("Phi MTA anchor thread holds the apartment"),
+                    Err(error) => log_phi_silica(&format!(
+                        "Phi MTA anchor could not initialize WinRT: 0x{:08X}: {}",
+                        error.code().0 as u32,
+                        error.message()
+                    )),
+                }
+                // The anchor exists purely to hold the apartment open; it never
+                // runs Phi work and never exits (park can wake spuriously).
+                loop {
+                    std::thread::park();
+                }
+            });
+        if let Err(error) = started {
+            log_phi_silica(&format!(
+                "Could not start the Phi MTA anchor thread: {error}"
+            ));
+        }
+    });
 }
+
+/// RAII membership in the `WinRT` multi-threaded apartment for one thread (#191).
+///
+/// `RoInitialize` used to be fire-and-forget: its `HRESULT` was discarded, so a
+/// thread that was already an STA (`RPC_E_CHANGED_MODE`) silently carried on as
+/// if it had joined the MTA, and no call was ever balanced with
+/// `RoUninitialize` — every retired `spawn_blocking` thread leaked an apartment
+/// reference. COM requires one `RoUninitialize` per *successful* call,
+/// including the `S_FALSE` "already initialized on this thread" case, which is
+/// exactly what `owns_initialization` tracks.
+#[cfg(windows)]
+struct WinRtApartment {
+    owns_initialization: bool,
+}
+
+#[cfg(windows)]
+impl Drop for WinRtApartment {
+    fn drop(&mut self) {
+        use windows::Win32::System::WinRT::RoUninitialize;
+        if self.owns_initialization {
+            unsafe { RoUninitialize() };
+        }
+    }
+}
+
+/// Join the multi-threaded apartment for the lifetime of the returned guard.
+///
+/// Failure is tolerated rather than fatal, exactly as before: a thread that is
+/// already an STA can still make these `WinRT` calls, and any other failure
+/// surfaces through the specific API that needs the apartment. What changed is
+/// that the outcome is inspected and logged instead of discarded, and only a
+/// successful initialization is ever undone.
+#[cfg(windows)]
+fn enter_winrt_apartment() -> WinRtApartment {
+    use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
+
+    ensure_mta_anchor();
+    // S_OK (initialized by us) and S_FALSE (this thread was already in the
+    // apartment) both come back as `Ok` from the binding and both take an
+    // apartment reference, so both are released on drop.
+    match unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
+        Ok(()) => WinRtApartment {
+            owns_initialization: true,
+        },
+        Err(error) if error.code() == windows_core::HRESULT(RPC_E_CHANGED_MODE) => {
+            log_phi_silica(
+                "Thread is already a single-threaded apartment (RPC_E_CHANGED_MODE); \
+                 continuing without changing it",
+            );
+            WinRtApartment {
+                owns_initialization: false,
+            }
+        }
+        Err(error) => {
+            log_phi_silica(&format!(
+                "RoInitialize failed: 0x{:08X}: {}",
+                error.code().0 as u32,
+                error.message()
+            ));
+            WinRtApartment {
+                owns_initialization: false,
+            }
+        }
+    }
+}
+
+/// `RPC_E_CHANGED_MODE`: the calling thread already belongs to a single-threaded
+/// apartment, so the requested concurrency model was refused.
+#[cfg(any(windows, test))]
+const RPC_E_CHANGED_MODE: i32 = 0x8001_0106_u32.cast_signed();
 
 /// Track if bootstrapper has been initialized
 #[cfg(windows)]
@@ -555,7 +657,9 @@ fn try_direct_dll_activation() -> Result<(), String> {
 /// identity — full MSIX install OR a developer-registered sparse package — with
 /// the Windows App SDK framework resolvable.
 #[cfg(windows)]
-fn create_language_model_winrt() -> Result<crate::windows_ai_bindings::LanguageModel, String> {
+fn create_language_model_winrt(
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<crate::windows_ai_bindings::LanguageModel, String> {
     use crate::windows_ai_bindings::LanguageModel;
 
     log_phi_silica("Creating LanguageModel via standard WinRT activation...");
@@ -566,7 +670,7 @@ fn create_language_model_winrt() -> Result<crate::windows_ai_bindings::LanguageM
             e.message()
         )
     })?;
-    wait_for_async_blocking(op)
+    wait_for_async_blocking(op, is_cancelled)
 }
 
 /// Create a LanguageModel, preferring the Microsoft-documented standard
@@ -589,7 +693,9 @@ fn create_language_model_winrt() -> Result<crate::windows_ai_bindings::LanguageM
 /// behavior, for comparison/debugging if standard activation ever
 /// regresses on some device.
 #[cfg(windows)]
-fn create_language_model() -> Result<crate::windows_ai_bindings::LanguageModel, String> {
+fn create_language_model(
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<crate::windows_ai_bindings::LanguageModel, String> {
     let force_direct_first = std::env::var("WFDIAG_ACTIVATION_ORDER")
         .map(|v| v.eq_ignore_ascii_case("direct"))
         .unwrap_or(false);
@@ -598,7 +704,7 @@ fn create_language_model() -> Result<crate::windows_ai_bindings::LanguageModel, 
         log_phi_silica(
             "WFDIAG_ACTIVATION_ORDER=direct set — trying direct DLL activation before standard WinRT",
         );
-        return match create_language_model_direct() {
+        return match create_language_model_direct(is_cancelled) {
             Ok(model) => {
                 log_phi_silica("LanguageModel created via direct DLL activation");
                 Ok(model)
@@ -608,7 +714,7 @@ fn create_language_model() -> Result<crate::windows_ai_bindings::LanguageModel, 
                     "Direct DLL activation failed ({}); falling back to standard WinRT activation",
                     direct_err
                 ));
-                create_language_model_winrt().map_err(|winrt_err| {
+                create_language_model_winrt(is_cancelled).map_err(|winrt_err| {
                     format!(
                         "Phi Silica model creation failed. Direct DLL path: {} | WinRT path: {}",
                         direct_err, winrt_err
@@ -618,7 +724,7 @@ fn create_language_model() -> Result<crate::windows_ai_bindings::LanguageModel, 
         };
     }
 
-    match create_language_model_winrt() {
+    match create_language_model_winrt(is_cancelled) {
         Ok(model) => {
             log_phi_silica("LanguageModel created via standard WinRT activation");
             Ok(model)
@@ -628,7 +734,7 @@ fn create_language_model() -> Result<crate::windows_ai_bindings::LanguageModel, 
                 "Standard WinRT activation failed ({}); falling back to direct DLL activation",
                 winrt_err
             ));
-            create_language_model_direct().map_err(|direct_err| {
+            create_language_model_direct(is_cancelled).map_err(|direct_err| {
                 format!(
                     "Phi Silica model creation failed. WinRT path: {} | Direct DLL path: {}",
                     winrt_err, direct_err
@@ -641,9 +747,10 @@ fn create_language_model() -> Result<crate::windows_ai_bindings::LanguageModel, 
 #[cfg(windows)]
 fn ensure_cached_model_locked(
     cached: &mut Option<crate::windows_ai_bindings::LanguageModel>,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), String> {
     if cached.is_none() {
-        *cached = Some(create_language_model()?);
+        *cached = Some(create_language_model(is_cancelled)?);
     }
     Ok(())
 }
@@ -680,7 +787,7 @@ fn prompt_fit_for_model(
 }
 
 #[cfg(windows)]
-fn ensure_feature_ready() -> Result<(), String> {
+fn ensure_feature_ready(is_cancelled: &dyn Fn() -> bool) -> Result<(), String> {
     use crate::windows_ai_bindings::{
         AIFeatureReadyResultState, AIFeatureReadyState, LanguageModel,
     };
@@ -696,11 +803,14 @@ fn ensure_feature_ready() -> Result<(), String> {
                     error.message()
                 )
             })?;
+            // #205: a 15-minute preparation is exactly the wait a user is most
+            // likely to abandon; honour their cancellation instead of pinning
+            // the model mutex for the whole budget.
             let result = wait_for_async_with_progress_blocking_timeout(
                 operation,
                 std::time::Duration::from_secs(15 * 60),
                 "Phi Silica preparation",
-                &|| false,
+                is_cancelled,
             )?;
             let status = result.Status().map_err(|error| {
                 format!(
@@ -759,8 +869,13 @@ fn ensure_feature_ready() -> Result<(), String> {
     }
 }
 
+/// Prepare the runtime and hand back the apartment membership it established.
+///
+/// The guard MUST be held by the caller for as long as it keeps calling `WinRT`
+/// on this thread (#191) — dropping it early leaves the thread outside the
+/// apartment it just joined.
 #[cfg(windows)]
-fn prepare_phi_runtime() -> Result<(), String> {
+fn prepare_phi_runtime(is_cancelled: &dyn Fn() -> bool) -> Result<WinRtApartment, String> {
     if !crate::has_package_identity() {
         return Err(PhiError::ai_unavailable(
             "phi_silica",
@@ -774,13 +889,14 @@ fn prepare_phi_runtime() -> Result<(), String> {
             "Phi Silica requires Windows 11 build 26100 or later; current build is {build}"
         ));
     }
-    ensure_winrt_initialized();
+    let apartment = enter_winrt_apartment();
     init_windows_app_sdk()?;
     let (laf_ok, laf_message) = try_unlock_laf();
     if !laf_ok {
         return Err(format!("Phi Silica LAF unlock failed: {laf_message}"));
     }
-    ensure_feature_ready()
+    ensure_feature_ready(is_cancelled)?;
+    Ok(apartment)
 }
 
 #[cfg(windows)]
@@ -793,7 +909,9 @@ fn format_hresult(value: Option<windows_core::HRESULT>) -> String {
 /// Create LanguageModel using DllGetActivationFactory from bundled DLL
 /// This bypasses RoGetActivationFactory entirely, like CsWinRT does
 #[cfg(windows)]
-fn create_language_model_direct() -> Result<crate::windows_ai_bindings::LanguageModel, String> {
+fn create_language_model_direct(
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<crate::windows_ai_bindings::LanguageModel, String> {
     use crate::windows_ai_bindings::{ILanguageModelStatics, LanguageModel};
     use windows::Win32::System::LibraryLoader::GetProcAddress;
     use windows_core::{HSTRING, Interface};
@@ -910,7 +1028,7 @@ fn create_language_model_direct() -> Result<crate::windows_ai_bindings::Language
     log_phi_silica("CreateAsync started, waiting...");
 
     // Wait for async operation
-    let model = wait_for_async_blocking(async_op)?;
+    let model = wait_for_async_blocking(async_op, is_cancelled)?;
 
     log_phi_silica("LanguageModel created successfully via direct activation!");
 
@@ -951,8 +1069,9 @@ fn check_phi_silica_safe_for_identity(
         );
     }
 
-    // Ensure WinRT is initialized before calling any WinRT APIs
-    ensure_winrt_initialized();
+    // Join the apartment for the rest of this probe; the guard leaves it again
+    // when the function returns (#191).
+    let _apartment = enter_winrt_apartment();
     log_phi_silica("WinRT initialized");
 
     // Try to initialize Windows App SDK bootstrapper (may fail for packaged apps, that's OK)
@@ -1096,7 +1215,7 @@ fn check_phi_silica_safe_for_identity(
                         None,
                     );
                 };
-                match ensure_cached_model_locked(&mut cached) {
+                match ensure_cached_model_locked(&mut cached, &|| false) {
                     Ok(()) => {
                         log_phi_silica("Direct DLL activation succeeded — Phi Silica IS available");
                         return (
@@ -1187,9 +1306,33 @@ pub fn is_phi_silica_available() -> PhiSilicaStatus {
     }
 }
 
+/// How long to sleep between polls of a `WinRT` async operation (#205).
+///
+/// The bindings expose only `IAsyncInfo::Status`, so these waits poll rather
+/// than wait on a completion handler; a flat 10 ms tick spent ~6,000 wakeups a
+/// minute on operations that routinely run for minutes. Stay at 10 ms while a
+/// fast completion is still plausible, then back off — 50 ms is still far
+/// finer-grained than any user-visible deadline, including cancellation.
+#[cfg(any(windows, test))]
+fn async_poll_interval(elapsed: std::time::Duration) -> std::time::Duration {
+    if elapsed < std::time::Duration::from_millis(500) {
+        std::time::Duration::from_millis(10)
+    } else {
+        std::time::Duration::from_millis(50)
+    }
+}
+
 /// Blocking wait for an async operation - runs in spawn_blocking to be Send-safe
+///
+/// `is_cancelled` is honoured for the same reason the generation wait honours
+/// it (#205): `LanguageModel` creation can occupy the process-wide model mutex
+/// for up to two minutes, so an abandoned turn must be able to cancel the `WinRT`
+/// operation and release the lock instead of idling out the full budget.
 #[cfg(windows)]
-fn wait_for_async_blocking<T>(op: windows_future::IAsyncOperation<T>) -> Result<T, String>
+fn wait_for_async_blocking<T>(
+    op: windows_future::IAsyncOperation<T>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<T, String>
 where
     T: windows_core::RuntimeType,
 {
@@ -1230,7 +1373,16 @@ where
                 );
             }
             AsyncStatus::Started => {
-                if started.elapsed() >= Duration::from_secs(2 * 60) {
+                let elapsed = started.elapsed();
+                if is_cancelled() {
+                    let _ = info.Cancel();
+                    return Err(PhiError::ai_unavailable(
+                        "phi_silica",
+                        "Phi Silica model creation was cancelled",
+                    )
+                    .into());
+                }
+                if elapsed >= Duration::from_secs(2 * 60) {
                     let _ = info.Cancel();
                     return Err(PhiError::ai_unavailable(
                         "phi_silica",
@@ -1238,7 +1390,7 @@ where
                     )
                     .into());
                 }
-                sleep(Duration::from_millis(10));
+                sleep(async_poll_interval(elapsed));
             }
             _ => {
                 return Err(PhiError::ai_unavailable(
@@ -1296,7 +1448,7 @@ where
     P: windows_core::RuntimeType,
 {
     use std::thread::sleep;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
     use windows_core::Interface;
     use windows_future::{AsyncStatus, IAsyncInfo};
 
@@ -1332,6 +1484,7 @@ where
                 );
             }
             AsyncStatus::Started => {
+                let elapsed = started.elapsed();
                 if is_cancelled() {
                     let _ = info.Cancel();
                     return Err(PhiError::ai_unavailable(
@@ -1340,7 +1493,7 @@ where
                     )
                     .into());
                 }
-                if started.elapsed() >= timeout {
+                if elapsed >= timeout {
                     let _ = info.Cancel();
                     return Err(PhiError::ai_unavailable(
                         "phi_silica",
@@ -1351,7 +1504,7 @@ where
                     )
                     .into());
                 }
-                sleep(Duration::from_millis(10));
+                sleep(async_poll_interval(elapsed));
             }
             _ => {
                 return Err(PhiError::ai_unavailable(
@@ -1364,27 +1517,87 @@ where
     }
 }
 
+/// The opt-in debug log's location under a local-app-data root (#217).
+///
+/// It used to be a hardcoded `C:\temp\phi-silica-rust.log`: a world-writable
+/// directory outside the app's own storage, which any user on the machine can
+/// pre-create or plant a link in. This follows the same
+/// `%LOCALAPPDATA%\WFDiag` convention as the credential store in
+/// `wfdiag-native-settings`.
+#[cfg(any(windows, test))]
+fn phi_log_path_in(local_data_dir: &std::path::Path) -> std::path::PathBuf {
+    local_data_dir
+        .join("WFDiag")
+        .join("logs")
+        .join("phi-silica.log")
+}
+
+/// True when this metadata describes a file with more than one hard link.
+/// Only the Unix test build can ask: `number_of_links` is still unstable in
+/// `std::os::windows::fs::MetadataExt`, so the Windows build relies on the
+/// symlink/reparse refusal plus per-user directory ownership.
+#[cfg(all(unix, test))]
+fn is_multiply_linked(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.nlink() > 1
+}
+
+/// Open the debug log for appending without ever following a link (#217).
+///
+/// An existing entry is used only when it is a plain file: `symlink_metadata`
+/// does not traverse, so a symlink or reparse point planted at the path is
+/// refused rather than redirecting the appended text somewhere else. When
+/// nothing is there, `create_new` makes creation itself the atomic check, so a
+/// link that appears between the probe and the open cannot win the race.
+#[cfg(any(windows, test))]
+fn open_log_file(path: &std::path::Path) -> Option<std::fs::File> {
+    use std::fs::OpenOptions;
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_file() {
+                return None;
+            }
+            #[cfg(all(unix, test))]
+            if is_multiply_linked(&metadata) {
+                return None;
+            }
+            OpenOptions::new().append(true).open(path).ok()
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(path)
+            .ok(),
+        Err(_) => None,
+    }
+}
+
 /// File logging for debugging MSIX apps, opt-in via `WFDIAG_AI_LOG=1` so
-/// production runs don't write to C:\temp on every AI call.
+/// production runs don't write to disk on every AI call.
 #[cfg(windows)]
 fn log_phi_silica(msg: &str) {
-    use std::fs::OpenOptions;
     use std::io::Write;
     use std::sync::OnceLock;
 
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let enabled = *ENABLED.get_or_init(|| {
-        std::env::var("WFDIAG_AI_LOG")
-            .map(|v| !v.trim().is_empty() && v != "0")
-            .unwrap_or(false)
+    static LOG_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    let path = LOG_PATH.get_or_init(|| {
+        let enabled = std::env::var("WFDIAG_AI_LOG")
+            .is_ok_and(|value| !value.trim().is_empty() && value != "0");
+        if !enabled {
+            return None;
+        }
+        let path = phi_log_path_in(&dirs::data_local_dir()?);
+        // Ordinary directory permissions: this lives under the user's own
+        // local app data, not a shared root (#217).
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        Some(path)
     });
-    if !enabled {
+    let Some(path) = path.as_deref() else {
         return;
-    }
+    };
 
-    let log_path = std::path::Path::new("C:\\temp\\phi-silica-rust.log");
-    let _ = std::fs::create_dir_all("C:\\temp");
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+    if let Some(mut file) = open_log_file(path) {
         let _ = writeln!(
             file,
             "[{}] {}",
@@ -1402,8 +1615,10 @@ pub async fn ensure_phi_silica_ready() -> Result<(), String> {
     spawn_blocking(|| {
         log_phi_silica("=== ensure_phi_silica_ready called ===");
         let mut cached = cached_model_guard();
-        prepare_phi_runtime()?;
-        ensure_cached_model_locked(&mut cached)?;
+        // The guard keeps this thread in the WinRT apartment until the closure
+        // returns (#191).
+        let _apartment = prepare_phi_runtime(&|| false)?;
+        ensure_cached_model_locked(&mut cached, &|| false)?;
         log_phi_silica("Phi Silica runtime and cached model are ready");
         Ok(())
     })
@@ -1428,8 +1643,8 @@ pub async fn measure_prompt_fit(prompt: &str) -> Result<PhiPromptFit, String> {
     let prompt = prompt.to_string();
     tokio::task::spawn_blocking(move || {
         let mut cached = cached_model_guard();
-        prepare_phi_runtime()?;
-        ensure_cached_model_locked(&mut cached)?;
+        let _apartment = prepare_phi_runtime(&|| false)?;
+        ensure_cached_model_locked(&mut cached, &|| false)?;
         let result =
             prompt_fit_for_model(cached.as_ref().expect("cached model initialized"), &prompt);
         if result.is_err() {
@@ -1614,8 +1829,11 @@ pub async fn generate_response(
     let prompt_owned = prompt.to_string();
     tokio::task::spawn_blocking(move || {
         let mut cached = cached_model_guard();
-        prepare_phi_runtime()?;
-        ensure_cached_model_locked(&mut cached)?;
+        // #205: model preparation and creation can take minutes on a cold
+        // runtime, so the turn's cancellation reaches them too — not just the
+        // generation call below.
+        let _apartment = prepare_phi_runtime(&is_cancelled)?;
+        ensure_cached_model_locked(&mut cached, &is_cancelled)?;
         let Some(model) = cached.as_ref() else {
             return Err("Phi Silica model was unavailable after preparation".to_string());
         };
@@ -1657,5 +1875,108 @@ mod windows_tests {
         assert!(message.contains("requires the Microsoft Store version"));
         assert_eq!(ready_state, None);
         assert_eq!(error_code.as_deref(), Some("NO_PACKAGE_IDENTITY"));
+    }
+}
+
+/// Platform-neutral tests for the pure helpers behind the `WinRT` waits, the
+/// apartment bookkeeping, and the debug log location. These run on the Linux
+/// engine build as well as on Windows.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    fn test_directory(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "wfdiag_phi_{label}_{}_{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        directory
+    }
+
+    #[test]
+    fn poll_interval_backs_off_after_the_first_moments() {
+        // #205: responsive while a fast completion is plausible, then cheap.
+        assert_eq!(
+            async_poll_interval(Duration::ZERO),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            async_poll_interval(Duration::from_millis(499)),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            async_poll_interval(Duration::from_millis(500)),
+            Duration::from_millis(50)
+        );
+        assert_eq!(
+            async_poll_interval(Duration::from_secs(90)),
+            Duration::from_millis(50)
+        );
+        // A cancellation check must never wait longer than a UI frame budget.
+        assert!(async_poll_interval(Duration::from_secs(600)) <= Duration::from_millis(50));
+    }
+
+    #[test]
+    fn changed_mode_is_the_documented_sta_hresult() {
+        // #191: the value the apartment guard tolerates instead of treating a
+        // pre-existing STA thread as a hard failure.
+        assert_eq!(RPC_E_CHANGED_MODE.cast_unsigned(), 0x8001_0106);
+    }
+
+    #[test]
+    fn debug_log_lives_under_the_app_local_data_directory() {
+        // #217: no more hardcoded C:\temp.
+        let path = phi_log_path_in(Path::new("C:/Users/x/AppData/Local"));
+        assert_eq!(
+            path,
+            Path::new("C:/Users/x/AppData/Local")
+                .join("WFDiag")
+                .join("logs")
+                .join("phi-silica.log")
+        );
+        assert!(!path.starts_with("C:/temp"));
+    }
+
+    #[test]
+    fn debug_log_appends_to_a_plain_file_and_creates_it_when_absent() {
+        let directory = test_directory("log_plain");
+        let path = directory.join("phi-silica.log");
+
+        let mut file = open_log_file(&path).expect("create the log");
+        std::io::Write::write_all(&mut file, b"first\n").expect("write");
+        drop(file);
+        let mut file = open_log_file(&path).expect("reopen the log");
+        std::io::Write::write_all(&mut file, b"second\n").expect("append");
+        drop(file);
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\nsecond\n");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn debug_log_refuses_a_planted_symlink_or_hard_link() {
+        // #217: appending through a link planted at the log path would write
+        // into a file of someone else's choosing.
+        let directory = test_directory("log_links");
+        let victim = directory.join("victim.txt");
+        std::fs::write(&victim, b"untouched").expect("write victim");
+
+        let symlinked = directory.join("symlinked.log");
+        std::os::unix::fs::symlink(&victim, &symlinked).expect("symlink");
+        assert!(open_log_file(&symlinked).is_none());
+
+        let hard_linked = directory.join("hardlinked.log");
+        std::fs::hard_link(&victim, &hard_linked).expect("hard link");
+        assert!(open_log_file(&hard_linked).is_none());
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        std::fs::remove_dir_all(&directory).ok();
     }
 }

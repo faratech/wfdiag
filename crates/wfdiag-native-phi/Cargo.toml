@@ -16,6 +16,8 @@ wfdiag-native-ai-provider = { workspace = true }
 wfdiag-native-settings = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
+# Resolves %LOCALAPPDATA% for the opt-in debug log (#217).
+dirs = { workspace = true }
 winreg = { workspace = true }
 windows-core = "0.62"
 windows-future = "0.3"

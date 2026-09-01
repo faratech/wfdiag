@@ -25,7 +25,7 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::AsyncRead;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(unix)]
@@ -341,26 +341,15 @@ impl InstallProcess for RealInstallProcess {
     }
 }
 
+/// #204: one bounded-drain implementation, now shared with the chat bridge
+/// process runner in `cli_bridge.rs`.
 async fn drain_bounded<R: AsyncRead + Unpin>(
-    mut reader: Option<R>,
+    reader: Option<R>,
     limit: usize,
 ) -> Result<Vec<u8>, ProcessFailure> {
-    let mut retained = Vec::with_capacity(limit.min(8 * 1024));
-    let mut buffer = [0_u8; 8 * 1024];
-    let Some(reader) = reader.as_mut() else {
-        return Ok(retained);
-    };
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .await
-            .map_err(|_| ProcessFailure::Wait)?;
-        if read == 0 {
-            return Ok(retained);
-        }
-        let remaining = limit.saturating_sub(retained.len());
-        retained.extend_from_slice(&buffer[..read.min(remaining)]);
-    }
+    cli_bridge::drain_bounded(reader, limit)
+        .await
+        .map_err(|_| ProcessFailure::Wait)
 }
 
 async fn run_contained_process(

@@ -10,8 +10,23 @@ use windows::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
 };
 
-/// The on-disk envelope version used by every shipping 2.x scan.
-const VERSION: u8 = 2;
+/// The on-disk envelope version used by every shipping 2.x scan: the payload
+/// after the header is current-user DPAPI ciphertext. Windows always reads and
+/// writes this version, byte-for-byte as before.
+const VERSION_DPAPI: u8 = 2;
+
+/// Envelope version for the non-Windows development fallback, whose payload is
+/// **plaintext** JSON because DPAPI does not exist there (#216). It is a
+/// distinct version so a plaintext file can never be mistaken for a protected
+/// one: Windows refuses to read it, and a non-Windows build refuses to read a
+/// real DPAPI envelope instead of returning its ciphertext as "data".
+const VERSION_PLAINTEXT_FALLBACK: u8 = 3;
+
+/// The version this build writes.
+#[cfg(windows)]
+const VERSION: u8 = VERSION_DPAPI;
+#[cfg(not(windows))]
+const VERSION: u8 = VERSION_PLAINTEXT_FALLBACK;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EncryptedHeader {
@@ -112,6 +127,15 @@ impl EncryptedStorage {
         Ok(decrypted)
     }
 
+    /// Explain why an envelope this build cannot interpret was refused (#216).
+    fn wrong_envelope_message(version: u8) -> String {
+        match version {
+            VERSION_DPAPI => "This scan file is protected with Windows DPAPI (envelope version 2) and can only be read on the Windows build that wrote it.".to_string(),
+            VERSION_PLAINTEXT_FALLBACK => "This scan file is an unprotected non-Windows development envelope (version 3) and is refused instead of being treated as DPAPI-protected data.".to_string(),
+            other => format!("Unsupported encryption version: {other}"),
+        }
+    }
+
     fn validate_filename(filename: &str) -> Result<()> {
         let valid = !filename.is_empty()
             && !filename.contains("..")
@@ -178,16 +202,16 @@ impl EncryptedStorage {
         }
         let header: EncryptedHeader = serde_json::from_slice(&file_data[4..4 + header_len])
             .map_err(|error| anyhow!("Failed to parse header: {error}"))?;
-        if header.version != VERSION && header.version != 1 {
-            return Err(anyhow!(
-                "Unsupported encryption version: {}",
-                header.version
-            ));
-        }
         if header.version == 1 {
             return Err(anyhow!(
                 "Legacy v1 encrypted files need re-encryption. Please clear scan history and re-run diagnostics."
             ));
+        }
+        // #216: the two envelope versions carry different payloads (DPAPI
+        // ciphertext vs. plaintext JSON) and are never interchangeable, so a
+        // build only ever reads the version it can actually interpret.
+        if header.version != VERSION {
+            return Err(anyhow!(Self::wrong_envelope_message(header.version)));
         }
 
         let encrypted_data = &file_data[4 + header_len..];
@@ -290,9 +314,82 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&envelope[4..4 + header_len])
                 .expect("parse header"),
-            serde_json::json!({ "version": 2 })
+            serde_json::json!({ "version": VERSION })
         );
         assert!(!directory.join("same.enc.tmp").exists());
+        fs::remove_dir_all(directory).ok();
+    }
+
+    /// Hand-build an envelope with an arbitrary header version and body so
+    /// both directions of the #216 refusal can be tested from either platform.
+    fn envelope(version: u8, body: &[u8]) -> Vec<u8> {
+        let header = serde_json::to_vec(&EncryptedHeader { version }).expect("serialize header");
+        let mut file = u32::try_from(header.len())
+            .expect("header length")
+            .to_le_bytes()
+            .to_vec();
+        file.extend(header);
+        file.extend(body);
+        file
+    }
+
+    #[test]
+    fn plaintext_fallback_uses_its_own_envelope_version() {
+        let directory = temp_dir("envelope_version");
+        let storage = EncryptedStorage::new(directory.clone()).expect("create storage");
+        storage.store("scan", &42_u8).expect("store");
+        let envelope = fs::read(directory.join("scan.enc")).expect("read envelope");
+        let header_len =
+            u32::from_le_bytes([envelope[0], envelope[1], envelope[2], envelope[3]]) as usize;
+        let header: serde_json::Value =
+            serde_json::from_slice(&envelope[4..4 + header_len]).expect("parse header");
+        // Windows keeps writing the shipping DPAPI envelope byte-for-byte; the
+        // plaintext development fallback is a different version entirely.
+        if cfg!(windows) {
+            assert_eq!(header, serde_json::json!({ "version": 2 }));
+            assert_ne!(&envelope[4 + header_len..], b"42");
+        } else {
+            assert_eq!(header, serde_json::json!({ "version": 3 }));
+            assert_eq!(&envelope[4 + header_len..], b"42");
+        }
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn an_envelope_from_the_other_build_is_refused_rather_than_misread() {
+        let directory = temp_dir("foreign_envelope");
+        let storage = EncryptedStorage::new(directory.clone()).expect("create storage");
+        fs::create_dir_all(&directory).expect("create directory");
+
+        // A plaintext-fallback file must never be accepted by Windows, and a
+        // DPAPI file must never be handed back as plaintext off Windows.
+        let foreign = if cfg!(windows) {
+            VERSION_PLAINTEXT_FALLBACK
+        } else {
+            VERSION_DPAPI
+        };
+        fs::write(directory.join("foreign.enc"), envelope(foreign, b"42")).expect("write envelope");
+        let error = storage
+            .load::<u8>("foreign")
+            .expect_err("a foreign envelope must be refused")
+            .to_string();
+        assert!(
+            error.contains(if cfg!(windows) {
+                "unprotected"
+            } else {
+                "DPAPI"
+            }),
+            "unexpected refusal message: {error}"
+        );
+
+        fs::write(directory.join("future.enc"), envelope(9, b"42")).expect("write envelope");
+        assert!(
+            storage
+                .load::<u8>("future")
+                .expect_err("unknown versions stay unsupported")
+                .to_string()
+                .contains("Unsupported encryption version: 9")
+        );
         fs::remove_dir_all(directory).ok();
     }
 

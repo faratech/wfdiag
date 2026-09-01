@@ -33,6 +33,7 @@ tokio-util = "0.7"
 url = "2.5"
 uuid = "1.20.0"
 winreg = "0.56"
+zeroize = "1"
 
 # Workspace crates.
 wfdiag-app = { path = "crates/wfdiag-app" }
