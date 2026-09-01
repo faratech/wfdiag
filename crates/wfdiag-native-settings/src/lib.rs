@@ -62,6 +62,11 @@ pub struct AppSettings {
     pub preferred_ai_provider: String,
     #[serde(default)]
     pub network_grounding_enabled: bool,
+    /// Whether the one-time "connect an AI provider" offer was shown (#32).
+    /// Only a fresh, nothing-configured profile is offered, and dismissing
+    /// or connecting sets this so the offer never nags.
+    #[serde(default)]
+    pub ai_onboarding_seen: bool,
     #[serde(default)]
     pub cloud_fallback_policy: CloudFallbackPolicy,
     #[serde(default, skip_serializing)]
@@ -136,6 +141,7 @@ impl Default for AppSettings {
             ai_enabled: true,
             preferred_ai_provider: default_ai_provider(),
             network_grounding_enabled: false,
+            ai_onboarding_seen: false,
             cloud_fallback_policy: CloudFallbackPolicy::Ask,
             open_ai_api_key: None,
             open_ai_model: None,
@@ -535,6 +541,7 @@ pub enum SettingsUpdate {
     PreferredAiProvider(String),
     NetworkGrounding(bool),
     CloudFallbackPolicy(CloudFallbackPolicy),
+    AiOnboardingSeen(bool),
 }
 
 impl SettingsUpdate {
@@ -549,6 +556,7 @@ impl SettingsUpdate {
             Self::CloseToTray(value) => settings.close_to_tray = value,
             Self::PreferredAiProvider(value) => settings.preferred_ai_provider = value,
             Self::NetworkGrounding(value) => settings.network_grounding_enabled = value,
+            Self::AiOnboardingSeen(value) => settings.ai_onboarding_seen = value,
             Self::CloudFallbackPolicy(value) => settings.cloud_fallback_policy = value,
         }
     }

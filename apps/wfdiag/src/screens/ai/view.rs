@@ -5,7 +5,10 @@
 use crate::app::WfdiagShell;
 use crate::app::consts::{BOT_AVATAR, ISSUE_WARN_DARK};
 use crate::app::message::Message;
-use crate::app::policy::{ai_workspace_height, provider_display_name};
+use crate::app::policy::{
+    OnboardingAction, OnboardingCandidate, ai_workspace_height, onboarding_candidates,
+    provider_display_name,
+};
 use crate::app::screen::ShellEnv;
 use crate::app::state::{
     AiMode, AiPreparationUi, ChatDisplayMessage, ChatDisplayRole, CloudFallbackConsent,
@@ -153,6 +156,9 @@ impl AiScreen {
             vc.message(Message::Ai(AiMsg::CopyReport)),
             self.streaming,
             vc.message(Message::Ai(AiMsg::CancelChat)),
+            env.settings.ai_onboarding_seen,
+            vc.callback(|action| Message::Ai(AiMsg::OnboardingAction(action))),
+            vc.message(Message::Ai(AiMsg::DismissOnboarding)),
         )
     }
 }
@@ -201,7 +207,17 @@ pub(crate) fn ai_page(
     copy_report: Callback<()>,
     chat_pending: bool,
     cancel_chat: Callback<()>,
+    ai_onboarding_seen: bool,
+    onboarding_action: Callback<OnboardingAction>,
+    dismiss_onboarding: Callback<()>,
 ) -> View {
+    // #32: the one-time connect offer, derived from the probed rows. It only
+    // applies to an enabled profile that has not dismissed it before.
+    let onboarding: Vec<OnboardingCandidate> = if ai_enabled && !ai_onboarding_seen {
+        onboarding_candidates(provider_status)
+    } else {
+        Vec::new()
+    };
     let chat_interaction_blocked = preparation.intent.is_some()
         || full_scan_consent.is_some()
         || cloud_fallback_consent.is_some();
@@ -394,6 +410,9 @@ pub(crate) fn ai_page(
             retry_preparation.clone(),
             chat_pending,
             cancel_chat,
+            &onboarding,
+            onboarding_action.clone(),
+            dismiss_onboarding.clone(),
         )
     } else {
         ai_scan_report_workspace(
@@ -689,6 +708,70 @@ pub(crate) fn ai_preparation_panel(
         ))
 }
 
+/// The one-time connect offer's rows: one proposal per detected provider,
+/// then "Not now" (dismiss) and the plain Settings route. With no
+/// proposals the layout is exactly what shipped before #32.
+#[allow(clippy::too_many_lines)]
+fn onboarding_rows(
+    onboarding: &[OnboardingCandidate],
+    onboarding_action: Callback<OnboardingAction>,
+    dismiss_onboarding: Callback<()>,
+    open_settings: Callback<()>,
+    configure_label: &'static str,
+    palette: Palette,
+) -> Vec<View> {
+    if onboarding.is_empty() {
+        return vec![
+            Button::new()
+                .height(32.0)
+                .resource_overrides(primary_button_resources())
+                .on_click(open_settings)
+                .content(configure_label),
+        ];
+    }
+    let mut rows = Vec::new();
+    for candidate in onboarding {
+        let button = match candidate.action {
+            OnboardingAction::OpenSettings => Button::new()
+                .height(30.0)
+                .on_click(open_settings.clone())
+                .content(candidate.label),
+            _ => {
+                let callback = onboarding_action.clone();
+                let action = candidate.action;
+                Button::new()
+                    .height(30.0)
+                    .resource_overrides(primary_button_resources())
+                    .on_click(move || {
+                        let _ = callback.call(action);
+                    })
+                    .content(candidate.label)
+            }
+        };
+        rows.push(
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(10.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .children((
+                    TextBlock::new()
+                        .text(candidate.detail)
+                        .font_size(12.0)
+                        .foreground(palette.muted)
+                        .vertical_alignment(VerticalAlignment::Center),
+                    button,
+                )),
+        );
+    }
+    rows.push(
+        Button::new()
+            .height(26.0)
+            .on_click(dismiss_onboarding)
+            .content("Not now"),
+    );
+    rows
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ai_assistant_workspace(
     palette: Palette,
@@ -719,6 +802,9 @@ pub(crate) fn ai_assistant_workspace(
     retry_preparation: Callback<()>,
     chat_pending: bool,
     cancel_chat: Callback<()>,
+    onboarding: &[OnboardingCandidate],
+    onboarding_action: Callback<OnboardingAction>,
+    dismiss_onboarding: Callback<()>,
 ) -> View {
     let conversation_active = visual_state.is_conversation() || !chat_messages.is_empty();
     let interaction_blocked = preparation.intent.is_some()
@@ -997,43 +1083,54 @@ pub(crate) fn ai_assistant_workspace(
         } else {
             "Open Settings"
         };
+        let mut rows: Vec<View> = vec![
+            icons::path(if ai_enabled {
+                FaIcon::CircleInfo
+            } else {
+                FaIcon::Gear
+            })
+            .width(30.0)
+            .height(30.0)
+            .into(),
+            TextBlock::new()
+                .text(if ai_enabled {
+                    "Connect an AI provider"
+                } else {
+                    "AI insights are turned off"
+                })
+                .font_size(18.0)
+                .font_weight(FontWeight::BOLD)
+                .into(),
+            TextBlock::new()
+                .text(if ai_enabled {
+                    "Choose a local, subscription, or API provider in Settings. Diagnostics remain on this PC until a cloud provider is used."
+                } else {
+                    "Enable them in Settings to use the assistant or create scan reports."
+                })
+                .font_size(12.5)
+                .foreground(palette.muted)
+                .text_wrapping(TextWrapping::Wrap)
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .max_width(520.0)
+                .into(),
+        ];
+        rows.extend(onboarding_rows(
+            onboarding,
+            onboarding_action,
+            dismiss_onboarding,
+            open_settings,
+            configure_label,
+            palette,
+        ));
         StackPanel::new()
             .horizontal_alignment(HorizontalAlignment::Center)
             .vertical_alignment(VerticalAlignment::Center)
             .spacing(9.0)
-            .children((
-                icons::path(if ai_enabled {
-                    FaIcon::CircleInfo
-                } else {
-                    FaIcon::Gear
-                })
-                .width(30.0)
-                .height(30.0),
-                TextBlock::new()
-                    .text(if ai_enabled {
-                        "Connect an AI provider"
-                    } else {
-                        "AI insights are turned off"
-                    })
-                    .font_size(18.0)
-                    .font_weight(FontWeight::BOLD),
-                TextBlock::new()
-                    .text(if ai_enabled {
-                        "Choose a local, subscription, or API provider in Settings. Diagnostics remain on this PC until a cloud provider is used."
-                    } else {
-                        "Enable them in Settings to use the assistant or create scan reports."
-                    })
-                    .font_size(12.5)
-                    .foreground(palette.muted)
-                    .text_wrapping(TextWrapping::Wrap)
-                    .horizontal_alignment(HorizontalAlignment::Center)
-                    .max_width(520.0),
-                Button::new()
-                    .height(32.0)
-                    .resource_overrides(primary_button_resources())
-                    .on_click(open_settings)
-                    .content(configure_label),
-            ))
+            .keyed_children(
+                rows.into_iter()
+                    .enumerate()
+                    .map(|(index, view)| KeyedView::new(index, view)),
+            )
     } else {
         StackPanel::new()
             .horizontal_alignment(HorizontalAlignment::Center)

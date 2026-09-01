@@ -2,6 +2,7 @@
 
 #![deny(unsafe_code)]
 
+use crate::app::policy::OnboardingAction;
 use crate::app::state::{AiMode, ChatDisplayMessage, CloudFallbackConsent, FullScanConsent};
 use wfdiag_app::domain::ai_intent::PendingAiIntent;
 use wfdiag_native_ai_chat::ProviderUse;
@@ -76,6 +77,10 @@ pub(crate) enum AiMsg {
     RetryPendingIntent,
     /// Jump to the report tab and generate it for the latest scan.
     ExplainLatestScan,
+    /// #32: act on one proposal of the one-time connect offer.
+    OnboardingAction(OnboardingAction),
+    /// #32: never show the connect offer again.
+    DismissOnboarding,
 }
 
 #[cfg(test)]

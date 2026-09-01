@@ -196,6 +196,89 @@ pub(crate) fn provider_selector_caption(
     ))
 }
 
+/// Whether the one-time "connect an AI provider" offer applies (#32): a
+/// profile that has never seen it, routes by Auto, and has configured
+/// nothing at all. Anything configured — a key, an endpoint, a CLI path —
+/// means the user already made a choice and must not be nudged.
+pub(crate) fn onboarding_probe_wanted(settings: &AppSettings) -> bool {
+    !settings.ai_onboarding_seen
+        && parse_provider_preference(&settings.preferred_ai_provider) == AIProviderPreference::Auto
+        && !settings.open_ai_api_key_set
+        && !settings.anthropic_api_key_set
+        && !settings.gemini_api_key_set
+        && !settings.deepseek_api_key_set
+        && settings.local_ai_endpoint.is_none()
+        && settings.ollama_endpoint.is_none()
+        && settings.ollama_model.is_none()
+        && settings.custom_endpoint.is_none()
+        && settings.custom_model.is_none()
+        && !settings.custom_api_key_set
+        && settings.codex_cli_path.is_none()
+        && settings.claude_cli_path.is_none()
+        && settings.phi_silica_laf_token.is_none()
+}
+
+/// What the offer's card can propose, derived purely from the probed
+/// provider rows. Detection never launches anything: `configured` for the
+/// subscription CLIs means the CLI is installed, `available` means it is
+/// signed in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OnboardingCandidate {
+    pub(crate) label: &'static str,
+    pub(crate) detail: &'static str,
+    pub(crate) action: OnboardingAction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OnboardingAction {
+    /// Run the vendor CLI's browser sign-in; the payload is the wire id.
+    SignIn(&'static str),
+    /// Continue in Settings (local servers need an endpoint or model).
+    OpenSettings,
+    /// Make on-device Phi the preference.
+    PreferPhi,
+}
+
+pub(crate) fn onboarding_candidates(
+    provider_status: Option<&AIProviderStatus>,
+) -> Vec<OnboardingCandidate> {
+    let Some(status) = provider_status else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for row in &status.providers {
+        match (row.id, row.configured, row.available) {
+            (AIProvider::CodexCli, true, false) => candidates.push(OnboardingCandidate {
+                label: "Sign in to ChatGPT",
+                detail: "Codex CLI detected",
+                action: OnboardingAction::SignIn("codex_cli"),
+            }),
+            (AIProvider::ClaudeCode, true, false) => candidates.push(OnboardingCandidate {
+                label: "Sign in to Claude",
+                detail: "Claude Code CLI detected",
+                action: OnboardingAction::SignIn("claude_code"),
+            }),
+            (AIProvider::PhiSilica, true, true) => candidates.push(OnboardingCandidate {
+                label: "Use on-device AI",
+                detail: "Phi Silica is ready on this PC",
+                action: OnboardingAction::PreferPhi,
+            }),
+            (AIProvider::Ollama, _, true) => candidates.push(OnboardingCandidate {
+                label: "Set up Ollama",
+                detail: "An Ollama server is running",
+                action: OnboardingAction::OpenSettings,
+            }),
+            (AIProvider::FoundryLocal, _, true) => candidates.push(OnboardingCandidate {
+                label: "Set up Foundry Local",
+                detail: "Foundry Local is running",
+                action: OnboardingAction::OpenSettings,
+            }),
+            _ => {}
+        }
+    }
+    candidates
+}
+
 fn provider_row_suffix(
     provider_status: Option<&AIProviderStatus>,
     provider_loading: bool,
@@ -1495,6 +1578,52 @@ pub(crate) mod tests {
         );
         assert_eq!(provider_selector_caption("openai", Some(&status)), None);
         assert_eq!(provider_selector_caption("auto", None), None);
+    }
+
+    #[test]
+    fn onboarding_candidates_propose_only_detected_and_unconnected_providers() {
+        let mut status = provider_status(AIProvider::None);
+        status.providers = vec![
+            selector_row(AIProvider::CodexCli, false, true),
+            selector_row(AIProvider::ClaudeCode, false, false),
+            selector_row(AIProvider::PhiSilica, true, true),
+            selector_row(AIProvider::Ollama, true, true),
+            selector_row(AIProvider::OpenAI, false, false),
+        ];
+
+        let candidates = onboarding_candidates(Some(&status));
+
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0].action, OnboardingAction::SignIn("codex_cli"));
+        assert_eq!(candidates[1].action, OnboardingAction::PreferPhi);
+        assert_eq!(candidates[2].action, OnboardingAction::OpenSettings);
+        // Without a probe there is nothing to offer but also nothing to say.
+        assert!(onboarding_candidates(None).is_empty());
+    }
+
+    #[test]
+    fn onboarding_probe_wanted_requires_fresh_auto_and_nothing_configured() {
+        let mut settings = AppSettings::default();
+        assert!(onboarding_probe_wanted(&settings));
+
+        settings.ai_onboarding_seen = true;
+        assert!(!onboarding_probe_wanted(&settings));
+        settings.ai_onboarding_seen = false;
+
+        settings.preferred_ai_provider = "openai".to_string();
+        assert!(!onboarding_probe_wanted(&settings));
+        settings.preferred_ai_provider = "auto".to_string();
+
+        settings.open_ai_api_key_set = true;
+        assert!(!onboarding_probe_wanted(&settings));
+        settings.open_ai_api_key_set = false;
+
+        settings.ollama_endpoint = Some("http://127.0.0.1:11434".to_string());
+        assert!(!onboarding_probe_wanted(&settings));
+        settings.ollama_endpoint = None;
+
+        settings.codex_cli_path = Some("codex".to_string());
+        assert!(!onboarding_probe_wanted(&settings));
     }
 
     #[test]

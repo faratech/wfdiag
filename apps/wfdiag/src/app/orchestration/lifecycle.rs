@@ -8,7 +8,8 @@ use crate::app::message::Message;
 use crate::app::native_msg::NativeMsg;
 use crate::app::policy::{
     MonitoringLifecycleAction, effective_window_theme, global_shortcut_is_allowed,
-    monitoring_lifecycle_action, window_hook_retry_delay, window_is_usable, window_theme_setting,
+    monitoring_lifecycle_action, onboarding_probe_wanted, window_hook_retry_delay,
+    window_is_usable, window_theme_setting,
 };
 use crate::app::state::{Page, PageTransition};
 use crate::app::tasks::{spawn_instance_watch, spawn_palette_focus_delay, spawn_window_hook_retry};
@@ -177,6 +178,16 @@ impl WfdiagShell {
         self.shell.window_hook_retry_failures = 0;
         // Producers may have queued data before the HWND became available.
         ui_wake::notify();
+        // #32: warm the provider probes once for a fresh, nothing-configured
+        // profile so the onboarding card on the AI page answers instantly.
+        // The AI page itself re-requests on every navigation; this only
+        // removes the first-visit "checking" wait.
+        if !self.shell.deterministic_visual
+            && onboarding_probe_wanted(&self.shell.settings)
+            && self.app.is_some()
+        {
+            let _ = self.dispatch(AppCommand::RequestProviderStatus);
+        }
     }
 
     pub(crate) fn apply_window_lifecycle(

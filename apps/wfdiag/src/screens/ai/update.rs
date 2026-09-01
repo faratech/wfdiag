@@ -2,13 +2,19 @@
 
 #![deny(unsafe_code)]
 
-use crate::app::policy::{provider_display_name, provider_from_wire, rejection_text};
+use crate::app::policy::{
+    OnboardingAction, provider_display_name, provider_from_wire, rejection_text,
+};
 use crate::app::screen::{Effect, ScreenCx};
 use crate::app::state::{AiMode, ChatDisplayMessage, ChatDisplayRole, FullScanConsent, Page};
 use crate::screens::ai::state::{AiMsg, AiScreen};
-use wfdiag_app::{AppCommand, AppEvent, ChatEvent, DispatchOutcome, ProviderEvent, ReportEvent};
+use wfdiag_app::{
+    AppCommand, AppEvent, ChatEvent, DispatchOutcome, ProviderEvent, ReportEvent,
+    SubscriptionOperation,
+};
 use wfdiag_native_ai_provider::AIProvider;
 use wfdiag_native_diagnostics::ScanKind;
+use wfdiag_native_settings::SettingsUpdate;
 
 /// How many rendered chat bubbles are kept.
 const MAX_CHAT_DISPLAY_MESSAGES: usize = 200;
@@ -56,7 +62,51 @@ impl AiScreen {
                 self.mode = AiMode::ScanReport;
                 self.begin_report_generation(false, cx);
             }
+            AiMsg::OnboardingAction(action) => self.onboarding_action(action, cx),
+            AiMsg::DismissOnboarding => {
+                match cx.dispatch(AppCommand::UpdateSetting(SettingsUpdate::AiOnboardingSeen(
+                    true,
+                ))) {
+                    DispatchOutcome::Rejected(reason) => cx.status(rejection_text(&reason)),
+                    _ => cx.status("You can connect a provider anytime in Settings"),
+                }
+            }
         }
+    }
+
+    /// #32: one proposal of the one-time connect offer. Signing in routes
+    /// through the vendor CLI's own browser flow; preferring Phi just sets
+    /// the preference. Both mark the offer seen so it never nags again.
+    fn onboarding_action(&mut self, action: OnboardingAction, cx: &mut ScreenCx<'_>) {
+        if cx.shell.deterministic_visual {
+            return;
+        }
+        let outcome = match action {
+            // `OpenSettings` never reaches the update path: the view routes
+            // that proposal straight to the existing open-settings callback.
+            OnboardingAction::OpenSettings => return,
+            OnboardingAction::SignIn(wire) => cx.dispatch(AppCommand::SubscriptionAuth {
+                provider: wire.to_string(),
+                operation: SubscriptionOperation::SignIn,
+            }),
+            OnboardingAction::PreferPhi => cx.dispatch(AppCommand::SetProviderPreference {
+                preference: "phi_silica".to_string(),
+            }),
+        };
+        match outcome {
+            DispatchOutcome::Accepted { .. } => match action {
+                OnboardingAction::SignIn(_) => {
+                    cx.status("Complete the sign-in in the browser window the vendor CLI opened");
+                }
+                OnboardingAction::PreferPhi => cx.status("AI will use the on-device model"),
+                OnboardingAction::OpenSettings => {}
+            },
+            DispatchOutcome::Rejected(reason) => cx.status(rejection_text(&reason)),
+            DispatchOutcome::Ignored { .. } => {}
+        }
+        let _ = cx.dispatch(AppCommand::UpdateSetting(SettingsUpdate::AiOnboardingSeen(
+            true,
+        )));
     }
 
     pub(crate) fn begin_chat_send(&mut self, prompt: String, cx: &mut ScreenCx<'_>) {
