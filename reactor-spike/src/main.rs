@@ -12412,11 +12412,17 @@ impl Component for WfdiagSpike {
                 match command {
                     window_support::TRAY_COMMAND_SHOW => {
                         match instance_support::main_window_hwnd() {
-                            Some(window) if window_support::is_visible(window) => {
-                                window_support::hide(window);
-                            }
                             Some(window) => {
-                                window_support::restore(window);
+                                // Honor the intent captured when the user
+                                // opened the menu (or left-clicked), not
+                                // live visibility at drain time.
+                                if window_support::take_tray_menu_intent()
+                                    == window_support::TRAY_MENU_INTENT_HIDE
+                                {
+                                    window_support::hide(window);
+                                } else {
+                                    window_support::restore(window);
+                                }
                             }
                             None => instance_support::activate_main_window(),
                         }
@@ -18707,6 +18713,7 @@ fn process_header_258(
         ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_header_cell_258(
     palette: Palette,
     narrow: bool,

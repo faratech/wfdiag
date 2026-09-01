@@ -659,7 +659,7 @@ pub async fn run_chat_turn(
     let mut forced_final = false;
     let mut staged_remediation = false;
     let mut requested_full_scan = false;
-    let mut deadline =
+    let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(TURN_TIMEOUT_SECS);
 
     let done =

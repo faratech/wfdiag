@@ -15,15 +15,17 @@ pub fn show_scan_complete_toast(collected: usize, errors: usize) -> Result<(), S
     use windows::UI::Notifications::{
         ToastNotification, ToastNotificationManager, ToastTemplateType,
     };
-    use windows::Win32::System::Com::{
-        COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
-    };
+    use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
     use windows::core::HSTRING;
 
     const AUMID: &str = "32827MikeFara.WindowsForumDiagnostics_t6j5qexy2jpp2!App";
 
-    // WinRT activation needs an apartment; this runs on a detached worker.
-    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    // WinRT activation needs an apartment, and this runs on a detached worker
+    // that never pumps messages — an STA without a pump is the wrong
+    // apartment and can stall activation. The MTA has no such requirement and
+    // fits these fire-and-forget calls; an in-place RPC_E_CHANGED_MODE leaves
+    // the existing apartment alone (`should_uninit` stays false).
+    let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let should_uninit = hr.is_ok();
 
     let result = (|| {
@@ -38,9 +40,13 @@ pub fn show_scan_complete_toast(collected: usize, errors: usize) -> Result<(), S
             .SetInnerText(&HSTRING::from("Diagnostics complete"))
             .map_err(|e| format!("Could not build the notification: {e}"))?;
         let body: HSTRING = if errors > 0 {
-            HSTRING::from(format!("{collected} diagnostics collected, {errors} errors"))
+            HSTRING::from(format!(
+                "{collected} diagnostics collected, {errors} errors"
+            ))
         } else {
-            HSTRING::from(format!("{collected} diagnostics collected with no collection errors"))
+            HSTRING::from(format!(
+                "{collected} diagnostics collected with no collection errors"
+            ))
         };
         text_nodes
             .Item(1)
