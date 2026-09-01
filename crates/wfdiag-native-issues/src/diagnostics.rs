@@ -74,7 +74,7 @@ pub struct DiagnosticTask {
 /// shipping catalog without maintaining a second list of task identifiers.
 #[cfg(test)]
 pub(crate) fn get_all_tasks() -> Vec<DiagnosticTask> {
-    include_str!("../../../src-tauri/src/diagnostics.rs")
+    include_str!("../../wfdiag-native-diagnostics/src/catalog.rs")
         .lines()
         .filter_map(|line| {
             line.trim()

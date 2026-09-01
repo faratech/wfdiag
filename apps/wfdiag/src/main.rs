@@ -1,14 +1,13 @@
 #![windows_subsystem = "windows"]
 
-mod action_support;
 mod analysis_support;
 mod chat_support;
 mod export_support;
 mod fix_plan_support;
+mod fixtures;
 mod focus_support;
 mod icons;
 mod instance_support;
-mod issue_support;
 mod markdown_render;
 mod notification_support;
 mod provider_setup_support;
@@ -23,12 +22,6 @@ mod window_support;
 #[allow(dead_code, non_snake_case, non_upper_case_globals)]
 mod winui_focus_bindings;
 
-use action_support::{
-    ActionApproval, ActionItemRun, ActionItemStatus, ActionPrepareInput, ActionProposal,
-    ActionRequest, ActionRunEvent, ActionRunStatus, ActionRunSummary, ActionSnapshot,
-    ActionWorkerEvent, ApprovalScope, DetectedIssueRemediation, NativeActionRuntime,
-    current_action_catalog_fingerprint,
-};
 use analysis_support::{
     AnalysisRoute, AnalysisWorkerEvent, DiagnosticAnalysisGeneration, GroundingTrace,
     GroundingTraceSource, IssuePrioritizationGeneration, NativeAnalysisRuntime,
@@ -46,12 +39,6 @@ use fix_plan_support::{
     initial_fix_plan_route,
 };
 use icons::FaIcon;
-use issue_support::{
-    PendingIssueDetection, PreparedIssueDetection, advance_nonzero_generation,
-    canonical_issue_metadata_snapshot, fixture_258_issues, issue_projection_matches_evidence,
-    pending_issue_preparation_is_current, prepare_issue_detection, project_issues,
-    take_current_issue_completion,
-};
 use markdown_render::{MarkdownStyle, render_markdown_lite};
 use provider_setup_support::{ModelCatalog, ProviderSetupRuntime, ProviderSetupWorkerEvent};
 use report_support::{NativeReportRuntime, ReportGeneration, ReportScan, ReportWorkerEvent};
@@ -96,6 +83,12 @@ use wfdiag_native_history::{
     HistoryRuntimeConfig, NativeHistoryRuntime, ScanRecord, ScanStorage, ScanSummary,
     TaskChangeSummary, TaskDiffDetail, TaskTrend, Timestamp,
 };
+use wfdiag_native_issues::projection::{
+    PendingIssueDetection, PreparedIssueDetection, advance_nonzero_generation,
+    canonical_issue_metadata_snapshot, issue_projection_matches_evidence,
+    pending_issue_preparation_is_current, prepare_issue_detection, project_issues,
+    take_current_issue_completion,
+};
 use wfdiag_native_issues::{
     Issue, IssueDetectionCompleted, IssueRuntime, IssueSeverity, RemediationSummary,
     RemediationTier, Timestamp as IssueTimestamp,
@@ -114,7 +107,15 @@ use wfdiag_native_projection::render::{
     MONITOR_GRAPH_HEIGHT, MONITOR_GRAPH_PATH_COUNT, MONITOR_GRAPH_WIDTH, fixed_process_slots,
     monitor_graph_geometry,
 };
+use wfdiag_native_remediation::broker::{
+    ActionApproval, ActionPrepareInput, ActionProposal, ActionRequest, ActionSnapshot,
+    ApprovalScope, DetectedIssueRemediation, MAX_BATCH_ACTIONS, current_action_catalog_fingerprint,
+};
 use wfdiag_native_remediation::remediation;
+use wfdiag_native_remediation::runtime::{
+    ActionItemRun, ActionItemStatus, ActionRunEvent, ActionRunStatus, ActionRunSummary,
+    ActionWorkerEvent, NativeActionRuntime,
+};
 #[cfg(feature = "settings-test-path")]
 use wfdiag_native_settings::{
     AllowAllSettings, ShippingSettingsStorage, WindowsDpapiCredentialStorage,
@@ -10077,7 +10078,7 @@ impl Component for WfdiagSpike {
         let has_fixture_scan = !diagnostic_results.is_empty();
         let issue_metadata = canonical_issue_metadata_snapshot();
         let issues = if deterministic_visual && has_fixture_scan {
-            fixture_258_issues()
+            fixtures::fixture_258_issues()
         } else {
             Vec::new()
         };
@@ -10315,7 +10316,7 @@ impl Component for WfdiagSpike {
         {
             (None, None, None, None, None, None, Vec::new(), None)
         } else {
-            match NativeActionRuntime::start() {
+            match NativeActionRuntime::start(Some(Arc::new(ui_wake_support::notify))) {
                 Ok((runtime, receiver)) => {
                     let (run_events, snapshot) = runtime.subscribe_run_events();
                     let receiver = Arc::new(Mutex::new(receiver));
@@ -21263,7 +21264,7 @@ fn remediation_step_label(status: remediation::RemediationStepStatus) -> &'stati
     }
 }
 
-fn action_item_run_view(palette: Palette, action: &action_support::ActionItemRun) -> View {
+fn action_item_run_view(palette: Palette, action: &ActionItemRun) -> View {
     let mut details = Vec::new();
     if let Some(result) = action.result.as_ref() {
         details.push(KeyedView::new(
@@ -21870,7 +21871,7 @@ fn fix_plan_panel(
                 }
             })
         })
-        .take(action_support::MAX_BATCH_ACTIONS)
+        .take(MAX_BATCH_ACTIONS)
         .collect::<Vec<_>>();
     let batch_button: View = if batch_actions.len() > 1 {
         let review = review_actions.clone();
@@ -25784,7 +25785,7 @@ mod diagnostic_selection_tests {
         ActionProposal {
             proposal_id: format!("proposal-{remediation_id}"),
             approval_scope,
-            actions: vec![action_support::ActionPreview {
+            actions: vec![wfdiag_native_remediation::broker::ActionPreview {
                 remediation: spec.summary(),
                 issue_id: issue_id.map(str::to_string),
                 steps: spec.preview_steps(),

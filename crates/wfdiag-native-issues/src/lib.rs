@@ -12,6 +12,7 @@ mod fix_plan;
 pub mod issue_catalog;
 #[allow(clippy::all, clippy::pedantic)]
 pub mod issue_detector;
+pub mod projection;
 mod remediation;
 mod runtime;
 /// UTC timestamps, re-exported from `wfdiag-native-core` where the
