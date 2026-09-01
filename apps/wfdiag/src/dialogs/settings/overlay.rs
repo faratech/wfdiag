@@ -73,6 +73,8 @@ impl SettingsDialog {
                 env.visual_state == VisualState::SettingsBottom,
                 &self.draft,
                 &settings_phi_gate,
+                provider_status,
+                status_loading,
                 env.deterministic_visual,
                 self.provider_setup_index,
                 self.provider_catalogs.get(self.provider_setup_index),

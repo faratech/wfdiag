@@ -3,13 +3,13 @@
 #![deny(unsafe_code)]
 
 use crate::app::consts::{
-    AI_PROVIDER_IDS, AI_PROVIDER_LABELS, PROVIDER_KEY_LABELS, PROVIDER_SETUP_LABELS,
-    QUICK_SCAN_TASK_IDS, SETTINGS_MAX_CONCURRENT_TASKS,
+    AI_PROVIDER_IDS, PROVIDER_KEY_LABELS, PROVIDER_SETUP_LABELS, QUICK_SCAN_TASK_IDS,
+    SETTINGS_MAX_CONCURRENT_TASKS,
 };
 use crate::app::policy::{
-    PhiPreferenceGate, codex_model_options, provider_setup_model, provider_setup_provider,
-    selected_setting_index, subscription_auth_provider_for_setup,
-    subscription_install_progress_label,
+    PhiPreferenceGate, codex_model_options, provider_selector_caption, provider_selector_labels,
+    provider_setup_model, provider_setup_provider, selected_setting_index,
+    subscription_auth_provider_for_setup, subscription_install_progress_label,
 };
 use crate::screens::ai::view::primary_button_resources;
 use crate::widgets::badges::status_pill;
@@ -23,6 +23,7 @@ use wfdiag_native_ai_chat::workers::subscription_auth::SubscriptionAuthState;
 use wfdiag_native_ai_chat::workers::subscription_install::SubscriptionInstallProgress;
 use wfdiag_native_ai_chat::{SubscriptionAuthOperation, SubscriptionAuthProvider};
 use wfdiag_native_ai_provider::AIProvider;
+use wfdiag_native_ai_provider::AIProviderStatus;
 use wfdiag_native_diagnostics::DiagnosticTask;
 use wfdiag_native_settings::{AppSettings, CloudFallbackPolicy, ProviderKeyId};
 use windows_reactor::*;
@@ -34,6 +35,8 @@ pub(crate) fn settings_dialog(
     bottom: bool,
     settings: &AppSettings,
     phi_preference_gate: &PhiPreferenceGate,
+    provider_status: Option<&AIProviderStatus>,
+    provider_status_loading: bool,
     provider_setup_partial: bool,
     provider_setup_index: usize,
     provider_catalog_state: Option<&ProviderCatalogUiState>,
@@ -215,6 +218,8 @@ pub(crate) fn settings_dialog(
                                     bottom,
                                     settings,
                                     phi_preference_gate,
+                                    provider_status,
+                                    provider_status_loading,
                                     provider_setup_partial,
                                     provider_setup_index,
                                     provider_catalog_state,
@@ -1003,12 +1008,30 @@ pub(crate) fn settings_phi_preference_status(palette: Palette, gate: &PhiPrefere
         )
 }
 
+fn settings_provider_selector_caption(palette: Palette, caption: Option<String>) -> View {
+    let Some(text) = caption else {
+        return View::empty();
+    };
+    Border::new()
+        .padding(Thickness::new(0.0, 0.0, 0.0, 8.0))
+        .automation_name("AI provider status")
+        .content(
+            TextBlock::new()
+                .text(text)
+                .font_size(11.5)
+                .foreground(palette.muted)
+                .text_wrapping(TextWrapping::Wrap),
+        )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn settings_content(
     theme: WindowTheme,
     bottom: bool,
     settings: &AppSettings,
     phi_preference_gate: &PhiPreferenceGate,
+    provider_status: Option<&AIProviderStatus>,
+    provider_status_loading: bool,
     provider_setup_partial: bool,
     provider_setup_index: usize,
     provider_catalog_state: Option<&ProviderCatalogUiState>,
@@ -1086,12 +1109,13 @@ pub(crate) fn settings_content(
     let export_format_index =
         selected_setting_index(&settings.export_format, &["text", "json", "html"]);
     let provider_index = selected_setting_index(&settings.preferred_ai_provider, &AI_PROVIDER_IDS);
-    let mut provider_labels = AI_PROVIDER_LABELS.map(str::to_string);
-    match phi_preference_gate {
-        PhiPreferenceGate::Checking => provider_labels[1].push_str(" — checking"),
-        PhiPreferenceGate::Blocked(_) => provider_labels[1].push_str(" — unavailable"),
-        PhiPreferenceGate::Ready => {}
-    }
+    let provider_labels = provider_selector_labels(
+        phi_preference_gate,
+        provider_status,
+        provider_status_loading,
+    );
+    let provider_caption =
+        provider_selector_caption(&settings.preferred_ai_provider, provider_status);
     let cloud_fallback_index = Some(match settings.cloud_fallback_policy {
         CloudFallbackPolicy::Ask => 0,
         CloudFallbackPolicy::Allow => 1,
@@ -1141,6 +1165,7 @@ pub(crate) fn settings_content(
                         59.0,
                     ),
                     settings_phi_preference_status(palette, phi_preference_gate),
+                    settings_provider_selector_caption(palette, provider_caption),
                 )),
                 settings_row(
                     palette,

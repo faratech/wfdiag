@@ -6,10 +6,10 @@
 #![deny(unsafe_code)]
 
 use crate::app::consts::{
-    AI_WORKSPACE_MIN_HEIGHT, AI_WORKSPACE_VERTICAL_CHROME, CODEX_MODEL_IDS,
-    DIAGNOSTICS_COMPACT_BREAKPOINT, PROCESS_DETAILS_COLUMN_WIDTH, PROCESS_WIDE_CONTENT_MIN_WIDTH,
-    PROVIDER_SETUP_PROVIDERS, SHELL_CONTENT_HORIZONTAL_CHROME, WINDOW_HOOK_RETRY_MAX,
-    WINDOW_HOOK_RETRY_MIN,
+    AI_PROVIDER_IDS, AI_PROVIDER_LABELS, AI_WORKSPACE_MIN_HEIGHT, AI_WORKSPACE_VERTICAL_CHROME,
+    CODEX_MODEL_IDS, DIAGNOSTICS_COMPACT_BREAKPOINT, PROCESS_DETAILS_COLUMN_WIDTH,
+    PROCESS_WIDE_CONTENT_MIN_WIDTH, PROVIDER_SETUP_PROVIDERS, SHELL_CONTENT_HORIZONTAL_CHROME,
+    WINDOW_HOOK_RETRY_MAX, WINDOW_HOOK_RETRY_MIN,
 };
 use crate::app::message::HistoryChangeKind;
 use crate::app::state::{HistoryTrendBadge, Page};
@@ -22,9 +22,10 @@ use wfdiag_native_ai_chat::workers::subscription_install::{
 };
 use wfdiag_native_ai_provider::{
     AIProvider, AIProviderPreference, AIProviderStatus, FoundryCliEndpointSource,
-    PackageIdentitySource, ProcessSubscriptionCliStatusSource, ProviderManagementBackend,
-    ProviderManagementService, ProviderModelDefaults, ProviderProbeBundle, ProviderSelectionState,
-    SettingsServiceProviderConfigurationSource, SharedAiCache, parse_provider_preference,
+    PackageIdentitySource, ProcessSubscriptionCliStatusSource, ProviderInfo,
+    ProviderManagementBackend, ProviderManagementService, ProviderModelDefaults,
+    ProviderProbeBundle, ProviderSelectionState, SettingsServiceProviderConfigurationSource,
+    SharedAiCache, parse_provider_preference,
 };
 use wfdiag_native_diagnostics::ScanKind;
 use wfdiag_native_export::ReportFormat;
@@ -140,6 +141,92 @@ pub(crate) fn phi_preference_gate(
                 "Phi Silica is unavailable or not ready on this PC.".to_string()
             }),
         )
+    }
+}
+
+/// Per-option suffixes for the Settings provider selector (#25): what each
+/// choice is worth right now. The Phi gate wins for the on-device row — it
+/// knows about package identity, which a probe cannot see — and every other
+/// row reads its `ProviderInfo`. `Auto` names the provider the router would
+/// pick at the moment the status was taken. With no status at all the labels
+/// stay plain unless a refresh is in flight.
+pub(crate) fn provider_selector_labels(
+    gate: &PhiPreferenceGate,
+    provider_status: Option<&AIProviderStatus>,
+    provider_loading: bool,
+) -> [String; AI_PROVIDER_IDS.len()] {
+    let mut labels = AI_PROVIDER_LABELS.map(str::to_string);
+    for (label, id) in labels.iter_mut().zip(AI_PROVIDER_IDS) {
+        let suffix = match id {
+            "auto" => match provider_status {
+                Some(status) => format!(" — uses {}", status.active_provider),
+                None if provider_loading => " — checking…".to_string(),
+                None => String::new(),
+            },
+            "phi_silica" => match gate {
+                PhiPreferenceGate::Checking => " — checking".to_string(),
+                PhiPreferenceGate::Blocked(_) => " — unavailable".to_string(),
+                PhiPreferenceGate::Ready => {
+                    provider_row_suffix(provider_status, provider_loading, id)
+                }
+            },
+            _ => provider_row_suffix(provider_status, provider_loading, id),
+        };
+        label.push_str(&suffix);
+    }
+    labels
+}
+
+/// One caption line for the selector: with Auto selected it names the
+/// provider the routing currently resolves to. `None` keeps the layout as
+/// it ships today.
+pub(crate) fn provider_selector_caption(
+    preference: &str,
+    provider_status: Option<&AIProviderStatus>,
+) -> Option<String> {
+    if preference != "auto" {
+        return None;
+    }
+    let status = provider_status?;
+    let active = status.active_provider.to_string();
+    let index = AI_PROVIDER_IDS.iter().position(|id| *id == active)?;
+    Some(format!(
+        "Auto currently resolves to {}.",
+        AI_PROVIDER_LABELS[index]
+    ))
+}
+
+fn provider_row_suffix(
+    provider_status: Option<&AIProviderStatus>,
+    provider_loading: bool,
+    id: &str,
+) -> String {
+    let Some(row): Option<&ProviderInfo> = provider_status
+        .and_then(|status| status.providers.iter().find(|row| row.id.to_string() == id))
+    else {
+        // A legacy or missing row set says nothing once settled; while a
+        // refresh is in flight it says so rather than looking stale.
+        if provider_loading {
+            return " — checking…".to_string();
+        }
+        return String::new();
+    };
+    if row.available {
+        return " ✓".to_string();
+    }
+    match id {
+        // Subscription CLIs: configured means installed, available means
+        // signed in.
+        "codex_cli" | "claude_code" if row.configured => " — signed out".to_string(),
+        "codex_cli" | "claude_code" => " — not installed".to_string(),
+        // Ollama's `configured` is always true; reachability is the fact.
+        _ => {
+            if row.configured {
+                " — not reachable".to_string()
+            } else {
+                " — not set up".to_string()
+            }
+        }
     }
 }
 
@@ -1335,6 +1422,79 @@ pub(crate) mod tests {
         let ready_gate = phi_preference_gate(Some(&ready), false);
         assert_eq!(ready_gate, PhiPreferenceGate::Ready);
         assert!(validate_phi_preference("phi_silica", &ready_gate).is_ok());
+    }
+
+    fn selector_row(id: AIProvider, available: bool, configured: bool) -> ProviderInfo {
+        ProviderInfo {
+            id,
+            available,
+            configured,
+            model: None,
+            endpoint: None,
+            supports_tools: false,
+            supports_streaming: false,
+        }
+    }
+
+    #[test]
+    fn provider_selector_labels_report_each_providers_state() {
+        let mut status = provider_status(AIProvider::Ollama);
+        status.providers = vec![
+            selector_row(AIProvider::PhiSilica, true, true),
+            selector_row(AIProvider::FoundryLocal, true, true),
+            selector_row(AIProvider::Ollama, true, true),
+            selector_row(AIProvider::CodexCli, false, true),
+            selector_row(AIProvider::ClaudeCode, false, false),
+            selector_row(AIProvider::OpenAI, false, true),
+            selector_row(AIProvider::Anthropic, false, false),
+        ];
+
+        let labels = provider_selector_labels(&PhiPreferenceGate::Ready, Some(&status), false);
+
+        assert_eq!(labels[0], "Auto — uses ollama");
+        assert_eq!(labels[1], "Phi Silica (on-device) ✓");
+        assert_eq!(labels[3], "Ollama (local server) ✓");
+        assert_eq!(
+            labels[5],
+            "ChatGPT via Codex CLI (subscription) — signed out"
+        );
+        assert_eq!(
+            labels[6],
+            "Claude via Claude Code CLI (subscription) — not installed"
+        );
+        assert_eq!(labels[7], "OpenAI (cloud) — not reachable");
+        assert_eq!(labels[8], "Anthropic Claude (cloud) — not set up");
+        // Rows the status did not include say nothing rather than inventing state.
+        assert_eq!(labels[9], "Google Gemini (cloud)");
+    }
+
+    #[test]
+    fn provider_selector_labels_without_status_stay_plain_or_checking() {
+        let checking = provider_selector_labels(&PhiPreferenceGate::Checking, None, true);
+        assert!(checking[0].ends_with("— checking…"));
+        assert!(
+            checking
+                .iter()
+                .skip(1)
+                .all(|label| label.ends_with("checking") || label.ends_with("checking…"))
+        );
+
+        let plain = provider_selector_labels(&PhiPreferenceGate::Ready, None, false);
+        for (label, base) in plain.iter().zip(AI_PROVIDER_LABELS) {
+            assert_eq!(label, base);
+        }
+    }
+
+    #[test]
+    fn provider_selector_caption_names_the_auto_resolution_only_for_auto() {
+        let status = provider_status(AIProvider::PhiSilica);
+
+        assert_eq!(
+            provider_selector_caption("auto", Some(&status)),
+            Some("Auto currently resolves to Phi Silica (on-device).".to_string())
+        );
+        assert_eq!(provider_selector_caption("openai", Some(&status)), None);
+        assert_eq!(provider_selector_caption("auto", None), None);
     }
 
     #[test]
