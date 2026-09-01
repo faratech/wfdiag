@@ -32,7 +32,7 @@ def validate_reactor_version_source() -> None:
         "Reactor build version source",
     )
     display_environment = extract(
-        "apps/wfdiag/src/main.rs",
+        "apps/wfdiag/src/app/consts.rs",
         r'const\s+APP_VERSION:\s*&str\s*=\s*env!\("([^"]+)"\)',
         "Reactor UI version source",
     )

@@ -1,43 +1,67 @@
-# WFDiag native Windows Reactor prototype
+# WFDiag native WinUI 3 shell (`wfdiag.exe`)
 
-This directory is a non-shipping, pure-native WinUI 3 rewrite prototype. Its shell and all six
-screens are assembled manually from Windows Reactor controls; it does not host WebView2, load the
-React application, execute JavaScript, or use a web/native UI bridge. It deliberately does not
-replace or become a dependency of the shipping Tauri UI. The existing Rust backend now depends on
-the separate framework-neutral `wfdiag-ui-core` event contract and exposes a native monitor sink so
-both shells can share backend events during migration.
+This crate is **the shipping WFDiag application** as of the owner's 2026-09-01 cutover
+decision (`docs/REACTOR_MIGRATION.md#cutover-decision-2026-09-01`). It is a pure-native
+WinUI 3 shell built on `windows-reactor`: its chrome and all six screens are assembled
+manually from native controls. It does not host WebView2, load the React application,
+execute JavaScript, or use a web/native UI bridge. The Tauri + React shell (`src-tauri`,
+`src/`) is kept buildable as a rollback until a later cleanup release.
 
-`scripts/check-reactor-readiness.py` enforces that boundary by scanning this crate's direct Cargo
-dependencies and `src` tree. A WebView/browser-host dependency, WebView API marker, or web frontend
-asset is a cutover blocker rather than an alternate route to parity.
+`scripts/check-reactor-readiness.py` enforces that boundary by scanning this crate's direct
+Cargo dependencies and `src` tree. A WebView/browser-host dependency, a WebView API marker,
+or a web frontend asset is a blocker, not an alternate route to parity.
 
-All six screens support deterministic fixture modes for visual comparison; the normal candidate
-also wires live framework-neutral backend workers:
+## What lives here (and what does not)
 
-- Diagnostics
-- Live Monitor
-- Processes
-- AI Analysis
-- Issues
-- History
+This crate contains **no engine logic**. Everything testable without a window lives in the
+workspace crates under `crates/`; the shell depends on those, on `windows`, and on
+`windows-reactor` — nothing else. `main.rs` is a thin entry point: panic hook, version
+probe, single-instance decision, `App::run_component::<WfdiagShell>`.
 
-The prototype embeds the current WFDiag badge and AI avatar from `public/wf-ds`. WinUI/Reactor does
-not expose the CSS-style per-element backdrop blur used by the shipping UI at the pinned revision,
-so `assets/bg-24H4-*-native-blurred.webp` are deterministic, pre-blurred derivatives of the two
-canonical WF wallpapers. They retain the source artwork while approximating the existing acrylic
-depth with native image, tint, border, and Acrylic window layers.
+| Module | Contents |
+| --- | --- |
+| `app/` | the root Reactor `Component`: `mod.rs` (state + `Component` impl), `state.rs`, `message.rs`, `consts.rs`, `policy.rs` (pure decisions), `tasks.rs` (background helpers), `orchestration/` (`actions`, `analysis`, `chat`, `export`, `history`, `issues`, `lifecycle`, `providers`, `report`, `scan`, `settings`, `subscriptions`, `update`) |
+| `screens/` | `diagnostics`, `monitor`, `processes`, `ai`, `issues`, `history` — each a `view.rs` |
+| `dialogs/` | `about`, `action_review`, `palette`, `settings` |
+| `widgets/` | `badges`, `cards`, `chrome`, `icons`, `markdown_render`, `palette_colors`, `table` |
+| `platform/` | every Win32/WinRT/WinUI edge: `window` (subclass, revisioned lifecycle snapshots, keyboard hook), `instance`, `notifications`, `save_picker`, `external`, `focus`, `winui_focus_bindings`, `ui_wake`, `crash` |
+| `ai/` | `chat_tools` (this shell's tool backend) and `report` (Phi-aware resolvers) over the shared AI runtimes |
+| `fixtures/` | deterministic visual fixtures and the environment knobs (`knobs.rs`), gated behind the `validation` feature. Nothing here runs in a production build |
 
-The dependency is pinned to Microsoft `windows-rs` revision
-`1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8` because the documented Reactor 0.100 API is not yet a
-usable crates.io release. As checked with `cargo search` on 2026-08-31, both `windows-reactor` and
-`windows-reactor-setup` still publish only the placeholder `0.0.0` version even though the reviewed
-source declares `0.100.0`; the official-release cutover gate therefore remains blocked.
+Backend events enter through `Message::Backend`, so `wfdiag_ui_core::UiEvent` is the typed
+shell boundary. State and callbacks are owned by the Reactor `Component`; there is no DOM and
+no IPC bridge between the controls and the component.
+
+The shell embeds the current WFDiag badge and AI avatar from `public/wf-ds`. WinUI/Reactor
+does not expose the CSS-style per-element backdrop blur used by the previous UI at the pinned
+revision, so `assets/bg-24H4-*-native-blurred.webp` are deterministic, pre-blurred derivatives
+of the two canonical WF wallpapers, combined with native image, tint, border, and Acrylic
+layers.
+
+## Cargo features
+
+| Feature | Purpose |
+| --- | --- |
+| *(default)* | **Framework-dependent.** `build.rs` stages only the matching `Microsoft.WindowsAppRuntime.Bootstrap.dll` beside the executable; the machine must have Windows App Runtime 2.4 installed. This is what the Store package ships. |
+| `self-contained` | Stages the complete Windows App Runtime beside the executable for direct-installer (MSI/NSIS/portable) validation. **Native Windows Cargo only** — see below. |
+| `settings-test-path` | Enables the exact-path settings store used by integration validation. Never enable it for a Store or direct-installer production artifact. |
+| `validation` | Superset of `settings-test-path`. Also compiles in `src/fixtures/knobs.rs` — every environment knob (`WFDIAG_REACTOR_*`, `WFDIAG_NO_*`) and the `--wfdiag-version-probe` entry point. Without it the shell performs **no** environment reads at all and every knob is a compile-time production default (#186, #212). Never enable it for a production artifact. |
+
+## Dependency pin
+
+`windows-reactor`, `windows-reactor-setup`, and `windows-core` are pinned to Microsoft
+`windows-rs` revision `1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8` (Reactor 0.100.0 source),
+because crates.io still publishes only the placeholder `0.0.0` for both Reactor crates. The
+pin is a **revision, never a branch**. Moving it means updating both Cargo dependencies,
+`reactor-baselines/manifest.json` (`reactor_pin`), and `scripts/build-reactor-msix-probe.py`
+together in one reviewed change. `scripts/check-external-gates.py` watches crates.io so the
+eventual move to an official release happens as an ordinary dependency update.
 
 ## Check from WSL
 
-Use separate target directories for the two deployment modes. Reactor stages runtime files beside
-the executable, so sharing one target directory could leave stale self-contained DLLs in a later
-framework-dependent build.
+Use separate target directories for the two deployment modes. Reactor stages runtime files
+beside the executable, so sharing one target directory could leave stale self-contained DLLs
+in a later framework-dependent build.
 
 Framework-dependent (default):
 
@@ -51,46 +75,69 @@ PATH=/usr/lib/llvm-20/bin:$PATH \
   cargo xwin check --target x86_64-pc-windows-msvc
 ```
 
-Do not select `self-contained` from WSL. At the pinned Reactor revision, the setup helper downloads
-and extracts packages through `%SystemRoot%\System32\curl.exe` and `tar.exe`, which are available
-only when the build script runs under Windows. `build.rs` rejects that cross-host combination so a
-bare `.exe` cannot be mistaken for a distributable self-contained candidate. Use native Windows
-Cargo for the direct-installer artifact check below.
+Workspace-wide lint from the same host:
+
+```bash
+PATH=/usr/lib/llvm-20/bin:$PATH cargo xwin clippy --workspace \
+  --target x86_64-pc-windows-msvc -- -D warnings
+```
+
+Do not select `self-contained` from WSL. At the pinned Reactor revision, the setup helper
+downloads and extracts packages through `%SystemRoot%\System32\curl.exe` and `tar.exe`,
+which are available only when the build script runs under Windows. `build.rs` rejects that
+cross-host combination so a bare `.exe` cannot be mistaken for a distributable self-contained
+candidate.
 
 ## Run on Windows
 
-By default, the build script selects Reactor's framework-dependent deployment and stages the
-matching Windows App Runtime bootstrap DLL next to the binary. The current Reactor revision expects
-Windows App Runtime 2.4 to be installed.
-
 ```powershell
-cargo run --target aarch64-pc-windows-msvc
+cargo run -p wfdiag --target aarch64-pc-windows-msvc
 ```
 
-For direct-installer validation, enable `self-contained`. Reactor stages the matching Windows App
-Runtime and its complete projection/runtime file set beside the executable, then embeds its
-self-contained manifest. The installer must carry that upstream-staged set, not just the `.exe`.
+For direct-installer validation, enable `self-contained`. Reactor stages the matching Windows
+App Runtime and its complete projection/runtime file set beside the executable, then embeds
+its self-contained manifest. The installer must carry that upstream-staged set, not just the
+`.exe`.
 
-The pinned setup helper otherwise reuses one extraction directory for every target architecture.
-`build.rs` scopes that cache by `CARGO_CFG_TARGET_ARCH` and checks the PE machine type of the staged
-Windows App Runtime and WinUI DLLs. A stale x64 extraction can therefore no longer be copied into an
-ARM64 artifact (or the reverse); the build fails before an invalid package can reach startup.
+The pinned setup helper otherwise reuses one extraction directory for every target
+architecture. `build.rs` scopes that cache by `CARGO_CFG_TARGET_ARCH` and checks the PE
+machine type of the staged Windows App Runtime and WinUI DLLs, so a stale x64 extraction can
+no longer be copied into an ARM64 artifact (or the reverse); the build fails before an invalid
+package can reach startup.
 
 ```powershell
 $env:CARGO_TARGET_DIR = "target/self-contained"
-cargo build --release --target aarch64-pc-windows-msvc --features self-contained
+cargo build --release -p wfdiag --target aarch64-pc-windows-msvc --features self-contained
 ```
 
 Run that packaging build with native Windows Cargo. `cargo xwin` remains valid for Linux-side
-compile and lint checks, but Reactor's pinned setup helper uses Windows `curl.exe`/`tar.exe` while
-staging the self-contained runtime. A cross-compiled `.exe` without the adjacent runtime is an
+compile and lint checks, but a cross-compiled `.exe` without the adjacent runtime is an
 incomplete candidate, and the startup gate below intentionally rejects it before launch.
 
-Validate the complete `target/self-contained/aarch64-pc-windows-msvc/release` directory. It must
-contain the executable, `Microsoft.WindowsAppRuntime.dll`, `Microsoft.UI.Xaml.dll`, and the other
-Reactor-staged runtime files before it is handed to an MSI/NSIS packaging step.
+Validate the complete `target/self-contained/aarch64-pc-windows-msvc/release` directory. It
+must contain the executable, `Microsoft.WindowsAppRuntime.dll`, `Microsoft.UI.Xaml.dll`, and
+the other Reactor-staged runtime files before it is handed to an MSI/NSIS packaging step.
 
-Run the repeatable startup/Settings crash gate against that exact candidate directory:
+At the pinned setup revision, the helper stages `Microsoft.Web.WebView2.Core.dll` even for
+projects that do not create a WebView. `build.rs` removes that exact unused projection after
+staging, leaving 37 files in the tested candidate. The crate has no WebView2 dependency,
+control, browser UI, JavaScript bundle, or web/native bridge.
+
+Keep the `self-contained` path separate from the Store/MSIX workflow. It validates loose
+direct distribution and does not supply the registered package identity or `systemAIModels`
+capability required by the Store-only on-device AI path.
+
+## Validation
+
+The orchestrator runs every Windows suite and writes reports under `validation-reports/`:
+
+```powershell
+.\scripts\validate-reactor.ps1 -Suite all
+# or one lane:
+.\scripts\validate-reactor.ps1 -Suite startup|live-system|about|flows|visual|x64|readiness|gates
+```
+
+The startup/Settings crash gate, run against an exact candidate directory:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
@@ -99,100 +146,40 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -Iterations 3
 ```
 
-The gate verifies normal and direct-to-Settings startup, repeated Settings open/close through UI
-Automation, PE-machine alignment for the executable and critical staged runtime DLLs, local XAML
-runtime loading, and the absence of new Application Error/Windows Error Reporting events.
+It verifies normal and direct-to-Settings startup, repeated Settings open/close through UI
+Automation, PE-machine alignment for the executable and critical staged runtime DLLs, local
+XAML runtime loading, and the absence of new Application Error / Windows Error Reporting
+events. Every suite runs the executable's machine-readable version probe *before* any WinUI
+window is created and rejects a binary whose reported version does not match the pinned
+baseline, so a stale build cannot produce current-version evidence.
 
-The current Store-2.5.8 parity candidate was rebuilt natively for ARM64 at commit-working-tree state
-with SHA-256 `E748CDA9E9E89F9DFCDDE9BB3DEFB1387D1B70237EA9DD845CF7B019839B38EA`.
-Its pre-WinUI probe reported `2.5.8`, and three normal starts, three direct-to-Settings starts, and
-three UI Automation Settings open/close cycles passed with complete ARM64 runtime alignment, local
-XAML loading, no WebView projection/module, and zero new Application Error or WER events. A separate
-fixture-free run at the Store's 1440x1000 logical / 2160x1500 physical viewport projected the live
-`ANDROMEDA`, Windows 11 Professional (25H2), Standard user, and native ARM64 identity through UI
-Automation, captured the native frame, closed gracefully, and also produced zero crash events.
+`.github/workflows/reactor-validation.yml` runs the hermetic lanes on an x64 + ARM64 matrix.
+The deterministic AI lane is release-gating and has no `continue-on-error`: a no-provider
+result is a failure. The live-provider and live-system suites remain supplemental until
+hosted-runner UIA and device coverage are stable.
 
-At the pinned setup revision, the helper stages `Microsoft.Web.WebView2.Core.dll` even for projects
-that do not create a WebView. WFDiag's build script removes that exact unused projection after
-staging. A copied self-contained candidate with the file absent passed normal startup,
-direct-to-Settings startup, Settings open/close, local XAML loading, and crash-log validation before
-the omission was made part of the build. The WFDiag crate has no WebView2 dependency, control,
-browser UI, JavaScript bundle, or web/native bridge.
+### Validated ARM64 candidate (2.5.8)
 
-Keep this opt-in separate from the Store/MSIX workflow. It validates loose direct distribution and
-does not supply the registered package identity or `systemAIModels` capability required by the
-Store-only on-device AI path.
+The Store-2.5.8 parity candidate was rebuilt natively for ARM64 with executable SHA-256
+`E748CDA9E9E89F9DFCDDE9BB3DEFB1387D1B70237EA9DD845CF7B019839B38EA`. Its pre-WinUI probe
+reported `2.5.8`, and three normal starts, three direct-to-Settings starts, and three UI
+Automation Settings open/close cycles passed with complete ARM64 runtime alignment, local XAML
+loading, no WebView projection or module, and zero new Application Error or WER events. A
+separate fixture-free run at the Store's 1440x1000 logical / 2160x1500 physical viewport
+projected the live `ANDROMEDA`, Windows 11 Professional (25H2), Standard user, and native ARM64
+identity through UI Automation, captured the native frame, closed gracefully, and produced zero
+crash events. This is developer-machine validation; it does not satisfy the signed
+MSI/NSIS/portable clean-machine gate.
 
-The prototype demonstrates a hand-built native title area and navigation rail, six responsive page
-layouts, theme switching, pane collapse, process filtering, lifecycle-aware monitor pause/resume,
-live AI chat/report interaction, a native settings surface built from WinUI controls, accessibility
-metadata, and the shipping shortcut set. Ctrl+R and Ctrl+Numpad1..6 use Reactor accelerators; the
-isolated Win32 window subclass supplies Ctrl+K, main-row Ctrl+1..6, Ctrl+/, Ctrl+Shift+Q, and
-Ctrl+Shift+F through the UI-thread lifecycle poll with editable-control, overlay, and active-scan
-guards. This implements current behavior without pretending that the pinned Reactor accelerator
-API can express those chords.
-State and callbacks are owned by the Reactor `Component`; there is no DOM or IPC bridge between the
-controls and the component.
+## Shortcuts and window lifecycle
 
-Backend events intentionally enter through `Message::Backend`, so
-`wfdiag-ui-core::UiEvent` is the typed shell boundary. The Reactor shell now owns a
-`NativeMonitorRuntime`, drains its receiver without Tauri, and renders live CPU, memory, storage,
-network, GPU, and NPU samples. `NativeDiagnosticRuntime` runs Quick and Full scans through the
-existing Windows collectors with native progress/results, task-granular cancellation, and stale
-session protection. Targeted reruns use an overlay transaction over the committed scan: the prior
-rows, session, scan kind, and task set survive until the one authoritative target result can be
-replaced or appended; issue detection then receives the complete merged evidence. Reruns do not
-create one-row auto-save records, and every failed/cancelled delivery path restores the base snapshot.
-The live Processes page consumes the monitor runtime's nonblocking full-process
-queries with debounced filtering, sortable columns, native virtualization, 100-row paging, periodic
-refresh, stale-request rejection, selectable details, and responsive full-width rows. An ARM64
-expanded-desktop run passed pause/resume, refresh, filtering, PID sorting, selection, scrolling and
-page 2 with native XAML loaded and zero WebView/WER evidence; compact/collapsed and x64 runtime
-coverage remain open. The component also owns the native History worker and renders
-the existing encrypted Store-compatible scan list, tag-aware filtering and fallback labels,
-refresh, selection, all-category comparison rows, independent label/tag editing, and lazy
-side-by-side task details without Tauri IPC. JSON task outputs additionally receive bounded
-leaf-level Added/Removed/Changed rows with overflow disclosure, while non-JSON retains the raw
-side-by-side view; comparison rows include recurring-failure trend badges. The native Settings
-dialog now owns the shared settings runtime and Store-compatible persistence path: it loads
-off-thread, edits every visible non-secret 2.5.8 field, restores the persisted snapshot and preview
-theme on Cancel, and commits only a matching successful Save response. ARM64 automation passed
-cancel/reopen and save/restart against an isolated Store-file copy without touching the installed
-app's settings. Deterministic rows remain isolated to visual QA. Provider-specific model-catalog
-and subscription account-flow evidence, live startup-scan/picker/email-client evidence, and the
-remaining error/accessibility/device matrices are still production integration gates. The
-repository also contains UI-neutral History, Settings, Issues, and Export workers that preserve the shipping
-DPAPI/history, credential, detection, and report-rendering behavior. Their implemented paths are
-live; the manifest entries remain partial until those explicit gaps and live matrices close. A
-Tauri-free AI provider service now preserves the exact status/preference wire contracts,
-capabilities, routing, Store-identity validation, shared response cache, Ollama/custom network
-probes, and typed worker used by Tauri. Reactor instantiates the same explicit probe bundle
-with concrete Phi, Foundry Local, Ollama, custom-endpoint, and Codex/Claude CLI sources and renders
-the resolved live provider state. Auto clean-failure retries now honor persisted Ask/Allow/Never
-cloud consent; explicit provider choices never fall back, and local-to-cloud transitions disclose
-their `ProviderUse` fallback attribution. Settings now drives cancellable live model-catalog
-requests from its current draft configuration, renders selectable results and explicit
-blocked/loading/error/stale state, and retains manual model entry. The typed Codex/Claude account
-worker and component handlers cover status and cancellable sign-in/sign-out operations; Settings
-renders Check, Sign in, Sign out, and Cancel with operation status, detail, and errors. The setup
-browser seeds from configured provider fields, follows explicit Active AI choices, and remains
-independently browsable under Auto. Phi activation and Save are guarded by live availability/readiness
-and its backend reason while the setup pane remains reachable. The shared Anthropic default is
-`claude-sonnet-5`.
-
-The explicit Install CLI action is now wired for Codex and Claude Code. The allowlisted winget
-package requires confirmation; unavailable or failed winget returns a structured vendor PowerShell
-fallback that requires a second confirmation and never runs automatically. The installer executes
-off-UI inside a Windows Job Object so cancellation, timeout, drop, or worker shutdown terminates its
-entire process tree. Provider-specific live catalog/account/browser/install,
-credential/fallback-error, accessibility, and packaged Phi/Aion validation remain open. The
-UI-neutral System and Update workers also preserve the canonical Windows host,
-architecture/emulation, Store-signature, and GitHub release policies. Reactor now renders live
-machine/OS/elevation state, exposes architecture and emulation to UI Automation, delays scans until
-the elevation probe completes, and owns the
-Store-compatible delayed update check, throttle, notification, native About dialog, and typed
-allowlisted external actions. Packaged Store/direct x64 and ARM64 validation, complete accessibility
-coverage, and explicit browser-action automation remain open.
+Ctrl+R and Ctrl+Numpad1..6 use Reactor accelerators. The isolated Win32 subclass in
+`platform/window.rs` supplies Ctrl+K, main-row Ctrl+1..6, Ctrl+/, Ctrl+Shift+Q, and
+Ctrl+Shift+F through the UI-thread lifecycle poll, with editable-control, overlay, and
+active-scan guards; the same subclass publishes coherent revisioned visibility/minimize/focus
+snapshots that drive monitor pause/resume and close-to-tray. Both were accepted as the
+implementation for this release by the 2026-09-01 decision; an official Reactor API for either
+remains a tracked follow-up, not a blocker.
 
 ## Current visual evidence
 
@@ -305,24 +292,42 @@ restoration. All of these gates run in
 The separate live-provider/system suites remain supplemental until hosted-runner UIA and device
 coverage are stable.
 
-## Known Phase 0 gates
+## Known gates
 
-- Reactor must publish an official non-placeholder release before production adoption.
-- The current public accelerator enum cannot represent WFDiag's full shortcut set (no main-row
-  digits, `K`, `/`, or Shift; Control-only modifiers). Ctrl+R/Ctrl+Numpad1..6 retain native Reactor
-  accelerators and the isolated Win32 subclass supplies the missing shipping chords, but this
-  reviewed fallback does not close the official-Reactor-API or live keyboard/focus gate.
-- Window show/hide, close interception, tray restoration, and full `AppWindow` lifecycle APIs are
-  not exposed by the pinned Reactor surface; the owner-approved interim path is isolated Win32
-  interop in `window_support.rs` plus the cached HWND in `instance_support.rs`. Its lifecycle
-  snapshots and monitor visibility wiring are implemented, but do not close the official API gate.
-- Remaining interaction/error/persistence depth — provider-specific live AI and packaged Phi/Aion
-  evidence, the model-catalog/subscription-account and cloud-fallback provider/error/accessibility
-  matrices, live issue-to-chat/fix-plan evidence, external email-client/clipboard validation, and
-  monitor/network error/accessibility/soak validation — is tracked in `reactor-baselines/manifest.json`'s
-  `backend_parity` matrix.
-- This host can launch and capture the Windows ARM64 executable through WSL interop. Cutover remains
-  blocked on paired native reviews for the remaining 2.5.8 states,
-  light/system/high-contrast and DPI coverage, accessibility validation, and x64 visual evidence.
-- Store/MSIX and self-contained MSI/NSIS/portable deployment still require clean-machine x64 and
-  ARM64 validation with one approved Windows App Runtime strategy.
+Updated 2026-09-01. Three gates that were open when this file called the crate a prototype
+were **closed by the owner's cutover decision** and are recorded as `passed` in
+`reactor-baselines/manifest.json`:
+
+- ~~Reactor must publish an official non-placeholder release before production adoption.~~
+  **Closed.** The release ships on the reviewed exact revision; crates.io still publishes only
+  `0.0.0`, and migrating to an official release is a follow-up dependency update.
+- ~~The public accelerator enum cannot represent WFDiag's full shortcut set.~~ **Closed for
+  this release.** Ctrl+R/Ctrl+Numpad1..6 keep native Reactor accelerators; the isolated Win32
+  keyboard hook in `platform/window.rs` supplies Ctrl+K, main-row Ctrl+1..6, Ctrl+/,
+  Ctrl+Shift+Q and Ctrl+Shift+F with pure policy tests. An official Reactor accelerator API
+  remains a tracked follow-up.
+- ~~Window show/hide, close interception, tray restoration, and `AppWindow` lifecycle APIs are
+  not exposed by the pinned Reactor surface.~~ **Closed for this release.** The isolated Win32
+  interop in `platform/window.rs` plus the cached exact HWND in `platform/instance.rs` (was
+  `window_support.rs` / `instance_support.rs` before the module decomposition) is the accepted
+  implementation. An official Reactor window-lifecycle API remains a tracked follow-up.
+
+Still open — all of these need real x64/ARM64 hardware evidence, not more code:
+
+- Remaining interaction/error/persistence depth — provider-specific live AI and packaged
+  Phi/Aion evidence, the model-catalog/subscription-account and cloud-fallback
+  provider/error/accessibility matrices, live issue-to-chat/fix-plan evidence, external
+  email-client/clipboard validation, and monitor/network error/accessibility/soak validation —
+  is tracked in `reactor-baselines/manifest.json`'s `backend_parity` matrix (all 19 surfaces
+  `partial`, `on_device_ai_and_package_identity` `blocked`).
+- Visual parity: paired native reviews for light/system/high-contrast and DPI coverage,
+  accessibility validation, and x64 visual evidence (`current_baseline_capture`,
+  `native_control_parity`). This Linux host can launch and capture the Windows ARM64 executable
+  through WSL interop, which is useful evidence but not a substitute for the device matrix.
+- Store/MSIX and self-contained MSI/NSIS/portable deployment still require clean-machine x64
+  and ARM64 validation (`store_packaging_validation`, `direct_distribution_validation`,
+  `aion_store_validation`). The Windows App Runtime strategy itself is decided:
+  `Microsoft.WindowsAppRuntime.2`, MinVersion 2.4.0.0.
+
+Run `python3 scripts/check-reactor-readiness.py` for the authoritative current state; it exits
+1 while any gate is blocked, and that is expected.

@@ -708,7 +708,7 @@
     {
       "id": "window_lifecycle",
       "status": "passed",
-      "summary": "Owner decision 2026-09-01: the isolated Win32 interop in apps/wfdiag/src/platform/window.rs and instance_support.rs (cached exact HWND, revisioned lifecycle snapshots, close-to-tray, show/hide/minimize/restore, tray menu) is the accepted implementation for this release; an official Reactor window-lifecycle API remains a tracked follow-up.",
+      "summary": "Owner decision 2026-09-01: the isolated Win32 interop in apps/wfdiag/src/platform/window.rs and platform/instance.rs (cached exact HWND, revisioned lifecycle snapshots, close-to-tray, show/hide/minimize/restore, tray menu) is the accepted implementation for this release; an official Reactor window-lifecycle API remains a tracked follow-up.",
       "evidence": [
         "docs/REACTOR_MIGRATION.md#cutover-decision-2026-09-01",
         "apps/wfdiag/src/platform/window.rs",

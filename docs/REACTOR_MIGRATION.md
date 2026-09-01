@@ -2,40 +2,72 @@
 
 ## Status
 
-WFDiag's shipping UI remains React/Tauri. The `apps/wfdiag` package and
-`reactor-baselines` contract are non-shipping feasibility work: they must not
-replace, modify, or become a prerequisite for the current Store, MSI, NSIS, or
-portable builds.
+**Cutover decided (2026-09-01).** The native WinUI 3 shell `apps/wfdiag` (package and binary
+`wfdiag` / `wfdiag.exe`) is the shipping product. The Tauri + React shell (`src-tauri`,
+`src/`) is kept buildable as a rollback and is packaged only through the Store workflow's
+`shell: tauri` input; removing it is a later release. The full decision record, including the
+three gates that were waiting on Microsoft rather than on this repository, is at the bottom
+of this document: [Cutover decision (2026-09-01)](#cutover-decision-2026-09-01).
 
-The selected direction is a parallel, pure-native WinUI 3 rewrite. The
-Reactor application will manually compose native controls and will not host
-WebView2, load the existing React bundle, execute JavaScript, or maintain a
-web/native UI bridge. The six populated prototype screens establish that this
-direction is feasible, but production cutover is currently blocked. The
-authoritative machine-readable state is
-[`reactor-baselines/manifest.json`](../reactor-baselines/manifest.json), and
-the read-only checker is:
+The direction is unchanged from the original plan: a pure-native WinUI 3 application that
+composes native controls directly. It does not host WebView2, load the React bundle, execute
+JavaScript, or maintain a web/native UI bridge. That is enforced, not merely intended —
+`reactor-baselines/manifest.json` schema 2 fixes the implementation kind to
+`native_winui3_reactor`, fixes the inspected source root to `apps/wfdiag/src`, and sets
+`webview_ui_allowed` to `false`.
+
+### What is done
+
+- The engine is a Rust workspace of framework-neutral crates under `crates/`; both shells are
+  thin hosts over them. No engine crate `#[path]`-includes `src-tauri` any more; `src-tauri`
+  keeps one-line `pub use` shims.
+- `wfdiag-app` is the application-service facade (`AppService { start, snapshot, dispatch,
+  drain, shutdown }`) with mockable ports and headless integration suites that drive the real
+  service on Linux.
+- The native shell is decomposed: a thin `main.rs` over `app/`, `screens/`, `dialogs/`,
+  `widgets/`, `platform/`, `ai/`, and `fixtures/`.
+- Release plumbing is native-first: `AppxManifest.xml` launches `wfdiag.exe` and depends on
+  `Microsoft.WindowsAppRuntime.2` (MinVersion `2.4.0.0`), single-sourced from
+  `reactor-baselines/manifest.json` → `reactor_pin`; the Store workflow builds the native
+  shell per architecture and packages it through
+  `scripts/build-reactor-msix-probe.py {stage,pack,bundle,validate-msix}`;
+  `.github/workflows/reactor-validation.yml` is an x64 + ARM64 matrix.
+- `cutover.official_reactor_release`, `upstream.window_lifecycle`, and
+  `upstream.global_accelerators` are closed by the owner decision.
+
+### What remains
+
+Everything still open is **hardware evidence**, not design. The authoritative
+machine-readable state is
+[`reactor-baselines/manifest.json`](../reactor-baselines/manifest.json), and the read-only
+checker is:
 
 ```bash
 python3 scripts/check-reactor-readiness.py
 python3 scripts/check-reactor-readiness.py --json
 ```
 
-The command deliberately returns exit code 1 while any blocker remains. A
-green result is a cutover prerequisite, not permission by itself.
+It deliberately returns exit code 1 while any blocker remains, and will keep reporting NOT
+READY until the five remaining cutover gates (`current_baseline_capture`,
+`native_control_parity`, `aion_store_validation`, `store_packaging_validation`,
+`direct_distribution_validation`) and every `backend_parity` surface have real x64/ARM64
+evidence. Do not weaken or bypass a gate to make the command green; produce the evidence
+through `scripts/validate-reactor.ps1 -Suite all` and
+[`docs/validation/clean-machine-protocol.md`](validation/clean-machine-protocol.md), and
+record it in the manifest.
 
-The manifest also carries an explicit `backend_parity` matrix covering every
-shipping service surface: diagnostics, monitoring, processes, Issues and
-remediation, History, export/share, Settings and credentials, AI provider
-management/chat/reporting, on-device AI, elevation, desktop integrations,
-updates, tray lifecycle, single-instance behavior, and global commands. A
-fixture-rendered screen cannot satisfy that gate. Each surface stays
-`blocked` or `partial` until the native shell has direct integration evidence;
-only evidence-backed `passed` entries allow the checker to go green.
+The `backend_parity` matrix covers every shipping service surface: diagnostics, monitoring,
+processes, Issues and remediation, History, export/share, Settings and credentials, AI
+provider management/chat/reporting, on-device AI, elevation, desktop integrations, updates,
+tray lifecycle, single-instance behavior, and global commands. A fixture-rendered screen
+cannot satisfy that gate. Each surface stays `blocked` or `partial` until the native shell
+has direct integration evidence; only evidence-backed `passed` entries allow the checker to
+go green.
 
 ## Native UI architecture
 
-`apps/wfdiag/src/main.rs` is a hand-built Reactor `Component` with a native
+The shell's root `Component` (`apps/wfdiag/src/app/mod.rs`; `main.rs` is now only a thin
+entry point) is hand-built with a native
 title area, navigation rail, status bar, settings `ContentDialog`, and six
 native pages: Diagnostics, Live Monitor, Processes, AI Analysis, Issues, and
 History. Reactor builders create the real WinUI controls directly. Component
@@ -64,6 +96,12 @@ border, and Acrylic layers. This keeps the artwork native and local while
 approximating the source depth without a browser renderer.
 
 ## Pinned prototype
+
+> **Superseded in part (2026-09-01).** The pin itself is unchanged and still exact, but it is
+> no longer "prototype-only": the owner decided to ship on this reviewed revision. See
+> [Cutover decision](#cutover-decision-2026-09-01). Moving the pin still requires updating both
+> Cargo dependencies, `reactor-baselines/manifest.json` (`reactor_pin`), and
+> `scripts/build-reactor-msix-probe.py` in one reviewed change. Historical text follows.
 
 The feasibility spike pins both `windows-reactor` and
 `windows-reactor-setup` to the reviewed `windows-rs` commit
@@ -325,7 +363,7 @@ extraction and wiring frontier moved substantially across the reviewed series:
   powers restart-as-administrator; single instance (mutex + activation
   event) and scan-completion toasts (AUMID-bound, silent-unpackaged) are
   live; tray + close-to-tray + Show/Hide/Quick Scan/Exit run through the
-  isolated Win32 subclass in `apps/wfdiag/src/window_support.rs` per the
+  isolated Win32 subclass in `apps/wfdiag/src/platform/window.rs` per the
   owner-approved interop interpretation of the lifecycle gate. The exact
   Reactor HWND is cached independently of visibility, restore/show targets
   that handle, and an atomic revisioned lifecycle snapshot now feeds window
@@ -366,7 +404,9 @@ runtimes joining their OS threads while the command sender was still
 alive (recv never disconnected); fixed by releasing the sender before
 the join in all three workers.
 
-`wfdiag-native-system` now owns the canonical machine, Windows-version,
+`wfdiag-native-system` now owns the canonical machine, Windows-version, elevation, and
+architecture/emulation projections that both shells read, so the parity suites compare
+one implementation against itself rather than two independent ones.
 elevation, process/native architecture, emulation, page-size, and processor
 count projections behind a nonblocking worker. `wfdiag-native-update` owns the
 Store-aware GitHub release policy and Windows package-signature provider,
@@ -448,7 +488,15 @@ Final evidence must include at least:
 
 ## Runtime and packaging gate
 
-The Store manifest currently depends on
+> **Superseded in part (2026-09-01).** `AppxManifest.xml` now depends on
+> `Microsoft.WindowsAppRuntime.2` (MinVersion `2.4.0.0`), single-sourced from
+> `reactor-baselines/manifest.json` → `reactor_pin`. The runtime *alignment* question below is
+> therefore decided; the clean-machine and Store-certification *validation* bullets are still
+> open (`store_packaging_validation`, `direct_distribution_validation`, `aion_store_validation`).
+> The closing instruction not to change `AppxManifest.xml` "based on the spike alone" was
+> discharged by the owner decision, not by a spike. Historical text follows.
+
+The Store manifest previously depended on
 `Microsoft.WindowsAppRuntime.1.8`. The pinned Reactor setup stages Windows App
 SDK 2.4 (`Microsoft.WindowsAppRuntime.2`). This is an intentional blocking
 finding, not a version string to edit until validation is available.
@@ -575,7 +623,9 @@ The remaining-gate evidence is produced by a dedicated harness (owner goal:
 - `docs/validation/clean-machine-protocol.md` — the manual protocol for
   clean-machine and Store certification gates, with a sign-off table.
 
-`wfdiag-native-system` now owns the canonical machine, Windows-version,
+`wfdiag-native-system` now owns the canonical machine, Windows-version, elevation, and
+architecture/emulation projections that both shells read, so the parity suites compare
+one implementation against itself rather than two independent ones.
 
 The checker tests use only temporary fixtures and verify that evaluation does
 not change the inspected tree:
@@ -608,35 +658,43 @@ Unexpected `error` findings—missing contracts, changed checksums, Store
 identity drift, unpinned dependencies, or omitted gates—are regressions and
 must be corrected before further prototype work is trusted.
 
-## Strict no-cutover gates
+## Release gates (historical wording updated 2026-09-01)
 
-Tauri remains the only production frontend until every condition below is
-satisfied in the same candidate revision:
+This list was originally written as "strict no-cutover gates": Tauri was to remain the only
+production frontend until every condition below was satisfied. The 2026-09-01 decision
+settled the direction — the native shell ships — so the list below is now the **release
+acceptance checklist** for that shell, not a veto on the choice of shell. Items 1, 2, and the
+upstream-API portion of item 6 were closed by that decision; the rest still require real
+x64/ARM64 hardware evidence recorded in `reactor-baselines/manifest.json`.
 
-1. `check-reactor-readiness.py` exits 0 with evidence-backed gates.
-2. Shared backend contract tests pass through both the Tauri and Reactor
-   adapters with preserved settings, credential, cache, and history formats.
-3. Every baseline state passes native fidelity review at all required themes,
-   window sizes, DPI settings, and accessibility modes.
-4. Scan, monitoring, processes, issues/remediation, history, AI streaming and
-   cancellation, settings, exports, elevation, tray, taskbar, notifications,
-   clipboard, updates, and single-instance workflows pass on x64 and ARM64.
-5. Narrator/UI Automation, keyboard-only operation, focus restoration, high
-   contrast, text scaling, reduced motion, and chart alternatives pass.
-6. Store certification and clean-machine Store/direct distribution testing
-   pass with one validated Windows App Runtime strategy.
-7. Startup, memory, UI latency, large-list scrolling, streaming throughput,
-   and complete installed footprint meet the recorded Tauri baseline or have
-   explicit approved exceptions.
+1. `check-reactor-readiness.py` exits 0 with evidence-backed gates. *(open — five cutover
+   gates and the `backend_parity` matrix)*
+2. Shared backend contract tests pass through both the Tauri and native adapters with
+   preserved settings, credential, cache, and history formats. *(structurally closed: both
+   shells now compile the same engine crates, and CI tests the whole workspace on Windows
+   plus the engine crates on Linux)*
+3. Every baseline state passes native fidelity review at all required themes, window sizes,
+   DPI settings, and accessibility modes. *(open — `current_baseline_capture`)*
+4. Scan, monitoring, processes, issues/remediation, history, AI streaming and cancellation,
+   settings, exports, elevation, tray, taskbar, notifications, clipboard, updates, and
+   single-instance workflows pass on x64 and ARM64. *(open — `backend_parity`)*
+5. Narrator/UI Automation, keyboard-only operation, focus restoration, high contrast, text
+   scaling, reduced motion, and chart alternatives pass. *(open)*
+6. Store certification and clean-machine Store/direct distribution testing pass with one
+   validated Windows App Runtime strategy. *(open — `store_packaging_validation`,
+   `direct_distribution_validation`; the runtime strategy itself is decided:
+   `Microsoft.WindowsAppRuntime.2`, MinVersion 2.4.0.0)*
+7. Startup, memory, UI latency, large-list scrolling, streaming throughput, and complete
+   installed footprint meet the recorded Tauri baseline or have explicit approved exceptions.
+   *(open)*
 
-The native rewrite may use documented Reactor and `windows` APIs for required
-Windows integration, but it may not satisfy a gate by reintroducing WebView2,
-embedding the Tauri frontend, or routing UI behavior through JavaScript.
+The native shell may use documented Reactor and `windows` APIs for required Windows
+integration, but it may not satisfy a gate by reintroducing WebView2, embedding the Tauri
+frontend, or routing UI behavior through JavaScript.
 
-Only after these gates pass should a separate cutover change make Reactor the
-shipping entry point. Removal of React, Vite, Tauri, Node-dependent CI, and
-`dist` staging belongs to a later cleanup change after a signed rollback tag
-has been created.
+Removal of React, Vite, Tauri, Node-dependent CI, and `dist` staging belongs to a later
+cleanup release, after a signed rollback tag has been created. Until then `src-tauri` stays
+buildable and CI keeps testing it.
 
 ## Cutover decision (2026-09-01)
 
@@ -661,7 +719,7 @@ three gates that were waiting on Microsoft rather than on this repository:
    DLL from whichever `Microsoft.WindowsAppRuntime*` package the app depends on;
    this must still be validated on Copilot+ hardware (`aion_store_validation`).
 3. **Window lifecycle and global accelerators.** The isolated Win32 interop in
-   `apps/wfdiag/src/window_support.rs` and `instance_support.rs` (cached HWND,
+   `apps/wfdiag/src/platform/window.rs` and `platform/instance.rs` (cached HWND,
    revisioned lifecycle snapshots, close-to-tray, tray menu, the keyboard hook
    delivering Ctrl+K / Ctrl+1..6 / Ctrl+/ / Ctrl+Shift+Q / Ctrl+Shift+F) is the
    accepted implementation for this release. Official Reactor APIs for both

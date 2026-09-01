@@ -1212,7 +1212,7 @@ def _print_human(report: ReadinessReport) -> None:
     if report.ready:
         print("READY: every automated native Reactor cutover gate passed.")
     else:
-        print("NOT READY: the shipping Tauri frontend must remain the production UI.")
+        print("NOT READY: hardware-evidence gates are still open; do not tag a Store release until they pass.")
 
 
 def main(argv: list[str] | None = None) -> int:
