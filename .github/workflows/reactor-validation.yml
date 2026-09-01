@@ -50,12 +50,12 @@ jobs:
           cargo test --locked --manifest-path crates/wfdiag-native-ai-report/Cargo.toml --all-targets
 
       - name: Build self-contained validation candidate
-        run: cargo build --locked --target x86_64-pc-windows-msvc --features self-contained,settings-test-path --manifest-path reactor-spike/Cargo.toml
+        run: cargo build --locked --target x86_64-pc-windows-msvc --features self-contained,settings-test-path --manifest-path apps/wfdiag/Cargo.toml
 
       - name: Version probe
         shell: pwsh
         run: |
-          $exe = "target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe"
+          $exe = "target\x86_64-pc-windows-msvc\debug\wfdiag.exe"
           $env:WFDIAG_REACTOR_VERSION_PROBE_FILE = "${{ runner.temp }}\version.json"
           & $exe --wfdiag-version-probe
           if ($LASTEXITCODE -ne 0) { throw "version probe failed" }
@@ -66,7 +66,7 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-ai-flows.ps1 `
-            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag.exe" `
             -OutputDirectory "validation-reports\ai-flows"
 
       - name: Live-system validation
@@ -75,7 +75,7 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-live-system.ps1 `
-            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag.exe" `
             -OutputDirectory "validation-reports\live-system" `
             -HoldSeconds 2
 
@@ -86,7 +86,7 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-chat.ps1 `
-            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag.exe" `
             -OutputDirectory "validation-reports\chat"
 
       - name: Report flow validation
@@ -96,7 +96,7 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-report.ps1 `
-            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag.exe" `
             -OutputDirectory "validation-reports\report" `
             -ScanWaitSeconds 300
 
@@ -107,7 +107,7 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-remediation.ps1 `
-            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe" `
+            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag.exe" `
             -OutputDirectory "validation-reports\remediation" `
             -ScanWaitSeconds 300
 
@@ -125,5 +125,5 @@ jobs:
           name: reactor-validation-evidence
           path: |
             validation-reports/
-            reactor-spike/captures-2.5.8/validation-*/
+            apps/wfdiag/captures-2.5.8/validation-*/
           if-no-files-found: warn

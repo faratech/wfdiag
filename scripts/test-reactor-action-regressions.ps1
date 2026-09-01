@@ -18,7 +18,7 @@
 
 param(
     [Parameter(Mandatory = $true)][string]$Executable,
-    [string]$OutputDirectory = "reactor-spike\captures-2.5.8\validation-action-regressions",
+    [string]$OutputDirectory = "apps\wfdiag\captures-2.5.8\validation-action-regressions",
     [ValidateRange(5, 120)][int]$StepWaitSeconds = 30,
     [switch]$IncludeAdminRelaunch,
     [ValidateRange(15, 180)][int]$AdminWaitSeconds = 75

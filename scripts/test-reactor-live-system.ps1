@@ -39,7 +39,7 @@ if ([string]::IsNullOrWhiteSpace($canonicalVersion)) {
 
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $repoRoot (
-        "reactor-spike\captures-{0}\live-system-validation" -f $canonicalVersion)
+        "apps\wfdiag\captures-{0}\live-system-validation" -f $canonicalVersion)
 }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 [IO.Directory]::CreateDirectory($OutputDirectory) | Out-Null

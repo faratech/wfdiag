@@ -83,7 +83,7 @@ stale 2.5.4 development build cannot silently produce 2.5.8 evidence.
 
 ```powershell
 .\scripts\capture-reactor-baselines.ps1 `
-  -Executable C:\path\to\wfdiag-reactor-spike.exe
+  -Executable C:\path\to\wfdiag.exe
 ```
 
 For one-off interactive captures, `capture-window.ps1` accepts either
@@ -99,7 +99,7 @@ Error/WER. Build and run the startup gate first; this script does not build.
 
 ```powershell
 .\scripts\test-reactor-live-system.ps1 `
-  -Executable C:\path\to\wfdiag-reactor-spike.exe `
+  -Executable C:\path\to\wfdiag.exe `
   -OutputDirectory C:\path\to\live-system-evidence `
   -HoldSeconds 2
 ```
@@ -122,7 +122,7 @@ and live-system gates:
 
 ```powershell
 .\scripts\test-reactor-about-parity.ps1 `
-  -Executable C:\path\to\new-build\aarch64-pc-windows-msvc\release\wfdiag-reactor-spike.exe `
+  -Executable C:\path\to\new-build\aarch64-pc-windows-msvc\release\wfdiag.exe `
   -OutputDirectory C:\Temp\wfdiag-reactor-about-2.5.8-new
 ```
 
@@ -143,12 +143,12 @@ closing that child, the evidence identifies the exact PID for manual cleanup.
 
 ```powershell
 .\scripts\test-reactor-action-regressions.ps1 `
-  -Executable C:\path\to\validation-build\wfdiag-reactor-spike.exe `
+  -Executable C:\path\to\validation-build\wfdiag.exe `
   -OutputDirectory C:\Temp\wfdiag-reactor-action-regressions
 
 # Interactive UAC handoff coverage:
 .\scripts\test-reactor-action-regressions.ps1 `
-  -Executable C:\path\to\validation-build\wfdiag-reactor-spike.exe `
+  -Executable C:\path\to\validation-build\wfdiag.exe `
   -IncludeAdminRelaunch
 ```
 

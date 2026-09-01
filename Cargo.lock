@@ -5593,6 +5593,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
+name = "wfdiag"
+version = "2.5.8"
+dependencies = [
+ "semver",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "wfdiag-native-ai-chat",
+ "wfdiag-native-ai-provider",
+ "wfdiag-native-ai-report",
+ "wfdiag-native-diagnostics",
+ "wfdiag-native-export",
+ "wfdiag-native-history",
+ "wfdiag-native-issues",
+ "wfdiag-native-monitor",
+ "wfdiag-native-phi",
+ "wfdiag-native-remediation",
+ "wfdiag-native-settings",
+ "wfdiag-native-system",
+ "wfdiag-native-update",
+ "wfdiag-ui-core",
+ "windows 0.62.2",
+ "windows-core 0.100.0",
+ "windows-reactor",
+ "windows-reactor-setup",
+]
+
+[[package]]
 name = "wfdiag-native-ai-chat"
 version = "0.1.0"
 dependencies = [
@@ -5769,34 +5797,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "windows 0.62.2",
-]
-
-[[package]]
-name = "wfdiag-reactor-spike"
-version = "0.0.1"
-dependencies = [
- "semver",
- "serde_json",
- "tokio",
- "tokio-util",
- "wfdiag-native-ai-chat",
- "wfdiag-native-ai-provider",
- "wfdiag-native-ai-report",
- "wfdiag-native-diagnostics",
- "wfdiag-native-export",
- "wfdiag-native-history",
- "wfdiag-native-issues",
- "wfdiag-native-monitor",
- "wfdiag-native-phi",
- "wfdiag-native-remediation",
- "wfdiag-native-settings",
- "wfdiag-native-system",
- "wfdiag-native-update",
- "wfdiag-ui-core",
- "windows 0.62.2",
- "windows-core 0.100.0",
- "windows-reactor",
- "windows-reactor-setup",
 ]
 
 [[package]]

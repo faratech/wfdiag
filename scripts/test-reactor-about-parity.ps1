@@ -17,7 +17,7 @@ candidate; its version probe must report 2.5.8.
 
 .EXAMPLE
 .\scripts\test-reactor-about-parity.ps1 `
-  -Executable C:\path\to\aarch64-pc-windows-msvc\release\wfdiag-reactor-spike.exe
+  -Executable C:\path\to\aarch64-pc-windows-msvc\release\wfdiag.exe
 #>
 
 [CmdletBinding()]
@@ -76,7 +76,7 @@ if ($canonicalVersion -cne $oracleVersion) {
 
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $repoRoot (
-        "reactor-spike\captures-{0}\about-validation\{1}" -f
+        "apps\wfdiag\captures-{0}\about-validation\{1}" -f
             $oracleVersion,
             $captureStamp)
 }

@@ -13,7 +13,7 @@
 
 param(
     [Parameter(Mandatory = $true)][string]$Executable,
-    [string]$OutputDirectory = "reactor-spike\captures-2.5.8\validation-process-refresh",
+    [string]$OutputDirectory = "apps\wfdiag\captures-2.5.8\validation-process-refresh",
     [string]$VariantsJson = "reactor-baselines\variants.json",
     [string]$StoreBaselinePng = "reactor-baselines\captures\store-2.5.8\processes-populated-desktop-dark.png",
     [ValidateRange(1, 20)][int]$HoldSeconds = 2,

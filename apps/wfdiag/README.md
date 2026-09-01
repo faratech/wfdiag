@@ -95,7 +95,7 @@ Run the repeatable startup/Settings crash gate against that exact candidate dire
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File scripts/test-reactor-startup.ps1 `
-  -Executable target/self-contained/aarch64-pc-windows-msvc/release/wfdiag-reactor-spike.exe `
+  -Executable target/self-contained/aarch64-pc-windows-msvc/release/wfdiag.exe `
   -Iterations 3
 ```
 

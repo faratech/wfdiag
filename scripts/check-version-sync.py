@@ -27,20 +27,20 @@ def extract(path: str, pattern: str, label: str) -> str:
 
 def validate_reactor_version_source() -> None:
     build_source = extract(
-        "reactor-spike/build.rs",
+        "apps/wfdiag/build.rs",
         r'const\s+APP_VERSION_SOURCE:\s*&str\s*=\s*"([^"]+)"',
         "Reactor build version source",
     )
     display_environment = extract(
-        "reactor-spike/src/main.rs",
+        "apps/wfdiag/src/main.rs",
         r'const\s+APP_VERSION:\s*&str\s*=\s*env!\("([^"]+)"\)',
         "Reactor UI version source",
     )
-    build_script = (ROOT / "reactor-spike/build.rs").read_text(encoding="utf-8")
+    build_script = (ROOT / "apps/wfdiag/build.rs").read_text(encoding="utf-8")
 
-    if build_source != "../version.json":
+    if build_source != "../../version.json":
         raise ValueError(
-            "Reactor build version source must point to canonical ../version.json; "
+            "Reactor build version source must point to canonical ../../version.json; "
             f"got {build_source!r}"
         )
     if display_environment != "WFDIAG_APP_VERSION":
@@ -66,6 +66,7 @@ def main() -> int:
         return 1
     package_lock = read_json("package-lock.json")
     cargo_toml = tomllib.loads((ROOT / "src-tauri/Cargo.toml").read_text(encoding="utf-8"))
+    shell_toml = tomllib.loads((ROOT / "apps/wfdiag/Cargo.toml").read_text(encoding="utf-8"))
     cargo_lock = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
     appx = (ROOT / "AppxManifest.xml").read_text(encoding="utf-8")
     appx_match = re.search(r'<Identity\b[^>]*\bVersion="([^"]+)"', appx, re.DOTALL)
@@ -79,14 +80,18 @@ def main() -> int:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
-    cargo_lock_version = next(
-        (
-            package["version"]
-            for package in cargo_lock.get("package", [])
-            if package.get("name") == "wfdiag-tauri"
-        ),
-        None,
-    )
+    def lock_version(name: str):
+        return next(
+            (
+                package["version"]
+                for package in cargo_lock.get("package", [])
+                if package.get("name") == name
+            ),
+            None,
+        )
+
+    cargo_lock_version = lock_version("wfdiag-tauri")
+    shell_lock_version = lock_version("wfdiag")
     msix_version = read_json("src-tauri/tauri.msix.conf.json")["bundle"]["windows"]["msix"]["msixVersion"]
     appx_version = appx_match.group(1)
     expected_windows_version = f"{canonical}.0"
@@ -114,7 +119,9 @@ def main() -> int:
         "package-lock.json (root)": package_lock["version"],
         "package-lock.json": package_lock["packages"][""]["version"],
         "src-tauri/Cargo.toml": cargo_toml["package"]["version"],
-        "Cargo.lock": cargo_lock_version,
+        "apps/wfdiag/Cargo.toml": shell_toml["package"]["version"],
+        "Cargo.lock (wfdiag-tauri)": cargo_lock_version,
+        "Cargo.lock (wfdiag)": shell_lock_version,
         "src-tauri/tauri.conf.json": read_json("src-tauri/tauri.conf.json")["version"],
         "src/App.tsx": extract(
             "src/App.tsx", r"const\s+APP_VERSION\s*=\s*['\"]([\d.]+)['\"]", "App UI"

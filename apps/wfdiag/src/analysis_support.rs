@@ -40,7 +40,7 @@ use crate::ui_wake_support::NotifySenderExt;
 // This adapter uses the diagnostic builder; the included module also contains
 // sibling one-shot builders that remain live in the Tauri surface.
 #[allow(dead_code)]
-#[path = "../../src-tauri/src/ai_prompts.rs"]
+#[path = "../../../src-tauri/src/ai_prompts.rs"]
 mod shipping_ai_prompts;
 
 const ANALYSIS_CACHE_VERSION: &str = "rag-v2";

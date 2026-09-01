@@ -72,7 +72,7 @@ def check_crates_io(timeout: float) -> dict:
 
 def read_runtime_pins(root: Path) -> dict:
     store_manifest = root / "AppxManifest.xml"
-    prototype = root / "reactor-spike" / "Cargo.toml"
+    prototype = root / "apps/wfdiag" / "Cargo.toml"
     pins = {
         "store_framework": None,
         "reactor_framework": EXPECTED_RUNTIME_FRAMEWORK,
@@ -123,8 +123,8 @@ def check_runtime_drift(root: Path, host_frameworks: list[str] | None) -> dict:
 def check_packaging_pre_flight(root: Path) -> dict:
     expected = [
         "AppxManifest.xml",
-        "reactor-spike/Cargo.toml",
-        "reactor-spike/build.rs",
+        "apps/wfdiag/Cargo.toml",
+        "apps/wfdiag/build.rs",
         "docs/validation/clean-machine-protocol.md",
     ]
     missing = [name for name in expected if not (root / name).is_file()]

@@ -8,7 +8,7 @@ package.
 The probe builds the default, framework-dependent Reactor target for x64 and
 ARM64. Each clean package layout contains:
 
-- `wfdiag-reactor-spike.exe`
+- `wfdiag.exe`
 - Reactor's architecture-matched
   `Microsoft.WindowsAppRuntime.Bootstrap.dll`
 - the canonical Store manifest and its four referenced image assets

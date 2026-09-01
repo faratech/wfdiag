@@ -2,7 +2,7 @@
 
 ## Status
 
-WFDiag's shipping UI remains React/Tauri. The `reactor-spike` package and
+WFDiag's shipping UI remains React/Tauri. The `apps/wfdiag` package and
 `reactor-baselines` contract are non-shipping feasibility work: they must not
 replace, modify, or become a prerequisite for the current Store, MSI, NSIS, or
 portable builds.
@@ -35,7 +35,7 @@ only evidence-backed `passed` entries allow the checker to go green.
 
 ## Native UI architecture
 
-`reactor-spike/src/main.rs` is a hand-built Reactor `Component` with a native
+`apps/wfdiag/src/main.rs` is a hand-built Reactor `Component` with a native
 title area, navigation rail, status bar, settings `ContentDialog`, and six
 native pages: Diagnostics, Live Monitor, Processes, AI Analysis, Issues, and
 History. Reactor builders create the real WinUI controls directly. Component
@@ -50,7 +50,7 @@ host or JavaScript bridge design is out of scope for this migration.
 
 Schema 2 of the readiness manifest makes that choice enforceable. It fixes
 the implementation kind to `native_winui3_reactor`, fixes the inspected
-source root to `reactor-spike/src`, and sets `webview_ui_allowed` to `false`.
+source root to `apps/wfdiag/src`, and sets `webview_ui_allowed` to `false`.
 The checker independently blocks direct Tauri, Wry, WebView/WebView2, CEF, or
 similar browser-host dependencies, WebView API markers in Rust, and web
 frontend assets under the native source root. Changing the manifest to permit
@@ -81,8 +81,8 @@ reviewed change when that release exists.
 On a Windows developer machine with the MSVC Rust target installed:
 
 ```powershell
-cargo build --manifest-path reactor-spike/Cargo.toml --target x86_64-pc-windows-msvc
-cargo run --manifest-path reactor-spike/Cargo.toml --target x86_64-pc-windows-msvc
+cargo build --manifest-path apps/wfdiag/Cargo.toml --target x86_64-pc-windows-msvc
+cargo run --manifest-path apps/wfdiag/Cargo.toml --target x86_64-pc-windows-msvc
 ```
 
 Repeat with `aarch64-pc-windows-msvc` on or for an ARM64 test machine. The
@@ -93,7 +93,7 @@ This Linux/WSL host can cross-check both Windows architectures:
 
 ```bash
 (
-  cd reactor-spike
+  cd apps/wfdiag
   PATH=/usr/lib/llvm-20/bin:$PATH cargo xwin check --target x86_64-pc-windows-msvc
   PATH=/usr/lib/llvm-20/bin:$PATH cargo xwin check --target aarch64-pc-windows-msvc
 )
@@ -325,7 +325,7 @@ extraction and wiring frontier moved substantially across the reviewed series:
   powers restart-as-administrator; single instance (mutex + activation
   event) and scan-completion toasts (AUMID-bound, silent-unpackaged) are
   live; tray + close-to-tray + Show/Hide/Quick Scan/Exit run through the
-  isolated Win32 subclass in `reactor-spike/src/window_support.rs` per the
+  isolated Win32 subclass in `apps/wfdiag/src/window_support.rs` per the
   owner-approved interop interpretation of the lifecycle gate. The exact
   Reactor HWND is cached independently of visibility, restore/show targets
   that handle, and an atomic revisioned lifecycle snapshot now feeds window
@@ -359,7 +359,7 @@ host build of the full current candidate passed
 subsystem constructed (chat, report, action, instance, tray hook):
 native ARM64 execution, Store-matching machine card and footer UIA,
 logical/physical/UIA evidence under
-`reactor-spike/captures-2.5.8/live-system-validation-claude/`, zero
+`apps/wfdiag/captures-2.5.8/live-system-validation-claude/`, zero
 Application Error/WER events, and a clean graceful close. The run
 initially exposed a graceful-close hang — root-caused to the worker
 runtimes joining their OS threads while the command sender was still
@@ -393,7 +393,7 @@ each exact viewport/theme, source version, and SHA-256 under
 accepted as the visual oracle.
 
 The native pass retains same-viewport source-left/native-right evidence for
-nine primary states under `reactor-spike/captures-2.5.8`: Diagnostics empty and
+nine primary states under `apps/wfdiag/captures-2.5.8`: Diagnostics empty and
 populated, Monitor populated, AI empty, Issues empty and populated, History
 comparison, and Settings top use the `-reactor-current.png` / `-comparison-current.png`
 pairs. The corrected Processes milestone uses
@@ -401,7 +401,7 @@ pairs. The corrected Processes milestone uses
 `live-process-validation/processes-populated-store-left-reactor-right.png`.
 
 The final ARM64 candidate also has pairs for all 18 manifest states under
-`reactor-spike/captures-2.5.8/final`. These current-version reviews drive
+`apps/wfdiag/captures-2.5.8/final`. These current-version reviews drive
 implementation but are not cutover approvals; themes, DPI values,
 accessibility modes, and x64 visual evidence still require matched review.
 
@@ -424,7 +424,7 @@ Before implementing or approving a screen:
    ```
 
 4. Capture the equivalent Reactor state using process name
-   `wfdiag-reactor-spike` while the prototype is active.
+   `wfdiag` while the prototype is active.
 5. Record both paths, dimensions, hashes, state metadata, and review evidence
    in `reactor-baselines/manifest.json`. Never use screenshots containing API
    keys, usernames, machine-identifying paths, or real diagnostic data.
@@ -494,7 +494,7 @@ Diagnostics viewport: 1440x1000 logical at 144 DPI (2160x1500 physical). UI
 Automation independently matched `ANDROMEDA`, Windows 11 Professional (25H2),
 Standard user, and `Native ARM64 execution`; the local XAML/no-WebView checks,
 graceful close, and Application Error/WER checks passed. Evidence is under
-`reactor-spike/captures-2.5.8/live-system-validation`, including the Store-left/
+`apps/wfdiag/captures-2.5.8/live-system-validation`, including the Store-left/
 Reactor-right combined review.
 
 Do not change `AppxManifest.xml`, Store workflow manifests, bundled AI DLLs,

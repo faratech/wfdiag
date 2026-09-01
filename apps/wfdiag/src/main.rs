@@ -9,6 +9,7 @@ mod focus_support;
 mod icons;
 mod instance_support;
 mod issue_support;
+mod json_diff;
 mod markdown_support;
 mod notification_support;
 mod process_identity;
@@ -130,7 +131,7 @@ use wfdiag_native_update::{
     NativeUpdateRuntime, SignatureProvider, UpdateInfo, UpdateReply, UpdateService,
     WindowsPackageSignatureProvider,
 };
-use wfdiag_reactor_spike::json_diff::{
+use json_diff::{
     JsonDifference, JsonDifferenceKind, find_json_differences, visible_differences,
 };
 use wfdiag_ui_core::{
@@ -152,8 +153,8 @@ const ELEVATED_RELAUNCH_FLAG: &str = "--wfdiag-elevated-relaunch";
 const VERSION_PROBE_FILE_ENV: &str = "WFDIAG_REACTOR_VERSION_PROBE_FILE";
 #[cfg(feature = "settings-test-path")]
 const LIVE_TEST_FIXTURE_ENV: &str = "WFDIAG_REACTOR_LIVE_TEST_FIXTURE";
-const APP_BADGE: &[u8] = include_bytes!("../../public/wf-ds/app-badge.png");
-const BOT_AVATAR: &[u8] = include_bytes!("../../public/wf-ds/chatgpt-bot-avatar.webp");
+const APP_BADGE: &[u8] = include_bytes!("../../../public/wf-ds/app-badge.png");
+const BOT_AVATAR: &[u8] = include_bytes!("../../../public/wf-ds/chatgpt-bot-avatar.webp");
 const STETHOSCOPE_LIGHT: &[u8] = include_bytes!("../assets/stethoscope-light.png");
 const STETHOSCOPE_DARK: &[u8] = include_bytes!("../assets/stethoscope-dark.png");
 const STATUS_INFO_LIGHT: &[u8] = include_bytes!("../assets/status-circle-info-light.png");

@@ -1,10 +1,10 @@
 # WFDiag workspace: engine crates (`crates/*`), the native WinUI 3 shell
-# (`reactor-spike`, becoming `apps/wfdiag`), and the Tauri shell kept as a
+# (`apps/wfdiag`, becoming `apps/wfdiag`), and the Tauri shell kept as a
 # rollback (`src-tauri`). `cargo test` defaults to the engine + native shell.
 [workspace]
 resolver = "3"
-members = ["crates/*", "reactor-spike", "src-tauri"]
-default-members = ["crates/*", "reactor-spike"]
+members = ["crates/*", "apps/wfdiag", "src-tauri"]
+default-members = ["crates/*", "apps/wfdiag"]
 
 [workspace.package]
 edition = "2024"

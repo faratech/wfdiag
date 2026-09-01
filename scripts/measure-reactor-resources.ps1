@@ -14,14 +14,14 @@ and Quick Scan at 250 ms through completion plus a 15-second settle and
 
 .EXAMPLE
 .\scripts\measure-reactor-resources.ps1 `
-  -Executable C:\code\wfdiag-new\wfdiag-reactor-spike.exe `
+  -Executable C:\code\wfdiag-new\wfdiag.exe `
   -OutputDirectory C:\code\wfdiag-new-resource-evidence
 
 .EXAMPLE
 .\scripts\measure-reactor-resources.ps1 `
   -Executable @(
-    'C:\code\wfdiag-before\wfdiag-reactor-spike.exe',
-    'C:\code\wfdiag-after\wfdiag-reactor-spike.exe'
+    'C:\code\wfdiag-before\wfdiag.exe',
+    'C:\code\wfdiag-after\wfdiag.exe'
   ) `
   -Label @('before', 'after') `
   -OutputDirectory C:\code\wfdiag-resource-comparison
@@ -30,7 +30,7 @@ and Quick Scan at 250 ms through completion plus a 15-second settle and
 .\scripts\measure-reactor-resources.ps1 `
   -Executable @(
     'C:\Program Files\WindowsApps\Publisher.App_2.5.8.0_arm64__publisher\app.exe',
-    'C:\code\wfdiag-reactor\wfdiag-reactor-spike.exe'
+    'C:\code\wfdiag-reactor\wfdiag.exe'
   ) `
   -LaunchMode @('tauri', 'reactor') `
   -Label @('tauri', 'reactor') `

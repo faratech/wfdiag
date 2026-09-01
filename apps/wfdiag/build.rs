@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 const WEBVIEW2_PROJECTION: &str = "Microsoft.Web.WebView2.Core.dll";
-const APP_VERSION_SOURCE: &str = "../version.json";
+const APP_VERSION_SOURCE: &str = "../../version.json";
 
 // The pinned setup crate copies these PE images from the Windows App Runtime
 // MSIX. Its copy helpers deliberately ignore missing inputs, so checking only

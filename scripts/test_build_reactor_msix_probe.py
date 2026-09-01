@@ -186,15 +186,21 @@ class ReactorMsixProbeTests(unittest.TestCase):
 
     def test_only_reactor_build_script_outputs_are_removed_before_restaging(self):
         profile = self.root / "target" / "release"
-        reactor_output = profile / "build" / "wfdiag-reactor-spike-deadbeef"
-        dependency_output = profile / "build" / "serde-deadbeef"
+        reactor_output = profile / "build" / "wfdiag-deadbeefdeadbeef"
+        dependency_output = profile / "build" / "serde-deadbeefdeadbeef"
+        # Same workspace target dir, same `wfdiag-` prefix: must survive.
+        tauri_output = profile / "build" / "wfdiag-tauri-deadbeefdeadbeef"
+        engine_output = profile / "build" / "wfdiag-native-phi-deadbeefdeadbeef"
         reactor_output.mkdir(parents=True)
-        dependency_output.mkdir()
+        for sibling in (dependency_output, tauri_output, engine_output):
+            sibling.mkdir()
 
         probe._remove_reactor_build_script_outputs(profile)
 
         self.assertFalse(reactor_output.exists())
         self.assertTrue(dependency_output.is_dir())
+        self.assertTrue(tauri_output.is_dir())
+        self.assertTrue(engine_output.is_dir())
 
     def test_owned_directory_guard_rejects_output_root(self):
         with self.assertRaisesRegex(probe.ProbeBuildError, "non-child path"):

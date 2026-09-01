@@ -4,14 +4,14 @@
   "store_manifest": "AppxManifest.xml",
   "ui_architecture": {
     "kind": "native_winui3_reactor",
-    "source_root": "reactor-spike/src",
+    "source_root": "apps/wfdiag/src",
     "webview_ui_allowed": false
   },
   "reactor_pin": {
     "repository": "https://github.com/microsoft/windows-rs",
     "revision": "1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8",
     "expected_crate_version": "0.100.0",
-    "prototype_manifest": "reactor-spike/Cargo.toml",
+    "prototype_manifest": "apps/wfdiag/Cargo.toml",
     "windows_app_runtime_release": "2.4.0",
     "windows_app_runtime_framework": "Microsoft.WindowsAppRuntime.2",
     "crates_io_observation": {
@@ -441,12 +441,12 @@
       "evidence": [
         "crates/wfdiag-native-system/src/lib.rs",
         "crates/wfdiag-native-system/src/runtime.rs",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/captures-2.5.8/live-system-validation/diagnostics-empty-desktop-dark-live-system-store-left-reactor-right.png",
-        "reactor-spike/captures-2.5.8/live-system-validation/diagnostics-live-system-20260830-114311.png",
-        "reactor-spike/captures-2.5.8/live-system-validation/diagnostics-live-system-20260830-114311.uia.json",
-        "reactor-spike/src/main.rs",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/captures-2.5.8/live-system-validation/diagnostics-empty-desktop-dark-live-system-store-left-reactor-right.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation/diagnostics-live-system-20260830-114311.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation/diagnostics-live-system-20260830-114311.uia.json",
+        "apps/wfdiag/src/main.rs",
         "scripts/test-reactor-live-system.ps1",
         "src-tauri/src/architecture.rs"
       ]
@@ -457,9 +457,9 @@
       "summary": "Quick and Full scans execute through the UI-neutral native runtime with progress, task-granular cancellation, stale-session protection, selectable result details, Settings-backed custom Quick Scan tasks, authoritative post-scan issue projection, optional Store-compatible history auto-save, and native export/share entry points. Full admin/non-admin, cancellation-race, collector-error, x64/ARM64, accessibility, and long-run interaction matrices remain unfinished, so status stays partial.",
       "evidence": [
         "crates/wfdiag-native-diagnostics/src/runtime.rs",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/src/main.rs"
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/src/main.rs"
       ]
     },
     {
@@ -469,9 +469,9 @@
       "evidence": [
         "crates/wfdiag-native-issues/README.md",
         "crates/wfdiag-native-issues/src/lib.rs",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/src/main.rs",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/src/main.rs",
         "src-tauri/src/issue_catalog.rs"
       ]
     },
@@ -482,9 +482,9 @@
       "evidence": [
         "crates/wfdiag-native-remediation/src/lib.rs",
         "crates/wfdiag-native-remediation/src/remediation.rs",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/src/action_support.rs",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/src/action_support.rs",
         "src-tauri/src/action_broker.rs",
         "src-tauri/src/remediation.rs"
       ]
@@ -495,10 +495,10 @@
       "summary": "Live system samples flow directly into Reactor through a bounded native event bus. Revisioned window visibility, focus, and minimize snapshots now pause the monitor while the window is unusable, cancel pending process work, and resume with a refresh only when lifecycle state owned the pause. Long-run lease behavior, failure recovery, x64/accessibility evidence, and the network-connections view still need parity validation.",
       "evidence": [
         "crates/wfdiag-native-monitor/src/runtime.rs",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/src/main.rs",
-        "reactor-spike/src/window_support.rs"
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/src/main.rs",
+        "apps/wfdiag/src/window_support.rs"
       ]
     },
     {
@@ -508,13 +508,13 @@
       "evidence": [
         "crates/wfdiag-native-monitor/examples/process_query.rs",
         "crates/wfdiag-native-monitor/src/runtime.rs",
-        "reactor-spike/captures-2.5.8/live-process-validation/live-initial.png",
-        "reactor-spike/captures-2.5.8/live-process-validation/live-page2-top.png",
-        "reactor-spike/captures-2.5.8/live-process-validation/live-selected-details.png",
-        "reactor-spike/captures-2.5.8/live-process-validation/processes-populated-store-left-reactor-right.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/src/main.rs"
+        "apps/wfdiag/captures-2.5.8/live-process-validation/live-initial.png",
+        "apps/wfdiag/captures-2.5.8/live-process-validation/live-page2-top.png",
+        "apps/wfdiag/captures-2.5.8/live-process-validation/live-selected-details.png",
+        "apps/wfdiag/captures-2.5.8/live-process-validation/processes-populated-store-left-reactor-right.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/src/main.rs"
       ]
     },
     {
@@ -524,9 +524,9 @@
       "evidence": [
         "crates/wfdiag-native-history/README.md",
         "crates/wfdiag-native-history/src/runtime.rs",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/src/main.rs",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/src/main.rs",
         "src-tauri/src/results_storage.rs"
       ]
     },
@@ -537,10 +537,10 @@
       "evidence": [
         "crates/wfdiag-native-export/README.md",
         "crates/wfdiag-native-export/src/lib.rs",
-        "reactor-spike/src/export_support.rs",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/src/main.rs",
+        "apps/wfdiag/src/export_support.rs",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/src/main.rs",
         "src-tauri/src/commands/export.rs"
       ]
     },
@@ -551,12 +551,12 @@
       "evidence": [
         "crates/wfdiag-native-settings/README.md",
         "crates/wfdiag-native-settings/src/lib.rs",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/design-qa.md",
-        "reactor-spike/src/main.rs",
-        "reactor-spike/src/provider_setup_support.rs",
-        "reactor-spike/src/subscription_auth_support.rs",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/design-qa.md",
+        "apps/wfdiag/src/main.rs",
+        "apps/wfdiag/src/provider_setup_support.rs",
+        "apps/wfdiag/src/subscription_auth_support.rs",
         "src-tauri/src/commands/settings.rs",
         "src/components/SettingsDialog.tsx"
       ]
@@ -570,12 +570,12 @@
         "crates/wfdiag-native-ai-provider/src/composition.rs",
         "crates/wfdiag-native-ai-provider/src/lib.rs",
         "crates/wfdiag-native-phi/src/lib.rs",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/src/chat_support.rs",
-        "reactor-spike/src/main.rs",
-        "reactor-spike/src/provider_setup_support.rs",
-        "reactor-spike/src/subscription_auth_support.rs",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/src/chat_support.rs",
+        "apps/wfdiag/src/main.rs",
+        "apps/wfdiag/src/provider_setup_support.rs",
+        "apps/wfdiag/src/subscription_auth_support.rs",
         "crates/wfdiag-native-ai-chat/src/subscription_auth.rs",
         "crates/wfdiag-native-ai-provider/src/model_catalog.rs",
         "src-tauri/src/ai_providers/ollama.rs",
@@ -587,7 +587,7 @@
       "status": "partial",
       "summary": "The native chat worker starts by default and resolves every turn from live DPAPI-backed settings. OpenAI, Anthropic, Gemini, and DeepSeek APIs; Foundry Local, Ollama, and custom OpenAI-compatible endpoints; signed-in Codex and Claude Code subscriptions; and package-bound Phi route through shared transports. Streaming, immediate in-flight cancellation, backend-owned conversation/New Conversation, stale-request rejection, exactly-one terminal projection, and the canonical exact-ten bounded tool catalog are wired. Auto-selected local-provider clean failures honor persisted Ask/Allow/Never cloud consent; explicit providers never fall back, and allowed local-to-cloud transitions are disclosed with ProviderUse fallback attribution. The closed parser admits only run_diagnostic, search_windows_knowledge, get_scan_summary, request_full_scan, get_detected_issues, compare_with_previous_scan, get_live_stats, list_remediations, list_scan_history, and stage_remediation with bounded closed arguments; scan/remediation calls create typed consent/proposal events and never execute directly. Ask AI immediately sends structured current-issue evidence. Prioritize / Propose fix plan uses a cancellable native worker with the shared bounded catalog-ID prompt/parser, stale fingerprint rejection, provider attribution, local-only Auto retry, and the normal tiered action broker for every selected action. Mandatory hermetic engine/UIA gates cover custom-provider chat, cancel, exact tool names, and a real remediation-catalog round trip. Provider-specific live Windows and fallback success/error/accessibility evidence, packaged Phi, live issue-to-chat/fix-plan evidence, and the remaining error matrices stay open, so status remains partial.",
       "evidence": [
-        "reactor-spike/src/chat_support.rs",
+        "apps/wfdiag/src/chat_support.rs",
         ".github/workflows/reactor-validation.yml",
         "crates/wfdiag-native-ai-chat/src/cli_bridge.rs",
         "crates/wfdiag-native-ai-chat/src/bounded_tools.rs",
@@ -605,7 +605,7 @@
       "status": "partial",
       "summary": "The native report worker starts by default and routes the same API, local, subscription, and Phi provider set through the shared ReportService. Streaming, duplicate suppression, immediate cancellation, exactly-one terminal projection, provider attribution, force-refresh Regenerate, shared-fingerprint cache identity, and full cached-body rehydration are wired. Reactor resolves the newest different stored scan off-thread for changed-since-last-scan evidence; compact evidence and Auto Phi-to-next-local reroute policies are shared and tested. The mandatory hermetic UIA gate asserts streamed report content and a fresh deterministic regeneration; shared service/worker tests separately pin cache and cached-body paths. Provider-specific and packaged live Windows evidence plus error and accessibility matrices remain open, so status stays partial.",
       "evidence": [
-        "reactor-spike/src/report_support.rs",
+        "apps/wfdiag/src/report_support.rs",
         ".github/workflows/reactor-validation.yml",
         "crates/wfdiag-native-ai-report/src/lib.rs",
         "scripts/test-reactor-ai-flows.ps1",
@@ -618,8 +618,8 @@
       "summary": "Reactor chat/report now route Phi through the shared package-bound Windows adapter, and provider status uses the shared identity-gated Phi probe. The gate remains blocked because Phi/Aion activation, Store identity/capability readback, runtime alignment, model readiness, fallback behavior, and real Copilot+ x64/ARM64 execution have not been validated through a Reactor package.",
       "evidence": [
         "crates/wfdiag-native-phi/src/lib.rs",
-        "reactor-spike/src/chat_support.rs",
-        "reactor-spike/src/report_support.rs",
+        "apps/wfdiag/src/chat_support.rs",
+        "apps/wfdiag/src/report_support.rs",
         "src-tauri/src/phi_silica.rs",
         "src-tauri/src/sparse_identity.rs",
         "AppxManifest.xml"
@@ -631,10 +631,10 @@
       "summary": "restart-as-administrator (runas relaunch) and allowlisted external links implemented through shared launchers; live candidate exercised process startup and graceful close without elevation prompts. Interactive UAC capture still open.",
       "evidence": [
         "crates/wfdiag-native-remediation/src/elevation.rs",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/src/export_support.rs",
-        "reactor-spike/src/update_support.rs"
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/src/export_support.rs",
+        "apps/wfdiag/src/update_support.rs"
       ]
     },
     {
@@ -643,12 +643,12 @@
       "summary": "Native save picking, Windows clipboard delivery through the WinRT DataTransfer API, allowlisted browser launch, and the AUMID-bound scan-completion toast are implemented. Save-dialog cancellation is a silent no-op; actual picker/path failures remain typed and surface with detail in the native status UI. The live candidate invokes the toast after completed scan finalization when notifications are enabled; failures are best-effort and do not affect scan completion. Interactive picker cancellation/error capture, clipboard/browser delivery, packaged-toast capture, and x64/ARM64/accessibility matrices remain open.",
       "evidence": [
         "crates/wfdiag-native-export/src/renderer.rs",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/src/export_support.rs",
-        "reactor-spike/src/main.rs",
-        "reactor-spike/src/notification_support.rs",
-        "reactor-spike/src/save_picker.rs"
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/src/export_support.rs",
+        "apps/wfdiag/src/main.rs",
+        "apps/wfdiag/src/notification_support.rs",
+        "apps/wfdiag/src/save_picker.rs"
       ]
     },
     {
@@ -658,10 +658,10 @@
       "evidence": [
         "crates/wfdiag-native-update/README.md",
         "crates/wfdiag-native-update/src/lib.rs",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/src/main.rs",
-        "reactor-spike/src/update_support.rs",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/src/main.rs",
+        "apps/wfdiag/src/update_support.rs",
         "src-tauri/src/update_check.rs",
         "src/components/AboutDialog.tsx",
         "src/hooks/useUpdateCheck.ts"
@@ -673,11 +673,11 @@
       "summary": "Tray icon, close-to-tray, Show/Hide/Quick Scan/Exit, hidden/minimized restore, and forced exit run through the isolated comctl32 subclass and Shell_NotifyIconW. The exact Reactor HWND is registered independently of visibility and cleared with stale-window protection; coherent revisioned visible/minimized/focused/tray snapshots are polled by the component and drive monitor pause/resume. The subclass was active during the live ARM64 validation run, which closed gracefully. Menu, close-to-tray, minimize/focus, restoration, and accessibility interaction capture remain open, so status stays partial.",
       "evidence": [
         "crates/wfdiag-native-remediation/src/elevation.rs",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/src/instance_support.rs",
-        "reactor-spike/src/main.rs",
-        "reactor-spike/src/window_support.rs"
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/src/instance_support.rs",
+        "apps/wfdiag/src/main.rs",
+        "apps/wfdiag/src/window_support.rs"
       ]
     },
     {
@@ -685,11 +685,11 @@
       "status": "partial",
       "summary": "The single-instance mutex decided primary/secondary at startup during every live run. Second-launch handoff uses the activation event and the exact registered main-window HWND, which remains available while hidden; minimized windows restore, hidden windows show, and foreground activation is best-effort under Windows policy. The interactive hidden/minimized second-launch focus matrix remains open, so status stays partial.",
       "evidence": [
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
-        "reactor-spike/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "reactor-spike/src/instance_support.rs",
-        "reactor-spike/src/main.rs",
-        "reactor-spike/src/window_support.rs"
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
+        "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
+        "apps/wfdiag/src/instance_support.rs",
+        "apps/wfdiag/src/main.rs",
+        "apps/wfdiag/src/window_support.rs"
       ]
     },
     {
@@ -697,8 +697,8 @@
       "status": "partial",
       "summary": "Native command palette (filtered command list, titlebar entry) and shortcut help dialog parity; expressible accelerators are wired (Ctrl+R refresh, Ctrl+Numpad1..6 screens). The full shipping set (Ctrl+1..6 main row, Ctrl+K, Ctrl+/, Ctrl+Shift+Q/F) is not expressible in the pinned AcceleratorKey enum (Control-only modifiers; numpad digits, R, Enter, arithmetic keys only) \u2014 upstream gap.",
       "evidence": [
-        "reactor-spike/src/main.rs",
-        "reactor-spike/README.md"
+        "apps/wfdiag/src/main.rs",
+        "apps/wfdiag/README.md"
       ]
     }
   ],
@@ -709,8 +709,8 @@
       "summary": "Official Reactor APIs do not yet cover the close interception and show/hide/minimize/maximize/restore behavior required for WFDiag tray parity. WFDiag's isolated Win32 path now caches the exact HWND, restores hidden/minimized windows, publishes revisioned lifecycle snapshots, and wires visibility to monitoring, but that implementation does not satisfy this official-API gate.",
       "evidence": [
         "https://github.com/microsoft/windows-rs/blob/1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8/crates/libs/reactor/public-api.txt",
-        "reactor-spike/src/instance_support.rs",
-        "reactor-spike/src/window_support.rs"
+        "apps/wfdiag/src/instance_support.rs",
+        "apps/wfdiag/src/window_support.rs"
       ]
     },
     {
@@ -740,11 +740,11 @@
       "evidence": [
         "reactor-baselines/manifest.json",
         "reactor-baselines/captures/store-2.5.8",
-        "reactor-spike/design-qa.md",
-        "reactor-spike/captures-2.5.8/diagnostics-empty-desktop-dark-comparison-current.png",
-        "reactor-spike/captures-2.5.8/diagnostics-populated-desktop-dark-comparison-current.png",
-        "reactor-spike/captures-2.5.8/current-comparisons-contact-v2.png",
-        "reactor-spike/captures-2.5.8/final/all-18-comparisons-contact.png"
+        "apps/wfdiag/design-qa.md",
+        "apps/wfdiag/captures-2.5.8/diagnostics-empty-desktop-dark-comparison-current.png",
+        "apps/wfdiag/captures-2.5.8/diagnostics-populated-desktop-dark-comparison-current.png",
+        "apps/wfdiag/captures-2.5.8/current-comparisons-contact-v2.png",
+        "apps/wfdiag/captures-2.5.8/final/all-18-comparisons-contact.png"
       ]
     },
     {
@@ -752,8 +752,8 @@
       "status": "blocked",
       "summary": "All six screens and their interaction states have not yet passed parity review using Reactor-owned native WinUI controls only; WebView2 and browser-hosted UI are prohibited.",
       "evidence": [
-        "reactor-spike/src/main.rs",
-        "reactor-spike/design-qa.md",
+        "apps/wfdiag/src/main.rs",
+        "apps/wfdiag/design-qa.md",
         "scripts/check-reactor-readiness.py"
       ]
     },
@@ -774,7 +774,7 @@
       "status": "blocked",
       "summary": "Signed self-contained x64/ARM64 MSI, NSIS, and portable-directory distributions have not passed clean-machine install and uninstall tests.",
       "evidence": [
-        "reactor-spike/README.md",
+        "apps/wfdiag/README.md",
         "docs/REACTOR_MIGRATION.md"
       ]
     }

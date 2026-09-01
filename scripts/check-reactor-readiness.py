@@ -29,7 +29,7 @@ EXPECTED_REACTOR_FRAMEWORK = "Microsoft.WindowsAppRuntime.2"
 EXPECTED_SCHEMA_VERSION = 2
 
 EXPECTED_UI_ARCHITECTURE = "native_winui3_reactor"
-EXPECTED_UI_SOURCE_ROOT = "reactor-spike/src"
+EXPECTED_UI_SOURCE_ROOT = "apps/wfdiag/src"
 FORBIDDEN_UI_DEPENDENCIES = {
     "cef",
     "cef-sys",
@@ -307,7 +307,7 @@ def _check_reactor_prototype(
     root: Path, report: ReadinessReport, manifest: dict[str, Any]
 ) -> None:
     reactor = manifest.get("reactor_pin", {})
-    relative = reactor.get("prototype_manifest", "reactor-spike/Cargo.toml")
+    relative = reactor.get("prototype_manifest", "apps/wfdiag/Cargo.toml")
     try:
         cargo_path = _safe_repo_path(root, relative)
     except ValueError as error:
@@ -419,7 +419,7 @@ def _check_native_ui(
     """Reject browser-hosted UI code from the native Reactor candidate."""
 
     reactor = manifest.get("reactor_pin", {})
-    relative_manifest = reactor.get("prototype_manifest", "reactor-spike/Cargo.toml")
+    relative_manifest = reactor.get("prototype_manifest", "apps/wfdiag/Cargo.toml")
     try:
         cargo_path = _safe_repo_path(root, relative_manifest)
         cargo = tomllib.loads(cargo_path.read_text(encoding="utf-8"))

@@ -15,7 +15,7 @@ $captureScript = Join-Path $PSScriptRoot "capture-window.ps1"
 $versionProbeFlag = "--wfdiag-version-probe"
 $versionProbeEnvironment = "WFDIAG_REACTOR_VERSION_PROBE_FILE"
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
-    $OutputDirectory = Join-Path $repoRoot "reactor-spike\captures-2.5.8\final"
+    $OutputDirectory = Join-Path $repoRoot "apps\wfdiag\captures-2.5.8\final"
 }
 
 $Executable = [IO.Path]::GetFullPath($Executable)

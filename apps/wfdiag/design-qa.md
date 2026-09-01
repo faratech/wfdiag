@@ -8,7 +8,7 @@ viewports, source version, and SHA-256 hashes are recorded in
 `reactor-baselines/manifest.json` and stored under
 `reactor-baselines/captures/store-2.5.8`.
 
-`reactor-spike` is a manually composed native WinUI 3 shell through Windows Reactor at the pinned
+`apps/wfdiag` is a manually composed native WinUI 3 shell through Windows Reactor at the pinned
 `windows-rs` revision. It does not host WebView2, HTML, CSS, JavaScript, the React bundle, or a
 web/native UI bridge.
 

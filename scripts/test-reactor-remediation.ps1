@@ -13,7 +13,7 @@
 
 param(
     [Parameter(Mandatory = $true)][string]$Executable,
-    [string]$OutputDirectory = "reactor-spike\captures-2.5.8\validation-remediation",
+    [string]$OutputDirectory = "apps\wfdiag\captures-2.5.8\validation-remediation",
     [ValidateRange(30, 600)][int]$ScanWaitSeconds = 180,
     [switch]$IncludeOpenTool
 )

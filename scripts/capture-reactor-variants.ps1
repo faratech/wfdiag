@@ -13,7 +13,7 @@
 
 param(
     [Parameter(Mandatory = $true)][string]$Executable,
-    [string]$OutputDirectory = "reactor-spike\captures-2.5.8\variants",
+    [string]$OutputDirectory = "apps\wfdiag\captures-2.5.8\variants",
     [string]$VariantsJson = "reactor-baselines\variants.json",
     [string[]]$Themes = @("dark", "light"),
     [ValidateSet("diagnostics-populated", "monitor-empty", "processes-empty", "settings-bottom")]

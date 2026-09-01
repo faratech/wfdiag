@@ -25,7 +25,7 @@ core dark-theme captures is necessary evidence, but is not by itself the
 entire gate.
 
 Schema 2 also protects the chosen architecture. The candidate must use native
-Reactor/WinUI controls from `reactor-spike/src`; WebView-hosted parity is not
+Reactor/WinUI controls from `apps/wfdiag/src`; WebView-hosted parity is not
 allowed. The validator rejects direct browser-shell dependencies, WebView API
 markers, and HTML/CSS/JavaScript/TypeScript frontend assets in that source
 tree. An unused WebView2 projection DLL staged by the upstream self-contained

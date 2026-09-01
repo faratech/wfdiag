@@ -9,7 +9,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Executable,
-    [string]$OutputDirectory = "reactor-spike\captures-2.5.8\validation-ui-regressions",
+    [string]$OutputDirectory = "apps\wfdiag\captures-2.5.8\validation-ui-regressions",
     [ValidateRange(5, 60)][int]$StartupWaitSeconds = 10,
     [ValidateRange(5, 120)][int]$NetworkWaitSeconds = 30,
     [ValidateRange(1, 10)][int]$MinimumNetworkRows = 2,

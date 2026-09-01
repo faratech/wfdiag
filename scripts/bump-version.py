@@ -136,7 +136,7 @@ def refresh_cargo_lock(cargo_dir: Path, dry_run: bool) -> None:
         return
     try:
         subprocess.run(
-            ["cargo", "update", "--offline", "-p", "wfdiag-tauri"],
+            ["cargo", "update", "--offline", "-p", "wfdiag-tauri", "-p", "wfdiag"],
             cwd=cargo_dir,
             check=True,
             capture_output=True,
@@ -145,7 +145,7 @@ def refresh_cargo_lock(cargo_dir: Path, dry_run: bool) -> None:
         print("  Refreshed: Cargo.lock")
     except FileNotFoundError:
         print("  Warning: cargo not found on PATH — Cargo.lock was not refreshed; run "
-              "'cargo update -p wfdiag-tauri' manually before committing")
+              "'cargo update -p wfdiag-tauri -p wfdiag' manually before committing")
     except subprocess.CalledProcessError as e:
         print(f"  Warning: failed to refresh Cargo.lock: {e.stderr.strip() if e.stderr else e}")
 
@@ -344,10 +344,13 @@ def main():
     if update_package_lock(script_dir / 'package-lock.json', new_version, dry_run):
         success_count += 1
 
-    # 4. src-tauri/Cargo.toml
-    total_count += 1
-    if update_cargo_toml(script_dir / 'src-tauri' / 'Cargo.toml', new_version, dry_run):
-        success_count += 1
+    # 4. src-tauri/Cargo.toml (Tauri rollback shell) and apps/wfdiag/Cargo.toml
+    #    (native shell) share the app version; one lock refresh covers both.
+    total_count += 2
+    tauri_updated = update_cargo_toml(script_dir / 'src-tauri' / 'Cargo.toml', new_version, dry_run)
+    shell_updated = update_cargo_toml(script_dir / 'apps' / 'wfdiag' / 'Cargo.toml', new_version, dry_run)
+    success_count += int(tauri_updated) + int(shell_updated)
+    if tauri_updated or shell_updated:
         refresh_cargo_lock(script_dir, dry_run)
 
     # 5. src-tauri/tauri.conf.json

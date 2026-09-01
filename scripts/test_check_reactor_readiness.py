@@ -119,9 +119,9 @@ class Fixture:
             appx_manifest(readiness.EXPECTED_REACTOR_FRAMEWORK),
         )
         self.write_text(
-            "reactor-spike/Cargo.toml",
+            "apps/wfdiag/Cargo.toml",
             f'''[package]
-name = "test-reactor-spike"
+name = "test-wfdiag"
 version = "0.0.0"
 edition = "2024"
 
@@ -133,7 +133,7 @@ windows-reactor-setup = {{ git = "{readiness.EXPECTED_REACTOR_REPOSITORY}", rev 
 ''',
         )
         self.write_text(
-            "reactor-spike/src/main.rs",
+            "apps/wfdiag/src/main.rs",
             "use windows_reactor::*;\nfn main() {}\n",
         )
         self.manifest = {
@@ -148,7 +148,7 @@ windows-reactor-setup = {{ git = "{readiness.EXPECTED_REACTOR_REPOSITORY}", rev 
                 "repository": readiness.EXPECTED_REACTOR_REPOSITORY,
                 "revision": readiness.EXPECTED_REACTOR_REVISION,
                 "expected_crate_version": readiness.EXPECTED_REACTOR_VERSION,
-                "prototype_manifest": "reactor-spike/Cargo.toml",
+                "prototype_manifest": "apps/wfdiag/Cargo.toml",
                 "windows_app_runtime_release": readiness.EXPECTED_REACTOR_RUNTIME_RELEASE,
                 "windows_app_runtime_framework": readiness.EXPECTED_REACTOR_FRAMEWORK,
             },
@@ -275,7 +275,7 @@ class ReactorReadinessTests(unittest.TestCase):
         self.assertIn("store.capabilities", blockers)
 
     def test_floating_or_changed_reactor_pin_is_a_blocker(self):
-        cargo_path = self.root / "reactor-spike/Cargo.toml"
+        cargo_path = self.root / "apps/wfdiag/Cargo.toml"
         cargo = cargo_path.read_text(encoding="utf-8")
         cargo = cargo.replace(
             f'rev = "{readiness.EXPECTED_REACTOR_REVISION}"',
@@ -289,7 +289,7 @@ class ReactorReadinessTests(unittest.TestCase):
         self.assertIn("reactor.prototype", codes(report, "blocker"))
 
     def test_webview_dependency_is_a_blocker(self):
-        cargo_path = self.root / "reactor-spike/Cargo.toml"
+        cargo_path = self.root / "apps/wfdiag/Cargo.toml"
         cargo = cargo_path.read_text(encoding="utf-8")
         cargo = cargo.replace(
             "[build-dependencies]",
@@ -306,10 +306,10 @@ class ReactorReadinessTests(unittest.TestCase):
 
     def test_webview_source_or_frontend_asset_is_a_blocker(self):
         self.fixture.write_text(
-            "reactor-spike/src/browser.rs",
+            "apps/wfdiag/src/browser.rs",
             "fn attach(controller: CoreWebView2Controller) {}\n",
         )
-        self.fixture.write_text("reactor-spike/src/index.html", "<main>WFDiag</main>")
+        self.fixture.write_text("apps/wfdiag/src/index.html", "<main>WFDiag</main>")
 
         report = self.fixture.report()
 
@@ -320,7 +320,7 @@ class ReactorReadinessTests(unittest.TestCase):
 
     def test_captured_webview_process_name_is_data_not_a_ui_marker(self):
         self.fixture.write_text(
-            "reactor-spike/src/process_fixture.rs",
+            "apps/wfdiag/src/process_fixture.rs",
             'const PROCESS_NAME: &str = "msedgewebview2.exe";\n',
         )
 

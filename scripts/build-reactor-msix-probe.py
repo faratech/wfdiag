@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import struct
@@ -29,15 +30,15 @@ import zipfile
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-REACTOR_MANIFEST = PROJECT_ROOT / "reactor-spike" / "Cargo.toml"
+REACTOR_MANIFEST = PROJECT_ROOT / "apps/wfdiag" / "Cargo.toml"
 STORE_MANIFEST = PROJECT_ROOT / "AppxManifest.xml"
 VERSION_FILE = PROJECT_ROOT / "version.json"
 ICONS_DIR = PROJECT_ROOT / "src-tauri" / "icons"
 
 STORE_IDENTITY_NAME = "32827MikeFara.WindowsForumDiagnostics"
 STORE_PUBLISHER = "CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4"
-STORE_EXECUTABLE = "wfdiag-reactor-spike.exe"
-REACTOR_BINARY = "wfdiag-reactor-spike.exe"
+STORE_EXECUTABLE = "wfdiag.exe"
+REACTOR_BINARY = "wfdiag.exe"
 BOOTSTRAP_DLL = "Microsoft.WindowsAppRuntime.Bootstrap.dll"
 WINDOWS_APP_RUNTIME_FRAMEWORK = "Microsoft.WindowsAppRuntime.2"
 WINDOWS_APP_RUNTIME_MIN_VERSION = "2.4.0.0"
@@ -468,7 +469,11 @@ def _remove_reactor_build_script_outputs(profile_dir: Path) -> None:
     build_root = profile_dir / "build"
     if not build_root.is_dir():
         return
-    for path in build_root.glob("wfdiag-reactor-spike-*"):
+    for path in build_root.iterdir():
+        # Cargo names build-script dirs `<package>-<16 hex>`; anchor on the exact
+        # package so sibling wfdiag-tauri-*/wfdiag-native-* dirs are never removed.
+        if not re.fullmatch(r"wfdiag-[0-9a-f]{16}", path.name):
+            continue
         if path.is_dir():
             shutil.rmtree(path)
 

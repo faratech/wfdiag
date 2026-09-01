@@ -13,7 +13,7 @@
 
 param(
     [string]$BuildRoot = "C:\Temp\claude\wfdiag",
-    [string]$OutputDirectory = "reactor-spike\captures-2.5.8\validation-x64",
+    [string]$OutputDirectory = "apps\wfdiag\captures-2.5.8\validation-x64",
     [string[]]$Suites = @("live-system", "chat", "report", "remediation"),
     [ValidateRange(30, 600)][int]$ScanWaitSeconds = 240
 )
@@ -30,13 +30,13 @@ $buildArgs = @(
     "build", "--target", "x86_64-pc-windows-msvc", "--features", "self-contained"
 )
 Write-Host "Building x64 self-contained candidate..."
-& $cargo @buildArgs --manifest-path (Join-Path $BuildRoot "reactor-spike\Cargo.toml") 2>&1 |
+& $cargo @buildArgs --manifest-path (Join-Path $BuildRoot "apps\wfdiag\Cargo.toml") 2>&1 |
     Select-Object -Last 3
 if ($LASTEXITCODE -ne 0) {
     throw "x64 build failed with exit code $LASTEXITCODE."
 }
 
-$executable = Join-Path $BuildRoot "target\x86_64-pc-windows-msvc\debug\wfdiag-reactor-spike.exe"
+$executable = Join-Path $BuildRoot "target\x86_64-pc-windows-msvc\debug\wfdiag.exe"
 if (-not (Test-Path -LiteralPath $executable)) {
     throw "Built x64 executable not found: $executable"
 }

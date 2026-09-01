@@ -16,7 +16,7 @@
 
 param(
     [Parameter(Mandatory = $true)][string]$Executable,
-    [string]$OutputDirectory = "reactor-spike\captures-2.5.8\validation-ai-flows",
+    [string]$OutputDirectory = "apps\wfdiag\captures-2.5.8\validation-ai-flows",
     [ValidateRange(10, 120)][int]$StepWaitSeconds = 45,
     [ValidateRange(1, 65535)][int]$MockProviderPort = 18080
 )
