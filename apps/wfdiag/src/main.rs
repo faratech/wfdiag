@@ -65,6 +65,6 @@ fn main() {
         instance::SingleInstanceDecision::Secondary => return,
     };
     if let Err(error) = App::run_component::<WfdiagShell>(()) {
-        crate::platform::crash::report_runtime_start_failure(&error);
+        crate::platform::crash::report_runtime_start_failure(APP_VERSION, &error);
     }
 }
