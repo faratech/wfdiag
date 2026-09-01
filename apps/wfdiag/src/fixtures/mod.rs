@@ -1,8 +1,9 @@
 //! Deterministic visual fixtures for the shell's validation and QA modes.
 //!
-//! Nothing here participates in a production run: every item is reachable only
-//! from the deterministic-visual code paths, so the whole tree can later be
-//! gated behind a cargo feature by cfg-ing this one module declaration.
+//! Fixture *data* ([`issues`], the data constructors in [`visual`]) is
+//! compiled only with the `validation` feature. The two plumbing enums
+//! (`VisualState`, `LiveTestFixture`) stay in every build so their pure
+//! parsers keep the production default on one code path.
 //!
 //! # Environment access is forbidden outside [`knobs`] (#186, #212)
 //!
@@ -17,8 +18,10 @@
 //! are documented at their call sites. Engine crates own their own variables
 //! and are out of scope for this rule.
 
+#[cfg(feature = "validation")]
 pub(crate) mod issues;
 pub(crate) mod knobs;
 pub(crate) mod visual;
 
+#[cfg(feature = "validation")]
 pub(crate) use issues::fixture_258_issues;

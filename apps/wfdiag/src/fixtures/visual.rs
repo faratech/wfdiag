@@ -3,14 +3,24 @@
 #![deny(unsafe_code)]
 
 use crate::app::state::Page;
+#[cfg(feature = "validation")]
 use crate::screens::processes::view::ProcessViewRow;
+#[cfg(feature = "validation")]
 use wfdiag_native_projection::process_identity::ProcessIdentity;
-use wfdiag_native_remediation::broker::{ActionRequest, current_action_catalog_fingerprint};
+// `ActionRequest` stays ungated: the `LiveTestFixture::permits_actions`
+// signature (not validation-gated) names it.
+use wfdiag_native_remediation::broker::ActionRequest;
+#[cfg(feature = "validation")]
+use wfdiag_native_remediation::broker::current_action_catalog_fingerprint;
+#[cfg(feature = "validation")]
 use wfdiag_native_remediation::remediation;
+#[cfg(feature = "validation")]
 use wfdiag_native_remediation::runtime::{
     ActionItemRun, ActionItemStatus, ActionRunStatus, ActionRunSummary,
 };
+#[cfg(feature = "validation")]
 use wfdiag_native_system::SystemInfo;
+#[cfg(feature = "validation")]
 use wfdiag_ui_core::SystemStats;
 
 /// Deterministic Store 2.5.8 visual states used only by screenshot/QA automation.
@@ -147,6 +157,7 @@ impl LiveTestFixture {
     }
 }
 
+#[cfg(feature = "validation")]
 pub(crate) fn remediation_partial_visual_run() -> ActionRunSummary {
     use remediation::{
         FixCompletionStatus, FixResult, RemediationStepResult, RemediationStepStatus,
@@ -192,6 +203,7 @@ pub(crate) fn remediation_partial_visual_run() -> ActionRunSummary {
     }
 }
 
+#[cfg(feature = "validation")]
 pub(crate) fn fixture_258_system_info() -> SystemInfo {
     SystemInfo {
         computer_name: "ANDROMEDA".to_string(),
@@ -200,6 +212,7 @@ pub(crate) fn fixture_258_system_info() -> SystemInfo {
     }
 }
 
+#[cfg(feature = "validation")]
 pub(crate) fn fixture_system_stats() -> SystemStats {
     SystemStats {
         cpu_utilization: 10.3,
@@ -236,6 +249,7 @@ pub(crate) fn fixture_system_stats() -> SystemStats {
     }
 }
 
+#[cfg(feature = "validation")]
 pub(crate) fn fixture_monitor_empty_stats() -> SystemStats {
     SystemStats {
         cpu_utilization: 71.2,
@@ -272,6 +286,7 @@ pub(crate) fn fixture_monitor_empty_stats() -> SystemStats {
     }
 }
 
+#[cfg(feature = "validation")]
 #[derive(Clone, Copy)]
 pub(crate) struct ProcessFixture258 {
     pub(crate) name: &'static str,
@@ -283,6 +298,7 @@ pub(crate) struct ProcessFixture258 {
     pub(crate) threads: u32,
 }
 
+#[cfg(feature = "validation")]
 pub(crate) const PROCESS_ROWS_258: [ProcessFixture258; 19] = [
     ProcessFixture258 {
         name: "firefox.exe",
@@ -457,6 +473,7 @@ pub(crate) const PROCESS_ROWS_258: [ProcessFixture258; 19] = [
     },
 ];
 
+#[cfg(feature = "validation")]
 impl ProcessFixture258 {
     pub(crate) fn virtual_memory(self) -> &'static str {
         match self.pid {
@@ -495,6 +512,7 @@ impl ProcessFixture258 {
     }
 }
 
+#[cfg(feature = "validation")]
 impl From<ProcessFixture258> for ProcessViewRow {
     fn from(process: ProcessFixture258) -> Self {
         Self {
@@ -515,7 +533,8 @@ impl From<ProcessFixture258> for ProcessViewRow {
     }
 }
 
-#[cfg(test)]
+// The fixture data these tests pin exists only in validation builds.
+#[cfg(all(test, feature = "validation"))]
 mod tests {
     use super::*;
     use crate::app::policy::{

@@ -326,6 +326,7 @@ impl MonitorHistory {
             .collect()
     }
 
+    #[cfg(feature = "validation")]
     pub(crate) fn fixture_258() -> Self {
         let cpu = [10.3, 63.0, 20.0, 17.0, 10.3];
         let memory = [81.0; 5];

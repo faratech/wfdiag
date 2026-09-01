@@ -110,9 +110,14 @@ pub(crate) fn history_page(
     trends_error: Option<&str>,
     load_trends: Callback<()>,
 ) -> View {
+    #[cfg(feature = "validation")]
     if deterministic_visual {
         return history_fixture_page(palette, narrow, fixture_empty);
     }
+    // A shipping build's knobs are compile-time `Live`/`None`/`false`, so the
+    // fixture page could never be reached.
+    #[cfg(not(feature = "validation"))]
+    let _ = (deterministic_visual, fixture_empty, palette, narrow);
     history_live_page(
         palette,
         narrow,
@@ -1029,6 +1034,7 @@ pub(crate) fn history_comparison_placeholder(
     "Comparison is unavailable. Select the scan again to retry.".to_string()
 }
 
+#[cfg(feature = "validation")]
 pub(crate) fn history_fixture_page(palette: Palette, narrow: bool, empty: bool) -> View {
     if empty {
         return history_empty_page(palette, narrow);
@@ -1234,6 +1240,8 @@ pub(crate) fn history_fixture_page(palette: Palette, narrow: bool, empty: bool) 
     ))
 }
 
+// Fixture-only: the live page renders its own empty state.
+#[cfg(feature = "validation")]
 pub(crate) fn history_empty_page(palette: Palette, narrow: bool) -> View {
     let sessions = Border::new()
         .background(palette.card)

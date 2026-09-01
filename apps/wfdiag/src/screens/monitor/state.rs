@@ -4,6 +4,7 @@
 
 use crate::app::state::MonitorHistory;
 use crate::fixtures::visual::VisualState;
+#[cfg(feature = "validation")]
 use crate::fixtures::visual::{fixture_monitor_empty_stats, fixture_system_stats};
 use wfdiag_app::ports::monitor::NetworkConnection;
 use wfdiag_ui_core::SystemStats;
@@ -27,24 +28,34 @@ pub(crate) struct MonitorScreen {
 impl MonitorScreen {
     /// The first frame, including the deterministic screenshot fixtures.
     pub(crate) fn new(visual_state: VisualState, fixture_mode: bool) -> Self {
-        Self {
-            stats: match visual_state {
-                VisualState::MonitorEmpty => Some(fixture_monitor_empty_stats()),
-                VisualState::SettingsBottom => Some(fixture_system_stats()),
-                _ if fixture_mode => Some(fixture_system_stats()),
-                _ => None,
-            },
-            history: match visual_state {
-                VisualState::MonitorEmpty => {
-                    let mut history = MonitorHistory::default();
-                    history.push_stats(&fixture_monitor_empty_stats());
-                    history
-                }
-                VisualState::SettingsBottom => MonitorHistory::fixture_258(),
-                _ if fixture_mode => MonitorHistory::fixture_258(),
-                _ => MonitorHistory::default(),
-            },
-            ..Self::default()
+        #[cfg(feature = "validation")]
+        {
+            Self {
+                stats: match visual_state {
+                    VisualState::MonitorEmpty => Some(fixture_monitor_empty_stats()),
+                    VisualState::SettingsBottom => Some(fixture_system_stats()),
+                    _ if fixture_mode => Some(fixture_system_stats()),
+                    _ => None,
+                },
+                history: match visual_state {
+                    VisualState::MonitorEmpty => {
+                        let mut history = MonitorHistory::default();
+                        history.push_stats(&fixture_monitor_empty_stats());
+                        history
+                    }
+                    VisualState::SettingsBottom => MonitorHistory::fixture_258(),
+                    _ if fixture_mode => MonitorHistory::fixture_258(),
+                    _ => MonitorHistory::default(),
+                },
+                ..Self::default()
+            }
+        }
+        // A shipping build's knobs are compile-time `Live`/`None`/`false`, so
+        // no fixture arm could ever fire.
+        #[cfg(not(feature = "validation"))]
+        {
+            let _ = (visual_state, fixture_mode);
+            Self::default()
         }
     }
 }

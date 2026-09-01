@@ -1060,7 +1060,6 @@ pub(crate) mod tests {
         assert!(page_host_scrolls(Page::Diagnostics, true));
     }
     use crate::app::message::SettingsDialogAction;
-    use crate::fixtures::visual::fixture_258_system_info;
     use crate::screens::history::view::history_comparison_placeholder;
 
     #[test]
@@ -1407,7 +1406,14 @@ pub(crate) mod tests {
         };
         assert_eq!(
             machine_card_accessibility_name(
-                &fixture_258_system_info(),
+                // Same identity as the Store 2.5.8 fixture
+                // (`fixtures::visual::fixture_258_system_info`); pinned inline
+                // so this accessibility contract holds in every feature shape.
+                &wfdiag_native_system::SystemInfo {
+                    computer_name: "ANDROMEDA".to_string(),
+                    os_version: "Windows 11 Professional (25H2)".to_string(),
+                    is_admin: false,
+                },
                 Some(&architecture),
                 Some("architecture probe degraded"),
             ),

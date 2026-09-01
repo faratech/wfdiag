@@ -64,14 +64,15 @@ use crate::dialogs::palette::state::PaletteDialog;
 use crate::dialogs::settings::state::SettingsDialog;
 use crate::dialogs::shortcuts_help::state::ShortcutHelpDialog;
 use crate::dialogs::update_notice::state::UpdateNoticeDialog;
+#[cfg(feature = "validation")]
 use crate::fixtures;
 use crate::fixtures::knobs::{
     fixture_mode, initial_page_override, initial_window_height, initial_window_width,
     live_test_fixture_from_env, settings_dialog_open_override, startup_theme_setting, visual_state,
 };
-use crate::fixtures::visual::{
-    LiveTestFixture, VisualState, fixture_258_system_info, remediation_partial_visual_run,
-};
+use crate::fixtures::visual::{LiveTestFixture, VisualState};
+#[cfg(feature = "validation")]
+use crate::fixtures::visual::{fixture_258_system_info, remediation_partial_visual_run};
 use crate::platform::{instance, notifications, ui_wake, window};
 use crate::screens::ai::state::AiScreen;
 use crate::screens::diagnostics::state::DiagnosticsScreen;
@@ -235,14 +236,20 @@ impl Component for WfdiagShell {
         let diagnostic_catalog = engine.catalog.clone();
         let issue_maintenance = engine.maintenance.clone();
         let has_fixture_scan = !diagnostic_results.is_empty();
+        #[cfg(feature = "validation")]
         let issues = if deterministic_visual && has_fixture_scan {
             fixtures::fixture_258_issues()
         } else {
             engine.issues.clone()
         };
+        // A shipping build's knobs are compile-time `Live`/`None`/`false`, so
+        // the fixture issues could never be selected.
+        #[cfg(not(feature = "validation"))]
+        let issues = engine.issues.clone();
 
         // Remediation previews and run history survive a process restart; the
         // engine rehydrates them at start, so adopt them for the first frame.
+        #[cfg(feature = "validation")]
         let (action_active_run, action_run_history, action_review) =
             if visual_state == VisualState::RemediationPartial {
                 (None, vec![remediation_partial_visual_run()], None)
@@ -253,6 +260,12 @@ impl Component for WfdiagShell {
                     engine.review.clone(),
                 )
             };
+        #[cfg(not(feature = "validation"))]
+        let (action_active_run, action_run_history, action_review) = (
+            engine.active_run.clone(),
+            engine.run_history.clone(),
+            engine.review.clone(),
+        );
         let action_expanded_runs = action_active_run
             .iter()
             .chain(
@@ -263,6 +276,7 @@ impl Component for WfdiagShell {
             .map(|run| run.run_id.clone())
             .collect();
 
+        #[cfg(feature = "validation")]
         let initial_system_info = if deterministic_visual {
             fixture_258_system_info()
         } else {
@@ -271,6 +285,11 @@ impl Component for WfdiagShell {
                 .clone()
                 .unwrap_or_else(pending_system_info)
         };
+        #[cfg(not(feature = "validation"))]
+        let initial_system_info = engine
+            .system_info
+            .clone()
+            .unwrap_or_else(pending_system_info);
         let is_admin = initial_system_info.is_admin;
 
         let window_lifecycle_revision = window::lifecycle_snapshot().revision;

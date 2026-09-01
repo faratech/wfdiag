@@ -9,6 +9,7 @@ use crate::app::policy::process_layout_metrics;
 use crate::app::screen::ShellEnv;
 use crate::app::shell_msg::ShellMsg;
 use crate::app::state::Page;
+#[cfg(feature = "validation")]
 use crate::fixtures::visual::PROCESS_ROWS_258;
 use crate::screens::monitor::state::MonitorMsg;
 use crate::screens::processes::state::{ProcessesMsg, ProcessesScreen};
@@ -226,18 +227,25 @@ pub(crate) fn processes_page(
     let (narrow, row_width) = process_layout_metrics(window_width, pane_expanded);
     let needle = filter.trim().to_ascii_lowercase();
     let (display_rows, total, offset, limit) = if deterministic_visual {
-        let rows = PROCESS_ROWS_258
-            .into_iter()
-            .filter(|process| {
-                needle.is_empty()
-                    || process.name.to_ascii_lowercase().contains(&needle)
-                    || process.pid.to_string().contains(&needle)
-                    || process.status.to_ascii_lowercase().contains(&needle)
-            })
-            .map(|process| Arc::new(ProcessViewRow::from(process)))
-            .collect::<Vec<_>>();
-        let total = if needle.is_empty() { 450 } else { rows.len() };
-        (rows, total, 0, PROCESS_PAGE_SIZE)
+        #[cfg(feature = "validation")]
+        {
+            let rows = PROCESS_ROWS_258
+                .into_iter()
+                .filter(|process| {
+                    needle.is_empty()
+                        || process.name.to_ascii_lowercase().contains(&needle)
+                        || process.pid.to_string().contains(&needle)
+                        || process.status.to_ascii_lowercase().contains(&needle)
+                })
+                .map(|process| Arc::new(ProcessViewRow::from(process)))
+                .collect::<Vec<_>>();
+            let total = if needle.is_empty() { 450 } else { rows.len() };
+            (rows, total, 0, PROCESS_PAGE_SIZE)
+        }
+        // A shipping build's knobs are compile-time `Live`/`None`/`false`, so
+        // the fixture rows could never be reached.
+        #[cfg(not(feature = "validation"))]
+        (Vec::new(), 0, 0, PROCESS_PAGE_SIZE)
     } else if let Some(page) = process_page {
         (live_rows.to_vec(), page.total, page.offset, page.limit)
     } else {
@@ -289,6 +297,8 @@ pub(crate) fn processes_page(
             )),
         ));
     let start = if total == 0 { 0 } else { offset + 1 };
+    // The fixture arm is unreachable in a shipping build (its knobs are
+    // compile-time defaults), so it needs no cfg of its own.
     let end = if deterministic_visual && needle.is_empty() {
         (offset + limit).min(total)
     } else {
