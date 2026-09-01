@@ -55,17 +55,9 @@ impl Timestamp {
     }
 
     /// Create a timestamp from Unix epoch seconds
-    #[allow(dead_code)]
     #[must_use]
     pub fn from_secs(secs: i64) -> Self {
         Self { secs }
-    }
-
-    /// Get the Unix timestamp in seconds
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn timestamp(&self) -> i64 {
-        self.secs
     }
 
     /// Check if this timestamp is before another by a given duration

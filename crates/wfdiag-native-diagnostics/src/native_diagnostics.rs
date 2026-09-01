@@ -134,7 +134,6 @@ fn pending_reboot_output(
     })
 }
 
-#[allow(dead_code)]
 impl NativeDiagnostics {
     pub fn new() -> Result<Self> {
         Ok(Self)
@@ -818,11 +817,6 @@ impl NativeDiagnostics {
         }
 
         Ok(info)
-    }
-
-    pub fn run_chkdsk(&self) -> Result<Value> {
-        // Use native disk health check via Storage Management WMI - much faster than chkdsk
-        self.get_disk_health()
     }
 
     /// Get disk health using Windows Storage Management API (`MSFT_PhysicalDisk`)

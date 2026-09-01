@@ -83,16 +83,6 @@ pub trait ProcessIdentitySource {
     }
 }
 
-/// Build the stable identity stored by the process-selection state.
-// Retained for library consumers and fixtures that do not own a native
-// ProcessRow. The executable currently constructs its local row projection
-// through the trait-equivalent `ProcessIdentity::new` path.
-#[allow(dead_code)]
-#[must_use]
-pub fn process_identity(row: &(impl ProcessIdentitySource + ?Sized)) -> ProcessIdentity {
-    row.process_identity()
-}
-
 fn match_quality(selection: ProcessIdentity, observation: ProcessIdentity) -> Option<u8> {
     if !selection.matches_observation(observation) {
         return None;
@@ -230,7 +220,7 @@ mod tests {
     fn unchanged_identity_selects_the_newest_row_data() {
         let old = FixtureRow::new(4242, 100, "old sample");
         let refreshed = [FixtureRow::new(4242, 100, "new sample")];
-        let selected = process_identity(&old);
+        let selected = old.process_identity();
 
         assert_eq!(
             reconcile_process_selection(Some(selected), &refreshed),

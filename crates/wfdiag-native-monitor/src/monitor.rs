@@ -870,12 +870,6 @@ impl SystemMonitor {
         let snapshot = snapshot.as_ref().expect("process snapshot was just stored");
         paginate_process_snapshot(&snapshot.processes, snapshot.captured_at, &query)
     }
-
-    #[allow(dead_code)]
-    pub async fn set_update_interval(&self, seconds: u64) {
-        let mut interval = self.update_interval.lock().await;
-        *interval = Duration::from_secs(seconds.max(1));
-    }
 }
 
 // ============================================================================

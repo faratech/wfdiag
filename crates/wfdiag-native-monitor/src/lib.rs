@@ -23,4 +23,4 @@ pub mod monitor;
 mod runtime;
 
 pub use monitor::*;
-pub use runtime::{NativeMonitorRuntime, ProcessQueryOutcome, UiBusMonitorEmitter};
+pub use runtime::{NativeMonitorRuntime, ProcessQueryOutcome};

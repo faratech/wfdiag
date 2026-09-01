@@ -45,14 +45,6 @@ pub mod diagnostics {
         CATALOG.get_or_init(|| RwLock::new(Vec::new()))
     }
 
-    /// Replace the fallback metadata used by the compatibility `ScanStorage`
-    /// constructor. Production runtimes inject their catalog per instance.
-    pub fn set_default_task_catalog(tasks: Vec<DiagnosticTask>) {
-        if let Ok(mut current) = catalog().write() {
-            *current = tasks;
-        }
-    }
-
     #[must_use]
     pub fn get_all_tasks() -> Vec<DiagnosticTask> {
         catalog()
@@ -62,21 +54,9 @@ pub mod diagnostics {
     }
 }
 
-/// Compatibility settings shim used only by `ScanStorage::new`. Native code
-/// should prefer `ScanStorage::new_in` or `NativeHistoryRuntime::start` and
-/// inject the current settings-backed policy.
-pub mod commands {
-    pub mod settings {
-        #[must_use]
-        pub fn history_retention() -> (bool, u32) {
-            (true, 30)
-        }
-    }
-}
-
 pub mod storage;
 
-pub use diagnostics::{DiagnosticTask, set_default_task_catalog};
+pub use diagnostics::DiagnosticTask;
 pub use encrypted_storage::EncryptedStorage;
 pub use runtime::{HistoryReply, HistoryRuntimeConfig, HistoryRuntimeError, NativeHistoryRuntime};
 pub use storage::{

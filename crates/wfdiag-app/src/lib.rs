@@ -73,7 +73,7 @@ pub use event::{
     PrioritizationEvent, ProviderEvent, ReportEvent, ScanEvent, SettingsEvent, SubscriptionEvent,
     SystemEvent, UpdateEvent,
 };
-pub use ids::{Epoch, Generation, RequestId};
+pub use ids::{Epoch, RequestId};
 pub use ports::{AppPorts, ElevationPort, EnvironmentPort, UpdateThrottlePort};
 pub use service::{AppService, AppStartError, ShutdownReport};
 pub use snapshot::{

@@ -153,14 +153,6 @@ impl ScanStorage {
         }
     }
 
-    pub fn new() -> Result<Self, String> {
-        Self::new_in(
-            Self::default_storage_directory()?,
-            crate::commands::settings::history_retention,
-            crate::diagnostics::get_all_tasks,
-        )
-    }
-
     /// Open the existing scan-history format at an explicit directory.
     ///
     /// Providers are evaluated for every save/cleanup or comparison so a UI

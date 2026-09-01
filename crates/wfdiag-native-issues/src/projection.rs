@@ -341,7 +341,7 @@ mod tests {
             &result
         ));
         assert_eq!(prepared.request.results.len(), 1);
-        assert_eq!(prepared.request.now.timestamp(), 1_788_076_800);
+        assert_eq!(prepared.request.now.secs, 1_788_076_800);
         assert_eq!(prepared.request.temp_file_count, Some(1_069));
     }
 

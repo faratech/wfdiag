@@ -5,10 +5,9 @@ pub use wfdiag_native_history::storage::*;
 
 /// Open the shipping Tauri scan store.
 ///
-/// `ScanStorage::new()` only exists for the history crate's compatibility
-/// defaults (fixed retention, empty task catalog). This shell must inject the
-/// user's retention setting and the live diagnostic catalog instead, exactly
-/// as the backend did before the store moved into its own crate.
+/// This shell must inject the user's retention setting and the live
+/// diagnostic catalog instead of compatibility defaults, exactly as the
+/// backend did before the store moved into its own crate.
 pub fn open_default_storage() -> Result<ScanStorage, String> {
     ScanStorage::new_in(
         ScanStorage::default_storage_directory()?,

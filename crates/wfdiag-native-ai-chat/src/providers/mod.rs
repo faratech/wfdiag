@@ -10,18 +10,14 @@ pub mod openai_compat;
 
 pub mod anthropic;
 pub mod deepseek;
-#[allow(dead_code)]
 pub mod gemini;
 pub(crate) mod sse;
 
 // The subscription transports drive the locally installed Codex / Claude Code
 // CLIs. Their process bridge lives in this crate, without any desktop
 // framework dependency.
-#[allow(dead_code)]
 pub(crate) mod acp_bridge;
-#[allow(dead_code)]
 pub mod claude_cli;
-#[allow(dead_code)]
 pub mod codex;
 
 pub(crate) use crate::{
