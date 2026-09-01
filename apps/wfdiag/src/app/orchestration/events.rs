@@ -52,8 +52,8 @@ impl WfdiagShell {
                 AppEvent::Export(event) => self.apply_export_event(event, context),
                 AppEvent::Update(event) => self.apply_update_event(event, context),
                 AppEvent::System(event) => self.apply_system_event(event, context),
-                AppEvent::WorkerStopped { worker, panicked } => {
-                    self.apply_worker_stopped(worker, panicked);
+                AppEvent::WorkerStopped { worker, unexpected } => {
+                    self.apply_worker_stopped(worker, unexpected);
                 }
                 // #195: the three `blocking_recv()` waits are gone with the
                 // receivers. A reply that never arrives is now a typed
@@ -279,9 +279,9 @@ impl WfdiagShell {
         }
     }
 
-    fn apply_worker_stopped(&mut self, worker: WorkerKind, panicked: bool) {
+    fn apply_worker_stopped(&mut self, worker: WorkerKind, unexpected: bool) {
         self.clear_pending_for(worker);
-        let detail = if panicked { " unexpectedly" } else { "" };
+        let detail = if unexpected { " unexpectedly" } else { "" };
         self.shell.status = format!("The {} worker stopped{detail}", worker.as_str());
     }
 

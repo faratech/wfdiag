@@ -799,13 +799,15 @@ pub enum AppEvent {
     Prioritization(PrioritizationEvent),
     /// A remediation-execution fact.
     Action(ActionEvent),
-    /// A worker stopped. `panicked` is true when it stopped without being
-    /// asked to, which is the only signal the worker crates expose.
+    /// A worker stopped. `unexpected` is true when it stopped without being
+    /// asked to — all a channel disconnect can tell us, and the only signal
+    /// the worker crates expose (a release build aborts on panic, so a
+    /// panicking worker never reports anything).
     WorkerStopped {
         /// Which worker.
         worker: WorkerKind,
-        /// Whether it stopped on its own.
-        panicked: bool,
+        /// Whether it stopped without being asked to.
+        unexpected: bool,
     },
     /// A worker reply did not arrive inside its deadline. The domain's
     /// pending state is cleared; nothing hangs.

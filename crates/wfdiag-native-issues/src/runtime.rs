@@ -37,7 +37,6 @@ enum WorkerCommand {
 pub enum IssueRuntimeError {
     Spawn(String),
     Disconnected,
-    WorkerPanicked,
     ShutdownTimedOut,
     DuplicateRemediationSummary(String),
     MissingRemediationSummary {
@@ -51,7 +50,6 @@ impl fmt::Display for IssueRuntimeError {
         match self {
             Self::Spawn(reason) => write!(formatter, "failed to start issue worker: {reason}"),
             Self::Disconnected => formatter.write_str("issue worker is disconnected"),
-            Self::WorkerPanicked => formatter.write_str("issue worker panicked"),
             Self::ShutdownTimedOut => {
                 formatter.write_str("issue worker did not stop within the shutdown budget")
             }

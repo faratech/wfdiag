@@ -427,7 +427,9 @@ fn aggregate_npus(per_adapter: &[(AdapterClass, AdapterMetrics)]) -> Option<Adap
 /// # Panics
 ///
 /// Panics if the process-wide adapter-state mutex has been poisoned by a
-/// previous panic inside this module.
+/// previous panic inside this module. In a `panic = "abort"` build (the
+/// release profile) a poisoning panic ends the process before this can be
+/// observed.
 pub fn refresh() -> AdapterSnapshot {
     let mut guard = ADAPTER_STATE.lock().unwrap();
     let state = guard.get_or_insert_with(AdapterState::default);
@@ -581,7 +583,9 @@ fn sample_process_segments(adapter: &TrackedAdapter, handle: HANDLE, entry: &mut
 /// # Panics
 ///
 /// Panics if the process-wide adapter-state mutex has been poisoned by a
-/// previous panic inside this module.
+/// previous panic inside this module. In a `panic = "abort"` build (the
+/// release profile) a poisoning panic ends the process before this can be
+/// observed.
 pub fn process_stats(processes: &[(u32, u64)], enabled: bool) -> HashMap<u32, ProcAdapterStats> {
     let mut guard = ADAPTER_STATE.lock().unwrap();
     let Some(state) = guard.as_mut() else {

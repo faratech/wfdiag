@@ -33,7 +33,6 @@ pub enum ExportError {
     Serialization(String),
     Spawn(String),
     Disconnected,
-    WorkerPanicked,
     ShutdownTimedOut,
 }
 
@@ -48,7 +47,6 @@ impl fmt::Display for ExportError {
             }
             Self::Spawn(reason) => write!(formatter, "failed to start export worker: {reason}"),
             Self::Disconnected => formatter.write_str("export worker is disconnected"),
-            Self::WorkerPanicked => formatter.write_str("export worker panicked"),
             Self::ShutdownTimedOut => {
                 formatter.write_str("export worker did not stop within the shutdown budget")
             }

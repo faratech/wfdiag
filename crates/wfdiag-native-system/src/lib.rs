@@ -32,7 +32,6 @@ pub enum SystemError {
     Serialization(String),
     Spawn(String),
     Disconnected,
-    WorkerPanicked,
     ShutdownTimedOut,
 }
 
@@ -48,7 +47,6 @@ impl fmt::Display for SystemError {
             }
             Self::Spawn(reason) => write!(formatter, "failed to start system worker: {reason}"),
             Self::Disconnected => formatter.write_str("system worker is disconnected"),
-            Self::WorkerPanicked => formatter.write_str("system worker panicked"),
             Self::ShutdownTimedOut => {
                 formatter.write_str("system worker did not stop within the shutdown budget")
             }

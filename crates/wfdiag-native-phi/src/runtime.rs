@@ -286,7 +286,7 @@ fn cached_model_guard()
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
         .unwrap_or_else(|poisoned| {
-            log_phi_silica("LanguageModel cache mutex was poisoned; recovering it");
+            log_phi_silica("LanguageModel cache mutex was poisoned; using its inner value");
             poisoned.into_inner()
         })
 }
@@ -294,7 +294,9 @@ fn cached_model_guard()
 /// Non-blocking variant for STATUS PROBES: the generation path holds the
 /// cache guard for the whole response, so a probing `.lock()` used to queue
 /// behind in-flight inference for minutes. Returns None only when another
-/// thread actively holds the mutex (poison is still recovered).
+/// thread actively holds the mutex (poison is tolerated: the inner value
+/// is used; in a `panic = "abort"` build a poisoning panic ends the process
+/// before this path can run).
 #[cfg(windows)]
 fn try_cached_model_guard()
 -> Option<std::sync::MutexGuard<'static, Option<crate::windows_ai_bindings::LanguageModel>>> {
@@ -303,7 +305,7 @@ fn try_cached_model_guard()
     match mutex.try_lock() {
         Ok(guard) => Some(guard),
         Err(TryLockError::Poisoned(poisoned)) => {
-            log_phi_silica("LanguageModel cache mutex was poisoned; recovering it");
+            log_phi_silica("LanguageModel cache mutex was poisoned; using its inner value");
             Some(poisoned.into_inner())
         }
         Err(TryLockError::WouldBlock) => {

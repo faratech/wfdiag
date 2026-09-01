@@ -147,9 +147,14 @@ impl WmiConnection {
     ///
     /// # Errors
     /// Returns an error when the provider rejects the query, enumeration
-    /// fails or times out, or the query panics inside the COM layer.
+    /// fails or times out, or the query panics inside the COM layer. The
+    /// panic branch is reachable only in unwind builds (dev/test); the
+    /// release profile builds with `panic = "abort"`, where a panic ends
+    /// the process before `catch_unwind` could observe it.
     pub fn query(&self, wql: &str) -> Result<Vec<HashMap<String, Value>>> {
-        // Wrap entire query in catch_unwind for safety
+        // Unwind builds only: keep a panicking extraction from taking the
+        // worker down. Under `panic = "abort"` (release) the first line of
+        // defense is moot, but the guard is free.
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.query_internal(wql)));
 
@@ -193,8 +198,10 @@ impl WmiConnection {
                 }
 
                 if let Some(obj) = objects[0].take() {
-                    // Use catch_unwind to prevent panics from crashing the app;
-                    // an object that panics while extracting is skipped, not fatal.
+                    // Unwind builds (dev/test): skip an object whose extraction
+                    // panics instead of failing the whole query. Release builds
+                    // use `panic = "abort"`, where the panic ends the process
+                    // before this guard could run.
                     if let Ok(props) =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             self.extract_properties(&obj)

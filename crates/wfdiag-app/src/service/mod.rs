@@ -2194,7 +2194,7 @@ impl AppService {
         if terminated && !self.terminating {
             self.queue.push(AppEvent::WorkerStopped {
                 worker: WorkerKind::Diagnostics,
-                panicked: true,
+                unexpected: true,
             });
             self.workers.diagnostic_events = None;
         }
@@ -2220,7 +2220,7 @@ impl AppService {
             self.workers.monitor = None;
             self.queue.push(AppEvent::WorkerStopped {
                 worker: WorkerKind::Monitor,
-                panicked: true,
+                unexpected: true,
             });
         }
     }
@@ -2248,7 +2248,7 @@ impl AppService {
             self.workers.settings = None;
             self.queue.push(AppEvent::WorkerStopped {
                 worker: WorkerKind::Settings,
-                panicked: true,
+                unexpected: true,
             });
         }
     }
@@ -2282,7 +2282,7 @@ impl AppService {
                 if !self.terminating {
                     self.queue.push(AppEvent::WorkerStopped {
                         worker: WorkerKind::Settings,
-                        panicked: false,
+                        unexpected: false,
                     });
                 }
                 return;
@@ -2369,7 +2369,7 @@ impl AppService {
             self.issue_outstanding = false;
             self.queue.push(AppEvent::WorkerStopped {
                 worker: WorkerKind::Issues,
-                panicked: true,
+                unexpected: true,
             });
         }
     }
@@ -2413,7 +2413,7 @@ impl AppService {
             self.workers.export = None;
             self.queue.push(AppEvent::WorkerStopped {
                 worker: WorkerKind::Export,
-                panicked: true,
+                unexpected: true,
             });
         }
     }
@@ -2474,7 +2474,7 @@ impl AppService {
             self.workers.system = None;
             self.queue.push(AppEvent::WorkerStopped {
                 worker: WorkerKind::System,
-                panicked: true,
+                unexpected: true,
             });
         }
     }

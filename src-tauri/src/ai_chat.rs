@@ -718,7 +718,9 @@ fn spawn_chat_run(
     // A panicking turn task used to die silently — no terminal event, busy
     // never cleared, UI on an eternal "Reasoning" chip. Guard the whole body
     // so a panic still produces the standard error/done pair and a clean
-    // idle session.
+    // idle session. Reachable only in unwind builds (dev/test): the release
+    // profile builds with `panic = "abort"`, where the panic ends the
+    // process before this guard could run.
     let panic_app = app.clone();
     let panic_runtime = runtime.clone();
     let panic_session_id = session_id.clone();
@@ -1061,9 +1063,7 @@ fn spawn_chat_run(
             }
         }); // end of guarded turn body
         if futures::FutureExt::catch_unwind(guarded).await.is_err() {
-            eprintln!(
-                "AI chat turn panicked (session {panic_session_id}); recovering session state"
-            );
+            eprintln!("AI chat turn panicked (session {panic_session_id}); emitting error/done");
             let emitter = SessionEmitter::new(panic_app, Vec::new());
             emitter.error(&ErrorPayload {
                 session_id: panic_session_id.clone(),
