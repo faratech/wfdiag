@@ -3,7 +3,7 @@
 #![deny(unsafe_code)]
 
 use crate::app::WfdiagShell;
-use crate::app::consts::{PROCESS_FILTER_DEBOUNCE, PROCESS_PAGE_SIZE};
+use crate::app::consts::{PROCESS_FILTER_DEBOUNCE, PROCESS_PAGE_SIZE, WINDOW_COMMAND_POLL};
 use crate::app::message::{Message, PaletteFocusAction};
 use crate::app::policy::{
     MonitoringLifecycleAction, effective_window_theme, global_shortcut_is_allowed,
@@ -20,6 +20,7 @@ use crate::dialogs::palette::{
     PALETTE_SCAN_TEMPLATES, PALETTE_STOP_SCAN_TEMPLATE, PaletteCommandSpec,
     diagnostic_palette_icon, palette_visible_matches,
 };
+use crate::fixtures::knobs::tray_enabled;
 use crate::platform::{focus, instance, ui_wake, window};
 use crate::widgets::icons::FaIcon;
 use std::borrow::Cow;
@@ -163,7 +164,7 @@ impl WfdiagShell {
     /// Only used when the kernel wait registration is unavailable. Dropping a
     /// `ComponentTask` does NOT cancel its closure (windows-reactor keeps the
     /// thread running), so re-arming without cancelling would accumulate live
-    /// 50 ms poll threads until the 64-slot background budget starts rejecting
+    /// poll threads until the 64-slot background budget starts rejecting
     /// every other spawn in the app.
     pub(crate) fn arm_instance_watch(
         &mut self,
@@ -175,6 +176,17 @@ impl WfdiagShell {
         }
         if let Some(previous) = self.instance_wait.take() {
             previous.cancel();
+        }
+        // #207: this fallback used to spin at 50 ms for the rest of the
+        // session with nothing anywhere saying so. It now runs at
+        // WINDOW_COMMAND_POLL (250 ms) and says it once.
+        if !self.degraded_instance_watch_reported {
+            self.degraded_instance_watch_reported = true;
+            self.status = format!(
+                "Tray and single-instance events are polling every {} ms · Windows refused the \
+                 event-driven registration",
+                WINDOW_COMMAND_POLL.as_millis()
+            );
         }
         self.instance_wait = Some(spawn_instance_watch(context, lifecycle_revision));
     }
@@ -220,7 +232,9 @@ impl WfdiagShell {
         };
         // The validation switch omits only the notification-area icon. The
         // native wake/lifecycle subclass remains required for event delivery.
-        let tray_disabled = std::env::var_os("WFDIAG_NO_TRAY").is_some();
+        // Without the `validation` feature this knob is a compile-time `true`
+        // and no environment is read (#186).
+        let tray_disabled = !tray_enabled();
         let installed = if tray_disabled {
             window::install_without_tray(window)
         } else {

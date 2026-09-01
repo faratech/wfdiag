@@ -17,7 +17,9 @@ use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+use windows::Win32::UI::WindowsAndMessaging::{
+    MB_ICONERROR, MB_ICONWARNING, MB_OK, MESSAGEBOX_STYLE, MessageBoxW,
+};
 use windows::core::HSTRING;
 
 /// Modal title shared by every crash surface.
@@ -123,6 +125,11 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 }
 
 /// `%LOCALAPPDATA%\WFDiag\logs`, when the environment exposes it.
+///
+/// This is the one production environment read outside `fixtures::knobs` (see
+/// that module's invariant, #186). It stays here deliberately: the caller is a
+/// panic hook on an already-failing process, where a plain environment lookup
+/// is markedly safer than calling into shell32 for a known-folder path.
 fn crash_log_directory() -> Option<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA")?;
     if local.is_empty() {
@@ -172,14 +179,27 @@ fn show_panic_dialog(log_path: Option<&Path>) {
     show_message_box(&body);
 }
 
+/// One modal warning box for a degraded — but survivable — startup.
+///
+/// Shared with the single-instance path (#188, #189), which needs to tell the
+/// user something before any window exists and must not be mistaken for the
+/// fatal crash modal above.
+pub(crate) fn show_startup_warning(body: &str) {
+    show_message_box_with_style(body, MB_ICONWARNING | MB_OK);
+}
+
 /// One modal error box on the calling thread.
 fn show_message_box(body: &str) {
+    show_message_box_with_style(body, MB_ICONERROR | MB_OK);
+}
+
+fn show_message_box_with_style(body: &str, style: MESSAGEBOX_STYLE) {
     let text = HSTRING::from(body);
     let caption = HSTRING::from(CRASH_DIALOG_TITLE);
     // SAFETY: both strings outlive the synchronous call, and a null owner
     // window is documented as "no owner" rather than an invalid handle.
     unsafe {
-        MessageBoxW(None, &text, &caption, MB_ICONERROR | MB_OK);
+        MessageBoxW(None, &text, &caption, style);
     }
 }
 

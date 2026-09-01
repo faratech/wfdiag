@@ -9,7 +9,8 @@
 //!
 //! - `WM_CLOSE` is swallowed only while close-to-tray is enabled and the
 //!   window is visible (hide + add the tray icon instead).
-//! - `WM_APP_TRAY` is the tray icon's callback: left click restores, right
+//! - The registered tray callback message (see `tray_callback_message`) is
+//!   the tray icon's callback: left click restores, right
 //!   click opens the Store 2.5.8 tray menu (Show / Quick Scan / Exit).
 //! - Shipping global key chords are decoded without touching component state
 //!   and published alongside the tray command. One coalesced app-defined
@@ -37,8 +38,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, HHOOK, IDI_APPLICATION, IsIconic, IsWindowVisible, LoadIconW,
     MF_SEPARATOR, MF_STRING, PostMessageW, RegisterWindowMessageW, SIZE_MINIMIZED, SW_HIDE,
     SW_RESTORE, SW_SHOW, SetForegroundWindow, SetWindowsHookExW, ShowWindow, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TPM_RETURNCMD, UnhookWindowsHookEx, WA_INACTIVE, WH_KEYBOARD, WM_ACTIVATE,
-    WM_CLOSE, WM_COMMAND, WM_NCDESTROY, WM_SHOWWINDOW, WM_SIZE, WM_WINDOWPOSCHANGED,
+    TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, UnhookWindowsHookEx, WA_INACTIVE, WH_KEYBOARD,
+    WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_NCDESTROY, WM_NULL, WM_SHOWWINDOW, WM_SIZE,
+    WM_WINDOWPOSCHANGED,
 };
 use windows::core::{PCWSTR, w};
 
@@ -81,11 +83,47 @@ const MENU_SHOW: u32 = 1;
 const MENU_QUICK_SCAN: u32 = 2;
 const MENU_EXIT: u32 = 3;
 
-/// Win32 app-defined message used for the tray icon callback.
-const WM_APP_TRAY: u32 = 0x8000; // WM_APP
+/// Fallback ids if `RegisterWindowMessageW` ever fails (it returns 0). Raw
+/// `WM_APP`/`WM_APP + 1` on a window we do not own is exactly the collision
+/// #201 is about, so these are a last resort, not the normal path.
+const WM_APP_TRAY_FALLBACK: u32 = 0x8000; // WM_APP
+const WM_APP_UI_WAKE_FALLBACK: u32 = WM_APP_TRAY_FALLBACK + 1;
+
+/// The tray icon's callback message.
+///
+/// #201: the subclassed HWND belongs to WinUI/Reactor, not to us, so the
+/// `WM_APP` range is not ours to allocate from — any other component on that
+/// window may already use `WM_APP`/`WM_APP + 1` for its own purposes.
+/// `RegisterWindowMessageW` returns a system-wide unique id in the
+/// `0xC000-0xFFFF` range, which is the documented way to add a message to a
+/// window you do not own. Both ids are resolved once and cached.
+fn tray_callback_message() -> u32 {
+    static TRAY_CALLBACK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *TRAY_CALLBACK.get_or_init(|| {
+        // SAFETY: registers a private window message; no side effects.
+        let registered = unsafe { RegisterWindowMessageW(w!("WFDiagReactorTrayCallback")) };
+        if registered == 0 {
+            WM_APP_TRAY_FALLBACK
+        } else {
+            registered
+        }
+    })
+}
+
 /// Event-driven bridge from native/backend producers back to the Reactor UI
-/// thread. `WM_APP_TRAY` already occupies the first application message.
-const WM_APP_UI_WAKE: u32 = WM_APP_TRAY + 1;
+/// thread. See [`tray_callback_message`] for why this is registered too.
+fn ui_wake_message() -> u32 {
+    static UI_WAKE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *UI_WAKE.get_or_init(|| {
+        // SAFETY: registers a private window message; no side effects.
+        let registered = unsafe { RegisterWindowMessageW(w!("WFDiagReactorUiWake")) };
+        if registered == 0 {
+            WM_APP_UI_WAKE_FALLBACK
+        } else {
+            registered
+        }
+    })
+}
 const SUBCLASS_ID: usize = 0x5754_4449; // "WTDI"
 
 const FLAG_REGISTERED: u8 = 1 << 0;
@@ -166,7 +204,7 @@ pub struct WindowLifecycleSnapshot {
 /// Installation failure with enough detail for the component to distinguish
 /// a missing tray icon from a missing event-delivery subclass.
 ///
-/// Once `core_installed` is true, lifecycle and `WM_APP_UI_WAKE` delivery are
+/// Once `core_installed` is true, lifecycle and UI-wake delivery are
 /// usable even if Explorer rejected the optional notification-area icon.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowHookInstallError {
@@ -228,7 +266,7 @@ pub fn install(window: HWND, tooltip: &str) -> Result<(), WindowHookInstallError
 /// notification-area icon or close-to-tray behavior.
 ///
 /// This is the safe path for the `WFDIAG_NO_TRAY` investigation switch. The
-/// native subclass is still required because it owns `WM_APP_UI_WAKE`; merely
+/// native subclass is still required because it owns the UI-wake message; merely
 /// skipping [`install`] would strand worker events once polling is removed.
 pub fn install_without_tray(window: HWND) -> Result<(), WindowHookInstallError> {
     // A remount can follow a tray-enabled window in tests or diagnostics.
@@ -321,7 +359,7 @@ pub fn post_ui_wake() -> bool {
     // Coalesce via the pending flag, but never blindly trust it: the poster
     // that set it may still fail below (window not yet registered, PostMessage
     // refused) or not have posted yet. When a window is resolvable, post
-    // anyway — a duplicate WM_APP_UI_WAKE is a harmless no-op drain, while a
+    // anyway — a duplicate UI-wake message is a harmless no-op drain, while a
     // swallowed wake strands workers until the next unrelated event.
     let pending = UI_WAKE_PENDING.swap(true, Ordering::AcqRel);
     // Worker notifications must never enumerate desktop windows. The UI
@@ -334,7 +372,7 @@ pub fn post_ui_wake() -> bool {
         }
         return false;
     };
-    if unsafe { PostMessageW(Some(window), WM_APP_UI_WAKE, WPARAM(0), LPARAM(0)) }.is_err() {
+    if unsafe { PostMessageW(Some(window), ui_wake_message(), WPARAM(0), LPARAM(0)) }.is_err() {
         if !pending {
             UI_WAKE_PENDING.store(false, Ordering::Release);
         }
@@ -697,16 +735,12 @@ fn add_tray_icon(window: HWND, tooltip: &str) -> Result<(), String> {
         // notification area reserved a blank slot and the restore affordance
         // was invisible.
         uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
-        uCallbackMessage: WM_APP_TRAY,
+        uCallbackMessage: tray_callback_message(),
         hIcon: tray_icon(),
         szTip: [0; 128],
         ..Default::default()
     };
-    let tip: Vec<u16> = tooltip
-        .encode_utf16()
-        .take(data.szTip.len() - 1)
-        .chain(std::iter::once(0))
-        .collect();
+    let tip = encode_tray_tooltip(tooltip, data.szTip.len());
     data.szTip[..tip.len()].copy_from_slice(&tip);
     // SAFETY: data is fully initialized for NIM_ADD.
     let ok = unsafe { Shell_NotifyIconW(NIM_ADD, &data) };
@@ -716,6 +750,28 @@ fn add_tray_icon(window: HWND, tooltip: &str) -> Result<(), String> {
     } else {
         Err("Windows refused the tray icon".to_string())
     }
+}
+
+/// NUL-terminated UTF-16 tray tooltip that fits `capacity` code units.
+///
+/// #221: the previous `encode_utf16().take(capacity - 1)` truncated the
+/// *encoded* sequence, so a tooltip long enough to be cut mid-astral-character
+/// left a lone high surrogate as the last unit — an ill-formed UTF-16 string
+/// that the notification area renders as U+FFFD or drops. Truncating on a Rust
+/// `char` boundary first makes that unrepresentable: a `char` is either wholly
+/// included or wholly excluded.
+fn encode_tray_tooltip(tooltip: &str, capacity: usize) -> Vec<u16> {
+    let limit = capacity.saturating_sub(1);
+    let mut encoded: Vec<u16> = Vec::with_capacity(limit + 1);
+    for character in tooltip.chars() {
+        if encoded.len() + character.len_utf16() > limit {
+            break;
+        }
+        let mut buffer = [0_u16; 2];
+        encoded.extend_from_slice(character.encode_utf16(&mut buffer));
+    }
+    encoded.push(0);
+    encoded
 }
 
 /// The process-wide tray icon. `Shell_NotifyIconW` copies the icon, so the
@@ -815,7 +871,9 @@ unsafe extern "system" fn tray_subclass_proc(
             // Windows foreground-lock policy rejects an activation request.
             refresh_window_state(window);
         }
-        WM_APP_TRAY => {
+        // #201: registered ids are runtime values, so these are guard arms
+        // rather than constant patterns.
+        message if message == tray_callback_message() => {
             // lParam carries the mouse event for tray callback icons.
             let mouse_event = lparam.0 as u32;
             const WM_LBUTTONUP: u32 = 0x0202;
@@ -835,19 +893,13 @@ unsafe extern "system" fn tray_subclass_proc(
             // The shell's broadcast expects normal message processing.
             return unsafe { DefSubclassProc(window, message, wparam, lparam) };
         }
-        WM_APP_UI_WAKE => {
+        message if message == ui_wake_message() => {
             dispatch_ui_wake();
             return LRESULT(0);
         }
         WM_COMMAND => {
             let menu_id = (wparam.0 & 0xFFFF) as u32;
-            let command = match menu_id {
-                MENU_SHOW => Some(TRAY_COMMAND_SHOW),
-                MENU_QUICK_SCAN => Some(TRAY_COMMAND_QUICK_SCAN),
-                MENU_EXIT => Some(TRAY_COMMAND_EXIT),
-                _ => None,
-            };
-            if let Some(command) = command {
+            if let Some(command) = tray_command_for_menu_id(menu_id) {
                 TRAY_COMMAND.store(command, Ordering::SeqCst);
                 let _ = post_ui_wake();
                 return LRESULT(0);
@@ -939,9 +991,12 @@ fn show_tray_menu(window: HWND) {
         let mut cursor = POINT::default();
         let _ = GetCursorPos(&mut cursor);
         // With TPM_RETURNCMD the chosen menu id comes back in the BOOL.
+        // #202: TPM_NONOTIFY suppresses the WM_COMMAND that TPM_RETURNCMD
+        // already makes redundant — without it a pick can be handled twice,
+        // once here and once in the subclass's WM_COMMAND arm.
         let chosen = TrackPopupMenu(
             menu,
-            TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RETURNCMD,
+            TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
             cursor.x,
             cursor.y,
             None,
@@ -949,8 +1004,16 @@ fn show_tray_menu(window: HWND) {
             None,
         );
         let _ = DestroyMenu(menu);
-        if chosen.as_bool() {
-            let command = chosen.0 as u8;
+        // #202: the documented tray-menu recipe. Without a benign message
+        // after TrackPopupMenu the notification-area menu can stay on screen
+        // after the click that dismissed it.
+        let _ = PostMessageW(Some(window), WM_NULL, WPARAM(0), LPARAM(0));
+        // #202: map through the same table the WM_COMMAND arm uses. The old
+        // `chosen.0 as u8` truncating cast silently turned any menu id above
+        // 255 into an unrelated tray command, and only worked at all because
+        // the menu ids and the tray command values happen to coincide today.
+        if let Some(command) = tray_command_for_menu_id(u32::try_from(chosen.0).unwrap_or_default())
+        {
             if command == TRAY_COMMAND_QUICK_SCAN {
                 // Match the shipping Tauri flow: surface the scan before the
                 // component receives the command. This is safe while hidden
@@ -961,6 +1024,20 @@ fn show_tray_menu(window: HWND) {
             TRAY_COMMAND.store(command, Ordering::SeqCst);
             let _ = post_ui_wake();
         }
+    }
+}
+
+/// The single mapping from popup-menu id to tray command (#202).
+///
+/// Both the `TPM_RETURNCMD` return value and the `WM_COMMAND` arm go through
+/// this, so the two paths cannot drift and neither can invent a command from
+/// an id that is not on the menu.
+fn tray_command_for_menu_id(menu_id: u32) -> Option<u8> {
+    match menu_id {
+        MENU_SHOW => Some(TRAY_COMMAND_SHOW),
+        MENU_QUICK_SCAN => Some(TRAY_COMMAND_QUICK_SCAN),
+        MENU_EXIT => Some(TRAY_COMMAND_EXIT),
+        _ => None,
     }
 }
 
@@ -1059,6 +1136,47 @@ fn decode_lifecycle_word(word: u64) -> WindowLifecycleSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tray_tooltip_never_splits_a_surrogate_pair() {
+        // 128 is the real szTip capacity; a NUL always terminates the value.
+        const CAPACITY: usize = 128;
+        // Each emoji is two UTF-16 units, so 64 of them exactly fill the
+        // buffer and the 64th would have had to be cut in half.
+        let astral = "\u{1F600}".repeat(80);
+        let encoded = encode_tray_tooltip(&astral, CAPACITY);
+        assert_eq!(encoded.last(), Some(&0));
+        assert!(encoded.len() <= CAPACITY);
+        assert_eq!(
+            String::from_utf16(&encoded[..encoded.len() - 1]).expect("well-formed UTF-16"),
+            "\u{1F600}".repeat((CAPACITY - 1) / 2)
+        );
+    }
+
+    #[test]
+    fn tray_tooltip_keeps_short_text_intact_and_terminated() {
+        let encoded = encode_tray_tooltip("WindowsForum Diagnostics", 128);
+        assert_eq!(encoded.last(), Some(&0));
+        assert_eq!(
+            String::from_utf16_lossy(&encoded[..encoded.len() - 1]),
+            "WindowsForum Diagnostics"
+        );
+    }
+
+    #[test]
+    fn tray_menu_ids_map_to_exactly_the_three_shipping_commands() {
+        assert_eq!(tray_command_for_menu_id(MENU_SHOW), Some(TRAY_COMMAND_SHOW));
+        assert_eq!(
+            tray_command_for_menu_id(MENU_QUICK_SCAN),
+            Some(TRAY_COMMAND_QUICK_SCAN)
+        );
+        assert_eq!(tray_command_for_menu_id(MENU_EXIT), Some(TRAY_COMMAND_EXIT));
+        // The truncating `as u8` cast this replaced mapped 0x100 + id back
+        // onto a real command; the table cannot (#202).
+        for rejected in [0, 4, 0x100, 0x101, 0x102, u32::from(u16::MAX)] {
+            assert_eq!(tray_command_for_menu_id(rejected), None, "{rejected}");
+        }
+    }
 
     #[test]
     fn lifecycle_word_updates_flags_and_revision_atomically() {

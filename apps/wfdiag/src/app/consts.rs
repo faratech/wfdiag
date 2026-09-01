@@ -12,10 +12,15 @@ pub(crate) const HISTORY_TREND_SCAN_LIMIT: usize = 10;
 
 pub(crate) const ABOUT_DESCRIPTION: &str = "A native Windows diagnostics tool by WindowsForum.com. Runs hardware, driver, storage, network, security and log diagnostics locally — with optional on-device or cloud AI analysis.";
 
+/// Validation-only entry point (#212): the probe itself lives in
+/// `fixtures::knobs` and is compiled out without the `validation` feature, so
+/// its flag and destination variable are too.
+#[cfg(feature = "validation")]
 pub(crate) const VERSION_PROBE_FLAG: &str = "--wfdiag-version-probe";
 
 pub(crate) const ELEVATED_RELAUNCH_FLAG: &str = "--wfdiag-elevated-relaunch";
 
+#[cfg(feature = "validation")]
 pub(crate) const VERSION_PROBE_FILE_ENV: &str = "WFDIAG_REACTOR_VERSION_PROBE_FILE";
 
 pub(crate) const APP_BADGE: &[u8] = include_bytes!("../../../../public/wf-ds/app-badge.png");
@@ -156,7 +161,15 @@ pub(crate) const PALETTE_RESTORE_DELAY: Duration = Duration::from_millis(200);
 
 pub(crate) const SETTINGS_MAX_CONCURRENT_TASKS: u32 = 16;
 
-pub(crate) const WINDOW_COMMAND_POLL: Duration = Duration::from_millis(50);
+/// Interval of the DEGRADED instance/lifecycle watch (#207).
+///
+/// This poll only runs when `RegisterWaitForSingleObject` refused to arm the
+/// event-driven path; the healthy build never spins at all. It used to run at
+/// 50 ms forever, which burned a wakeup 20×/second for the whole session for
+/// no benefit — tray clicks and single-instance activation are not latency
+/// critical, so the degraded fallback is a quarter-second and the shell says
+/// so once in the status line.
+pub(crate) const WINDOW_COMMAND_POLL: Duration = Duration::from_millis(250);
 
 pub(crate) const WINDOW_HOOK_RETRY_MIN: Duration = Duration::from_millis(100);
 

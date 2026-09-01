@@ -26,8 +26,11 @@ if (-not (Test-Path -LiteralPath $cargo)) {
     throw "Native cargo not found at $cargo."
 }
 
+# The suites this script drives set WFDIAG_REACTOR_* knobs (fixtures, page,
+# visual state, settings isolation) and read the --wfdiag-version-probe
+# document, all of which are compiled out without `validation` (#186, #212).
 $buildArgs = @(
-    "build", "--target", "x86_64-pc-windows-msvc", "--features", "self-contained"
+    "build", "--target", "x86_64-pc-windows-msvc", "--features", "self-contained,validation"
 )
 Write-Host "Building x64 self-contained candidate..."
 & $cargo @buildArgs --manifest-path (Join-Path $BuildRoot "apps\wfdiag\Cargo.toml") 2>&1 |

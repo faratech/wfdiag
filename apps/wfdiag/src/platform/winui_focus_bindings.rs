@@ -1,6 +1,24 @@
 //! Focus-only WinUI bindings generated from the pinned Windows App SDK 2.4 metadata.
 //!
 //! Regenerate with windows-bindgen from Microsoft.UI.Xaml.winmd; do not hand-edit ABI definitions.
+//!
+//! # Two things a regeneration must re-apply (#192)
+//!
+//! 1. **No `unsafe impl Send` / `unsafe impl Sync`.** windows-bindgen emits a
+//!    pair per projected class; all 24 were deleted here and must stay
+//!    deleted. Every type in this file is a XAML object, and XAML objects are
+//!    apartment-bound to the STA that created them — sending one to another
+//!    thread is undefined behaviour, so those impls asserted something that is
+//!    simply false. `platform/focus.rs` is the only consumer and keeps them on
+//!    the UI thread in a `thread_local!`, which needs neither marker.
+//! 2. **The `usize` padding slots are load-bearing.** Each vtable below binds
+//!    only the one or two methods this shell calls; every preceding method of
+//!    that interface is still declared, as a `usize`, purely to hold its
+//!    ABI slot. Deleting an "unused" padding field silently shifts the bound
+//!    function pointer onto a different vtable entry, which then calls the
+//!    wrong COM method with the wrong signature. The `abi_layout` test at the
+//!    bottom of this file pins the resulting slot indices so that mistake
+//!    fails the build instead of the app.
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ComboBox(windows_core::IUnknown);
@@ -35,8 +53,6 @@ impl core::ops::Deref for ComboBox {
 impl windows_core::RuntimeName for ComboBox {
     const NAME: &'static str = "Microsoft.UI.Xaml.Controls.ComboBox";
 }
-unsafe impl Send for ComboBox {}
-unsafe impl Sync for ComboBox {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Control(windows_core::IUnknown);
@@ -63,8 +79,6 @@ impl core::ops::Deref for Control {
 impl windows_core::RuntimeName for Control {
     const NAME: &'static str = "Microsoft.UI.Xaml.Controls.Control";
 }
-unsafe impl Send for Control {}
-unsafe impl Sync for Control {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DependencyObject(windows_core::IUnknown);
@@ -90,8 +104,6 @@ impl core::ops::Deref for DependencyObject {
 impl windows_core::RuntimeName for DependencyObject {
     const NAME: &'static str = "Microsoft.UI.Xaml.DependencyObject";
 }
-unsafe impl Send for DependencyObject {}
-unsafe impl Sync for DependencyObject {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FocusManager(windows_core::IUnknown);
@@ -152,8 +164,6 @@ impl core::ops::Deref for FocusManager {
 impl windows_core::RuntimeName for FocusManager {
     const NAME: &'static str = "Microsoft.UI.Xaml.Input.FocusManager";
 }
-unsafe impl Send for FocusManager {}
-unsafe impl Sync for FocusManager {}
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FocusState(pub i32);
@@ -196,8 +206,6 @@ impl core::ops::Deref for FrameworkElement {
 impl windows_core::RuntimeName for FrameworkElement {
     const NAME: &'static str = "Microsoft.UI.Xaml.FrameworkElement";
 }
-unsafe impl Send for FrameworkElement {}
-unsafe impl Sync for FrameworkElement {}
 windows_core::imp::define_interface!(
     IComboBox,
     IComboBox_Vtbl,
@@ -665,8 +673,6 @@ impl core::ops::Deref for ItemsControl {
 impl windows_core::RuntimeName for ItemsControl {
     const NAME: &'static str = "Microsoft.UI.Xaml.Controls.ItemsControl";
 }
-unsafe impl Send for ItemsControl {}
-unsafe impl Sync for ItemsControl {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NumberBox(windows_core::IUnknown);
@@ -699,8 +705,6 @@ impl core::ops::Deref for NumberBox {
 impl windows_core::RuntimeName for NumberBox {
     const NAME: &'static str = "Microsoft.UI.Xaml.Controls.NumberBox";
 }
-unsafe impl Send for NumberBox {}
-unsafe impl Sync for NumberBox {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PasswordBox(windows_core::IUnknown);
@@ -733,8 +737,6 @@ impl core::ops::Deref for PasswordBox {
 impl windows_core::RuntimeName for PasswordBox {
     const NAME: &'static str = "Microsoft.UI.Xaml.Controls.PasswordBox";
 }
-unsafe impl Send for PasswordBox {}
-unsafe impl Sync for PasswordBox {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Selector(windows_core::IUnknown);
@@ -768,8 +770,6 @@ impl core::ops::Deref for Selector {
 impl windows_core::RuntimeName for Selector {
     const NAME: &'static str = "Microsoft.UI.Xaml.Controls.Primitives.Selector";
 }
-unsafe impl Send for Selector {}
-unsafe impl Sync for Selector {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TextBox(windows_core::IUnknown);
@@ -802,8 +802,6 @@ impl core::ops::Deref for TextBox {
 impl windows_core::RuntimeName for TextBox {
     const NAME: &'static str = "Microsoft.UI.Xaml.Controls.TextBox";
 }
-unsafe impl Send for TextBox {}
-unsafe impl Sync for TextBox {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UIElement(windows_core::IUnknown);
@@ -830,8 +828,6 @@ impl core::ops::Deref for UIElement {
 impl windows_core::RuntimeName for UIElement {
     const NAME: &'static str = "Microsoft.UI.Xaml.UIElement";
 }
-unsafe impl Send for UIElement {}
-unsafe impl Sync for UIElement {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct XamlRoot(windows_core::IUnknown);
@@ -857,5 +853,54 @@ impl core::ops::Deref for XamlRoot {
 impl windows_core::RuntimeName for XamlRoot {
     const NAME: &'static str = "Microsoft.UI.Xaml.XamlRoot";
 }
-unsafe impl Send for XamlRoot {}
-unsafe impl Sync for XamlRoot {}
+
+#[cfg(test)]
+mod abi_layout {
+    use super::*;
+
+    const POINTER: usize = core::mem::size_of::<usize>();
+
+    /// `IUnknown` (QueryInterface/AddRef/Release) plus `IInspectable`
+    /// (GetIids/GetRuntimeClassName/GetTrustLevel).
+    const INSPECTABLE_SLOTS: usize = 6;
+
+    /// Metadata slot of `IFocusManagerStatics::GetFocusedElement`, i.e. the
+    /// number of `IFocusManagerStatics` methods declared before it.
+    const GET_FOCUSED_ELEMENT_SLOT: usize = 19;
+
+    /// Metadata slot of `IUIElement::Focus`.
+    const UI_ELEMENT_FOCUS_SLOT: usize = 220;
+
+    #[test]
+    fn bound_methods_sit_on_their_metadata_vtable_slots() {
+        assert_eq!(
+            size_of::<windows_core::IInspectable_Vtbl>(),
+            INSPECTABLE_SLOTS * POINTER,
+            "the projected IInspectable header changed size"
+        );
+        assert_eq!(
+            core::mem::offset_of!(IFocusManagerStatics_Vtbl, GetFocusedElement),
+            (INSPECTABLE_SLOTS + GET_FOCUSED_ELEMENT_SLOT) * POINTER,
+            "a padding slot was added to or removed from IFocusManagerStatics_Vtbl"
+        );
+        assert_eq!(
+            core::mem::offset_of!(IFocusManagerStatics_Vtbl, GetFocusedElementWithRoot),
+            (INSPECTABLE_SLOTS + GET_FOCUSED_ELEMENT_SLOT + 1) * POINTER
+        );
+        assert_eq!(
+            core::mem::offset_of!(IUIElement_Vtbl, Focus),
+            (INSPECTABLE_SLOTS + UI_ELEMENT_FOCUS_SLOT) * POINTER,
+            "a padding slot was added to or removed from IUIElement_Vtbl"
+        );
+        // Nothing may follow the last bound method: a trailing padding slot
+        // would mean the generator dropped a method this file used to bind.
+        assert_eq!(
+            size_of::<IUIElement_Vtbl>(),
+            (INSPECTABLE_SLOTS + UI_ELEMENT_FOCUS_SLOT + 1) * POINTER
+        );
+        assert_eq!(
+            size_of::<IFocusManagerStatics_Vtbl>(),
+            (INSPECTABLE_SLOTS + GET_FOCUSED_ELEMENT_SLOT + 2) * POINTER
+        );
+    }
+}

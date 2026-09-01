@@ -183,6 +183,9 @@ class ReactorMsixProbeTests(unittest.TestCase):
         self.assertNotIn("--features", command)
         self.assertNotIn("self-contained", command)
         self.assertNotIn("settings-test-path", command)
+        # `validation` is a superset of `settings-test-path` (#186, #212) and
+        # must never reach a shipping package either.
+        self.assertNotIn("validation", command)
 
     def test_only_reactor_build_script_outputs_are_removed_before_restaging(self):
         profile = self.root / "target" / "release"

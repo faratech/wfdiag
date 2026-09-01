@@ -77,8 +77,14 @@ jobs:
         with:
           key: ci
       - run: cargo fmt --all --check
-      - run: cargo clippy --locked --workspace --all-targets --features wfdiag/settings-test-path -- -D warnings
-      - run: cargo test --locked --workspace --features wfdiag/settings-test-path
+      - run: cargo clippy --locked --workspace --all-targets --features wfdiag/validation -- -D warnings
+      - run: cargo test --locked --workspace --features wfdiag/validation
+      # Release shape: no wfdiag features at all. This is what actually ships,
+      # and it is the only configuration in which the shell's
+      # `production_defaults` knob test compiles (#186, #212) — without this
+      # step nothing would ever prove the fixture/env knobs are absent.
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked -p wfdiag
 
   rust-arm64:
     runs-on: windows-latest
@@ -97,8 +103,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ci-arm64
-      - run: cargo check --locked --workspace --all-targets --features wfdiag/settings-test-path --target aarch64-pc-windows-msvc
-      - run: cargo clippy --locked --workspace --all-targets --features wfdiag/settings-test-path --target aarch64-pc-windows-msvc -- -D warnings
+      - run: cargo check --locked --workspace --all-targets --features wfdiag/validation --target aarch64-pc-windows-msvc
+      - run: cargo clippy --locked --workspace --all-targets --features wfdiag/validation --target aarch64-pc-windows-msvc -- -D warnings
 
   cargo-audit:
     runs-on: ubuntu-latest

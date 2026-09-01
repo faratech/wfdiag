@@ -13,7 +13,7 @@ use crate::ai::chat_tools::NativeChatRuntime;
 use crate::app::consts::{
     APP_BADGE, APP_VERSION, PROCESS_LIVE_REFRESH_INTERVAL, PROCESS_PAGE_SIZE,
     PROVIDER_SETUP_LABELS, STATUS_INFO_DARK, STATUS_INFO_LIGHT, STATUS_OK_DARK, STATUS_OK_LIGHT,
-    STATUS_WARN_DARK, STATUS_WARN_LIGHT, WALLPAPER_DARK, WALLPAPER_LIGHT,
+    STATUS_WARN_DARK, STATUS_WARN_LIGHT, WALLPAPER_DARK, WALLPAPER_LIGHT, WINDOW_COMMAND_POLL,
 };
 use crate::app::message::{
     ActionReviewSurface, HistoryAckKind, Message, PaletteFocusAction, SettingsDialogAction,
@@ -56,7 +56,11 @@ use crate::dialogs::palette::{
 };
 use crate::dialogs::settings::settings_dialog;
 use crate::fixtures;
-use crate::fixtures::knobs::{initial_window_dimension, live_test_fixture_from_env};
+use crate::fixtures::knobs::{
+    ai_worker_policy, fixture_mode, initial_page_override, initial_window_height,
+    initial_window_width, live_test_fixture_from_env, settings_dialog_open_override,
+    startup_theme_setting, visual_state,
+};
 use crate::fixtures::visual::{
     LiveTestFixture, VisualState, fixture_258_system_info, fixture_monitor_empty_stats,
     fixture_system_stats, remediation_partial_visual_run,
@@ -64,7 +68,7 @@ use crate::fixtures::visual::{
 use crate::platform::external::{
     launch_email_compose_draft, launch_export_external_action, write_text_to_clipboard,
 };
-use crate::platform::{focus, instance, ui_wake, window};
+use crate::platform::{focus, instance, notifications, ui_wake, window};
 use crate::screens::ai::view::ai_page;
 use crate::screens::diagnostics::view::{
     diagnostic_matches_filter, diagnostics_page, format_diagnostic_duration,
@@ -375,6 +379,11 @@ pub(crate) struct WfdiagShell {
     export_pending: Option<PendingExport>,
     export_error: Option<String>,
     status: String,
+    /// One-shot latch for #206 (toast failure) and #207 (degraded instance
+    /// watch): both are session-level facts, so the status line states each
+    /// at most once instead of re-announcing it on every scan or wake.
+    notification_failure_reported: bool,
+    degraded_instance_watch_reported: bool,
     diagnostic_results: Vec<DiagnosticTaskResult>,
     previous_diagnostic_snapshot: Option<DiagnosticSnapshot>,
     targeted_diagnostic_overlay: Option<TargetedDiagnosticOverlay>,
@@ -430,19 +439,15 @@ impl Component for WfdiagShell {
             let _ = ui_sender.send(Message::NativeSignalReady);
         });
 
-        let visual_state = VisualState::from_env();
+        // Every knob below resolves to its production default with no
+        // environment access unless the `validation` feature is on (#186).
+        let visual_state = visual_state();
         let live_test_fixture = live_test_fixture_from_env();
         let (default_width, default_height) = visual_state.default_size();
-        let width = initial_window_dimension("WFDIAG_REACTOR_WIDTH", default_width);
-        let height = initial_window_dimension("WFDIAG_REACTOR_HEIGHT", default_height);
-        let initial_page = std::env::var("WFDIAG_REACTOR_PAGE")
-            .ok()
-            .as_deref()
-            .and_then(Page::from_tag)
-            .unwrap_or_else(|| visual_state.default_page());
-        let fixture_mode = std::env::var("WFDIAG_REACTOR_FIXTURE")
-            .ok()
-            .is_some_and(|value| value.eq_ignore_ascii_case("populated"));
+        let width = initial_window_width(default_width);
+        let height = initial_window_height(default_height);
+        let initial_page = initial_page_override().unwrap_or_else(|| visual_state.default_page());
+        let fixture_mode = fixture_mode();
         let diagnostic_results = if visual_state.has_scan()
             || live_test_fixture.is_some_and(LiveTestFixture::injects_scan)
             || (fixture_mode && !matches!(initial_page, Page::Monitor | Page::Processes))
@@ -775,7 +780,7 @@ impl Component for WfdiagShell {
         // execution workers. The first real chat/report/analysis/fix-plan
         // request initializes only the worker it needs. The harness policy is
         // evaluated at that same boundary, preserving WFDIAG_NO_WORKERS.
-        let ai_worker_policy = std::env::var_os("WFDIAG_NO_WORKERS").unwrap_or_default();
+        let ai_worker_policy = ai_worker_policy();
         let skip_workers = ai_worker_policy.as_os_str();
         let ai_worker_settings = settings_service.clone();
         // Provider management and on-demand report/analysis workers share
@@ -859,6 +864,18 @@ impl Component for WfdiagShell {
         } else {
             Some(spawn_instance_watch(context, window_lifecycle_revision))
         };
+        // #207: a live watch here means the kernel wait registration was
+        // refused and tray/activation delivery is polling instead. Say so from
+        // the first frame rather than only after the first re-arm; the same
+        // latch keeps `arm_instance_watch` from repeating it.
+        let degraded_instance_watch = instance_wait.is_some();
+        if degraded_instance_watch {
+            status = format!(
+                "Tray and single-instance events are polling every {} ms · Windows refused the \
+                 event-driven registration",
+                WINDOW_COMMAND_POLL.as_millis()
+            );
+        }
         let (ai_provider_runtime, ai_status_error) = if deterministic_visual {
             (None, None)
         } else {
@@ -883,15 +900,14 @@ impl Component for WfdiagShell {
                 ),
             }
         };
-        let settings_open = visual_state == VisualState::SettingsBottom
-            || std::env::var("WFDIAG_REACTOR_SETTINGS")
-                .ok()
-                .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        let settings_open =
+            visual_state == VisualState::SettingsBottom || settings_dialog_open_override();
         let update_delay_task = (!deterministic_visual).then(|| spawn_update_delay(context));
         // Validation knob: WFDIAG_REACTOR_THEME=light|dark|system selects
-        // the startup theme (default dark, the Store 2.5.8 baseline).
-        let initial_theme =
-            window_theme_from_setting(&std::env::var("WFDIAG_REACTOR_THEME").unwrap_or_default());
+        // the startup theme (default dark, the Store 2.5.8 baseline). Without
+        // the `validation` feature this is always the empty override, which
+        // resolves to that same baseline (#186).
+        let initial_theme = window_theme_from_setting(&startup_theme_setting());
         let initial_color_scheme = if initial_theme == WindowTheme::Light {
             ColorScheme::Light
         } else {
@@ -1137,6 +1153,8 @@ impl Component for WfdiagShell {
             export_pending: None,
             export_error,
             status,
+            notification_failure_reported: false,
+            degraded_instance_watch_reported: degraded_instance_watch,
             diagnostic_results,
             previous_diagnostic_snapshot: None,
             targeted_diagnostic_overlay: None,
@@ -1207,6 +1225,12 @@ impl Component for WfdiagShell {
         self.ensure_window_hook(context);
         match message {
             Message::NativeSignalReady => {
+                // #206: the toast worker posts a wake as soon as it records a
+                // failure; the atomic guard inside makes this a no-op read on
+                // every ordinary wake.
+                if let Some(error) = notifications::take_toast_failure() {
+                    self.report_notification_failure(error);
+                }
                 for pending in self.drain_native_messages() {
                     self.update(pending, context);
                 }

@@ -9,7 +9,7 @@
 
 use std::ffi::c_void;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
 use super::window;
 
@@ -24,8 +24,9 @@ use windows::Win32::System::Threading::{
     WaitForSingleObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GWL_EXSTYLE, GetWindowLongPtrW, GetWindowThreadProcessId, IsIconic, IsWindow,
-    IsWindowVisible, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow, WS_EX_TOOLWINDOW,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetWindow, GetWindowLongPtrW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SW_RESTORE, SW_SHOW,
+    SetForegroundWindow, ShowWindow, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, PCWSTR};
 
@@ -63,11 +64,27 @@ static INSTANCE_MUTEX: OnceLock<MutexHandle> = OnceLock::new();
 /// recycle a destroyed handle value.
 static MAIN_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
+/// Owning thread of the window in [`MAIN_WINDOW`], captured at registration.
+///
+/// #220: an HWND value alone is a weak identity — Windows recycles handle
+/// values, and the old validation accepted any live, non-tool window of this
+/// process. Pinning the creating thread adds a second dimension that a
+/// recycled handle on some other GUI thread cannot satisfy.
+static MAIN_WINDOW_THREAD: AtomicU32 = AtomicU32::new(0);
+
 /// The outcome of the startup single-instance acquisition.
 pub enum SingleInstanceDecision {
     /// This process owns the mutex; `InstanceWatch` observes activate
     /// requests from later launches.
     Primary(InstanceWatch),
+    /// The lock could not be created at all — not "someone else owns it", but
+    /// an SDDL or `CreateMutexW` failure that leaves ownership unknowable.
+    /// The process runs as primary anyway and the caller must tell the user
+    /// why (#188); `reason` is the Windows-level detail.
+    PrimaryWithoutLock {
+        watch: InstanceWatch,
+        reason: String,
+    },
     /// Another instance is already running and has been signalled to come to
     /// the foreground. The caller should exit.
     Secondary,
@@ -82,13 +99,17 @@ pub fn acquire(identifier: &str) -> SingleInstanceDecision {
             SingleInstanceDecision::Secondary
         }
         MutexClaim::Acquired => initialize_primary(identifier),
-        MutexClaim::Failed => {
-            // An access-denied or otherwise indeterminate mutex result must
-            // never be interpreted as ownership. That could create two
-            // interactive instances across an integrity boundary.
-            signal_primary(identifier);
-            SingleInstanceDecision::Secondary
-        }
+        // #188: an indeterminate mutex result is NOT ownership, but it is also
+        // not evidence that another instance exists. Treating it as
+        // "secondary" made the app silently unlaunchable — no window, no
+        // message, exit code 0. Run as primary and let `main` say so; the
+        // failure mode is at worst a duplicate window, never a dead launch.
+        MutexClaim::Failed(reason) => match initialize_primary(identifier) {
+            SingleInstanceDecision::Primary(watch) => {
+                SingleInstanceDecision::PrimaryWithoutLock { watch, reason }
+            }
+            other => other,
+        },
     }
 }
 
@@ -108,11 +129,28 @@ pub fn acquire_for_relaunch(
     loop {
         match try_claim_mutex(identifier) {
             MutexClaim::Acquired => return initialize_primary(identifier),
-            MutexClaim::Failed => {
-                signal_primary(identifier);
-                return SingleInstanceDecision::Secondary;
-            }
+            // Same reasoning as `acquire` (#188). The unelevated original is
+            // already on its way out, so the duplicate-window risk this once
+            // guarded against does not apply to the hand-off.
+            MutexClaim::Failed(reason) => match initialize_primary(identifier) {
+                SingleInstanceDecision::Primary(watch) => {
+                    return SingleInstanceDecision::PrimaryWithoutLock { watch, reason };
+                }
+                other => return other,
+            },
             MutexClaim::Occupied if std::time::Instant::now() >= deadline => {
+                // #189: the original copy never let go. This used to end the
+                // elevated process with no output at all, so an approved UAC
+                // prompt produced nothing the user could see.
+                super::crash::show_startup_warning(&format!(
+                    "WindowsForum Diagnostics could not take over from the copy that is \
+                     already running.\n\n\
+                     It stayed open for the full {} second hand-off, so this elevated \
+                     copy is closing to avoid running two instances at once.\n\n\
+                     Close the running WindowsForum Diagnostics window and choose \
+                     \"Restart as administrator\" again.",
+                    timeout.as_secs()
+                ));
                 signal_primary(identifier);
                 return SingleInstanceDecision::Secondary;
             }
@@ -127,25 +165,30 @@ pub fn acquire_for_relaunch(
 enum MutexClaim {
     Acquired,
     Occupied,
-    Failed,
+    /// The claim could not be evaluated; carries the user-facing detail.
+    Failed(String),
 }
 
 fn try_claim_mutex(identifier: &str) -> MutexClaim {
     let mutex_name = wide(&format!("Local\\{identifier}-single-instance"));
-    let Ok(security) = NamedObjectSecurity::for_interactive_session() else {
-        return MutexClaim::Failed;
+    let security = match NamedObjectSecurity::for_interactive_session() {
+        Ok(security) => security,
+        Err(error) => return MutexClaim::Failed(error),
     };
     // SAFETY: the name and security descriptor are valid for the duration of
     // CreateMutexW. GetLastError is cleared/read immediately around the call.
     unsafe { windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(0)) };
-    let Ok(handle) = (unsafe {
+    let handle = match unsafe {
         CreateMutexW(
             Some(&security.attributes),
             false,
             PCWSTR(mutex_name.as_ptr()),
         )
-    }) else {
-        return MutexClaim::Failed;
+    } {
+        Ok(handle) => handle,
+        Err(error) => {
+            return MutexClaim::Failed(format!("Windows refused the instance lock: {error}"));
+        }
     };
     let already_exists =
         unsafe { windows::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS };
@@ -248,9 +291,17 @@ fn signal_primary(identifier: &str) {
             {
                 unsafe {
                     let _ = SetEvent(handle);
+                    // #220: close it. The previous code leaked this handle on
+                    // purpose, hoping to keep the event object alive until the
+                    // primary opened it — but the only caller that reached
+                    // here exited within microseconds anyway, so process
+                    // teardown closed it regardless and the "protection" was
+                    // imaginary. Now that a lock failure can continue as
+                    // primary (#188), a stray handle to the activation event
+                    // would be a genuine process-lifetime leak in a process
+                    // that keeps running.
+                    let _ = CloseHandle(handle);
                 }
-                // Deliberately leave this rare race handle process-owned so
-                // the event cannot disappear before the primary opens it.
             }
         }
     }
@@ -378,13 +429,16 @@ impl Drop for InstanceWatch {
 /// by close-to-tray is absent from a visible-window enumeration but remains the
 /// same valid window that tray and single-instance activation must restore.
 ///
-/// Returns false for a stale/foreign/tool HWND and leaves the prior valid
-/// registration untouched.
+/// Returns false for a stale/foreign/tool/system HWND and leaves the prior
+/// valid registration untouched.
 #[must_use]
 pub fn register_main_window(window: HWND) -> bool {
-    if !is_main_window_candidate(window) {
+    let Some(thread) = main_window_candidate_thread(window) else {
         return false;
-    }
+    };
+    // Publish the owning thread first so any reader that observes the new
+    // HWND can already observe the thread id it has to match (#220).
+    MAIN_WINDOW_THREAD.store(thread, Ordering::Release);
     MAIN_WINDOW.store(hwnd_to_raw(window), Ordering::Release);
     true
 }
@@ -395,7 +449,12 @@ pub fn register_main_window(window: HWND) -> bool {
 /// old window can never clear a newly registered replacement window.
 pub fn unregister_main_window(window: HWND) {
     let raw = hwnd_to_raw(window);
-    let _ = MAIN_WINDOW.compare_exchange(raw, 0, Ordering::AcqRel, Ordering::Acquire);
+    if MAIN_WINDOW
+        .compare_exchange(raw, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        MAIN_WINDOW_THREAD.store(0, Ordering::Release);
+    }
 }
 
 /// Whether the atomic registration still names this exact HWND.
@@ -414,6 +473,12 @@ pub(crate) fn is_registered_main_window(window: HWND) -> bool {
 /// top-level enumeration and cache the result. Visible candidates are
 /// preferred during that bootstrap search, but visibility is never a validity
 /// requirement and is never used for subsequent lookups.
+///
+/// #220: the enumeration is a last resort, never a shortcut. The registered
+/// HWND always wins, and the search itself now ranks candidates by window
+/// class instead of taking whichever window Windows happened to hand back
+/// first — a process gets top-level IME/marshal windows for free on every GUI
+/// thread, and those passed the old process+style filter.
 #[must_use]
 pub fn main_window_hwnd() -> Option<HWND> {
     if let Some(window) = registered_main_window() {
@@ -422,8 +487,9 @@ pub fn main_window_hwnd() -> Option<HWND> {
 
     struct Collector {
         current_process: u32,
-        visible: Option<HWND>,
-        hidden: Option<HWND>,
+        /// Highest-ranked candidate so far: WinUI class beats visibility, and
+        /// visibility only breaks ties between windows of the same class.
+        best: Option<(u8, HWND)>,
     }
     unsafe extern "system" fn on_window(window: HWND, lparam: LPARAM) -> BOOL {
         // SAFETY: lparam points at our Collector for the duration of the
@@ -439,21 +505,34 @@ pub fn main_window_hwnd() -> Option<HWND> {
         if is_tool_window_style(ex_style) {
             return BOOL(1);
         }
+        // Owned windows are dialogs and popups of some other window of ours
+        // (the crash MessageBox, a ContentDialog host); the shell's top-level
+        // window is unowned.
+        if !unsafe { GetWindow(window, GW_OWNER) }
+            .unwrap_or_default()
+            .0
+            .is_null()
+        {
+            return BOOL(1);
+        }
+        let class_name = window_class_name(window);
+        if class_is_transient_system_window(&class_name) {
+            return BOOL(1);
+        }
 
-        if unsafe { IsWindowVisible(window) }.as_bool() {
-            if collector.visible.is_none() {
-                collector.visible = Some(window);
-            }
-        } else if collector.hidden.is_none() {
-            collector.hidden = Some(window);
+        let rank = main_window_rank(
+            class_is_reactor_main_window(&class_name),
+            unsafe { IsWindowVisible(window) }.as_bool(),
+        );
+        if collector.best.is_none_or(|(best, _)| rank > best) {
+            collector.best = Some((rank, window));
         }
         BOOL(1)
     }
 
     let mut collector = Collector {
         current_process: unsafe { GetCurrentProcessId() },
-        visible: None,
-        hidden: None,
+        best: None,
     };
     unsafe {
         let _ = EnumWindows(
@@ -461,10 +540,10 @@ pub fn main_window_hwnd() -> Option<HWND> {
             LPARAM((&mut collector as *mut Collector) as isize),
         );
     }
-    let discovered = collector.visible.or(collector.hidden);
-    if let Some(window) = discovered {
-        // The enumeration already applied the same ownership/style filters;
-        // registration revalidates the handle in case destruction raced it.
+    if let Some((_, window)) = collector.best {
+        // The enumeration already applied the same ownership/style/class
+        // filters; registration revalidates the handle in case destruction
+        // raced it, and records the owning thread.
         if register_main_window(window) {
             return Some(window);
         }
@@ -507,13 +586,17 @@ fn registered_main_window() -> Option<HWND> {
     if raw == 0 {
         return None;
     }
+    let expected_thread = MAIN_WINDOW_THREAD.load(Ordering::Acquire);
     let window = hwnd_from_raw(raw);
-    if is_main_window_candidate(window) {
+    // #220: matching the handle value is not enough — Windows recycles them.
+    // The window must still be ours AND still live on the thread it was
+    // registered from.
+    if main_window_candidate_thread(window) == Some(expected_thread) && expected_thread != 0 {
         Some(window)
     } else {
         // Compare-exchange avoids clearing a replacement registered between
         // the load and this stale-handle validation.
-        let _ = MAIN_WINDOW.compare_exchange(raw, 0, Ordering::AcqRel, Ordering::Acquire);
+        unregister_main_window(window);
         None
     }
 }
@@ -528,21 +611,75 @@ pub(crate) fn registered_main_window_hwnd() -> Option<HWND> {
     registered_main_window()
 }
 
-fn is_main_window_candidate(window: HWND) -> bool {
+/// Validate `window` as this process's shell window, returning its owning
+/// thread id.
+///
+/// #220: the checks are process ownership, tool-window style, AND window
+/// class. The class filter is what keeps the per-GUI-thread IME/marshal
+/// windows Windows creates for us out of the candidate set; they are
+/// top-level, unowned, non-tool windows of this very process, so nothing
+/// cheaper distinguishes them.
+fn main_window_candidate_thread(window: HWND) -> Option<u32> {
     if window.0.is_null() || !unsafe { IsWindow(Some(window)) }.as_bool() {
-        return false;
+        return None;
     }
     let mut process_id = 0_u32;
-    unsafe { GetWindowThreadProcessId(window, Some(&mut process_id)) };
-    if process_id != unsafe { GetCurrentProcessId() } {
-        return false;
+    let thread_id = unsafe { GetWindowThreadProcessId(window, Some(&mut process_id)) };
+    if thread_id == 0 || process_id != unsafe { GetCurrentProcessId() } {
+        return None;
     }
     let ex_style = unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) };
-    !is_tool_window_style(ex_style)
+    if is_tool_window_style(ex_style) {
+        return None;
+    }
+    if class_is_transient_system_window(&window_class_name(window)) {
+        return None;
+    }
+    Some(thread_id)
 }
 
 fn is_tool_window_style(ex_style: isize) -> bool {
     (ex_style & WS_EX_TOOLWINDOW.0 as isize) != 0
+}
+
+/// The registered class of `window`, or an empty string when Windows refuses.
+///
+/// An empty name is deliberately *not* disqualifying: an unknown class still
+/// passes the transient-window filter, so a future Reactor class rename
+/// degrades to the old process+style behaviour instead of losing the window.
+fn window_class_name(window: HWND) -> String {
+    let mut buffer = [0_u16; 128];
+    let length = unsafe { GetClassNameW(window, &mut buffer) };
+    if length <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buffer[..usize::try_from(length).unwrap_or_default()])
+}
+
+/// WinUI 3 desktop windows — the shell's own top-level window included — all
+/// register this class.
+const REACTOR_MAIN_WINDOW_CLASS: &str = "WinUIDesktopWin32WindowClass";
+
+fn class_is_reactor_main_window(class_name: &str) -> bool {
+    class_name
+        .trim()
+        .eq_ignore_ascii_case(REACTOR_MAIN_WINDOW_CLASS)
+}
+
+/// Top-level windows Windows creates on this process's behalf, never the app.
+fn class_is_transient_system_window(class_name: &str) -> bool {
+    let class_name = class_name.trim().to_ascii_lowercase();
+    class_name == "ime"
+        || class_name == "default ime"
+        || class_name == "msctfime ui"
+        || class_name == "cicmarshalwndclass"
+        || class_name == "tooltips_class32"
+        || class_name.starts_with("xaml_windowedpopup")
+}
+
+/// Rank a bootstrap-search candidate: class evidence dominates visibility.
+fn main_window_rank(reactor_class: bool, visible: bool) -> u8 {
+    u8::from(reactor_class) * 2 + u8::from(visible)
 }
 
 fn hwnd_to_raw(window: HWND) -> isize {
@@ -590,5 +727,46 @@ mod tests {
     fn hwnd_integer_round_trip_preserves_the_opaque_value() {
         let raw = 0x1234_isize;
         assert_eq!(hwnd_to_raw(hwnd_from_raw(raw)), raw);
+    }
+
+    #[test]
+    fn per_thread_system_windows_are_never_main_window_candidates() {
+        for rejected in [
+            "IME",
+            "Default IME",
+            "MSCTFIME UI",
+            "CicMarshalWndClass",
+            "tooltips_class32",
+            "Xaml_WindowedPopupClass",
+            "  default ime  ",
+        ] {
+            assert!(class_is_transient_system_window(rejected), "{rejected:?}");
+            assert!(!class_is_reactor_main_window(rejected), "{rejected:?}");
+        }
+        for accepted in [REACTOR_MAIN_WINDOW_CLASS, "", "SomeFutureReactorClass"] {
+            assert!(!class_is_transient_system_window(accepted), "{accepted:?}");
+        }
+    }
+
+    #[test]
+    fn reactor_class_match_is_case_insensitive_but_exact() {
+        assert!(class_is_reactor_main_window("WinUIDesktopWin32WindowClass"));
+        assert!(class_is_reactor_main_window(
+            " winuidesktopwin32windowclass "
+        ));
+        assert!(!class_is_reactor_main_window(
+            "WinUIDesktopWin32WindowClass2"
+        ));
+        assert!(!class_is_reactor_main_window(""));
+    }
+
+    #[test]
+    fn window_class_outranks_visibility_in_the_bootstrap_search() {
+        // A hidden Reactor window must still beat a visible unknown window:
+        // close-to-tray hides the real window, and the enumeration is exactly
+        // where that used to pick the wrong one (#220).
+        assert!(main_window_rank(true, false) > main_window_rank(false, true));
+        assert!(main_window_rank(true, true) > main_window_rank(true, false));
+        assert!(main_window_rank(false, true) > main_window_rank(false, false));
     }
 }

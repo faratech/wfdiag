@@ -7,7 +7,7 @@
 #   * optional, user-approved UAC relaunch handoff (never bypasses UAC).
 #
 # The candidate MUST be a validation build compiled with
-# `--features settings-test-path`. Closed fixture names are ignored by normal
+# `--features validation`. Closed fixture names are ignored by normal
 # production builds. Settings live under a GUID-scoped temporary directory and
 # the export picker is cancelled, so no user configuration/report is written.
 #
@@ -440,7 +440,7 @@ if ($probe.schema -ne 1 -or [string]$probe.application_version -cne $expectedVer
     throw "Candidate probe does not match repository version '$expectedVersion'."
 }
 if ($probe.settings_test_path -ne $true) {
-    throw "This suite requires a validation candidate built with --features settings-test-path."
+    throw "This suite requires a validation candidate built with --features validation."
 }
 Assert-NoExactCandidateAlreadyRunning -Path $resolvedExecutable
 
@@ -450,7 +450,7 @@ $evidence = [ordered]@{
     executable = $resolvedExecutable
     applicationVersion = [string]$probe.application_version
     suite = "action-regressions"
-    settingsIsolation = "settings-test-path validation feature; GUID-scoped temporary files"
+    settingsIsolation = "validation cargo feature; GUID-scoped temporary files"
     remediationDisclosure = $null
     exportFallback = @()
     deviceManager = $null

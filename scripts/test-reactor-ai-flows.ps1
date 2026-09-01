@@ -1,7 +1,7 @@
 # Reactor validation: full AI flow against a hermetic mock provider.
 #
 # Starts a local OpenAI-compatible mock (scripts/lib/mock-provider.py),
-# points the candidate at it through the settings-test-path settings file,
+# points the candidate at it through the validation settings file,
 # and validates the REAL client paths end to end:
 #   1. streaming chat round-trip (send -> SSE deltas -> complete status)
 #   2. mid-stream cancel (Stop generating -> cancelled status)
@@ -9,7 +9,7 @@
 #      list_remediations, and answers with a known native catalog ID)
 #   4. report generation + forced regeneration
 #
-# Requires a candidate built with --features settings-test-path
+# Requires a candidate built with --features validation
 # (validation builds only; never production artifacts).
 #
 # Output: JSON evidence under -OutputDirectory. Exit 1 on failure.

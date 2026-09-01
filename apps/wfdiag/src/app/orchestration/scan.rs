@@ -19,10 +19,14 @@ use wfdiag_ui_core::{DiagnosticTaskResult, TaskProgressStatus, UiEvent};
 use windows_reactor::*;
 
 impl WfdiagShell {
-    /// Fire-and-forget scan-completion toast, mirroring the shipping
-    /// plugin's behavior when notifications are enabled. Best effort: any
-    /// failure is silent (the scan itself succeeded).
-    pub(crate) fn notify_scan_completion(&self) {
+    /// Queue the scan-completion toast, mirroring the shipping plugin's
+    /// behavior when notifications are enabled.
+    ///
+    /// #206: the toast runs on one shared worker thread instead of a detached
+    /// thread per scan, and its failure is no longer swallowed — the first one
+    /// (from this dispatch or from an earlier queued toast) is reported once in
+    /// the status line so a silently missing notification is explainable.
+    pub(crate) fn notify_scan_completion(&mut self) {
         if self.deterministic_visual || !self.settings_snapshot.show_notifications {
             return;
         }
@@ -32,11 +36,22 @@ impl WfdiagShell {
             .iter()
             .filter(|result| !result.success)
             .count();
-        let _ = std::thread::Builder::new()
-            .name("wfdiag-reactor-toast".to_string())
-            .spawn(move || {
-                let _ = notifications::show_scan_complete_toast(collected, errors);
-            });
+        if let Err(error) = notifications::request_scan_complete_toast(collected, errors) {
+            self.report_notification_failure(error);
+        }
+    }
+
+    /// Surface at most one notification failure for the session.
+    ///
+    /// Repeats are almost always the same cause, and a status line that keeps
+    /// re-announcing a best-effort toast failure is worse than one that says
+    /// it once.
+    pub(crate) fn report_notification_failure(&mut self, error: String) {
+        if self.notification_failure_reported {
+            return;
+        }
+        self.notification_failure_reported = true;
+        self.status = format!("Notification not shown · {error}");
     }
 
     pub(crate) fn maybe_begin_startup_scan(&mut self, context: &ComponentContext<Self>) {

@@ -6,11 +6,10 @@
 #![deny(unsafe_code)]
 
 use crate::app::consts::{
-    AI_WORKSPACE_MIN_HEIGHT, AI_WORKSPACE_VERTICAL_CHROME, APP_VERSION, CODEX_MODEL_IDS,
+    AI_WORKSPACE_MIN_HEIGHT, AI_WORKSPACE_VERTICAL_CHROME, CODEX_MODEL_IDS,
     DIAGNOSTICS_COMPACT_BREAKPOINT, PROCESS_DETAILS_COLUMN_WIDTH, PROCESS_WIDE_CONTENT_MIN_WIDTH,
     PROVIDER_SETUP_PROVIDERS, QUICK_DETECTION_SOURCE_TASK_IDS, QUICK_SCAN_TASK_IDS,
-    SHELL_CONTENT_HORIZONTAL_CHROME, VERSION_PROBE_FILE_ENV, VERSION_PROBE_FLAG,
-    WINDOW_HOOK_RETRY_MAX, WINDOW_HOOK_RETRY_MIN,
+    SHELL_CONTENT_HORIZONTAL_CHROME, WINDOW_HOOK_RETRY_MAX, WINDOW_HOOK_RETRY_MIN,
 };
 use crate::app::message::HistoryChangeKind;
 use crate::app::state::{
@@ -494,7 +493,7 @@ pub(crate) fn normalize_provider_preference_for_runtime(settings: &mut AppSettin
 
 pub(crate) fn reactor_settings_service(validator: Arc<dyn SettingsValidator>) -> SettingsService {
     #[cfg(feature = "settings-test-path")]
-    if let Some(path) = std::env::var_os("WFDIAG_REACTOR_SETTINGS_TEST_PATH") {
+    if let Some(path) = crate::fixtures::knobs::settings_test_path() {
         return SettingsService::new(
             Arc::new(ShippingSettingsStorage::at_path(path.into())),
             Arc::new(WindowsDpapiCredentialStorage::new()),
@@ -506,10 +505,13 @@ pub(crate) fn reactor_settings_service(validator: Arc<dyn SettingsValidator>) ->
 
 #[cfg(feature = "settings-test-path")]
 pub(crate) fn load_live_test_settings() -> Result<AppSettings, String> {
-    let path = std::env::var_os("WFDIAG_REACTOR_SETTINGS_TEST_PATH")
+    let path = crate::fixtures::knobs::settings_test_path()
         .filter(|path| !path.is_empty())
         .ok_or_else(|| {
-            "WFDIAG_REACTOR_SETTINGS_TEST_PATH is required for this validation fixture".to_string()
+            format!(
+                "{} is required for this validation fixture",
+                crate::fixtures::knobs::settings_test_path_env_name()
+            )
         })?;
     SettingsService::new(
         Arc::new(ShippingSettingsStorage::at_path(path.into())),
@@ -554,7 +556,7 @@ pub(crate) fn reactor_ai_provider_runtime(
 
 pub(crate) fn reactor_update_throttle() -> Option<UpdateThrottle> {
     #[cfg(feature = "settings-test-path")]
-    if let Some(path) = std::env::var_os("WFDIAG_REACTOR_SETTINGS_TEST_PATH") {
+    if let Some(path) = crate::fixtures::knobs::settings_test_path() {
         let path = std::path::PathBuf::from(path);
         return Some(UpdateThrottle::beside_settings_file(&path));
     }
@@ -1400,34 +1402,10 @@ pub(crate) fn resolve_export_picker_selection(
     }
 }
 
-pub(crate) fn write_version_probe_if_requested() -> bool {
-    let mut arguments = std::env::args_os().skip(1);
-    if arguments.next().as_deref() != Some(std::ffi::OsStr::new(VERSION_PROBE_FLAG)) {
-        return false;
-    }
-
-    // The capture harness passes the destination through the environment so
-    // paths containing spaces or non-ASCII characters never need shell
-    // quoting. Reject additional arguments to keep this probe deterministic.
-    if arguments.next().is_some() {
-        std::process::exit(2);
-    }
-    let Some(path) = std::env::var_os(VERSION_PROBE_FILE_ENV).filter(|path| !path.is_empty())
-    else {
-        std::process::exit(2);
-    };
-    if std::fs::write(path, version_probe_document()).is_err() {
-        std::process::exit(3);
-    }
-    true
-}
-
-pub(crate) fn version_probe_document() -> String {
-    format!(
-        "{{\"schema\":1,\"application_version\":\"{APP_VERSION}\",\"settings_test_path\":{}}}\n",
-        cfg!(feature = "settings-test-path")
-    )
-}
+// `write_version_probe_if_requested` / `version_probe_document` moved to
+// `fixtures::knobs` (#212): the probe reads the command line and an
+// environment variable, so it now lives with the other knobs and is compiled
+// out entirely without the `validation` feature.
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -1720,17 +1698,8 @@ pub(crate) mod tests {
         assert!(!settings.anthropic_api_key_set);
     }
 
-    #[test]
-    fn version_probe_document_uses_the_canonical_build_version() {
-        assert_eq!(
-            version_probe_document(),
-            format!(
-                "{{\"schema\":1,\"application_version\":\"{}\",\"settings_test_path\":{}}}\n",
-                env!("WFDIAG_APP_VERSION"),
-                cfg!(feature = "settings-test-path")
-            )
-        );
-    }
+    // `version_probe_document_uses_the_canonical_build_version` moved with the
+    // probe itself to `fixtures::knobs` (#212).
 
     pub(crate) fn provider_status(active_provider: AIProvider) -> AIProviderStatus {
         AIProviderStatus {

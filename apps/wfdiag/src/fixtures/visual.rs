@@ -32,13 +32,13 @@ pub(crate) enum VisualState {
 }
 
 impl VisualState {
-    pub(crate) fn from_env() -> Self {
-        match std::env::var("WFDIAG_REACTOR_VISUAL_STATE")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .replace('_', "-")
-            .as_str()
-        {
+    /// Pure parser for the visual-state knob (#186).
+    ///
+    /// The environment read that feeds this lives in `fixtures::knobs` and is
+    /// compiled out without the `validation` feature; a shipping build calls
+    /// this with `""` so the production default stays on one code path.
+    pub(crate) fn parse(value: &str) -> Self {
+        match value.to_ascii_lowercase().replace('_', "-").as_str() {
             "monitor-empty-desktop-dark" | "monitor-empty" => Self::MonitorEmpty,
             "processes-empty-desktop-dark" | "processes-empty" => Self::ProcessesEmpty,
             "history-empty-desktop-dark" | "history-empty" => Self::HistoryEmpty,
@@ -112,8 +112,8 @@ impl VisualState {
 
 /// Closed, validation-build-only live fixtures. Unlike screenshot fixtures,
 /// these exercise a deliberately tiny real native path. Production builds do
-/// not read [`LIVE_TEST_FIXTURE_ENV`], and the action fixture permits only the
-/// one non-mutating catalog item named below.
+/// not read `LIVE_TEST_FIXTURE_ENV` (the knob is not even compiled), and the
+/// action fixture permits only the one non-mutating catalog item named below.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LiveTestFixture {
     DeviceManager,
@@ -122,7 +122,9 @@ pub(crate) enum LiveTestFixture {
 }
 
 impl LiveTestFixture {
-    #[cfg(feature = "settings-test-path")]
+    /// Pure parser for the live-fixture knob (#186): the environment read
+    /// that feeds it lives in `fixtures::knobs` behind the `validation`
+    /// feature, and a shipping build calls this with `""` (always `None`).
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "device-manager" => Some(Self::DeviceManager),

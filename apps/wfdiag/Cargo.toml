@@ -16,6 +16,12 @@ self-contained = []
 # Enables the exact-path settings store used by integration validation. Never
 # enable this feature for Store or direct-installer production artifacts.
 settings-test-path = []
+# Superset of `settings-test-path` that also compiles in the shell's fixture /
+# environment knobs and the `--wfdiag-version-probe` entry point
+# (`src/fixtures/knobs.rs`). Without it the shell performs NO environment reads
+# at all and every knob is a compile-time production default (#186, #212).
+# Never enable this feature for Store or direct-installer production artifacts.
+validation = ["settings-test-path"]
 
 [dependencies]
 serde_json = { workspace = true, features = ["preserve_order"] }

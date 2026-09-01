@@ -67,7 +67,7 @@ jobs:
           cargo test --locked -p wfdiag-native-ai-report --all-targets
 
       - name: Build self-contained validation candidate (release)
-        run: cargo build --locked --release -p wfdiag --target ${{ matrix.triple }} --features self-contained,settings-test-path
+        run: cargo build --locked --release -p wfdiag --target ${{ matrix.triple }} --features self-contained,validation
 
       - name: Version probe
         shell: pwsh
