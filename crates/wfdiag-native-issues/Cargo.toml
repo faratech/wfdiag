@@ -10,7 +10,6 @@ publish.workspace = true
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 wfdiag-native-core = { workspace = true }
 wfdiag-remediation-catalog = { workspace = true }
 

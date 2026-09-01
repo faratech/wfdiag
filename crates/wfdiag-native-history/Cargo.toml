@@ -11,7 +11,6 @@ publish.workspace = true
 anyhow = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 wfdiag-native-core = { workspace = true }
 wfdiag-native-issues = { workspace = true }

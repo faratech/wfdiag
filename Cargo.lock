@@ -5596,20 +5596,15 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 name = "wfdiag"
 version = "2.5.8"
 dependencies = [
- "semver",
  "serde_json",
- "tokio",
- "tokio-util",
  "wfdiag-app",
  "wfdiag-native-ai-analysis",
  "wfdiag-native-ai-chat",
  "wfdiag-native-ai-provider",
- "wfdiag-native-ai-report",
  "wfdiag-native-diagnostics",
  "wfdiag-native-export",
  "wfdiag-native-history",
  "wfdiag-native-issues",
- "wfdiag-native-monitor",
  "wfdiag-native-phi",
  "wfdiag-native-projection",
  "wfdiag-native-remediation",
@@ -5758,7 +5753,6 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
  "tokio",
  "wfdiag-native-core",
  "wfdiag-native-issues",
@@ -5771,7 +5765,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "thiserror 2.0.20",
  "wfdiag-native-core",
  "wfdiag-remediation-catalog",
 ]
@@ -5780,8 +5773,6 @@ dependencies = [
 name = "wfdiag-native-monitor"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "encoding_rs",
  "futures",
  "serde",
  "serde_json",
@@ -5851,7 +5842,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "thiserror 2.0.20",
  "windows 0.62.2",
  "winreg 0.56.0",
 ]
@@ -5881,14 +5871,12 @@ dependencies = [
 name = "wfdiag-tauri"
 version = "2.5.8"
 dependencies = [
- "agent-client-protocol",
  "anyhow",
  "apple-native-keyring-store",
  "async-openai",
  "dirs",
  "embed-resource",
  "encoding_rs",
- "eventsource-stream",
  "futures",
  "keyring-core",
  "reqwest",
@@ -5900,7 +5888,6 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
- "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "url",
@@ -5920,7 +5907,6 @@ dependencies = [
  "wfdiag-native-settings",
  "wfdiag-native-system",
  "wfdiag-native-update",
- "wfdiag-remediation-catalog",
  "wfdiag-ui-core",
  "windows 0.62.2",
  "windows-collections 0.3.2",

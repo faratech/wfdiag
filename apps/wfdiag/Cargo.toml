@@ -25,20 +25,15 @@ validation = ["settings-test-path"]
 
 [dependencies]
 serde_json = { workspace = true, features = ["preserve_order"] }
-semver = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
-tokio-util = { workspace = true, features = ["rt"] }
 wfdiag-app = { workspace = true }
 wfdiag-native-ai-analysis = { workspace = true }
 wfdiag-native-ai-chat = { workspace = true }
-wfdiag-native-ai-report = { workspace = true }
 wfdiag-native-remediation = { workspace = true }
 wfdiag-native-ai-provider = { workspace = true }
 wfdiag-native-diagnostics = { workspace = true }
 wfdiag-native-export = { workspace = true }
 wfdiag-native-history = { workspace = true }
 wfdiag-native-issues = { workspace = true }
-wfdiag-native-monitor = { workspace = true }
 wfdiag-native-phi = { workspace = true }
 wfdiag-native-projection = { workspace = true }
 wfdiag-native-settings = { workspace = true }

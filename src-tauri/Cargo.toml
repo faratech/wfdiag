@@ -47,12 +47,9 @@ serde_json = { workspace = true }
 
 # Utilities
 anyhow = { workspace = true }
-thiserror = { workspace = true }
 # Already in the tree transitively (async-openai, tauri) — direct use for the
 # MCP bridge and native AI provider clients.
 reqwest = { workspace = true, features = ["json", "native-tls", "stream"] }
-# SSE parsing for Anthropic/Gemini streaming (already in the tree via async-openai)
-eventsource-stream = { workspace = true }
 # CancellationToken for stoppable AI chat turns
 tokio-util = { workspace = true, features = ["compat"] }
 uuid = { workspace = true, features = ["v4"] }
@@ -73,14 +70,12 @@ wfdiag-native-phi = { workspace = true }
 wfdiag-native-settings = { workspace = true }
 wfdiag-native-system = { workspace = true }
 wfdiag-native-update = { workspace = true }
-wfdiag-remediation-catalog = { workspace = true }
 wfdiag-native-remediation = { workspace = true }
 
 # OpenAI integration — Responses API for cloud OpenAI/Foundry Local one-shot,
 # chat-completion for the generic OpenAI-compatible providers (OpenRouter,
 # Ollama, Groq, …) which do not serve /v1/responses
 async-openai = { workspace = true, features = ["native-tls", "responses", "chat-completion"] }
-agent-client-protocol = { workspace = true }
 # Non-Windows secure storage fallback. Windows builds use DPAPI instead.
 [target.'cfg(not(windows))'.dependencies]
 keyring-core = "1"
