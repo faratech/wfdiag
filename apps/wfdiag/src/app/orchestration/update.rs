@@ -1,18 +1,16 @@
-//! About dialog and update-check orchestration.
+//! The About dialog and the update notice.
+//!
+//! The check itself belongs to the engine — [`AppCommand::CheckForUpdates`]
+//! and its once-a-day throttle — so what is left here is presentation: the
+//! dialog's epoch, the notice's dismiss timer, and its hover pause.
 
 #![deny(unsafe_code)]
 
 use crate::app::WfdiagShell;
-use crate::app::consts::APP_VERSION;
 use crate::app::policy::{about_dialog_callback_is_current, update_notice_remaining_after_elapsed};
-use crate::app::tasks::{
-    spawn_about_external_action, spawn_update_notice_timer, spawn_update_wait,
-};
+use crate::app::tasks::{spawn_about_external_action, spawn_update_notice_timer};
 use std::time::{Duration, Instant};
-use wfdiag_native_update::policy::{
-    AboutExternalAction, NOTICE_DURATION, UpdateThrottle, trusted_release_url,
-};
-use wfdiag_native_update::{NativeUpdateRuntime, UpdateInfo, UpdateService};
+use wfdiag_native_update::policy::{AboutExternalAction, NOTICE_DURATION};
 use windows_reactor::*;
 
 impl WfdiagShell {
@@ -74,52 +72,8 @@ impl WfdiagShell {
         ));
     }
 
-    pub(crate) fn begin_update_check(
-        &mut self,
-        throttle: Option<UpdateThrottle>,
-        context: &ComponentContext<Self>,
-    ) {
-        self.update_delay_task = None;
-        if self.deterministic_visual
-            || self.update_runtime.is_some()
-            || self.update_check_task.is_some()
-        {
-            return;
-        }
-
-        let Ok(service) = UpdateService::shipping_from_str(APP_VERSION, cfg!(debug_assertions))
-        else {
-            return;
-        };
-        let Ok(runtime) = NativeUpdateRuntime::start(service) else {
-            return;
-        };
-        let Ok(reply) = runtime.request_check() else {
-            return;
-        };
-
-        self.update_check_task = Some(spawn_update_wait(context, reply, throttle));
-        self.update_runtime = Some(runtime);
-    }
-
-    pub(crate) fn apply_update_check_result(
-        &mut self,
-        result: Result<Option<UpdateInfo>, String>,
-        context: &ComponentContext<Self>,
-    ) {
-        self.update_check_task = None;
-        self.update_runtime = None;
-
-        let Ok(Some(update)) = result else {
-            // Store builds, debug builds, offline hosts, malformed responses,
-            // and runtime failures all intentionally remain invisible.
-            return;
-        };
-        if trusted_release_url(&update).is_none() {
-            return;
-        }
-
-        self.update_info = Some(update);
+    /// Raise the notice for a newer release the engine just found.
+    pub(crate) fn show_update_notice(&mut self, context: &ComponentContext<Self>) {
         self.update_notice_epoch = self.update_notice_epoch.wrapping_add(1);
         if self.update_notice_epoch == 0 {
             self.update_notice_epoch = 1;

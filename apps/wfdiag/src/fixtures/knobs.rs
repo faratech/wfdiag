@@ -48,9 +48,6 @@ const HEIGHT_ENV: &str = "WFDIAG_REACTOR_HEIGHT";
 #[cfg(feature = "validation")]
 const NO_TRAY_ENV: &str = "WFDIAG_NO_TRAY";
 
-#[cfg(feature = "validation")]
-const NO_WORKERS_ENV: &str = "WFDIAG_NO_WORKERS";
-
 #[cfg(feature = "settings-test-path")]
 const SETTINGS_TEST_PATH_ENV: &str = "WFDIAG_REACTOR_SETTINGS_TEST_PATH";
 
@@ -172,17 +169,6 @@ pub(crate) fn tray_enabled() -> bool {
 #[cfg(not(feature = "validation"))]
 pub(crate) fn tray_enabled() -> bool {
     true
-}
-
-/// The harness's AI-worker suppression policy; empty means "start everything".
-#[cfg(feature = "validation")]
-pub(crate) fn ai_worker_policy() -> std::ffi::OsString {
-    std::env::var_os(NO_WORKERS_ENV).unwrap_or_default()
-}
-
-#[cfg(not(feature = "validation"))]
-pub(crate) fn ai_worker_policy() -> std::ffi::OsString {
-    std::ffi::OsString::new()
 }
 
 /// Isolated settings-store path used by the integration validation suites.
@@ -332,7 +318,6 @@ mod production_defaults {
         assert!((initial_window_width(1200.0) - 1200.0).abs() < f64::EPSILON);
         assert!((initial_window_height(800.0) - 800.0).abs() < f64::EPSILON);
         assert!(tray_enabled());
-        assert!(ai_worker_policy().is_empty());
         assert!(!write_version_probe_if_requested());
     }
 }

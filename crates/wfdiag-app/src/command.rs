@@ -15,6 +15,7 @@ use crate::ids::RequestId;
 use crate::ports::monitor::ProcessQuery;
 use wfdiag_native_diagnostics::ScanKind;
 use wfdiag_native_export::ExportRequestKind;
+use wfdiag_native_remediation::broker::ActionRequest;
 use wfdiag_native_settings::{AppSettings, ProviderCredentialTransaction, SettingsUpdate};
 
 /// Which worker a command was routed to, for rejection reporting and for
@@ -285,6 +286,20 @@ pub enum AppCommand {
         /// The detected issue authorising it. `None` is only valid for a
         /// maintenance action.
         issue_id: Option<String>,
+    },
+    /// Build one action proposal covering several remediations at once.
+    ///
+    /// This is the fix-plan "review these together" path: the plan already
+    /// named catalog ids against a specific evidence and catalog fingerprint,
+    /// and both are carried here so the broker refuses a preview whose
+    /// evidence moved on while the user was reading the plan.
+    PrepareRemediations {
+        /// The catalog ids with their authorising issues, in plan order.
+        actions: Vec<ActionRequest>,
+        /// The evidence fingerprint the selection was made against.
+        expected_scan_fingerprint: Option<String>,
+        /// The catalog fingerprint the selection was made against.
+        expected_catalog_fingerprint: Option<String>,
     },
     /// Approve a prepared action proposal.
     ///

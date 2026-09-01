@@ -1220,6 +1220,34 @@ impl AppService {
         remediation_id: String,
         issue_id: Option<String>,
     ) -> DispatchOutcome {
+        self.prepare_remediations(
+            vec![ActionRequest {
+                remediation_id,
+                issue_id,
+            }],
+            None,
+            None,
+        )
+    }
+
+    /// Stage one preview covering several catalog ids.
+    ///
+    /// The fingerprints are the caller's: a fix plan names ids against the
+    /// evidence and catalog it was generated from, and passing those through
+    /// lets the broker refuse a preview whose evidence has since changed.
+    /// `None` means "use the fingerprints as of right now", which is what a
+    /// single click on a live issue row wants.
+    pub(super) fn prepare_remediations(
+        &mut self,
+        actions: Vec<ActionRequest>,
+        expected_scan_fingerprint: Option<String>,
+        expected_catalog_fingerprint: Option<String>,
+    ) -> DispatchOutcome {
+        if actions.is_empty() {
+            return DispatchOutcome::Rejected(RejectReason::Invalid {
+                detail: "no remediation was selected".to_string(),
+            });
+        }
         if self.action_pending.is_some() {
             return DispatchOutcome::Rejected(RejectReason::Busy {
                 detail: "a remediation request is already active".to_string(),
@@ -1236,12 +1264,14 @@ impl AppService {
             return DispatchOutcome::Rejected(RejectReason::IdentityExhausted);
         };
         let input = ActionPrepareInput {
-            actions: vec![ActionRequest {
-                remediation_id,
-                issue_id,
-            }],
-            expected_scan_fingerprint: Some(snapshot.scan_fingerprint.clone()),
-            expected_catalog_fingerprint: Some(snapshot.catalog_fingerprint.clone()),
+            actions,
+            expected_scan_fingerprint: Some(
+                expected_scan_fingerprint.unwrap_or_else(|| snapshot.scan_fingerprint.clone()),
+            ),
+            expected_catalog_fingerprint: Some(
+                expected_catalog_fingerprint
+                    .unwrap_or_else(|| snapshot.catalog_fingerprint.clone()),
+            ),
         };
         if !runtime.prepare(request.get(), input, snapshot) {
             return DispatchOutcome::Rejected(RejectReason::Busy {
@@ -2032,6 +2062,7 @@ impl AppService {
         match event {
             AnalysisWorkerEvent::Ack {
                 provider_use,
+                grounding,
                 cached,
                 ..
             } => {
@@ -2043,6 +2074,7 @@ impl AppService {
                     .or_default();
                 entry.busy = true;
                 entry.cached = cached;
+                entry.grounding = grounding;
                 entry.provider_use = Some(provider_use.clone());
                 self.queue.push(AppEvent::Analysis(AnalysisEvent::Started {
                     task_id,
@@ -2053,6 +2085,7 @@ impl AppService {
             AnalysisWorkerEvent::Done {
                 interpretation,
                 provider_use,
+                grounding,
                 cached,
                 ..
             } => {
@@ -2065,6 +2098,7 @@ impl AppService {
                     .or_default();
                 entry.busy = false;
                 entry.cached = cached;
+                entry.grounding = grounding;
                 entry.error = None;
                 entry.interpretation = Some(interpretation.clone());
                 entry.provider_use = Some(provider_use.clone());
@@ -2077,7 +2111,11 @@ impl AppService {
                     }));
             }
             AnalysisWorkerEvent::Failed {
-                message, retryable, ..
+                message,
+                retryable,
+                provider_use,
+                grounding,
+                ..
             } => {
                 self.analysis_pending = None;
                 let entry = self
@@ -2087,6 +2125,8 @@ impl AppService {
                     .entry(task_id.clone())
                     .or_default();
                 entry.busy = false;
+                entry.grounding = grounding;
+                entry.provider_use = Some(provider_use);
                 entry.error = Some(message.clone());
                 self.queue.push(AppEvent::Analysis(AnalysisEvent::Failed {
                     task_id,
@@ -2107,8 +2147,14 @@ impl AppService {
 
     fn apply_prioritization_event(&mut self, event: AnalysisWorkerEvent, generation: Generation) {
         match event {
-            AnalysisWorkerEvent::Ack { provider_use, .. } => {
+            AnalysisWorkerEvent::Ack {
+                provider_use,
+                grounding,
+                ..
+            } => {
                 self.snapshot.ai.prioritization.busy = true;
+                self.snapshot.ai.prioritization.grounding = grounding;
+                self.snapshot.ai.prioritization.provider_use = Some(provider_use.clone());
                 self.queue
                     .push(AppEvent::Prioritization(PrioritizationEvent::Started {
                         provider: provider_use.provider_id,
@@ -2116,6 +2162,8 @@ impl AppService {
             }
             AnalysisWorkerEvent::Done {
                 interpretation,
+                provider_use,
+                grounding,
                 cached,
                 ..
             } => {
@@ -2131,6 +2179,8 @@ impl AppService {
                 }
                 self.snapshot.ai.prioritization = crate::snapshot_ai::PrioritizationSnapshot {
                     text: Some(interpretation.clone()),
+                    provider_use: Some(provider_use),
+                    grounding,
                     cached,
                     busy: false,
                     error: None,
@@ -2142,10 +2192,16 @@ impl AppService {
                     }));
             }
             AnalysisWorkerEvent::Failed {
-                message, retryable, ..
+                message,
+                retryable,
+                provider_use,
+                grounding,
+                ..
             } => {
                 self.prioritization_pending = None;
                 self.snapshot.ai.prioritization.busy = false;
+                self.snapshot.ai.prioritization.grounding = grounding;
+                self.snapshot.ai.prioritization.provider_use = Some(provider_use);
                 self.snapshot.ai.prioritization.error = Some(message.clone());
                 self.queue
                     .push(AppEvent::Prioritization(PrioritizationEvent::Failed {

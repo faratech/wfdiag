@@ -9,7 +9,7 @@ use crate::domain::ai_intent::PendingAiIntent;
 use crate::domain::catalog::CatalogState;
 use crate::domain::subscriptions::{AccountState, InstallPrompt};
 use std::collections::BTreeMap;
-use wfdiag_native_ai_analysis::ValidatedFixPlan;
+use wfdiag_native_ai_analysis::{GroundingTrace, ValidatedFixPlan};
 use wfdiag_native_ai_chat::{ChatToolHistory, ProviderUse, SubscriptionInstallProgress};
 use wfdiag_native_remediation::broker::ActionProposal;
 use wfdiag_native_remediation::runtime::ActionRunSummary;
@@ -94,6 +94,8 @@ pub struct AnalysisSnapshot {
     pub interpretation: Option<String>,
     /// Trust and model attribution.
     pub provider_use: Option<ProviderUse>,
+    /// The live-grounding trace, when the provider consulted sources.
+    pub grounding: Option<GroundingTrace>,
     /// Whether it came from the cache.
     pub cached: bool,
     /// Analysis is in flight.
@@ -107,6 +109,10 @@ pub struct AnalysisSnapshot {
 pub struct PrioritizationSnapshot {
     /// The model's ranking.
     pub text: Option<String>,
+    /// Trust and model attribution.
+    pub provider_use: Option<ProviderUse>,
+    /// The live-grounding trace, when the provider consulted sources.
+    pub grounding: Option<GroundingTrace>,
     /// Whether it came from the cache.
     pub cached: bool,
     /// Prioritisation is in flight.

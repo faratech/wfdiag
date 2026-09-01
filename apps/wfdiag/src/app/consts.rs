@@ -117,28 +117,15 @@ pub(crate) const QUICK_SCAN_TASK_IDS: [&str; 17] = [
     "firewall_status",
 ];
 
-// Store 2.5.8 always unions these cheap, non-admin issue sources into a
-// customised Quick Scan. Issue detection itself is intentionally integrated
-// separately; retaining the sources here preserves the scan contract.
-pub(crate) const QUICK_DETECTION_SOURCE_TASK_IDS: [&str; 11] = [
-    "logical_disk",
-    "network_adapter",
-    "pending_reboot",
-    "device_errors",
-    "defender_status",
-    "event_codes_critical",
-    "services",
-    "performance",
-    "startup_command",
-    "hosts_file",
-    "firewall_status",
-];
-
 pub(crate) const PROCESS_PAGE_SIZE: usize =
     wfdiag_native_projection::render::PROCESS_REPEATER_SLOTS;
 
 pub(crate) const PROCESS_FILTER_DEBOUNCE: Duration = Duration::from_millis(180);
 
+/// How often the Processes page re-reads the table while telemetry is live.
+///
+/// Telemetry itself ticks every second; enumerating processes that often is
+/// wasteful, so the page rides every other sample.
 pub(crate) const PROCESS_LIVE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) const DIAGNOSTICS_COMPACT_BREAKPOINT: f64 = 840.0;
@@ -152,8 +139,6 @@ pub(crate) const PROCESS_DETAILS_COLUMN_WIDTH: f64 = 312.0;
 pub(crate) const AI_WORKSPACE_VERTICAL_CHROME: f64 = 243.0;
 
 pub(crate) const AI_WORKSPACE_MIN_HEIGHT: f64 = 240.0;
-
-pub(crate) const SCAN_FINALIZATION_DELAY: Duration = Duration::from_millis(500);
 
 pub(crate) const PALETTE_FOCUS_DELAY: Duration = Duration::from_millis(125);
 
@@ -170,6 +155,12 @@ pub(crate) const SETTINGS_MAX_CONCURRENT_TASKS: u32 = 16;
 /// critical, so the degraded fallback is a quarter-second and the shell says
 /// so once in the status line.
 pub(crate) const WINDOW_COMMAND_POLL: Duration = Duration::from_millis(250);
+
+/// How long the shell waits for the engine's workers to stop on exit.
+///
+/// This is the budget `AppService::shutdown` reaps each worker inside; the
+/// tray Exit path must not hang on a worker that will not stop.
+pub(crate) const ENGINE_SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
 
 pub(crate) const WINDOW_HOOK_RETRY_MIN: Duration = Duration::from_millis(100);
 
@@ -225,8 +216,6 @@ pub(crate) const PROVIDER_SETUP_LABELS: [&str; 10] = [
     "DeepSeek",
     "Custom OpenAI-compatible endpoint",
 ];
-
-pub(crate) const PROVIDER_MODEL_REFRESH_DELAY: Duration = Duration::from_millis(400);
 
 pub(crate) const PROVIDER_SETUP_PROVIDERS: [AIProvider; 10] = [
     AIProvider::PhiSilica,

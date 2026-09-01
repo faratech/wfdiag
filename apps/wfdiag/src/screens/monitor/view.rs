@@ -8,7 +8,7 @@ use crate::widgets::chrome::{fa_icon_label, page_header};
 use crate::widgets::icons;
 use crate::widgets::icons::FaIcon;
 use crate::widgets::palette_colors::Palette;
-use wfdiag_native_monitor::NetworkConnection;
+use wfdiag_app::ports::monitor::NetworkConnection;
 use wfdiag_native_projection::render::{
     MONITOR_GRAPH_HEIGHT, MONITOR_GRAPH_PATH_COUNT, MONITOR_GRAPH_WIDTH, monitor_graph_geometry,
 };

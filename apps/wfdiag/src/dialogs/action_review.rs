@@ -72,8 +72,6 @@ pub(crate) fn action_review_presentation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::policy::action_proposal_matches_snapshot;
-    use wfdiag_native_remediation::broker::{ActionSnapshot, DetectedIssueRemediation};
     use wfdiag_native_remediation::remediation;
 
     fn action_proposal(
@@ -123,36 +121,8 @@ mod tests {
         assert_eq!(batch_ui.primary_label, "Run these 2 actions");
     }
 
-    #[test]
-    fn staged_action_review_rejects_changed_evidence_catalog_and_issue_mapping() {
-        let proposal = action_proposal("flush_dns", Some("dns-issue"), ApprovalScope::Exact);
-        let snapshot = ActionSnapshot {
-            scan_fingerprint: proposal.scan_fingerprint.clone(),
-            catalog_fingerprint: proposal.catalog_fingerprint.clone(),
-            detected_issues: vec![DetectedIssueRemediation {
-                issue_id: "dns-issue".to_string(),
-                remediation_id: Some("flush_dns".to_string()),
-            }],
-            is_admin: true,
-        };
-        assert!(action_proposal_matches_snapshot(&proposal, &snapshot));
-
-        let mut changed_scan = snapshot.clone();
-        changed_scan.scan_fingerprint = "scan-2".to_string();
-        assert!(!action_proposal_matches_snapshot(&proposal, &changed_scan));
-
-        let mut changed_catalog = snapshot.clone();
-        changed_catalog.catalog_fingerprint = "catalog-2".to_string();
-        assert!(!action_proposal_matches_snapshot(
-            &proposal,
-            &changed_catalog
-        ));
-
-        let mut changed_mapping = snapshot;
-        changed_mapping.detected_issues[0].remediation_id = Some("clear_temp_files".to_string());
-        assert!(!action_proposal_matches_snapshot(
-            &proposal,
-            &changed_mapping
-        ));
-    }
+    // The staged-review staleness guard moved into
+    // `wfdiag_app::domain::actions::proposal_matches`, which is unit-tested
+    // there (`stale_reviews`, `both_staged_surfaces_are_judged_against_one_snapshot`).
+    // This module keeps only the presentation contract.
 }

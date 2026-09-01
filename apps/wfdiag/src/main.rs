@@ -3,7 +3,6 @@
 //! Native WinUI 3 shell entry point. Everything the process does lives in
 //! the modules below; this file only starts it.
 
-mod ai;
 mod app;
 mod dialogs;
 mod fixtures;

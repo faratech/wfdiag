@@ -10,7 +10,7 @@ use crate::widgets::chrome::{fa_icon_label, page_header, placed};
 use crate::widgets::icons;
 use crate::widgets::icons::FaIcon;
 use crate::widgets::palette_colors::{Palette, palette_track};
-use wfdiag_native_monitor::{ProcessPage, ProcessRow, ProcessSortDirection, ProcessSortKey};
+use wfdiag_app::ports::monitor::{ProcessPage, ProcessRow, ProcessSortDirection, ProcessSortKey};
 use wfdiag_native_projection::process_identity::ProcessIdentity;
 use wfdiag_native_projection::render::fixed_process_slots;
 use windows_reactor::*;

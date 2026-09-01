@@ -477,6 +477,15 @@ impl AppService {
                 remediation_id,
                 issue_id,
             } => self.prepare_remediation(remediation_id, issue_id),
+            AppCommand::PrepareRemediations {
+                actions,
+                expected_scan_fingerprint,
+                expected_catalog_fingerprint,
+            } => self.prepare_remediations(
+                actions,
+                expected_scan_fingerprint,
+                expected_catalog_fingerprint,
+            ),
             AppCommand::ApproveAction {
                 proposal_id,
                 confirm_repair,

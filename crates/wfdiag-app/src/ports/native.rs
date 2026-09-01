@@ -250,12 +250,62 @@ pub fn windows_ports(
     elevation: Option<Arc<dyn ElevationPort>>,
     current_version: &str,
 ) -> AppPorts {
-    let settings_storage: Arc<dyn wfdiag_native_settings::SettingsStorage> =
-        Arc::new(ShippingSettingsStorage::new());
+    windows_ports_with(
+        WindowsPortOverrides::default(),
+        provider_backend,
+        elevation,
+        current_version,
+    )
+}
+
+/// The shipping choices a host may replace.
+///
+/// A validation build redirects the settings document to an isolated path and
+/// puts the update throttle beside it; the shell also enforces its own
+/// provider-preference admission rule at the settings layer. Everything left
+/// `None` keeps the shipping default.
+#[derive(Clone, Default)]
+pub struct WindowsPortOverrides {
+    /// Where the settings document lives.
+    pub settings_storage: Option<Arc<dyn wfdiag_native_settings::SettingsStorage>>,
+    /// The admission policy applied before a settings document is saved.
+    pub settings_validator: Option<Arc<dyn wfdiag_native_settings::SettingsValidator>>,
+    /// Where the once-a-day update-check throttle is persisted.
+    pub update_throttle: Option<Arc<dyn UpdateThrottlePort>>,
+}
+
+impl std::fmt::Debug for WindowsPortOverrides {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WindowsPortOverrides")
+            .field("settings_storage", &self.settings_storage.is_some())
+            .field("settings_validator", &self.settings_validator.is_some())
+            .field("update_throttle", &self.update_throttle.is_some())
+            .finish()
+    }
+}
+
+/// Build the Windows port bundle with host overrides.
+///
+/// # Panics
+///
+/// Panics only if the compiled-in `0.0.0` fallback — used when
+/// `current_version` is not valid semantic version syntax — ever stops parsing.
+#[must_use]
+pub fn windows_ports_with(
+    overrides: WindowsPortOverrides,
+    provider_backend: Arc<dyn ProviderManagementBackend>,
+    elevation: Option<Arc<dyn ElevationPort>>,
+    current_version: &str,
+) -> AppPorts {
+    let settings_storage: Arc<dyn wfdiag_native_settings::SettingsStorage> = overrides
+        .settings_storage
+        .unwrap_or_else(|| Arc::new(ShippingSettingsStorage::new()));
     let credentials: Arc<dyn wfdiag_native_settings::CredentialStorage> =
         Arc::new(WindowsDpapiCredentialStorage::new());
-    let settings_validator: Arc<dyn wfdiag_native_settings::SettingsValidator> =
-        Arc::new(AllowAllSettings);
+    let settings_validator: Arc<dyn wfdiag_native_settings::SettingsValidator> = overrides
+        .settings_validator
+        .unwrap_or_else(|| Arc::new(AllowAllSettings));
     // The AI resolvers read live settings and DPAPI keys per request, so they
     // are built from the same storages the service's own settings service uses.
     let ai = AiPorts::shipping(
@@ -284,10 +334,12 @@ pub fn windows_ports(
         monitor: Arc::new(WindowsMonitor),
         elevation: elevation.unwrap_or_else(|| Arc::new(UnsupportedElevation)),
         environment: Arc::new(SystemEnvironment),
-        update_throttle: ShippingUpdateThrottle::new().map_or_else(
-            |_| Arc::new(super::AlwaysCheckThrottle) as Arc<dyn UpdateThrottlePort>,
-            |throttle| Arc::new(throttle) as Arc<dyn UpdateThrottlePort>,
-        ),
+        update_throttle: overrides.update_throttle.unwrap_or_else(|| {
+            ShippingUpdateThrottle::new().map_or_else(
+                |_| Arc::new(super::AlwaysCheckThrottle) as Arc<dyn UpdateThrottlePort>,
+                |throttle| Arc::new(throttle) as Arc<dyn UpdateThrottlePort>,
+            )
+        }),
         ai,
     }
 }

@@ -8,39 +8,30 @@
 use crate::app::consts::{
     AI_WORKSPACE_MIN_HEIGHT, AI_WORKSPACE_VERTICAL_CHROME, CODEX_MODEL_IDS,
     DIAGNOSTICS_COMPACT_BREAKPOINT, PROCESS_DETAILS_COLUMN_WIDTH, PROCESS_WIDE_CONTENT_MIN_WIDTH,
-    PROVIDER_SETUP_PROVIDERS, QUICK_DETECTION_SOURCE_TASK_IDS, QUICK_SCAN_TASK_IDS,
-    SHELL_CONTENT_HORIZONTAL_CHROME, WINDOW_HOOK_RETRY_MAX, WINDOW_HOOK_RETRY_MIN,
+    PROVIDER_SETUP_PROVIDERS, SHELL_CONTENT_HORIZONTAL_CHROME, WINDOW_HOOK_RETRY_MAX,
+    WINDOW_HOOK_RETRY_MIN,
 };
 use crate::app::message::HistoryChangeKind;
-use crate::app::state::{
-    DiagnosticScanPolicy, ExportWriteKind, HistoryRetentionPolicy, HistoryTrendBadge,
-    PendingAiProviderGate, PendingExport, PendingExportAction, PendingSettingsSave,
-};
-use crate::platform::save_picker::{SavePickerError, SavePickerOutcome, ValidatedExportPath};
+use crate::app::state::HistoryTrendBadge;
 use crate::platform::window;
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
+use wfdiag_native_ai_chat::SubscriptionAuthProvider;
 use wfdiag_native_ai_chat::workers::subscription_install::{
     SubscriptionInstallProgress, SubscriptionInstallStage,
 };
-use wfdiag_native_ai_chat::{SubscriptionAuthOperation, SubscriptionAuthProvider};
 use wfdiag_native_ai_provider::{
     AIProvider, AIProviderPreference, AIProviderStatus, FoundryCliEndpointSource,
-    ModelCatalogRequest, NativeAiProviderRuntime, PackageIdentitySource,
-    ProcessSubscriptionCliStatusSource, ProviderManagementService, ProviderModelDefaults,
-    ProviderProbeBundle, ProviderSelectionState, SettingsServiceProviderConfigurationSource,
-    SharedAiCache, parse_provider_preference, provider_preference_for_runtime,
+    PackageIdentitySource, ProcessSubscriptionCliStatusSource, ProviderManagementBackend,
+    ProviderManagementService, ProviderModelDefaults, ProviderProbeBundle, ProviderSelectionState,
+    SettingsServiceProviderConfigurationSource, SharedAiCache, parse_provider_preference,
 };
-use wfdiag_native_diagnostics::{DiagnosticTask, ScanEvidence, ScanKind, SharedScanEvidence};
-use wfdiag_native_export::{ExportTask, ReportFormat};
-use wfdiag_native_history::{
-    ComparisonSummary, DiagnosticTask as HistoryDiagnosticTask, ScanRecord, ScanSummary,
-    TaskChangeSummary, TaskTrend, Timestamp,
-};
-use wfdiag_native_issues::{Issue, RemediationTier};
+use wfdiag_native_diagnostics::ScanKind;
+use wfdiag_native_export::ReportFormat;
+use wfdiag_native_history::{ComparisonSummary, ScanSummary, TaskChangeSummary, TaskTrend};
+use wfdiag_native_issues::RemediationTier;
 use wfdiag_native_phi::WindowsPhiStatusSource;
-use wfdiag_native_remediation::broker::{ActionProposal, ActionSnapshot};
+use wfdiag_native_remediation::broker::ActionProposal;
 use wfdiag_native_remediation::remediation;
 use wfdiag_native_remediation::runtime::{ActionRunStatus, ActionRunSummary};
 #[cfg(feature = "settings-test-path")]
@@ -51,10 +42,8 @@ use wfdiag_native_settings::{
     AppSettings, ProviderKeyId, SettingsService, SettingsValidator,
     windows_shipping_settings_service,
 };
-use wfdiag_native_system::{ArchitectureSnapshot, SystemInfo, SystemRequestKind};
-use wfdiag_native_update::policy::UpdateThrottle;
+use wfdiag_native_system::{ArchitectureSnapshot, SystemInfo};
 use wfdiag_native_update::{SignatureProvider, WindowsPackageSignatureProvider};
-use wfdiag_ui_core::DiagnosticTaskResult;
 use windows_reactor::*;
 
 pub(crate) fn provider_setup_provider(index: usize) -> Option<AIProvider> {
@@ -166,19 +155,6 @@ pub(crate) fn validate_phi_preference(
     Ok(())
 }
 
-pub(crate) const fn settings_ai_status_probe_needed(
-    settings_open: bool,
-    status_known: bool,
-    status_loading: bool,
-) -> bool {
-    settings_open && !status_known && !status_loading
-}
-
-pub(crate) fn provider_models_auto_discovery_allowed(index: usize) -> bool {
-    provider_setup_provider(index)
-        .is_some_and(|provider| !matches!(provider, AIProvider::PhiSilica | AIProvider::ClaudeCode))
-}
-
 pub(crate) fn subscription_auth_provider_for_setup(
     index: usize,
 ) -> Option<SubscriptionAuthProvider> {
@@ -209,12 +185,6 @@ pub(crate) const fn subscription_install_progress_label(
         SubscriptionInstallStage::Verifying => "Verifying the installed CLI path…",
         SubscriptionInstallStage::Completed => "CLI installation verified",
     }
-}
-
-pub(crate) fn subscription_auth_completion_refreshes_models(
-    operation: SubscriptionAuthOperation,
-) -> bool {
-    operation != SubscriptionAuthOperation::Status
 }
 
 pub(crate) fn provider_setup_model(index: usize, settings: &AppSettings) -> Option<&str> {
@@ -290,18 +260,30 @@ pub(crate) fn non_empty_provider_draft(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-pub(crate) fn provider_catalog_request_for_draft(
+/// The unsaved provider-setup values a catalog refresh discovers with.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProviderCatalogDraft {
+    pub(crate) api_key: Option<String>,
+    pub(crate) endpoint: Option<String>,
+    pub(crate) cli_path: Option<String>,
+}
+
+/// What the selected provider needs before discovery can even be attempted.
+///
+/// `Ok(None)` means the provider has no catalog at all (Phi Silica); `Err` is
+/// the user-facing reason the Settings pane shows instead of an empty list.
+pub(crate) fn provider_catalog_draft(
     setup_index: usize,
     settings: &AppSettings,
     provider_key_drafts: &[String; ProviderKeyId::ALL.len()],
-) -> Result<Option<ModelCatalogRequest>, String> {
+) -> Result<Option<ProviderCatalogDraft>, String> {
     let Some(provider) = provider_setup_provider(setup_index) else {
         return Err("The selected provider is not recognized".to_string());
     };
     if provider == AIProvider::PhiSilica {
         return Ok(None);
     }
-    let (draft_api_key, key_configured) = match provider {
+    let (api_key, key_configured) = match provider {
         AIProvider::OpenAI => (
             non_empty_provider_draft(&provider_key_drafts[0]),
             settings.open_ai_api_key_set,
@@ -327,20 +309,20 @@ pub(crate) fn provider_catalog_request_for_draft(
     if matches!(
         provider,
         AIProvider::OpenAI | AIProvider::Anthropic | AIProvider::Gemini | AIProvider::DeepSeek
-    ) && draft_api_key.is_none()
+    ) && api_key.is_none()
         && !key_configured
     {
         return Err("Enter an API key to load the available models.".to_string());
     }
 
-    let draft_endpoint = match provider {
+    let endpoint = match provider {
         AIProvider::FoundryLocal => settings.local_ai_endpoint.clone(),
         AIProvider::Ollama => settings.ollama_endpoint.clone(),
         AIProvider::CustomOpenAI => settings.custom_endpoint.clone(),
         _ => None,
     };
     if provider == AIProvider::CustomOpenAI
-        && draft_endpoint
+        && endpoint
             .as_deref()
             .map(str::trim)
             .unwrap_or_default()
@@ -348,17 +330,189 @@ pub(crate) fn provider_catalog_request_for_draft(
     {
         return Err("Enter an endpoint URL to load the available models.".to_string());
     }
-    let draft_cli_path = match provider {
+    let cli_path = match provider {
         AIProvider::CodexCli => settings.codex_cli_path.clone(),
         AIProvider::ClaudeCode => settings.claude_cli_path.clone(),
         _ => None,
     };
-    Ok(Some(ModelCatalogRequest {
-        provider,
-        draft_api_key,
-        draft_endpoint,
-        draft_cli_path,
+    Ok(Some(ProviderCatalogDraft {
+        api_key,
+        endpoint,
+        cli_path,
     }))
+}
+
+/// The status line one live scan transition produces.
+pub(crate) fn scan_progress_text(
+    label: &str,
+    cancelling: bool,
+    completed: usize,
+    total: usize,
+    task_name: &str,
+) -> String {
+    if cancelling {
+        format!("Stopping {label} · {task_name}")
+    } else {
+        format!("{label} · {completed} of {total} collected · {task_name}")
+    }
+}
+
+/// The status line one arrived task result produces.
+pub(crate) fn scan_result_text(
+    label: &str,
+    running: bool,
+    completed: usize,
+    total: usize,
+    errors: usize,
+) -> String {
+    if running {
+        format!("{label} · {completed} of {total} collected · {errors} errors")
+    } else {
+        format!("{label} complete · {completed} collected · {errors} errors")
+    }
+}
+
+/// The status line a finished scan produces.
+///
+/// History persistence is optional evidence: a scan whose auto-save failed is
+/// still a complete scan, and says so before it says history was not saved.
+pub(crate) fn scan_complete_text(
+    label: &str,
+    completed: usize,
+    errors: usize,
+    history_failed: bool,
+) -> String {
+    if history_failed {
+        format!("{label} complete · {completed} collected · {errors} errors · history not saved")
+    } else {
+        format!("{label} complete · {completed} collected · {errors} errors")
+    }
+}
+
+/// The status line a worker that missed its reply deadline produces (#195).
+pub(crate) fn worker_timeout_text(worker: &str) -> String {
+    format!("The {worker} worker did not answer in time · try again")
+}
+
+/// Map a subscription CLI's provider wire id back to its enum.
+pub(crate) fn subscription_provider_from_wire(wire: &str) -> Option<SubscriptionAuthProvider> {
+    match provider_from_wire(wire) {
+        AIProvider::CodexCli => Some(SubscriptionAuthProvider::Codex),
+        AIProvider::ClaudeCode => Some(SubscriptionAuthProvider::ClaudeCode),
+        _ => None,
+    }
+}
+
+/// Resolve a provider wire id back to its enum.
+///
+/// The ids are the ones [`AIProvider`]'s `Display` writes, which is what the
+/// settings document and every engine event carry.
+pub(crate) fn provider_from_wire(wire: &str) -> AIProvider {
+    const PROVIDERS: [AIProvider; 10] = [
+        AIProvider::OpenAI,
+        AIProvider::PhiSilica,
+        AIProvider::FoundryLocal,
+        AIProvider::Ollama,
+        AIProvider::CustomOpenAI,
+        AIProvider::CodexCli,
+        AIProvider::ClaudeCode,
+        AIProvider::Anthropic,
+        AIProvider::Gemini,
+        AIProvider::DeepSeek,
+    ];
+    PROVIDERS
+        .into_iter()
+        .find(|provider| provider.to_string() == wire)
+        .unwrap_or(AIProvider::None)
+}
+
+/// The status-line text for one refused command.
+///
+/// The engine already phrases its refusals for a user ("Enable AI insights in
+/// Settings before sending"), so the typed detail is the message; only the
+/// structural reasons get the enum's own prose.
+pub(crate) fn rejection_text(reason: &wfdiag_app::RejectReason) -> String {
+    match reason {
+        wfdiag_app::RejectReason::Busy { detail }
+        | wfdiag_app::RejectReason::Invalid { detail }
+        | wfdiag_app::RejectReason::NotReady { detail } => detail.clone(),
+        wfdiag_app::RejectReason::WorkerUnavailable { detail, .. } => detail.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Build the AI provider backend the engine probes through.
+///
+/// Package identity, the shared response cache and the shipping model
+/// defaults are application composition, which is why this stays with the
+/// shell rather than moving into `wfdiag-app`.
+pub(crate) fn reactor_provider_backend(
+    settings: SettingsService,
+    identity: Arc<dyn PackageIdentitySource>,
+    cache: SharedAiCache,
+) -> Arc<dyn ProviderManagementBackend> {
+    let probes = ProviderProbeBundle::shipping_networks(
+        Arc::new(SettingsServiceProviderConfigurationSource::new(settings)),
+        identity,
+        Arc::new(WindowsPhiStatusSource),
+        Arc::new(FoundryCliEndpointSource::new()),
+        Arc::new(ProcessSubscriptionCliStatusSource::new()),
+    );
+    Arc::new(ProviderManagementService::new(
+        probes,
+        ProviderSelectionState::default(),
+        Arc::new(cache),
+        ProviderModelDefaults {
+            foundry: "phi-4-mini".to_string(),
+            openai: "gpt-5-nano".to_string(),
+            anthropic: "claude-sonnet-5".to_string(),
+            gemini: "gemini-3.6-flash".to_string(),
+            deepseek: "deepseek-v4-flash".to_string(),
+        },
+    ))
+}
+
+/// The settings store the engine should use, when it is not the shipping one.
+///
+/// Only the `settings-test-path` validation feature ever redirects it.
+pub(crate) fn reactor_settings_storage() -> Option<Arc<dyn wfdiag_native_settings::SettingsStorage>>
+{
+    #[cfg(feature = "settings-test-path")]
+    if let Some(path) = crate::fixtures::knobs::settings_test_path() {
+        return Some(Arc::new(ShippingSettingsStorage::at_path(path.into())));
+    }
+    None
+}
+
+/// The update throttle the engine should use, when it is not the shipping one.
+pub(crate) fn reactor_update_throttle_port() -> Option<Arc<dyn wfdiag_app::UpdateThrottlePort>> {
+    #[cfg(feature = "settings-test-path")]
+    if let Some(path) = crate::fixtures::knobs::settings_test_path() {
+        return Some(Arc::new(IsolatedUpdateThrottle {
+            throttle: wfdiag_native_update::policy::UpdateThrottle::beside_settings_file(
+                std::path::Path::new(&path),
+            ),
+        }));
+    }
+    None
+}
+
+/// The validation-only throttle stored beside an isolated settings file.
+#[cfg(feature = "settings-test-path")]
+#[derive(Debug)]
+struct IsolatedUpdateThrottle {
+    throttle: wfdiag_native_update::policy::UpdateThrottle,
+}
+
+#[cfg(feature = "settings-test-path")]
+impl wfdiag_app::UpdateThrottlePort for IsolatedUpdateThrottle {
+    fn should_check(&self, now_millis: u64) -> bool {
+        self.throttle.should_check_at(now_millis)
+    }
+
+    fn record(&self, now_millis: u64) -> Result<(), String> {
+        self.throttle.record_at(now_millis)
+    }
 }
 
 pub(crate) fn window_theme_from_setting(value: &str) -> WindowTheme {
@@ -450,22 +604,6 @@ impl PackageIdentitySource for ReactorPackageIdentitySource {
     }
 }
 
-pub(crate) fn provider_preference_id(preference: AIProviderPreference) -> &'static str {
-    match preference {
-        AIProviderPreference::Auto => "auto",
-        AIProviderPreference::OpenAI => "openai",
-        AIProviderPreference::PhiSilica => "phi_silica",
-        AIProviderPreference::FoundryLocal => "foundry_local",
-        AIProviderPreference::Ollama => "ollama",
-        AIProviderPreference::CustomOpenAI => "custom_openai",
-        AIProviderPreference::CodexCli => "codex_cli",
-        AIProviderPreference::ClaudeCode => "claude_code",
-        AIProviderPreference::Anthropic => "anthropic",
-        AIProviderPreference::Gemini => "gemini",
-        AIProviderPreference::DeepSeek => "deepseek",
-    }
-}
-
 pub(crate) fn provider_display_name(provider: AIProvider) -> &'static str {
     match provider {
         AIProvider::None => "No provider",
@@ -480,15 +618,6 @@ pub(crate) fn provider_display_name(provider: AIProvider) -> &'static str {
         AIProvider::Gemini => "Google Gemini",
         AIProvider::DeepSeek => "DeepSeek",
     }
-}
-
-pub(crate) fn normalize_provider_preference_for_runtime(settings: &mut AppSettings) {
-    let identity = ReactorPackageIdentitySource::default();
-    let preference = provider_preference_for_runtime(
-        &settings.preferred_ai_provider,
-        identity.has_package_identity(),
-    );
-    settings.preferred_ai_provider = provider_preference_id(preference).to_string();
 }
 
 pub(crate) fn reactor_settings_service(validator: Arc<dyn SettingsValidator>) -> SettingsService {
@@ -527,141 +656,12 @@ pub(crate) fn load_live_test_settings() -> Result<AppSettings, String> {
     Err("the settings-test-path validation feature is not enabled".to_string())
 }
 
-pub(crate) fn reactor_ai_provider_runtime(
-    settings: SettingsService,
-    identity: Arc<dyn PackageIdentitySource>,
-    cache: SharedAiCache,
-) -> Result<NativeAiProviderRuntime, String> {
-    let probes = ProviderProbeBundle::shipping_networks(
-        Arc::new(SettingsServiceProviderConfigurationSource::new(settings)),
-        Arc::clone(&identity),
-        Arc::new(WindowsPhiStatusSource),
-        Arc::new(FoundryCliEndpointSource::new()),
-        Arc::new(ProcessSubscriptionCliStatusSource::new()),
-    );
-    let service = ProviderManagementService::new(
-        probes,
-        ProviderSelectionState::default(),
-        Arc::new(cache),
-        ProviderModelDefaults {
-            foundry: "phi-4-mini".to_string(),
-            openai: "gpt-5-nano".to_string(),
-            anthropic: "claude-sonnet-5".to_string(),
-            gemini: "gemini-3.6-flash".to_string(),
-            deepseek: "deepseek-v4-flash".to_string(),
-        },
-    );
-    NativeAiProviderRuntime::start(Arc::new(service)).map_err(|error| error.to_string())
-}
-
-pub(crate) fn reactor_update_throttle() -> Option<UpdateThrottle> {
-    #[cfg(feature = "settings-test-path")]
-    if let Some(path) = crate::fixtures::knobs::settings_test_path() {
-        let path = std::path::PathBuf::from(path);
-        return Some(UpdateThrottle::beside_settings_file(&path));
-    }
-    UpdateThrottle::shipping().ok()
-}
-
 pub(crate) fn scan_kind_label(scan_kind: ScanKind) -> &'static str {
     match scan_kind {
         ScanKind::Quick => "Quick Scan",
         ScanKind::Full => "Full Scan",
         ScanKind::Targeted => "Targeted Scan",
     }
-}
-
-pub(crate) fn scan_kind_history_tag(scan_kind: ScanKind) -> &'static str {
-    match scan_kind {
-        ScanKind::Quick => "Quick Scan",
-        ScanKind::Full => "Full Scan",
-        ScanKind::Targeted => "Manual Diagnostic",
-    }
-}
-
-pub(crate) fn requires_scan_data(prompt: &str) -> bool {
-    let normalized = prompt.trim().to_ascii_lowercase();
-    if normalized.is_empty()
-        || normalized.contains("in general")
-        || normalized.contains("generally")
-        || normalized.starts_with("define ")
-        || normalized == "what is windows?"
-        || normalized == "what is windows"
-        || (normalized.starts_with("what does ") && normalized.contains(" mean"))
-    {
-        return false;
-    }
-    let casual = normalized.trim_matches(|character: char| {
-        character.is_whitespace() || matches!(character, '.' | '!' | '?' | ',')
-    });
-    if matches!(
-        casual,
-        "hi" | "hello"
-            | "hey"
-            | "thanks"
-            | "thank you"
-            | "good morning"
-            | "good afternoon"
-            | "good evening"
-            | "who are you"
-            | "what can you do"
-            | "tell me a joke"
-    ) || casual.starts_with("write me a ")
-        || casual.starts_with("write a ")
-    {
-        return false;
-    }
-    true
-}
-
-pub(crate) fn scan_concurrency_from_settings(max_concurrent_tasks: u32) -> usize {
-    if max_concurrent_tasks == 0 {
-        5
-    } else {
-        usize::try_from(max_concurrent_tasks).unwrap_or(5)
-    }
-}
-
-pub(crate) fn select_scan_tasks(
-    catalog: &[DiagnosticTask],
-    scan_kind: ScanKind,
-    is_admin: bool,
-    custom_quick_tasks: Option<&[String]>,
-) -> Vec<String> {
-    let custom_quick_tasks = custom_quick_tasks.filter(|tasks| !tasks.is_empty());
-    catalog
-        .iter()
-        .filter(|task| match scan_kind {
-            ScanKind::Quick => custom_quick_tasks.map_or_else(
-                || QUICK_SCAN_TASK_IDS.contains(&task.id.as_str()),
-                |tasks| {
-                    tasks.iter().any(|task_id| task_id == &task.id)
-                        || QUICK_DETECTION_SOURCE_TASK_IDS.contains(&task.id.as_str())
-                },
-            ),
-            ScanKind::Full | ScanKind::Targeted => is_admin || !task.admin_required,
-        })
-        .map(|task| task.id.clone())
-        .collect()
-}
-
-pub(crate) fn issue_prioritization_payload(issues: &[Issue]) -> Result<String, String> {
-    let rows = issues
-        .iter()
-        .filter(|issue| {
-            issue.detected && issue.status == wfdiag_native_issues::IssueStatus::Detected
-        })
-        .map(|issue| {
-            serde_json::json!({
-                "id": issue.id,
-                "severity": issue.severity,
-                "title": issue.title,
-                "description": issue.description,
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::to_string(&rows)
-        .map_err(|error| format!("could not serialize detected issues: {error}"))
 }
 
 pub(crate) fn action_run_status_text(summary: &ActionRunSummary) -> String {
@@ -709,26 +709,6 @@ pub(crate) fn action_run_status_text(summary: &ActionRunSummary) -> String {
     }
 }
 
-pub(crate) fn action_proposal_matches_snapshot(
-    proposal: &ActionProposal,
-    snapshot: &ActionSnapshot,
-) -> bool {
-    proposal.scan_fingerprint == snapshot.scan_fingerprint
-        && proposal.catalog_fingerprint == snapshot.catalog_fingerprint
-        && proposal.actions.iter().all(|action| {
-            action
-                .issue_id
-                .as_deref()
-                .map_or(action.remediation.maintenance, |issue_id| {
-                    snapshot.detected_issues.iter().any(|issue| {
-                        issue.issue_id == issue_id
-                            && issue.remediation_id.as_deref()
-                                == Some(action.remediation.id.as_str())
-                    })
-                })
-        })
-}
-
 pub(crate) fn action_proposal_schedules_restart(proposal: &ActionProposal) -> bool {
     proposal
         .actions
@@ -768,282 +748,6 @@ pub(crate) const fn chat_completion_notice(finish_reason: &str) -> Option<&'stat
     }
 }
 
-pub(crate) fn history_task_catalog(catalog: &[DiagnosticTask]) -> Vec<HistoryDiagnosticTask> {
-    catalog
-        .iter()
-        .map(|task| HistoryDiagnosticTask {
-            id: task.id.clone(),
-            name: task.name.clone(),
-            description: task.description.clone(),
-            category: task.category.clone(),
-            admin_required: task.admin_required,
-        })
-        .collect()
-}
-
-pub(crate) fn export_task_catalog(catalog: &[DiagnosticTask]) -> Vec<ExportTask> {
-    catalog
-        .iter()
-        .map(|task| ExportTask::new(&task.id, &task.name, &task.category))
-        .collect()
-}
-
-pub(crate) fn system_identity_blocks_scan(
-    deterministic_visual: bool,
-    system_info_request_id: Option<u64>,
-) -> bool {
-    !deterministic_visual && system_info_request_id.is_some()
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StartupScanGate {
-    AwaitingSettings,
-    Armed,
-    Consumed,
-}
-
-pub(crate) fn apply_startup_scan_preference(gate: &mut StartupScanGate, scan_on_startup: bool) {
-    if *gate == StartupScanGate::AwaitingSettings {
-        *gate = if scan_on_startup {
-            StartupScanGate::Armed
-        } else {
-            StartupScanGate::Consumed
-        };
-    }
-}
-
-pub(crate) fn take_startup_scan_when_ready(
-    gate: &mut StartupScanGate,
-    deterministic_visual: bool,
-    settings_loading: bool,
-    system_info_request_id: Option<u64>,
-    architecture_request_id: Option<u64>,
-) -> bool {
-    if deterministic_visual {
-        *gate = StartupScanGate::Consumed;
-        return false;
-    }
-    if *gate != StartupScanGate::Armed
-        || settings_loading
-        || system_info_request_id.is_some()
-        || architecture_request_id.is_some()
-    {
-        return false;
-    }
-
-    // Consume before dispatch so every later completion/retry is a no-op even
-    // when the diagnostic runtime rejects the startup scan.
-    *gate = StartupScanGate::Consumed;
-    true
-}
-
-/// The scan executor's process-wide runtime. Building a 5-worker multi-thread
-/// runtime per scan start/run/cancel created and destroyed ~10 threads per
-/// scan and blocked on the shutdown barrier while the user watched "Stop
-/// scan". `enable_all()` also arms the IO/time drivers any diagnostic task
-/// that uses tokio networking or timers needs (without them such use panics
-/// inside the executor and surfaces as a misleading queue rejection).
-pub(crate) fn shared_diagnostic_executor() -> Result<&'static tokio::runtime::Runtime, String> {
-    static EXECUTOR: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
-    EXECUTOR
-        .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(5)
-                .thread_name("wfdiag-diagnostic")
-                .enable_all()
-                .build()
-                .map_err(|error| format!("could not create the diagnostic worker pool: {error}"))
-        })
-        .as_ref()
-        .map_err(Clone::clone)
-}
-
-pub(crate) fn next_process_request_id(current: u64) -> u64 {
-    let next = current.wrapping_add(1);
-    if next == 0 { 1 } else { next }
-}
-
-pub(crate) fn pending_ai_provider_gate(
-    ai_enabled: bool,
-    provider_loading: bool,
-    provider_status: Option<&AIProviderStatus>,
-) -> PendingAiProviderGate {
-    if !ai_enabled {
-        PendingAiProviderGate::Disabled
-    } else if provider_loading {
-        PendingAiProviderGate::Waiting
-    } else {
-        match provider_status {
-            Some(status) if status.active_provider != AIProvider::None => {
-                PendingAiProviderGate::Ready
-            }
-            Some(_) => PendingAiProviderGate::Unavailable,
-            None => PendingAiProviderGate::Refresh,
-        }
-    }
-}
-
-pub(crate) fn pending_export_write_is_current(
-    pending: Option<&PendingExport>,
-    request_id: u64,
-    kind: ExportWriteKind,
-) -> bool {
-    pending.is_some_and(|pending| {
-        pending.request_id == request_id
-            && matches!(
-                (&pending.action, kind),
-                (
-                    PendingExportAction::SaveToFile { .. },
-                    ExportWriteKind::File
-                ) | (
-                    PendingExportAction::SupportPackage { .. },
-                    ExportWriteKind::SupportPackage
-                )
-            )
-    })
-}
-
-pub(crate) fn scan_policy_requests_auto_save(policy: Option<&DiagnosticScanPolicy>) -> bool {
-    policy.is_some_and(|policy| policy.auto_save)
-}
-
-pub(crate) fn history_retention_tuple(policy: &RwLock<HistoryRetentionPolicy>) -> (bool, u32) {
-    policy.read().map_or((true, 30), |policy| {
-        (policy.retain_history, policy.history_limit)
-    })
-}
-
-pub(crate) fn update_history_retention_policy(
-    policy: &RwLock<HistoryRetentionPolicy>,
-    settings: &AppSettings,
-) {
-    if let Ok(mut policy) = policy.write() {
-        *policy = HistoryRetentionPolicy::from(settings);
-    }
-}
-
-pub(crate) fn authoritative_ui_results(
-    session_id: &str,
-    results: &ScanEvidence,
-    catalog: &[DiagnosticTask],
-) -> Vec<DiagnosticTaskResult> {
-    let mut results = results
-        .iter()
-        .map(|(task_id, result)| DiagnosticTaskResult::new(session_id, task_id, Arc::clone(result)))
-        .collect::<Vec<_>>();
-    results.sort_by_key(|result| {
-        catalog
-            .iter()
-            .position(|task| task.id == result.task_id)
-            .unwrap_or(usize::MAX)
-    });
-    results
-}
-
-pub(crate) fn merge_targeted_diagnostic_result(
-    mut prior: Vec<DiagnosticTaskResult>,
-    target_task_id: &str,
-    mut replacement: DiagnosticTaskResult,
-    base_session_id: Option<&str>,
-    catalog: &[DiagnosticTask],
-) -> Result<Vec<DiagnosticTaskResult>, String> {
-    if replacement.task_id != target_task_id {
-        return Err(format!(
-            "targeted rerun returned `{}` instead of `{target_task_id}`",
-            replacement.task_id
-        ));
-    }
-    let replacement_index = prior
-        .iter()
-        .position(|result| result.task_id == target_task_id);
-
-    if let Some(session_id) = base_session_id {
-        replacement.session_id = session_id.to_string();
-    }
-    let prior_order = prior
-        .iter()
-        .enumerate()
-        .map(|(index, result)| (result.task_id.clone(), index))
-        .collect::<HashMap<_, _>>();
-    if let Some(replacement_index) = replacement_index {
-        prior[replacement_index] = replacement;
-    } else {
-        prior.push(replacement);
-    }
-    prior.sort_by_key(|result| {
-        catalog
-            .iter()
-            .position(|task| task.id == result.task_id)
-            .map_or_else(
-                || {
-                    (
-                        1,
-                        prior_order
-                            .get(&result.task_id)
-                            .copied()
-                            .unwrap_or(usize::MAX),
-                    )
-                },
-                |index| (0, index),
-            )
-    });
-    Ok(prior)
-}
-
-pub(crate) fn diagnostic_output_snapshot(results: &[DiagnosticTaskResult]) -> SharedScanEvidence {
-    Arc::new(
-        results
-            .iter()
-            .map(|result| (result.task_id.clone(), Arc::clone(&result.result)))
-            .collect(),
-    )
-}
-
-pub(crate) fn authoritative_result_set_is_complete(
-    results: &ScanEvidence,
-    expected_task_ids: &[String],
-) -> bool {
-    let expected = expected_task_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
-    expected.len() == expected_task_ids.len()
-        && results.len() == expected_task_ids.len()
-        && results
-            .keys()
-            .all(|task_id| expected.contains(task_id.as_str()))
-}
-
-pub(crate) fn build_history_scan_record(
-    session_id: String,
-    system_info: &SystemInfo,
-    results: &[DiagnosticTaskResult],
-    duration_ms: u64,
-    history_tag: String,
-) -> ScanRecord {
-    let results = results
-        .iter()
-        .map(|result| (result.task_id.clone(), Arc::clone(&result.result)))
-        .collect::<HashMap<_, _>>();
-    let success_count = results.values().filter(|result| result.success).count();
-    let failure_count = results.len().saturating_sub(success_count);
-
-    ScanRecord {
-        id: session_id,
-        timestamp: Timestamp::now(),
-        computer_name: system_info.computer_name.clone(),
-        os_version: system_info.os_version.clone(),
-        is_admin: system_info.is_admin,
-        task_count: results.len(),
-        success_count,
-        failure_count,
-        results,
-        duration_ms,
-        label: None,
-        tags: vec![history_tag],
-    }
-}
-
 pub(crate) fn settings_dialog_callback_is_current(
     settings_open: bool,
     current_epoch: u64,
@@ -1077,33 +781,6 @@ pub(crate) fn update_notice_timer_callback_is_current(
     notice_visible
         && current_epoch == callback_epoch
         && current_timer_generation == callback_timer_generation
-}
-
-pub(crate) fn take_matching_pending_settings_save(
-    pending: &mut Option<PendingSettingsSave>,
-    request_id: u64,
-) -> Option<PendingSettingsSave> {
-    pending.take_if(|candidate| candidate.request_id == request_id)
-}
-
-pub(crate) fn take_matching_system_request(
-    system_info_request_id: &mut Option<u64>,
-    architecture_request_id: &mut Option<u64>,
-    request_id: u64,
-) -> Option<SystemRequestKind> {
-    if system_info_request_id
-        .take_if(|pending| *pending == request_id)
-        .is_some()
-    {
-        Some(SystemRequestKind::SystemInfo)
-    } else if architecture_request_id
-        .take_if(|pending| *pending == request_id)
-        .is_some()
-    {
-        Some(SystemRequestKind::Architecture)
-    } else {
-        None
-    }
 }
 
 pub(crate) fn pending_system_info() -> SystemInfo {
@@ -1142,43 +819,6 @@ pub(crate) fn machine_card_accessibility_name(
         label.push_str(error);
     }
     label
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AiWorkerKind {
-    Analysis,
-    Chat,
-    FixPlan,
-    Report,
-}
-
-impl AiWorkerKind {
-    pub(crate) const fn display_name(self) -> &'static str {
-        match self {
-            Self::Analysis => "one-shot diagnostic AI",
-            Self::Chat => "AI chat",
-            Self::FixPlan => "AI fix planning",
-            Self::Report => "AI report generation",
-        }
-    }
-}
-
-/// Interpret the explicit worker-isolation switch used by the native UI
-/// harness. An absent/empty/unknown policy is the production path and keeps
-/// every AI worker enabled.
-pub(crate) fn ai_worker_enabled(policy: &std::ffi::OsStr, worker: AiWorkerKind) -> bool {
-    match policy.to_str().unwrap_or_default() {
-        "analysis" => worker != AiWorkerKind::Analysis,
-        "chat" => worker != AiWorkerKind::Chat,
-        "fix-plan" => worker != AiWorkerKind::FixPlan,
-        "report" => worker != AiWorkerKind::Report,
-        "only-analysis" => worker == AiWorkerKind::Analysis,
-        "only-chat" => worker == AiWorkerKind::Chat,
-        "only-fix-plan" => worker == AiWorkerKind::FixPlan,
-        "only-report" => worker == AiWorkerKind::Report,
-        "only-action" | "only-instance" | "none" => false,
-        _ => true,
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1355,15 +995,6 @@ pub(crate) fn history_trend_badge(
     })
 }
 
-pub(crate) fn history_task_diff_result_is_current(
-    request_id: u64,
-    current_request_id: u64,
-    task_id: &str,
-    expanded_task_id: Option<&str>,
-) -> bool {
-    request_id == current_request_id && expanded_task_id == Some(task_id)
-}
-
 pub(crate) fn window_hook_retry_delay(failures: u8) -> Duration {
     let exponent = u32::from(failures.saturating_sub(1).min(5));
     WINDOW_HOOK_RETRY_MIN
@@ -1392,16 +1023,6 @@ pub(crate) fn resolved_export_format(value: &str) -> ReportFormat {
     ReportFormat::try_from(value).unwrap_or(ReportFormat::Text)
 }
 
-pub(crate) fn resolve_export_picker_selection(
-    result: Result<SavePickerOutcome, SavePickerError>,
-) -> Result<Option<ValidatedExportPath>, String> {
-    match result {
-        Ok(SavePickerOutcome::Cancelled) => Ok(None),
-        Ok(SavePickerOutcome::Selected(path)) => Ok(Some(path)),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
 // `write_version_probe_if_requested` / `version_probe_document` moved to
 // `fixtures::knobs` (#212): the probe reads the command line and an
 // environment variable, so it now lives with the other knobs and is compiled
@@ -1411,11 +1032,8 @@ pub(crate) fn resolve_export_picker_selection(
 pub(crate) mod tests {
     use super::*;
     use crate::app::message::SettingsDialogAction;
-    use crate::app::state::{DiagnosticSnapshot, TargetedDiagnosticOverlay};
     use crate::fixtures::visual::fixture_258_system_info;
-    use crate::platform::save_picker::ValidatedSupportPackagePaths;
     use crate::screens::history::view::history_comparison_placeholder;
-    use wfdiag_native_diagnostics::DiagnosticOutput;
 
     #[test]
     fn window_hook_retry_uses_bounded_exponential_backoff() {
@@ -1427,13 +1045,6 @@ pub(crate) mod tests {
             window_hook_retry_delay(u8::MAX),
             Duration::from_millis(3_200)
         );
-    }
-
-    #[test]
-    fn process_request_ids_advance_when_started_or_invalidated() {
-        assert_eq!(next_process_request_id(0), 1);
-        assert_eq!(next_process_request_id(41), 42);
-        assert_eq!(next_process_request_id(u64::MAX), 1);
     }
 
     #[test]
@@ -1484,60 +1095,6 @@ pub(crate) mod tests {
         assert_eq!(ai_workspace_height(540.0), 297.0);
         assert_eq!(ai_workspace_height(800.0), 557.0);
         assert_eq!(ai_workspace_height(200.0), AI_WORKSPACE_MIN_HEIGHT);
-    }
-
-    #[test]
-    fn production_worker_policy_enables_every_lazy_ai_worker() {
-        let default_policy = std::ffi::OsStr::new("");
-        for worker in [
-            AiWorkerKind::Analysis,
-            AiWorkerKind::Chat,
-            AiWorkerKind::FixPlan,
-            AiWorkerKind::Report,
-        ] {
-            assert!(ai_worker_enabled(default_policy, worker));
-        }
-
-        let chat_only = std::ffi::OsStr::new("only-chat");
-        assert!(ai_worker_enabled(chat_only, AiWorkerKind::Chat));
-        assert!(!ai_worker_enabled(chat_only, AiWorkerKind::Report));
-        assert!(!ai_worker_enabled(chat_only, AiWorkerKind::Analysis));
-        assert!(!ai_worker_enabled(chat_only, AiWorkerKind::FixPlan));
-
-        let skip_chat = std::ffi::OsStr::new("chat");
-        assert!(!ai_worker_enabled(skip_chat, AiWorkerKind::Chat));
-        assert!(ai_worker_enabled(skip_chat, AiWorkerKind::Report));
-
-        let no_ai_workers = std::ffi::OsStr::new("none");
-        for worker in [
-            AiWorkerKind::Analysis,
-            AiWorkerKind::Chat,
-            AiWorkerKind::FixPlan,
-            AiWorkerKind::Report,
-        ] {
-            assert!(!ai_worker_enabled(no_ai_workers, worker));
-        }
-    }
-
-    #[test]
-    fn automatic_model_discovery_never_bootstraps_the_claude_adapter() {
-        assert!(provider_models_auto_discovery_allowed(3));
-        assert!(!provider_models_auto_discovery_allowed(4));
-        assert!(!provider_models_auto_discovery_allowed(0));
-        assert!(!provider_models_auto_discovery_allowed(usize::MAX));
-    }
-
-    #[test]
-    fn account_status_checks_do_not_create_a_model_refresh_loop() {
-        assert!(!subscription_auth_completion_refreshes_models(
-            SubscriptionAuthOperation::Status
-        ));
-        assert!(subscription_auth_completion_refreshes_models(
-            SubscriptionAuthOperation::SignIn
-        ));
-        assert!(subscription_auth_completion_refreshes_models(
-            SubscriptionAuthOperation::SignOut
-        ));
     }
 
     #[test]
@@ -1670,18 +1227,17 @@ pub(crate) mod tests {
     fn provider_catalog_requests_use_unsaved_credentials_without_logging_them() {
         let settings = AppSettings::default();
         let mut drafts: [String; ProviderKeyId::ALL.len()] = Default::default();
-        assert!(provider_catalog_request_for_draft(6, &settings, &drafts).is_err());
+        assert!(provider_catalog_draft(6, &settings, &drafts).is_err());
 
         drafts[1] = "  test-anthropic-secret  ".to_string();
-        let request = provider_catalog_request_for_draft(6, &settings, &drafts)
-            .expect("request should be valid")
+        let draft = provider_catalog_draft(6, &settings, &drafts)
+            .expect("the draft should be usable")
             .expect("Anthropic has a catalog");
-        assert_eq!(request.provider, AIProvider::Anthropic);
-        assert_eq!(
-            request.draft_api_key.as_deref(),
-            Some("test-anthropic-secret")
-        );
-        assert!(!format!("{request:?}").contains("test-anthropic-secret"));
+        assert_eq!(draft.api_key.as_deref(), Some("test-anthropic-secret"));
+        assert!(!format!("{draft:?}").contains("test-anthropic-secret"));
+
+        // Phi Silica has no catalog at all, which is not an error.
+        assert_eq!(provider_catalog_draft(0, &settings, &drafts), Ok(None));
     }
 
     #[test]
@@ -1714,33 +1270,6 @@ pub(crate) mod tests {
             active_provider,
             providers: Vec::new(),
         }
-    }
-
-    #[test]
-    fn pending_ai_provider_gate_preserves_intent_until_readiness_is_terminal() {
-        let ready = provider_status(AIProvider::OpenAI);
-        let unavailable = provider_status(AIProvider::None);
-
-        assert_eq!(
-            pending_ai_provider_gate(false, false, Some(&ready)),
-            PendingAiProviderGate::Disabled
-        );
-        assert_eq!(
-            pending_ai_provider_gate(true, true, None),
-            PendingAiProviderGate::Waiting
-        );
-        assert_eq!(
-            pending_ai_provider_gate(true, false, None),
-            PendingAiProviderGate::Refresh
-        );
-        assert_eq!(
-            pending_ai_provider_gate(true, false, Some(&unavailable)),
-            PendingAiProviderGate::Unavailable
-        );
-        assert_eq!(
-            pending_ai_provider_gate(true, false, Some(&ready)),
-            PendingAiProviderGate::Ready
-        );
     }
 
     #[test]
@@ -1781,23 +1310,6 @@ pub(crate) mod tests {
 
         settings.preferred_ai_provider = "deepseek".to_string();
         assert_eq!(configured_provider_setup_index(&settings), 8);
-    }
-
-    #[test]
-    fn settings_provider_probe_is_independent_of_committed_ai_enablement() {
-        let committed = AppSettings {
-            ai_enabled: false,
-            ..AppSettings::default()
-        };
-        let mut draft = committed.clone();
-        draft.ai_enabled = true;
-
-        assert!(!committed.ai_enabled);
-        assert!(draft.ai_enabled);
-        assert!(settings_ai_status_probe_needed(true, false, false));
-        assert!(!settings_ai_status_probe_needed(false, false, false));
-        assert!(!settings_ai_status_probe_needed(true, true, false));
-        assert!(!settings_ai_status_probe_needed(true, false, true));
     }
 
     #[test]
@@ -1854,66 +1366,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn settings_save_completion_takes_only_the_matching_submitted_payload() {
-        let submitted = AppSettings {
-            theme: "light".to_string(),
-            export_format: "json".to_string(),
-            ..AppSettings::default()
-        };
-        let mut pending = Some(PendingSettingsSave {
-            request_id: 23,
-            dialog_epoch: 5,
-            submitted: submitted.clone(),
-        });
-
-        assert!(take_matching_pending_settings_save(&mut pending, 22).is_none());
-        assert_eq!(pending.as_ref().map(|save| save.request_id), Some(23));
-
-        let matched = take_matching_pending_settings_save(&mut pending, 23).unwrap();
-        assert_eq!(matched.dialog_epoch, 5);
-        assert_eq!(matched.submitted, submitted);
-        assert!(pending.is_none());
-    }
-
-    #[test]
-    fn system_completion_ids_reject_stale_results_and_clear_only_the_match() {
-        let mut system_info_request_id = Some(41);
-        let mut architecture_request_id = Some(42);
-
-        assert_eq!(
-            take_matching_system_request(
-                &mut system_info_request_id,
-                &mut architecture_request_id,
-                40,
-            ),
-            None
-        );
-        assert_eq!(system_info_request_id, Some(41));
-        assert_eq!(architecture_request_id, Some(42));
-
-        assert_eq!(
-            take_matching_system_request(
-                &mut system_info_request_id,
-                &mut architecture_request_id,
-                42,
-            ),
-            Some(SystemRequestKind::Architecture)
-        );
-        assert_eq!(system_info_request_id, Some(41));
-        assert_eq!(architecture_request_id, None);
-
-        assert_eq!(
-            take_matching_system_request(
-                &mut system_info_request_id,
-                &mut architecture_request_id,
-                41,
-            ),
-            Some(SystemRequestKind::SystemInfo)
-        );
-        assert_eq!(system_info_request_id, None);
-    }
-
-    #[test]
     fn machine_identity_accessibility_exposes_native_architecture_and_errors() {
         let architecture = ArchitectureSnapshot {
             process_architecture: 9,
@@ -1936,505 +1388,6 @@ pub(crate) mod tests {
         assert_eq!(privilege_label(true), "Administrator");
     }
 
-    fn task(id: &str, admin_required: bool) -> DiagnosticTask {
-        DiagnosticTask {
-            id: id.to_string(),
-            name: id.to_string(),
-            description: String::new(),
-            category: "Test".to_string(),
-            admin_required,
-        }
-    }
-
-    fn diagnostic_result(
-        session_id: &str,
-        task_id: &str,
-        success: bool,
-        output: &str,
-    ) -> DiagnosticTaskResult {
-        DiagnosticTaskResult::new(
-            session_id,
-            task_id,
-            Arc::new(DiagnosticOutput {
-                success,
-                output: output.to_string(),
-                error: (!success).then(|| "failed".to_string()),
-                duration_ms: 10,
-            }),
-        )
-    }
-
-    #[test]
-    fn quick_scan_is_the_exact_2_5_8_non_admin_union() {
-        let mut catalog = QUICK_SCAN_TASK_IDS
-            .iter()
-            .map(|id| task(id, false))
-            .collect::<Vec<_>>();
-        catalog.push(task("event_logs", false));
-        catalog.push(task("chkdsk", true));
-
-        assert_eq!(
-            select_scan_tasks(&catalog, ScanKind::Quick, true, None),
-            QUICK_SCAN_TASK_IDS.map(str::to_string)
-        );
-    }
-
-    #[test]
-    fn customised_quick_scan_keeps_every_store_detection_source() {
-        let catalog = vec![
-            task("comp_system", false),
-            task("os_info", false),
-            task("defender_status", false),
-            task("firewall_status", false),
-        ];
-        let custom = ["os_info".to_string()];
-
-        assert_eq!(
-            select_scan_tasks(&catalog, ScanKind::Quick, false, Some(&custom)),
-            [
-                "os_info".to_string(),
-                "defender_status".to_string(),
-                "firewall_status".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn scan_start_policy_snapshots_auto_save_concurrency_and_exact_tag() {
-        let mut settings = AppSettings {
-            auto_save: false,
-            max_concurrent_tasks: 9,
-            ..AppSettings::default()
-        };
-        let policy = DiagnosticScanPolicy::snapshot(&settings, ScanKind::Full, false);
-        settings.auto_save = true;
-        settings.max_concurrent_tasks = 2;
-
-        assert_eq!(policy.max_concurrent_tasks, 9);
-        assert_eq!(policy.history_tag, "Full Scan");
-        assert!(!scan_policy_requests_auto_save(Some(&policy)));
-        assert!(!scan_policy_requests_auto_save(None));
-        assert_eq!(scan_concurrency_from_settings(0), 5);
-
-        let auto_save_settings = AppSettings {
-            auto_save: true,
-            ..AppSettings::default()
-        };
-        let initial_targeted =
-            DiagnosticScanPolicy::snapshot(&auto_save_settings, ScanKind::Targeted, false);
-        assert!(scan_policy_requests_auto_save(Some(&initial_targeted)));
-        let targeted_rerun =
-            DiagnosticScanPolicy::snapshot(&auto_save_settings, ScanKind::Targeted, true);
-        assert!(!scan_policy_requests_auto_save(Some(&targeted_rerun)));
-        assert_eq!(targeted_rerun.history_tag, "Manual Diagnostic");
-    }
-
-    #[test]
-    fn targeted_rerun_commits_only_the_replacement_in_catalog_order() {
-        let catalog = vec![
-            task("first", false),
-            task("second", false),
-            task("third", false),
-        ];
-        let base = DiagnosticSnapshot {
-            // Deliberately out of catalog order. The commit establishes the
-            // canonical ordering while retaining an unknown prior row last.
-            results: vec![
-                diagnostic_result("scan-base", "second", false, "old second"),
-                diagnostic_result("scan-base", "orphan", true, "orphan unchanged"),
-                diagnostic_result("scan-base", "first", true, "first unchanged"),
-            ],
-            scan_kind: Some(ScanKind::Full),
-            task_ids: vec!["second".into(), "orphan".into(), "first".into()],
-            session_id: Some("scan-base".to_string()),
-            duration_ms: 812,
-            total: 3,
-            completed: 3,
-            errors: 1,
-        };
-        let overlay = TargetedDiagnosticOverlay::for_committed_session(
-            ScanKind::Targeted,
-            &["second".to_string()],
-            base,
-        )
-        .expect("an existing result should use an overlay transaction");
-        let committed = overlay
-            .commit(
-                diagnostic_result("scan-rerun", "second", true, "new second"),
-                &catalog,
-            )
-            .expect("the matching replacement should commit");
-
-        assert_eq!(
-            committed
-                .results
-                .iter()
-                .map(|result| result.task_id.as_str())
-                .collect::<Vec<_>>(),
-            ["first", "second", "orphan"]
-        );
-        assert_eq!(committed.results[0].output, "first unchanged");
-        assert_eq!(committed.results[1].output, "new second");
-        assert_eq!(committed.results[1].session_id, "scan-base");
-        assert_eq!(committed.results[2].output, "orphan unchanged");
-        assert_eq!(committed.scan_kind, Some(ScanKind::Full));
-        assert_eq!(
-            committed.task_ids,
-            [
-                "second".to_string(),
-                "orphan".to_string(),
-                "first".to_string()
-            ]
-        );
-        assert_eq!(committed.session_id.as_deref(), Some("scan-base"));
-        assert_eq!(committed.duration_ms, 812);
-        assert_eq!(committed.total, 3);
-        assert_eq!(committed.completed, 3);
-        assert_eq!(committed.errors, 0);
-
-        let issue_evidence = diagnostic_output_snapshot(&committed.results);
-        assert_eq!(issue_evidence.len(), 3);
-        assert_eq!(issue_evidence["second"].output, "new second");
-        assert_eq!(issue_evidence["first"].output, "first unchanged");
-    }
-
-    #[test]
-    fn targeted_rerun_rollback_restores_the_exact_committed_snapshot() {
-        let base = DiagnosticSnapshot {
-            results: vec![diagnostic_result("scan-base", "first", true, "old")],
-            scan_kind: Some(ScanKind::Quick),
-            task_ids: vec!["first".to_string()],
-            session_id: Some("scan-base".to_string()),
-            duration_ms: 55,
-            total: 1,
-            completed: 1,
-            errors: 0,
-        };
-        let mut overlay = TargetedDiagnosticOverlay::for_committed_session(
-            ScanKind::Targeted,
-            &["first".to_string()],
-            base.clone(),
-        )
-        .expect("an existing result should use an overlay transaction");
-        overlay.stage(diagnostic_result("scan-rerun", "first", false, "partial"));
-        assert_eq!(overlay.staged_counts(), (1, 1));
-        assert!(
-            overlay
-                .commit(
-                    diagnostic_result("scan-rerun", "wrong", true, "wrong"),
-                    &[task("first", false)],
-                )
-                .is_err()
-        );
-        assert_eq!(overlay.rollback(), base);
-
-        assert!(
-            TargetedDiagnosticOverlay::for_committed_session(
-                ScanKind::Targeted,
-                &["missing".to_string()],
-                DiagnosticSnapshot {
-                    results: Vec::new(),
-                    scan_kind: None,
-                    task_ids: Vec::new(),
-                    session_id: None,
-                    duration_ms: 0,
-                    total: 0,
-                    completed: 0,
-                    errors: 0,
-                },
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn targeted_rerun_adds_a_task_absent_from_the_committed_scan() {
-        let base = DiagnosticSnapshot {
-            results: vec![diagnostic_result("scan-base", "first", true, "first")],
-            scan_kind: Some(ScanKind::Quick),
-            task_ids: vec!["first".to_string()],
-            session_id: Some("scan-base".to_string()),
-            duration_ms: 55,
-            total: 1,
-            completed: 1,
-            errors: 0,
-        };
-        let overlay = TargetedDiagnosticOverlay::for_committed_session(
-            ScanKind::Targeted,
-            &["second".to_string()],
-            base,
-        )
-        .expect("a committed session overlays even when it did not select the target");
-        let committed = overlay
-            .commit(
-                diagnostic_result("scan-rerun", "second", true, "second"),
-                &[task("first", false), task("second", false)],
-            )
-            .expect("the new target should append to the committed task set");
-
-        assert_eq!(
-            committed
-                .results
-                .iter()
-                .map(|result| result.task_id.as_str())
-                .collect::<Vec<_>>(),
-            ["first", "second"]
-        );
-        assert_eq!(committed.results[1].session_id, "scan-base");
-        assert_eq!(
-            committed.task_ids,
-            ["first".to_string(), "second".to_string()]
-        );
-        assert_eq!(committed.total, 2);
-        assert_eq!(committed.completed, 2);
-        assert_eq!(committed.errors, 0);
-        assert_eq!(committed.scan_kind, Some(ScanKind::Quick));
-    }
-
-    #[test]
-    fn history_retention_provider_tracks_only_committed_settings() {
-        let policy = RwLock::new(HistoryRetentionPolicy {
-            retain_history: true,
-            history_limit: 30,
-        });
-        let settings = AppSettings {
-            retain_history: false,
-            history_limit: 7,
-            ..AppSettings::default()
-        };
-
-        update_history_retention_policy(&policy, &settings);
-        assert_eq!(history_retention_tuple(&policy), (false, 7));
-    }
-
-    #[test]
-    fn completed_scan_record_matches_shipping_fields_and_converts_results_explicitly() {
-        let system_info = SystemInfo {
-            computer_name: "HISTORY-PC".to_string(),
-            os_version: "Windows 11".to_string(),
-            is_admin: true,
-        };
-        let results = vec![
-            DiagnosticTaskResult::new(
-                "scan-7",
-                "os_info",
-                Arc::new(DiagnosticOutput {
-                    success: true,
-                    output: "ok".to_string(),
-                    error: None,
-                    duration_ms: 12,
-                }),
-            ),
-            DiagnosticTaskResult::new(
-                "scan-7",
-                "logical_disk",
-                Arc::new(DiagnosticOutput {
-                    success: false,
-                    output: "partial".to_string(),
-                    error: Some("denied".to_string()),
-                    duration_ms: 34,
-                }),
-            ),
-        ];
-
-        let record = build_history_scan_record(
-            "scan-7".to_string(),
-            &system_info,
-            &results,
-            742,
-            "Quick Scan".to_string(),
-        );
-        assert_eq!(record.id, "scan-7");
-        assert_eq!(record.computer_name, "HISTORY-PC");
-        assert_eq!(record.os_version, "Windows 11");
-        assert!(record.is_admin);
-        assert_eq!(record.task_count, 2);
-        assert_eq!(record.success_count, 1);
-        assert_eq!(record.failure_count, 1);
-        assert_eq!(record.duration_ms, 742);
-        assert!(record.label.is_none());
-        assert_eq!(record.tags, ["Quick Scan"]);
-        let failed = &record.results["logical_disk"];
-        assert!(!failed.success);
-        assert_eq!(failed.output, "partial");
-        assert_eq!(failed.error.as_deref(), Some("denied"));
-        assert_eq!(failed.duration_ms, 34);
-    }
-
-    #[test]
-    fn authoritative_session_snapshot_replaces_event_order_with_catalog_order() {
-        let catalog = vec![task("first", false), task("second", false)];
-        let snapshot = HashMap::from([
-            (
-                "second".to_string(),
-                Arc::new(DiagnosticOutput {
-                    success: false,
-                    output: "two".to_string(),
-                    error: Some("failed".to_string()),
-                    duration_ms: 2,
-                }),
-            ),
-            (
-                "first".to_string(),
-                Arc::new(DiagnosticOutput {
-                    success: true,
-                    output: "one".to_string(),
-                    error: None,
-                    duration_ms: 1,
-                }),
-            ),
-        ]);
-
-        let results = authoritative_ui_results("session-a", &snapshot, &catalog);
-        assert_eq!(
-            results
-                .iter()
-                .map(|result| result.task_id.as_str())
-                .collect::<Vec<_>>(),
-            ["first", "second"]
-        );
-        assert!(
-            results
-                .iter()
-                .all(|result| result.session_id == "session-a")
-        );
-        assert_eq!(results[1].error.as_deref(), Some("failed"));
-        assert_eq!(snapshot.len(), 2);
-        assert_eq!(snapshot["first"].output, "one");
-    }
-
-    #[test]
-    fn authoritative_result_set_requires_the_exact_selected_task_ids() {
-        let expected = vec!["first".to_string(), "second".to_string()];
-        let output = || DiagnosticOutput {
-            success: true,
-            output: "ok".to_string(),
-            error: None,
-            duration_ms: 1,
-        };
-        let exact = HashMap::from([
-            ("first".to_string(), Arc::new(output())),
-            ("second".to_string(), Arc::new(output())),
-        ]);
-        assert!(authoritative_result_set_is_complete(&exact, &expected));
-
-        let missing = HashMap::from([("first".to_string(), Arc::new(output()))]);
-        assert!(!authoritative_result_set_is_complete(&missing, &expected));
-
-        let extra = HashMap::from([
-            ("first".to_string(), Arc::new(output())),
-            ("second".to_string(), Arc::new(output())),
-            ("stale".to_string(), Arc::new(output())),
-        ]);
-        assert!(!authoritative_result_set_is_complete(&extra, &expected));
-
-        let same_size_substitution = HashMap::from([
-            ("first".to_string(), Arc::new(output())),
-            ("stale".to_string(), Arc::new(output())),
-        ]);
-        assert!(!authoritative_result_set_is_complete(
-            &same_size_substitution,
-            &expected,
-        ));
-
-        let duplicate_expected = vec!["first".to_string(), "first".to_string()];
-        assert!(!authoritative_result_set_is_complete(
-            &HashMap::from([("first".to_string(), Arc::new(output()))]),
-            &duplicate_expected,
-        ));
-    }
-
-    #[test]
-    fn full_scan_includes_admin_checks_only_when_elevated() {
-        let catalog = vec![task("os_info", false), task("chkdsk", true)];
-        assert_eq!(
-            select_scan_tasks(&catalog, ScanKind::Full, false, None),
-            ["os_info".to_string()]
-        );
-        assert_eq!(
-            select_scan_tasks(&catalog, ScanKind::Full, true, None),
-            ["os_info".to_string(), "chkdsk".to_string()]
-        );
-    }
-
-    #[test]
-    fn live_scan_waits_for_privilege_identity_without_affecting_visual_fixtures() {
-        assert!(system_identity_blocks_scan(false, Some(17)));
-        assert!(!system_identity_blocks_scan(false, None));
-        assert!(!system_identity_blocks_scan(true, Some(17)));
-    }
-
-    #[test]
-    fn persisted_startup_scan_waits_for_both_initializers_and_is_consumed_once() {
-        let mut gate = StartupScanGate::AwaitingSettings;
-        assert!(!take_startup_scan_when_ready(
-            &mut gate, false, false, None, None
-        ));
-
-        apply_startup_scan_preference(&mut gate, true);
-        assert!(!take_startup_scan_when_ready(
-            &mut gate, false, true, None, None
-        ));
-        assert!(!take_startup_scan_when_ready(
-            &mut gate,
-            false,
-            false,
-            Some(1),
-            None
-        ));
-        assert!(!take_startup_scan_when_ready(
-            &mut gate,
-            false,
-            false,
-            None,
-            Some(2)
-        ));
-        assert!(take_startup_scan_when_ready(
-            &mut gate, false, false, None, None
-        ));
-        assert_eq!(gate, StartupScanGate::Consumed);
-        assert!(!take_startup_scan_when_ready(
-            &mut gate, false, false, None, None
-        ));
-    }
-
-    #[test]
-    fn startup_scan_is_suppressed_when_disabled_or_in_visual_mode() {
-        let mut disabled = StartupScanGate::AwaitingSettings;
-        apply_startup_scan_preference(&mut disabled, false);
-        assert!(!take_startup_scan_when_ready(
-            &mut disabled,
-            false,
-            false,
-            None,
-            None
-        ));
-
-        let mut visual = StartupScanGate::Armed;
-        assert!(!take_startup_scan_when_ready(
-            &mut visual,
-            true,
-            false,
-            None,
-            None
-        ));
-        assert_eq!(visual, StartupScanGate::Consumed);
-    }
-
-    #[test]
-    fn export_picker_cancellation_is_silent_but_errors_keep_their_detail() {
-        let cancelled = resolve_export_picker_selection(Ok(SavePickerOutcome::Cancelled)).unwrap();
-        assert!(cancelled.is_none());
-
-        let error = resolve_export_picker_selection(Err(SavePickerError::InvalidUtcDate {
-            year: 2026,
-            month: 2,
-            day: 30,
-        }))
-        .unwrap_err();
-        assert_eq!(error, "invalid UTC export date 2026-02-30");
-    }
-
     #[test]
     fn export_action_falls_back_to_text_for_stale_or_unsupported_settings() {
         assert_eq!(resolved_export_format("text"), ReportFormat::Text);
@@ -2442,41 +1395,6 @@ pub(crate) mod tests {
         assert_eq!(resolved_export_format("html"), ReportFormat::Html);
         assert_eq!(resolved_export_format(""), ReportFormat::Text);
         assert_eq!(resolved_export_format("pdf"), ReportFormat::Text);
-    }
-
-    #[test]
-    fn export_write_completion_requires_matching_request_and_delivery_kind() {
-        let pending = PendingExport {
-            request_id: 17,
-            action: PendingExportAction::SupportPackage {
-                paths: ValidatedSupportPackagePaths {
-                    json: "case.json".into(),
-                    text: "case.txt".into(),
-                    html: "case.html".into(),
-                },
-            },
-        };
-
-        assert!(pending_export_write_is_current(
-            Some(&pending),
-            17,
-            ExportWriteKind::SupportPackage
-        ));
-        assert!(!pending_export_write_is_current(
-            Some(&pending),
-            16,
-            ExportWriteKind::SupportPackage
-        ));
-        assert!(!pending_export_write_is_current(
-            Some(&pending),
-            17,
-            ExportWriteKind::File
-        ));
-        assert!(!pending_export_write_is_current(
-            None,
-            17,
-            ExportWriteKind::SupportPackage
-        ));
     }
 
     #[test]
@@ -2717,25 +1635,100 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn history_task_detail_completion_requires_matching_generation_and_expansion() {
-        assert!(history_task_diff_result_is_current(
-            7,
-            7,
-            "os_info",
-            Some("os_info")
-        ));
-        assert!(!history_task_diff_result_is_current(
-            6,
-            7,
-            "os_info",
-            Some("os_info")
-        ));
-        assert!(!history_task_diff_result_is_current(
-            7,
-            7,
-            "os_info",
-            Some("cpu_info")
-        ));
-        assert!(!history_task_diff_result_is_current(7, 7, "os_info", None));
+    fn scan_status_text_distinguishes_running_stopping_and_complete() {
+        assert_eq!(
+            scan_progress_text("Quick Scan", false, 3, 17, "TPM"),
+            "Quick Scan · 3 of 17 collected · TPM"
+        );
+        assert_eq!(
+            scan_progress_text("Quick Scan", true, 3, 17, "TPM"),
+            "Stopping Quick Scan · TPM"
+        );
+        assert_eq!(
+            scan_result_text("Full Scan", true, 4, 17, 1),
+            "Full Scan · 4 of 17 collected · 1 errors"
+        );
+        assert_eq!(
+            scan_result_text("Full Scan", false, 17, 17, 1),
+            "Full Scan complete · 17 collected · 1 errors"
+        );
+    }
+
+    #[test]
+    fn a_failed_history_save_never_hides_a_completed_scan() {
+        assert_eq!(
+            scan_complete_text("Quick Scan", 17, 0, false),
+            "Quick Scan complete · 17 collected · 0 errors"
+        );
+        let failed = scan_complete_text("Quick Scan", 17, 0, true);
+        assert!(failed.starts_with("Quick Scan complete · 17 collected · 0 errors"));
+        assert!(failed.ends_with("· history not saved"));
+    }
+
+    #[test]
+    fn provider_wire_ids_round_trip_and_unknown_ids_are_none() {
+        for provider in [
+            AIProvider::OpenAI,
+            AIProvider::PhiSilica,
+            AIProvider::FoundryLocal,
+            AIProvider::Ollama,
+            AIProvider::CustomOpenAI,
+            AIProvider::CodexCli,
+            AIProvider::ClaudeCode,
+            AIProvider::Anthropic,
+            AIProvider::Gemini,
+            AIProvider::DeepSeek,
+        ] {
+            assert_eq!(provider_from_wire(&provider.to_string()), provider);
+        }
+        assert_eq!(provider_from_wire("open_a_i"), AIProvider::None);
+        assert_eq!(provider_from_wire(""), AIProvider::None);
+
+        assert_eq!(
+            subscription_provider_from_wire(&AIProvider::CodexCli.to_string()),
+            Some(SubscriptionAuthProvider::Codex)
+        );
+        assert_eq!(
+            subscription_provider_from_wire(&AIProvider::ClaudeCode.to_string()),
+            Some(SubscriptionAuthProvider::ClaudeCode)
+        );
+        assert_eq!(
+            subscription_provider_from_wire(&AIProvider::OpenAI.to_string()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_refusal_shows_the_engines_own_wording_not_the_enum_name() {
+        use wfdiag_app::{RejectReason, WorkerKind};
+        assert_eq!(
+            rejection_text(&RejectReason::NotReady {
+                detail: "Enable AI insights in Settings before sending".to_string(),
+            }),
+            "Enable AI insights in Settings before sending"
+        );
+        assert_eq!(
+            rejection_text(&RejectReason::Busy {
+                detail: "a chat turn is already streaming".to_string(),
+            }),
+            "a chat turn is already streaming"
+        );
+        assert_eq!(
+            rejection_text(&RejectReason::WorkerUnavailable {
+                worker: WorkerKind::History,
+                detail: "native history is unavailable".to_string(),
+            }),
+            "native history is unavailable"
+        );
+        // A structural refusal has no user-facing detail of its own, so the
+        // enum's prose is the message.
+        assert_eq!(
+            rejection_text(&RejectReason::IdentityExhausted),
+            RejectReason::IdentityExhausted.to_string()
+        );
+        assert_eq!(
+            worker_timeout_text("history"),
+            "The history worker did not answer in time · try again"
+        );
     }
 }

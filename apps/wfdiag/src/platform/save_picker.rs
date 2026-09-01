@@ -1,15 +1,26 @@
 //! Owned Windows Common Item Dialog support for native report export.
 //!
-//! [`show_export_save_picker`] is deliberately synchronous and must be called
-//! directly on Reactor's WinUI dispatcher thread in response to an explicit
-//! user action. It obtains only that GUI thread's active window and refuses to
-//! continue unless the HWND is a live window owned by both the current process
-//! and current thread. It never enumerates windows, matches titles, guesses an
-//! HWND, or falls back to an unowned dialog.
+//! # The dialog never runs on the UI thread (#140, #196)
 //!
-//! Keep report rendering and file I/O off the UI thread. The intended order is:
+//! [`IFileSaveDialog::Show`] is modal: it runs its own message loop until the
+//! user answers. Calling it from inside `Component::update` froze the whole
+//! shell — no repaint, no wake drain, no scan progress — for as long as the
+//! dialog was open (#140). [`SavePickerHost`] therefore runs every picker on a
+//! dedicated single-threaded apartment (`COINIT_APARTMENTTHREADED`) thread and
+//! posts the answer back as an ordinary `Message`, so the UI thread keeps
+//! publishing while the user browses.
 //!
-//! 1. call the picker on the UI thread;
+//! Moving off the UI thread also fixes the owner (#196): `GetActiveWindow`
+//! is per-GUI-thread and returns null on the picker thread, so the owner is
+//! now [`crate::platform::instance::registered_main_window_hwnd`] — the exact
+//! HWND Reactor registered — validated as a live window of this process. It
+//! never enumerates windows, matches titles, guesses an HWND, or falls back to
+//! an unowned dialog.
+//!
+//! Keep report rendering and file I/O off the UI thread too. The intended
+//! order is:
+//!
+//! 1. spawn the picker with [`SavePickerHost::request`];
 //! 2. treat [`SavePickerOutcome::Cancelled`] as a normal no-op;
 //! 3. move the selected [`ValidatedExportPath`] and rendered bytes to a worker;
 //! 4. write on that worker, reporting completion back to Reactor.
@@ -38,8 +49,7 @@ pub use wfdiag_native_export::path_policy::{ValidatedExportPath, ValidatedSuppor
 use windows::Win32::Foundation::{ERROR_CANCELLED, HWND};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
 use windows::Win32::System::SystemInformation::GetSystemTime;
-use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
-use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_RoamingAppData,
@@ -203,17 +213,22 @@ fn current_export_utc_timestamp() -> Result<ExportUtcTimestamp, SavePickerError>
     )?)
 }
 
-fn resolve_current_thread_owner() -> Result<HWND, SavePickerError> {
-    // SAFETY: These functions take no pointers. HWND validity and ownership
-    // are explicitly checked before the handle is used.
-    let owner = unsafe { GetActiveWindow() };
+/// Validate the owner HWND the UI thread handed to the picker thread.
+///
+/// #196: the old resolver called `GetActiveWindow`, which is per-GUI-thread,
+/// so it produced the right answer only while the dialog ran on the UI thread
+/// and produced `NoActiveOwner` whenever the shell window was not the active
+/// one. The owner is now the exact registered Reactor HWND, checked here for
+/// liveness and process ownership. It deliberately does NOT require the
+/// current thread: the picker runs on its own STA thread by design.
+fn validate_owner(owner: HWND) -> Result<HWND, SavePickerError> {
     if owner.0.is_null() {
         return Err(SavePickerError::NoActiveOwner);
     }
     // SAFETY: IsWindow only observes the handle table.
     if !unsafe { IsWindow(Some(owner)) }.as_bool() {
         return Err(SavePickerError::InvalidOwner {
-            reason: "GetActiveWindow returned a stale HWND",
+            reason: "the registered shell window is no longer a live HWND",
         });
     }
 
@@ -225,14 +240,8 @@ fn resolve_current_thread_owner() -> Result<HWND, SavePickerError> {
             reason: "Windows could not resolve the HWND owner",
         });
     }
-    // SAFETY: These functions take no arguments and return numeric IDs.
-    let current_thread = unsafe { GetCurrentThreadId() };
+    // SAFETY: This function takes no arguments and returns a numeric ID.
     let current_process = unsafe { GetCurrentProcessId() };
-    if owner_thread != current_thread {
-        return Err(SavePickerError::InvalidOwner {
-            reason: "the HWND does not belong to the current UI thread",
-        });
-    }
     if owner_process != current_process {
         return Err(SavePickerError::InvalidOwner {
             reason: "the HWND does not belong to this process",
@@ -319,21 +328,26 @@ fn default_export_directory() -> Option<PathBuf> {
     .find(|path| path.is_dir())
 }
 
-/// Show the native save dialog with a validated Reactor UI-thread owner.
+/// Show the native save dialog owned by `owner`.
 ///
 /// The dialog is configured for one settings-selected Store 2.5.8 format.
 /// The suggested date is UTC, matching the original
 /// `new Date().toISOString().split('T')[0]` behavior.
-pub fn show_export_save_picker(format: ReportFormat) -> Result<SavePickerOutcome, SavePickerError> {
-    show_export_save_picker_for_date(format, current_export_utc_date()?)
+fn show_export_save_picker(
+    owner: HWND,
+    format: ReportFormat,
+) -> Result<SavePickerOutcome, SavePickerError> {
+    show_export_save_picker_for_date(owner, format, current_export_utc_date()?)
 }
 
 /// Deterministic-date form of [`show_export_save_picker`].
-pub fn show_export_save_picker_for_date(
+fn show_export_save_picker_for_date(
+    owner: HWND,
     format: ReportFormat,
     date: ExportUtcDate,
 ) -> Result<SavePickerOutcome, SavePickerError> {
     show_save_picker(
+        owner,
         format,
         &suggested_export_filename(format, date),
         "Export Diagnostic Report",
@@ -342,16 +356,24 @@ pub fn show_export_save_picker_for_date(
 
 /// Show the Store-compatible support-package picker and validate the JSON,
 /// text, and HTML destinations before returning any of them.
-pub fn show_support_package_save_picker() -> Result<SupportPackagePickerOutcome, SavePickerError> {
-    show_support_package_save_picker_for_timestamp(current_export_utc_timestamp()?)
+fn show_support_package_save_picker(
+    owner: HWND,
+) -> Result<SupportPackagePickerOutcome, SavePickerError> {
+    show_support_package_save_picker_for_timestamp(owner, current_export_utc_timestamp()?)
 }
 
 /// Deterministic-time form of [`show_support_package_save_picker`].
-pub fn show_support_package_save_picker_for_timestamp(
+fn show_support_package_save_picker_for_timestamp(
+    owner: HWND,
     timestamp: ExportUtcTimestamp,
 ) -> Result<SupportPackagePickerOutcome, SavePickerError> {
     let filename = suggested_support_package_filename(timestamp);
-    match show_save_picker(ReportFormat::Json, &filename, "Generate Support Package")? {
+    match show_save_picker(
+        owner,
+        ReportFormat::Json,
+        &filename,
+        "Generate Support Package",
+    )? {
         SavePickerOutcome::Cancelled => Ok(SupportPackagePickerOutcome::Cancelled),
         SavePickerOutcome::Selected(selected) => Ok(SupportPackagePickerOutcome::Selected(
             validate_support_package_paths_with_policy(&selected, &current_user_export_policy())?,
@@ -360,11 +382,12 @@ pub fn show_support_package_save_picker_for_timestamp(
 }
 
 fn show_save_picker(
+    owner: HWND,
     format: ReportFormat,
     suggested_filename: &str,
     dialog_title: &str,
 ) -> Result<SavePickerOutcome, SavePickerError> {
-    let owner = resolve_current_thread_owner()?;
+    let owner = validate_owner(owner)?;
     let filter = export_filter_spec(format);
     let display_name = wide(filter.display_name);
     let pattern = wide(filter.pattern);
@@ -458,4 +481,159 @@ fn show_save_picker(
     let validated =
         validate_export_path_with_policy(&selected, format, &current_user_export_policy())?;
     Ok(SavePickerOutcome::Selected(validated))
+}
+
+// ------------------------------------------------------------- host -------
+
+/// Which picker to show.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SavePickerRequest {
+    /// The single-file report export, in the settings-selected format.
+    Export(ReportFormat),
+    /// The three-file support package.
+    SupportPackage,
+}
+
+/// What one picker answered.
+///
+/// Cancellation is a normal, silent outcome; only a typed failure carries
+/// status text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SavePickerReply {
+    /// The user dismissed the dialog. Nothing happens.
+    Cancelled,
+    /// A validated single-file destination.
+    Export(ValidatedExportPath),
+    /// Three validated support-package destinations.
+    SupportPackage(ValidatedSupportPackagePaths),
+    /// The dialog could not run, or the chosen path is not allowed.
+    Failed(String),
+}
+
+/// One finished picker, waiting for the UI thread to collect it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SavePickerCompletion {
+    /// The request generation this answers, so a superseded picker is dropped.
+    pub epoch: u64,
+    /// Which picker ran.
+    pub request: SavePickerRequest,
+    /// What it answered.
+    pub reply: SavePickerReply,
+}
+
+/// The completed answer, published by the picker thread and taken by the UI
+/// thread on the next coalesced wake.
+///
+/// Reactor's component sender is `!Send`, so the picker thread cannot enqueue
+/// a `Message` directly. It parks the answer here and posts the same
+/// process-wide wake every other producer uses; the shell drains it beside the
+/// engine's own event queue.
+static COMPLETED: Mutex<Option<SavePickerCompletion>> = Mutex::new(None);
+
+/// Take the finished picker answer, if one is waiting.
+#[must_use]
+pub fn take_completed_picker() -> Option<SavePickerCompletion> {
+    COMPLETED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
+/// Runs Common Item Dialogs off the UI thread (#140).
+///
+/// Each request gets its own single-threaded-apartment thread: WinUI owns the
+/// UI thread's apartment, and a modal `IFileSaveDialog::Show` there blocks the
+/// whole shell. The answer is parked in [`take_completed_picker`] and the host
+/// is woken; the epoch lets the shell drop an answer it has already
+/// superseded.
+#[derive(Debug, Clone, Copy)]
+pub struct SavePickerHost;
+
+impl SavePickerHost {
+    /// Start one picker. `wake` runs on the picker thread once the dialog
+    /// closes and must only signal, never touch UI state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the thread could not be spawned, or when no
+    /// registered shell window is available to own the dialog (#196).
+    pub fn request(request: SavePickerRequest, epoch: u64, wake: fn()) -> Result<(), String> {
+        let owner = crate::platform::instance::registered_main_window_hwnd()
+            .ok_or_else(|| SavePickerError::NoActiveOwner.to_string())?;
+        // HWND is not Send. The numeric handle is, and it is revalidated on
+        // the picker thread against this process's live window list.
+        let owner = owner.0 as usize;
+        std::thread::Builder::new()
+            .name("wfdiag-save-picker".to_string())
+            .spawn(move || {
+                let owner = HWND(owner as *mut std::ffi::c_void);
+                let reply = {
+                    let _apartment = SingleThreadedApartment::enter();
+                    run_picker(owner, request)
+                };
+                *COMPLETED
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(SavePickerCompletion {
+                        epoch,
+                        request,
+                        reply,
+                    });
+                wake();
+            })
+            .map(|_| ())
+            .map_err(|error| format!("the export dialog thread could not start: {error}"))
+    }
+}
+
+fn run_picker(owner: HWND, request: SavePickerRequest) -> SavePickerReply {
+    match request {
+        SavePickerRequest::Export(format) => match show_export_save_picker(owner, format) {
+            Ok(SavePickerOutcome::Cancelled) => SavePickerReply::Cancelled,
+            Ok(SavePickerOutcome::Selected(path)) => SavePickerReply::Export(path),
+            Err(error) => SavePickerReply::Failed(error.to_string()),
+        },
+        SavePickerRequest::SupportPackage => match show_support_package_save_picker(owner) {
+            Ok(SupportPackagePickerOutcome::Cancelled) => SavePickerReply::Cancelled,
+            Ok(SupportPackagePickerOutcome::Selected(paths)) => {
+                SavePickerReply::SupportPackage(paths)
+            }
+            Err(error) => SavePickerReply::Failed(error.to_string()),
+        },
+    }
+}
+
+/// COM apartment lifetime for one picker thread.
+///
+/// The Common Item Dialog requires an STA. `CoUninitialize` is paired in
+/// `Drop` so the apartment is torn down even if the dialog path returns early.
+struct SingleThreadedApartment {
+    initialized: bool,
+}
+
+impl SingleThreadedApartment {
+    fn enter() -> Self {
+        // SAFETY: this thread is freshly spawned and has no apartment yet.
+        // RPC_E_CHANGED_MODE cannot occur here; any other failure simply means
+        // the dialog will report its own COM error instead.
+        let result = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+            )
+        };
+        Self {
+            initialized: result.is_ok(),
+        }
+    }
+}
+
+impl Drop for SingleThreadedApartment {
+    fn drop(&mut self) {
+        if self.initialized {
+            // SAFETY: paired with the successful CoInitializeEx above, on the
+            // same thread.
+            unsafe { windows::Win32::System::Com::CoUninitialize() };
+        }
+    }
 }

@@ -1,32 +1,23 @@
 //! The shell's message alphabet and the small payload enums it carries.
+//!
+//! Every variant here is either a **user intent** or a **UI-side timer/dialog
+//! callback**. There is no longer one variant per engine worker: worker output
+//! arrives as a single [`Message::App`] batch of [`AppEvent`]s drained from
+//! [`wfdiag_app::AppService`], which has already applied every staleness guard.
+//! That is what removed the `*WorkerEventReceived` / `*Finished` / `*Rejected`
+//! / `*WaitCancelled` / `*WorkerStopped` families.
 
 #![deny(unsafe_code)]
 
-use crate::app::state::{
-    AiMode, FixPlanActionSelection, HistoryTaskDiffProjection, SubscriptionInstallPrompt,
-};
-use crate::platform::save_picker::ValidatedSupportPackagePaths;
+use crate::app::state::{AiMode, FixPlanActionSelection};
+use crate::platform::save_picker::{SavePickerReply, ValidatedSupportPackagePaths};
 use crate::platform::window;
-use wfdiag_native_ai_analysis::{AnalysisWorkerEvent, FixPlanWorkerEvent};
-use wfdiag_native_ai_chat::workers::provider_setup::ProviderSetupWorkerEvent;
-use wfdiag_native_ai_chat::workers::subscription_auth::SubscriptionAuthWorkerEvent;
-use wfdiag_native_ai_chat::workers::subscription_install::SubscriptionInstallWorkerEvent;
-use wfdiag_native_ai_chat::{ChatWorkerEvent, SubscriptionAuthProvider};
-use wfdiag_native_ai_provider::AIProviderStatus;
-use wfdiag_native_ai_report::{ReportGeneration, ReportWorkerEvent};
-use wfdiag_native_diagnostics::{ScanKind, SharedScanEvidence};
-use wfdiag_native_export::ExportCompleted;
-use wfdiag_native_history::{ComparisonSummary, ScanSummary, TaskTrend};
-use wfdiag_native_issues::IssueDetectionCompleted;
-use wfdiag_native_issues::projection::{PendingIssueDetection, PreparedIssueDetection};
-use wfdiag_native_monitor::{NetworkConnection, ProcessPage, ProcessSortKey};
+use wfdiag_app::AppEvent;
+use wfdiag_app::domain::subscriptions::InstallPrompt;
+use wfdiag_app::ports::monitor::ProcessSortKey;
+use wfdiag_native_ai_chat::SubscriptionAuthProvider;
 use wfdiag_native_projection::process_identity::ProcessIdentity;
-use wfdiag_native_remediation::runtime::{ActionRunEvent, ActionWorkerEvent};
-use wfdiag_native_settings::SettingsEvent;
-use wfdiag_native_system::SystemCompleted;
-use wfdiag_native_update::UpdateInfo;
-use wfdiag_native_update::policy::{AboutExternalAction, UpdateThrottle};
-use wfdiag_ui_core::UiEvent;
+use wfdiag_native_update::policy::AboutExternalAction;
 use windows_reactor::*;
 
 #[derive(Clone)]
@@ -69,14 +60,6 @@ impl SettingsDialogAction {
     }
 }
 
-/// Which history maintenance operation an acknowledgement completes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HistoryAckKind {
-    Label,
-    Tags,
-    Clear,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HistoryChangeKind {
     Regressed,
@@ -100,17 +83,24 @@ impl HistoryChangeKind {
     }
 }
 
+/// Which export payload a finished picker or write belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ActionReviewSurface {
-    Review,
-    RepairConfirmation,
+pub(crate) enum ExportPickerKind {
+    /// The single-file report export.
+    File,
+    /// The three-file support package.
+    SupportPackage,
 }
 
 #[derive(Clone)]
 pub(crate) enum Message {
-    /// One coalesced native-window wake. The UI thread drains every app-owned
-    /// event channel in response, replacing the former permanent poll tasks.
+    /// One coalesced native-window wake. The UI thread drains the application
+    /// service and every remaining UI-owned signal source in response.
     NativeSignalReady,
+    /// One drained batch of engine facts. Every staleness comparison already
+    /// happened inside `AppService::drain`, so these are applied in order with
+    /// no further guards.
+    App(Vec<AppEvent>),
     /// First-publication handoff. Reactor commits native window commands
     /// before running view effects, so this is the earliest deterministic
     /// point where Win32 lifecycle/shortcut integration can discover the HWND.
@@ -135,15 +125,6 @@ pub(crate) enum Message {
     AboutExternalRejected {
         epoch: u64,
     },
-    UpdateStartupDue {
-        throttle: Option<UpdateThrottle>,
-    },
-    UpdateStartupSkipped,
-    UpdateDelayCancelled,
-    UpdateDelayRejected,
-    UpdateCheckFinished(Result<Option<UpdateInfo>, String>),
-    UpdateCheckCancelled,
-    UpdateCheckRejected,
     UpdateNoticeClosed {
         epoch: u64,
     },
@@ -170,119 +151,36 @@ pub(crate) enum Message {
         epoch: u64,
         action: SettingsDialogAction,
     },
-    SettingsRuntimeEvent(Box<SettingsEvent>),
-    SettingsWorkerStopped,
-    ProviderModelsRefreshDue {
-        dialog_epoch: u64,
-        refresh_revision: u64,
-        setup_index: usize,
-    },
-    ProviderModelsRefreshCancelled {
-        refresh_revision: u64,
-    },
-    ProviderModelsRefreshRejected {
-        refresh_revision: u64,
-    },
     RefreshProviderModels,
     CancelProviderModels,
-    ProviderSetupWorkerEventReceived(Box<ProviderSetupWorkerEvent>),
-    ProviderSetupWorkerStopped,
     RefreshSubscriptionAuth(SubscriptionAuthProvider),
     StartSubscriptionSignIn(SubscriptionAuthProvider),
     StartSubscriptionSignOut(SubscriptionAuthProvider),
     CancelSubscriptionAuth,
-    SubscriptionAuthWorkerEventReceived(Box<SubscriptionAuthWorkerEvent>),
-    SubscriptionAuthWorkerStopped,
     RequestSubscriptionInstall(SubscriptionAuthProvider),
     SubscriptionInstallPromptClosed {
-        prompt: SubscriptionInstallPrompt,
+        prompt: InstallPrompt,
         result: ContentDialogResult,
     },
     CancelSubscriptionInstall,
-    SubscriptionInstallWorkerEventReceived(Box<SubscriptionInstallWorkerEvent>),
-    SubscriptionInstallWorkerStopped,
-    SystemRuntimeCompleted(Box<SystemCompleted>),
-    SystemWorkerStopped,
-    SystemWaitCancelled,
-    SystemWaitRejected,
-    IssueRuntimeCompleted(Box<IssueDetectionCompleted>),
-    IssueRequestPrepared(Box<PreparedIssueDetection>),
-    IssueRequestPreparationCancelled(PendingIssueDetection),
-    IssueRequestPreparationRejected(PendingIssueDetection),
-    IssueWorkerStopped,
-    IssueWaitCancelled,
-    IssueWaitRejected,
     RequestQuickScan,
     RequestFullScan,
     CancelScan,
-    DiagnosticSessionStarted {
-        session_id: String,
-        scan_kind: ScanKind,
-        task_count: usize,
+    /// The off-UI-thread save picker answered (#140, #196). The epoch rejects
+    /// an answer from a request the user has already superseded.
+    ExportPickerFinished {
+        epoch: u64,
+        kind: ExportPickerKind,
+        outcome: Box<SavePickerReply>,
     },
-    DiagnosticSessionStartFailed {
-        error: String,
-    },
-    DiagnosticRunFinished {
-        session_id: String,
-        cancelled: bool,
-        authoritative_results: Result<SharedScanEvidence, String>,
-    },
-    DiagnosticRunRejected,
-    DiagnosticFinalizationElapsed {
-        session_id: String,
-    },
-    DiagnosticFinalizationCancelled {
-        session_id: String,
-    },
-    DiagnosticFinalizationRejected {
-        session_id: String,
-    },
-    DiagnosticHistorySaveFinished {
-        session_id: String,
-        result: Result<(), String>,
-    },
-    DiagnosticHistorySaveWaitCancelled {
-        session_id: String,
-    },
-    DiagnosticHistorySaveRejected {
-        session_id: String,
-    },
-    DiagnosticCancelFinished {
-        session_id: String,
-        error: Option<String>,
-    },
-    DiagnosticCancelRejected {
-        session_id: String,
-    },
-    DiagnosticBatch {
-        events: Vec<UiEvent>,
-        terminated: bool,
-    },
-    AiStatusFinished {
-        request_id: u64,
-        result: Result<Box<AIProviderStatus>, String>,
-    },
-    AiStatusCancelled {
-        request_id: u64,
-    },
-    AiStatusRejected {
-        request_id: u64,
-    },
-    ExportRuntimeCompleted(Box<ExportCompleted>),
-    /// The rendered report file was written to the validated user path. The
-    /// write happens on a background worker; the error is already a string.
     ExportFileSaved {
-        request_id: u64,
+        epoch: u64,
         result: Box<Result<std::path::PathBuf, String>>,
     },
     SupportPackageSaved {
-        request_id: u64,
+        epoch: u64,
         result: Box<Result<ValidatedSupportPackagePaths, String>>,
     },
-    ExportWorkerStopped,
-    ExportWaitCancelled,
-    ExportWaitRejected,
     SetAiMode(AiMode),
     ToggleMonitoring,
     Refresh,
@@ -290,62 +188,22 @@ pub(crate) enum Message {
     ProcessSort(ProcessSortKey),
     ProcessPrevious,
     ProcessNext,
-    ProcessQueryFinished {
-        request_id: u64,
-        result: Result<ProcessPage, String>,
+    /// The process-filter debounce elapsed. The engine is only asked for a
+    /// page once the user stops typing.
+    ProcessQueryDue {
+        revision: u64,
     },
-    ProcessQueryDiscarded {
-        request_id: u64,
-    },
-    ProcessQueryRejected {
-        request_id: u64,
+    ProcessQueryDebounceEnded {
+        revision: u64,
     },
     SelectProcess(Option<ProcessIdentity>),
     RefreshHistory,
     HistoryFilterChanged(String),
     SelectHistory(String),
-    HistoryListFinished {
-        request_id: u64,
-        result: Result<Vec<ScanSummary>, String>,
-    },
-    HistoryCompareFinished {
-        request_id: u64,
-        result: Result<Box<ComparisonSummary>, String>,
-    },
     ToggleHistoryTaskDetail(String),
-    HistoryTaskDiffFinished {
-        request_id: u64,
-        task_id: String,
-        result: Result<Box<HistoryTaskDiffProjection>, String>,
-    },
-    HistoryTaskDiffRejected {
-        request_id: u64,
-        task_id: String,
-    },
-    HistoryQueryRejected {
-        request_id: u64,
-        comparison: bool,
-    },
     ChatInputChanged(String),
     UsePrompt(String),
     SendChat,
-    /// Chat events arrive at token rate; they are batched per wake so a
-    /// streamed answer costs one view rebuild per drain instead of one per
-    /// token. Order within the batch is the worker's emission order.
-    ChatWorkerEventsBatch(Vec<ChatWorkerEvent>),
-    ChatWorkerStopped,
-    ReportWorkerEventReceived(Box<ReportWorkerEvent>),
-    ReportWorkerStopped,
-    ReportGenerationPrepared {
-        request_id: u64,
-        generation: Box<ReportGeneration>,
-    },
-    ReportGenerationPreparationCancelled {
-        request_id: u64,
-    },
-    ReportGenerationPreparationRejected {
-        request_id: u64,
-    },
     GenerateReport,
     RegenerateReport,
     CancelReport,
@@ -360,8 +218,6 @@ pub(crate) enum Message {
     ProposeFixPlan,
     CancelFixPlan,
     ReviewFixPlanActions(FixPlanActionSelection),
-    FixPlanWorkerEventReceived(Box<FixPlanWorkerEvent>),
-    FixPlanWorkerStopped,
     CancelChat,
     NewConversation,
     AllowCloudFallback,
@@ -396,9 +252,6 @@ pub(crate) enum Message {
     AnalyzeSelectedDiagnostic,
     RetrySelectedDiagnosticAnalysis,
     CancelDiagnosticAnalysis,
-    AnalysisWorkerEventReceived(Box<AnalysisWorkerEvent>),
-    AnalysisWorkerStopped,
-    NetworkConnectionsFinished(Box<Result<Vec<NetworkConnection>, String>>),
     ToggleClearHistoryConfirm(bool),
     ClearHistoryConfirmed,
     BeginHistoryLabelEdit,
@@ -407,15 +260,7 @@ pub(crate) enum Message {
     SaveHistoryLabel,
     HistoryTagDraftChanged(String),
     SaveHistoryTags,
-    HistoryAckFinished {
-        kind: HistoryAckKind,
-        result: Result<(), String>,
-    },
     RequestHistoryTrends,
-    HistoryTrendsFinished {
-        request_id: u64,
-        result: Box<Result<Vec<TaskTrend>, String>>,
-    },
     ActionReviewDialogClosed {
         proposal_id: String,
         result: ContentDialogResult,
@@ -424,26 +269,17 @@ pub(crate) enum Message {
         proposal_id: String,
         result: ContentDialogResult,
     },
-    ActionWorkerEventReceived(Box<ActionWorkerEvent>),
-    ActionWorkerStopped,
-    InstanceWaitCancelled,
-    WindowHookRetryReady,
-    WindowHookRetryRejected,
-    ActionRunEventReceived(Box<ActionRunEvent>),
-    ActionRunStreamStopped,
     CancelActionRun,
     ActionRunExpandedChanged {
         run_id: String,
         expanded: bool,
     },
     RestartAsAdmin,
-    RestartAsAdminFinished(Result<bool, String>),
+    InstanceWaitCancelled,
+    WindowHookRetryReady,
+    WindowHookRetryRejected,
     InstanceActivated,
     WindowLifecycleChanged(window::WindowLifecycleSnapshot),
     GlobalShortcut(window::GlobalShortcutEvent),
     TrayCommand(u8),
-    BackendBatch {
-        events: Vec<UiEvent>,
-        terminated: bool,
-    },
 }

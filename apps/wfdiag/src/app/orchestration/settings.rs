@@ -1,4 +1,10 @@
-//! Settings dialog and persistence orchestration.
+//! The Settings dialog: its draft, its epochs, and its one Save command.
+//!
+//! The draft is the shell's — it is what the user is editing and has not
+//! committed. Persistence, validation and the credential transaction all
+//! belong to the engine, so Save is a single
+//! [`AppCommand::SaveSettings`] and the answer arrives as a
+//! [`wfdiag_app::SettingsEvent`].
 
 #![deny(unsafe_code)]
 
@@ -8,33 +14,21 @@ use crate::app::consts::{
 };
 use crate::app::message::SettingsDialogAction;
 use crate::app::policy::{
-    apply_startup_scan_preference, configured_provider_setup_index,
-    normalize_provider_preference_for_runtime, phi_preference_gate,
-    provider_setup_index_for_provider, set_provider_key_configured, set_provider_key_value,
-    set_provider_setup_model, settings_ai_status_probe_needed, settings_dialog_callback_is_current,
-    strip_provider_key_values, take_matching_pending_settings_save,
-    update_history_retention_policy, validate_phi_preference, window_theme_from_setting,
+    configured_provider_setup_index, phi_preference_gate, provider_setup_index_for_provider,
+    rejection_text, set_provider_key_value, set_provider_setup_model,
+    settings_dialog_callback_is_current, validate_phi_preference, window_theme_from_setting,
     window_theme_setting,
 };
-use crate::app::state::PendingSettingsSave;
 use crate::platform::window;
+use wfdiag_app::{AppCommand, DispatchOutcome, SubscriptionOperation};
+use wfdiag_native_ai_chat::SubscriptionAuthProvider;
 use wfdiag_native_ai_provider::{AIProvider, AIProviderPreference, parse_provider_preference};
-use wfdiag_native_issues::projection::advance_nonzero_generation;
 use wfdiag_native_settings::{
-    AppSettings, CloudFallbackPolicy, ProviderCredentialAction, ProviderKeyId, SettingsCommand,
-    SettingsEvent,
+    AppSettings, CloudFallbackPolicy, ProviderCredentialAction, ProviderKeyId,
 };
 use windows_reactor::*;
 
 impl WfdiagShell {
-    pub(crate) fn next_settings_request_id(&mut self) -> u64 {
-        self.settings_request_id = self.settings_request_id.wrapping_add(1);
-        if self.settings_request_id == 0 {
-            self.settings_request_id = 1;
-        }
-        self.settings_request_id
-    }
-
     pub(crate) fn next_settings_dialog_epoch(&mut self) -> u64 {
         self.settings_dialog_epoch = self.settings_dialog_epoch.wrapping_add(1);
         if self.settings_dialog_epoch == 0 {
@@ -47,57 +41,51 @@ impl WfdiagShell {
         settings_dialog_callback_is_current(self.settings_open, self.settings_dialog_epoch, epoch)
     }
 
-    pub(crate) fn resume_settings_wait(&mut self, _context: &ComponentContext<Self>) {
-        self.settings_wait = None;
+    /// Adopt a document the engine persisted or reloaded.
+    pub(crate) fn adopt_persisted_settings(&mut self, settings: &AppSettings, adopt_draft: bool) {
+        self.settings_snapshot = settings.clone();
+        self.provider_setup_index = configured_provider_setup_index(settings);
+        self.pane_open = !settings.nav_rail_collapsed;
+        window::set_close_to_tray(settings.close_to_tray);
+        if adopt_draft {
+            self.settings_draft = settings.clone();
+            self.theme = window_theme_from_setting(&settings.theme);
+        }
+        self.provider_key_drafts = Default::default();
+        self.provider_credential_transaction.discard();
+        self.provider_key_busy = false;
+        self.settings_error = None;
     }
 
-    pub(crate) fn persist_shell_settings(
-        &mut self,
-        submitted: AppSettings,
-        context: &ComponentContext<Self>,
-    ) -> bool {
+    /// Persist a settings change the shell made outside the dialog (the nav
+    /// rail and the theme toggle).
+    pub(crate) fn persist_shell_settings(&mut self, submitted: AppSettings) -> bool {
         if self.deterministic_visual {
             self.settings_snapshot = submitted.clone();
             self.settings_draft = submitted;
             return true;
         }
-        if self.settings_loading || self.settings_saving || self.settings_pending_save.is_some() {
+        if self.settings_loading || self.settings_saving || self.settings_save_epoch.is_some() {
             self.status = "Settings are already being saved…".to_string();
             return false;
         }
-        if self.settings_runtime.is_none() {
-            self.status = "Native settings persistence is unavailable".to_string();
-            return false;
+        match self.dispatch(AppCommand::SaveSettings(Box::new(submitted.clone()))) {
+            DispatchOutcome::Accepted { .. } => {
+                self.settings_save_epoch = Some(self.settings_dialog_epoch);
+                self.settings_saving = true;
+                self.settings_save_error = None;
+                true
+            }
+            outcome => {
+                if let Some(reason) = outcome.rejection() {
+                    self.status = format!("Settings were not saved · {}", rejection_text(reason));
+                }
+                false
+            }
         }
-        let Some(request_id) = advance_nonzero_generation(&mut self.settings_request_id) else {
-            self.status = "Native settings request identity was exhausted".to_string();
-            return false;
-        };
-        let command = SettingsCommand::Save {
-            request_id,
-            settings: Box::new(submitted.clone()),
-        };
-        if let Err(error) = self
-            .settings_runtime
-            .as_ref()
-            .expect("settings runtime availability checked above")
-            .send(command)
-        {
-            self.status = format!("Settings were not saved · {error}");
-            return false;
-        }
-        self.settings_pending_save = Some(PendingSettingsSave {
-            request_id,
-            dialog_epoch: self.settings_dialog_epoch,
-            submitted,
-        });
-        self.settings_saving = true;
-        self.settings_save_error = None;
-        self.resume_settings_wait(context);
-        true
     }
 
-    pub(crate) fn open_settings(&mut self, context: &ComponentContext<Self>) {
+    pub(crate) fn open_settings(&mut self) {
         if self.settings_open || self.settings_saving || self.about_open {
             return;
         }
@@ -106,21 +94,14 @@ impl WfdiagShell {
         self.provider_setup_index = configured_provider_setup_index(&self.settings_snapshot);
         self.provider_key_drafts = Default::default();
         self.provider_credential_transaction.discard();
-        self.provider_key_pending = None;
         self.provider_key_busy = false;
         self.theme = window_theme_from_setting(&self.settings_snapshot.theme);
         self.settings_save_error = None;
-        self.subscription_install_prompt = None;
         self.subscription_install_error = None;
         self.settings_open = true;
-        if settings_ai_status_probe_needed(
-            self.settings_open,
-            self.ai_provider_status.is_some(),
-            self.ai_status_loading,
-        ) {
-            self.request_ai_provider_status_for_settings(context);
-        }
-        self.schedule_provider_model_refresh(context);
+        let _ = self.dispatch(AppCommand::RequestProviderStatus);
+        self.probe_selected_subscription_account();
+        self.request_provider_model_refresh(false);
     }
 
     pub(crate) fn cancel_settings(&mut self, epoch: u64) {
@@ -130,7 +111,6 @@ impl WfdiagShell {
         self.settings_draft = self.settings_snapshot.clone();
         self.provider_key_drafts = Default::default();
         self.provider_credential_transaction.discard();
-        self.provider_key_pending = None;
         self.provider_key_busy = false;
         self.theme = window_theme_from_setting(&self.settings_snapshot.theme);
         window::set_close_to_tray(self.settings_snapshot.close_to_tray);
@@ -138,15 +118,14 @@ impl WfdiagShell {
         self.settings_open = false;
         self.cancel_provider_model_request();
         self.cancel_subscription_auth();
-        self.subscription_install_prompt = None;
         self.cancel_subscription_install();
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn apply_settings_dialog_action(
         &mut self,
         epoch: u64,
         action: SettingsDialogAction,
-        context: &ComponentContext<Self>,
     ) {
         if !self.settings_dialog_is_current(epoch) {
             return;
@@ -185,14 +164,8 @@ impl WfdiagShell {
             }
             SettingsDialogAction::AiEnabledChanged(value) => {
                 self.settings_draft.ai_enabled = value;
-                if value
-                    && settings_ai_status_probe_needed(
-                        self.settings_open,
-                        self.ai_provider_status.is_some(),
-                        self.ai_status_loading,
-                    )
-                {
-                    self.request_ai_provider_status_for_settings(context);
+                if value {
+                    let _ = self.dispatch(AppCommand::RequestProviderStatus);
                 }
             }
             SettingsDialogAction::PreferredAiProviderSelectionChanged(Some(index)) => {
@@ -202,7 +175,7 @@ impl WfdiagShell {
                         self.ai_status_loading,
                     );
                     if let Err(reason) = validate_phi_preference(provider, &phi_gate) {
-                        self.settings_save_error = Some(reason.clone());
+                        self.settings_save_error = Some(reason);
                         self.status = "Phi Silica preference was not changed".to_string();
                         return;
                     }
@@ -226,7 +199,7 @@ impl WfdiagShell {
                             provider_setup_index_for_provider(selected_provider)
                         {
                             self.provider_setup_index = setup_index;
-                            self.schedule_provider_model_refresh(context);
+                            self.request_provider_model_refresh(false);
                         }
                     }
                 }
@@ -244,7 +217,7 @@ impl WfdiagShell {
             SettingsDialogAction::CodexCliPathChanged(value) => {
                 self.settings_draft.codex_cli_path =
                     if value.is_empty() { None } else { Some(value) };
-                self.schedule_provider_model_refresh(context);
+                self.request_provider_model_refresh(false);
             }
             SettingsDialogAction::CodexModelSelectionChanged(Some(index)) => match index {
                 0 => self.settings_draft.codex_model = None,
@@ -257,7 +230,8 @@ impl WfdiagShell {
             SettingsDialogAction::ProviderSetupSelectionChanged(Some(index)) => {
                 if index < PROVIDER_SETUP_LABELS.len() {
                     self.provider_setup_index = index;
-                    self.schedule_provider_model_refresh(context);
+                    self.probe_selected_subscription_account();
+                    self.request_provider_model_refresh(false);
                 }
             }
             SettingsDialogAction::ProviderModelSelectionChanged(Some(index)) => {
@@ -298,7 +272,7 @@ impl WfdiagShell {
                     _ => {}
                 }
                 if refresh_catalog {
-                    self.schedule_provider_model_refresh(context);
+                    self.request_provider_model_refresh(false);
                 }
             }
             SettingsDialogAction::ScanOnStartupChanged(value) => {
@@ -331,13 +305,13 @@ impl WfdiagShell {
         if let Err(reason) =
             validate_phi_preference(&self.settings_draft.preferred_ai_provider, &phi_gate)
         {
-            self.settings_save_error = Some(reason.clone());
+            self.settings_save_error = Some(reason);
             self.status = "Settings were not saved · Phi Silica is not ready".to_string();
             return;
         }
         if self.deterministic_visual {
             self.settings_snapshot = self.settings_draft.clone();
-            strip_provider_key_values(&mut self.settings_snapshot);
+            crate::app::policy::strip_provider_key_values(&mut self.settings_snapshot);
             self.settings_draft = self.settings_snapshot.clone();
             self.provider_key_drafts = Default::default();
             self.provider_credential_transaction.discard();
@@ -345,21 +319,15 @@ impl WfdiagShell {
             self.settings_open = false;
             self.settings_save_error = None;
             self.status = "Settings saved".to_string();
-            self.cancel_provider_model_request();
-            self.cancel_subscription_auth();
             return;
         }
         if self.settings_loading || self.settings_saving {
             return;
         }
-        if self.settings_runtime.is_none() {
-            window::set_close_to_tray(self.settings_snapshot.close_to_tray);
-            self.settings_save_error =
-                Some("Native settings persistence is unavailable".to_string());
-            return;
-        }
 
-        let request_id = self.next_settings_request_id();
+        // The staged credential transaction is committed as one compensating
+        // unit by the engine; the document itself carries only the
+        // `*_configured` flags the staged actions imply.
         let mut submitted = self.settings_draft.clone();
         for (index, provider) in ProviderKeyId::ALL.into_iter().enumerate() {
             match self.provider_credential_transaction.staged_action(provider) {
@@ -378,261 +346,35 @@ impl WfdiagShell {
                 None => set_provider_key_value(&mut submitted, provider, None),
             }
         }
-        self.settings_pending_save = Some(PendingSettingsSave {
-            request_id,
-            dialog_epoch: epoch,
-            submitted: submitted.clone(),
-        });
-        self.settings_saving = true;
-        self.settings_save_error = None;
-        let command = SettingsCommand::Save {
-            request_id,
-            settings: Box::new(submitted),
-        };
-        if let Err(error) = self
-            .settings_runtime
-            .as_ref()
-            .expect("settings runtime availability checked above")
-            .send(command)
-        {
-            self.settings_pending_save = None;
-            self.settings_saving = false;
-            window::set_close_to_tray(self.settings_snapshot.close_to_tray);
-            self.settings_save_error = Some(error.to_string());
-            self.status = "Settings were not saved".to_string();
+        match self.dispatch(AppCommand::SaveSettings(Box::new(submitted.clone()))) {
+            DispatchOutcome::Accepted { .. } => {
+                self.settings_save_epoch = Some(epoch);
+                self.settings_saving = true;
+                self.settings_save_error = None;
+                // The staged keys are written by the credential broker as one
+                // compensating unit; the document above only carries the
+                // `*_configured` flags they imply.
+                self.commit_provider_credentials();
+            }
+            outcome => {
+                window::set_close_to_tray(self.settings_snapshot.close_to_tray);
+                if let Some(reason) = outcome.rejection() {
+                    self.settings_save_error = Some(rejection_text(reason));
+                }
+                self.status = "Settings were not saved".to_string();
+            }
         }
     }
 
-    pub(crate) fn apply_settings_event(
-        &mut self,
-        event: SettingsEvent,
-        context: &ComponentContext<Self>,
-    ) {
-        self.settings_wait = None;
-        let mut worker_stopped = false;
-        match event {
-            SettingsEvent::Loaded { request_id, result } => {
-                if self.settings_load_request_id != Some(request_id) {
-                    self.resume_settings_wait(context);
-                    return;
-                }
-                self.settings_load_request_id = None;
-                self.settings_loading = false;
-                match result {
-                    Ok(mut settings) => {
-                        normalize_provider_preference_for_runtime(&mut settings);
-                        apply_startup_scan_preference(
-                            &mut self.startup_scan_gate,
-                            settings.scan_on_startup,
-                        );
-                        let provider_preference = settings.preferred_ai_provider.clone();
-                        self.provider_setup_index = configured_provider_setup_index(&settings);
-                        self.theme = window_theme_from_setting(&settings.theme);
-                        self.pane_open = !settings.nav_rail_collapsed;
-                        update_history_retention_policy(&self.history_retention_policy, &settings);
-                        self.settings_snapshot = settings.clone();
-                        self.settings_draft = settings;
-                        self.provider_key_drafts = Default::default();
-                        self.provider_credential_transaction.discard();
-                        window::set_close_to_tray(self.settings_snapshot.close_to_tray);
-                        self.settings_error = None;
-                        self.ai_settings_ready = true;
-                        self.sync_ai_provider_preference(&provider_preference, context);
-                        if self.settings_open {
-                            if settings_ai_status_probe_needed(
-                                true,
-                                self.ai_provider_status.is_some(),
-                                self.ai_status_loading,
-                            ) {
-                                self.request_ai_provider_status_for_settings(context);
-                            }
-                            self.schedule_provider_model_refresh(context);
-                        }
-                    }
-                    Err(error) => {
-                        apply_startup_scan_preference(&mut self.startup_scan_gate, false);
-                        self.ai_settings_ready = false;
-                        self.ai_provider_status = None;
-                        self.ai_status_loading = false;
-                        self.ai_status_error = Some("AI settings could not be loaded".to_string());
-                        self.settings_error = Some(error.to_string());
-                        self.status = "Settings could not be loaded".to_string();
-                    }
-                }
-                self.maybe_begin_startup_scan(context);
-            }
-            SettingsEvent::Saved { request_id, result } => {
-                let Some(pending) = take_matching_pending_settings_save(
-                    &mut self.settings_pending_save,
-                    request_id,
-                ) else {
-                    self.resume_settings_wait(context);
-                    return;
-                };
-                self.settings_saving = false;
-                match result {
-                    Ok(()) => {
-                        let provider_preference = pending.submitted.preferred_ai_provider.clone();
-                        let closes_current_dialog =
-                            self.settings_dialog_is_current(pending.dialog_epoch);
-                        update_history_retention_policy(
-                            &self.history_retention_policy,
-                            &pending.submitted,
-                        );
-                        let mut committed = pending.submitted;
-                        strip_provider_key_values(&mut committed);
-                        self.settings_snapshot = committed.clone();
-                        self.pane_open = !self.settings_snapshot.nav_rail_collapsed;
-                        window::set_close_to_tray(self.settings_snapshot.close_to_tray);
-                        if closes_current_dialog || !self.settings_open {
-                            self.settings_draft = committed;
-                            self.theme = window_theme_from_setting(&self.settings_draft.theme);
-                        }
-                        self.provider_key_drafts = Default::default();
-                        self.provider_credential_transaction.discard();
-                        self.provider_key_pending = None;
-                        self.provider_key_busy = false;
-                        self.settings_error = None;
-                        self.settings_save_error = None;
-                        if closes_current_dialog {
-                            self.settings_open = false;
-                            self.cancel_provider_model_request();
-                            self.cancel_subscription_auth();
-                        }
-                        self.status = "Settings saved".to_string();
-                        self.sync_ai_provider_preference(&provider_preference, context);
-                    }
-                    Err(error) => {
-                        window::set_close_to_tray(self.settings_snapshot.close_to_tray);
-                        self.settings_save_error = Some(error.to_string());
-                        self.status = "Settings were not saved".to_string();
-                    }
-                }
-            }
-            SettingsEvent::ProviderKeyStored { request_id, result } => {
-                let Some(pending) = self
-                    .provider_key_pending
-                    .filter(|pending| pending.request_id == request_id && pending.store)
-                else {
-                    self.resume_settings_wait(context);
-                    return;
-                };
-                self.provider_key_pending = None;
-                self.provider_key_busy = false;
-                let succeeded = result.is_ok();
-                self.status = match result {
-                    Ok(()) => "API key saved".to_string(),
-                    Err(error) => format!("Credential change failed: {error}"),
-                };
-                if succeeded {
-                    set_provider_key_configured(
-                        &mut self.settings_snapshot,
-                        pending.provider,
-                        true,
-                    );
-                    set_provider_key_configured(&mut self.settings_draft, pending.provider, true);
-                    if let Some(draft) = self.provider_key_drafts.get_mut(pending.index) {
-                        draft.clear();
-                    }
-                    self.schedule_provider_model_refresh(context);
-                }
-            }
-            SettingsEvent::ProviderKeyCleared { request_id, result } => {
-                let Some(pending) = self
-                    .provider_key_pending
-                    .filter(|pending| pending.request_id == request_id && !pending.store)
-                else {
-                    self.resume_settings_wait(context);
-                    return;
-                };
-                self.provider_key_pending = None;
-                self.provider_key_busy = false;
-                let succeeded = result.is_ok();
-                self.status = match result {
-                    Ok(()) => "API key cleared".to_string(),
-                    Err(error) => format!("Credential change failed: {error}"),
-                };
-                if succeeded {
-                    set_provider_key_configured(
-                        &mut self.settings_snapshot,
-                        pending.provider,
-                        false,
-                    );
-                    set_provider_key_configured(&mut self.settings_draft, pending.provider, false);
-                    if let Some(draft) = self.provider_key_drafts.get_mut(pending.index) {
-                        draft.clear();
-                    }
-                    self.schedule_provider_model_refresh(context);
-                }
-            }
-            SettingsEvent::ProviderCredentialsCommitted { request_id, result } => {
-                // The staged Settings-dialog transaction integration owns
-                // request correlation. Until one is pending, ignore a stale
-                // completion rather than mutating credential indicators.
-                let _ = (request_id, result);
-            }
-            SettingsEvent::Updated { request_id, result } => {
-                let Some(pending) = self
-                    .cloud_fallback_policy_update
-                    .take()
-                    .filter(|pending| pending.request_id == request_id)
-                else {
-                    self.resume_settings_wait(context);
-                    return;
-                };
-                match result {
-                    Ok(settings) => {
-                        self.settings_snapshot.cloud_fallback_policy =
-                            settings.cloud_fallback_policy;
-                        self.settings_draft.cloud_fallback_policy = settings.cloud_fallback_policy;
-                        match pending.policy {
-                            CloudFallbackPolicy::Allow => {
-                                self.continue_chat_fallback(pending.consent, context);
-                            }
-                            CloudFallbackPolicy::Never => {
-                                let logical_request_id = pending.consent.attempt.logical_request_id;
-                                self.finish_chat_attempt_failure(
-                                    logical_request_id,
-                                    "The local provider failed, and cloud fallback was declined."
-                                        .to_string(),
-                                );
-                            }
-                            CloudFallbackPolicy::Ask => {
-                                self.cloud_fallback_consent = Some(pending.consent);
-                                self.status =
-                                    "Choose whether this request may use a cloud provider"
-                                        .to_string();
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        self.cloud_fallback_consent = Some(pending.consent);
-                        self.status = format!("Cloud fallback preference was not saved · {error}");
-                    }
-                }
-            }
-            SettingsEvent::Stopped => worker_stopped = true,
-        }
-
-        if worker_stopped {
-            apply_startup_scan_preference(&mut self.startup_scan_gate, false);
-            self.settings_loading = false;
-            self.settings_saving = false;
-            self.settings_load_request_id = None;
-            self.settings_pending_save = None;
-            self.provider_key_pending = None;
-            self.provider_key_busy = false;
-            if let Some(pending) = self.cloud_fallback_policy_update.take() {
-                self.cloud_fallback_consent = Some(pending.consent);
-            }
-            window::set_close_to_tray(self.settings_snapshot.close_to_tray);
-            self.settings_error = Some("Native settings worker stopped".to_string());
-            self.settings_save_error = None;
-            self.settings_receiver = None;
-            self.settings_runtime = None;
-            self.status = "Native settings persistence stopped".to_string();
-        } else {
-            self.resume_settings_wait(context);
-        }
+    /// Ask the engine for a subscription account probe when the dialog opens
+    /// on a CLI provider.
+    pub(crate) fn probe_selected_subscription_account(&mut self) {
+        let Some(provider) =
+            crate::app::policy::subscription_auth_provider_for_setup(self.provider_setup_index)
+        else {
+            return;
+        };
+        let _: SubscriptionAuthProvider = provider;
+        self.begin_subscription_auth_operation(provider, SubscriptionOperation::Status);
     }
 }

@@ -677,7 +677,7 @@ pub(crate) fn ai_assistant_workspace(
                 TextBlock::new()
                     .text(format!(
                         "{} could not answer before producing any output. {}",
-                        provider_display_name(consent.attempt.current_provider),
+                        provider_display_name(consent.local_provider),
                         consent.reason
                     ))
                     .font_size(12.5)
@@ -841,7 +841,7 @@ pub(crate) fn ai_assistant_workspace(
                                 .into()
                         });
                 KeyedView::new(
-                    format!("{}-{index}", message.request_id),
+                    format!("{}-{index}", message.turn),
                     StackPanel::new()
                         .max_width(if narrow { 620.0 } else { 760.0 })
                         .horizontal_alignment(if is_user {

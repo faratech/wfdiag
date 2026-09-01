@@ -1,33 +1,24 @@
 //! The value types the root component stores as fields.
+//!
+//! Everything here is **view state**: what is on screen, what the user is
+//! editing, and which overlay is open. Engine state — results, issues, history,
+//! provider status, staged remediations — lives in
+//! [`wfdiag_app::AppSnapshot`] and is projected into these types after every
+//! drain. Nothing in this module holds a request id or a worker handle.
 
 #![deny(unsafe_code)]
 
-use crate::ai::chat_tools::ChatToolSnapshot;
-use crate::app::message::ActionReviewSurface;
-use crate::app::policy::{
-    merge_targeted_diagnostic_result, scan_concurrency_from_settings, scan_kind_history_tag,
-};
 use crate::platform::save_picker::{ValidatedExportPath, ValidatedSupportPackagePaths};
 use crate::widgets::icons::FaIcon;
 use std::collections::VecDeque;
-use wfdiag_native_ai_analysis::{
-    DiagnosticAnalysisGeneration, FixPlanGeneration, GroundingTrace, IssuePrioritizationGeneration,
-};
-use wfdiag_native_ai_chat::workers::provider_setup::ModelCatalog;
-use wfdiag_native_ai_chat::workers::subscription_install::{
-    SubscriptionInstallFallbackReason, SubscriptionInstallMethod,
-};
-use wfdiag_native_ai_chat::{
-    ChatToolHistory, ProviderUse, SubscriptionAuthOperation, SubscriptionAuthProvider,
-    SubscriptionAuthStatus,
-};
-use wfdiag_native_ai_provider::{AIProvider, AIProviderPreference, ProviderAvailability};
-use wfdiag_native_diagnostics::{DiagnosticTask, ScanKind};
+use wfdiag_app::domain::ai_intent::PendingAiIntent;
+use wfdiag_native_ai_analysis::GroundingTrace;
+use wfdiag_native_ai_chat::{ChatToolHistory, ProviderUse};
+use wfdiag_native_ai_provider::AIProvider;
 use wfdiag_native_history::TaskDiffDetail;
 use wfdiag_native_projection::json_diff::{JsonDifference, find_json_differences};
-use wfdiag_native_remediation::broker::{ActionProposal, ActionRequest};
-use wfdiag_native_settings::{AppSettings, CloudFallbackPolicy, ProviderKeyId};
-use wfdiag_ui_core::{DiagnosticTaskResult, SystemStats};
+use wfdiag_native_remediation::broker::ActionRequest;
+use wfdiag_ui_core::SystemStats;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Page {
@@ -61,21 +52,6 @@ pub(crate) enum AiMode {
     ScanReport,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum PendingAiIntent {
-    Report { force_refresh: bool },
-    Chat { prompt: String },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PendingAiProviderGate {
-    Ready,
-    Waiting,
-    Refresh,
-    Disabled,
-    Unavailable,
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct AiPreparationUi<'a> {
     pub(crate) intent: Option<&'a PendingAiIntent>,
@@ -89,19 +65,36 @@ pub(crate) struct AiPreparationUi<'a> {
 
 impl AiPreparationUi<'_> {
     pub(crate) fn is_chat(self) -> bool {
-        matches!(self.intent, Some(PendingAiIntent::Chat { .. }))
+        self.intent.is_some_and(PendingAiIntent::is_chat)
     }
 
     pub(crate) fn is_report(self) -> bool {
-        matches!(self.intent, Some(PendingAiIntent::Report { .. }))
+        self.intent.is_some_and(PendingAiIntent::is_report)
     }
 }
 
+/// The Full Scan the assistant asked for, awaiting the user's answer.
+///
+/// This consent surface stays with the shell: the engine only reports that the
+/// model asked ([`wfdiag_app::ChatEvent::FullScanRequested`]) and never starts
+/// a scan on its own.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FullScanConsent {
     pub(crate) source_scan_id: String,
     pub(crate) reason: String,
     pub(crate) original_prompt: String,
+}
+
+/// The local-to-cloud question, projected for rendering.
+///
+/// The decision itself is [`wfdiag_app::AppCommand::CloudFallbackDecision`];
+/// this is only what the panel prints.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CloudFallbackConsent {
+    pub(crate) candidate: AIProvider,
+    pub(crate) local_provider: AIProvider,
+    pub(crate) reason: String,
+    pub(crate) saving: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,7 +105,7 @@ pub(crate) enum ChatDisplayRole {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ChatDisplayMessage {
-    pub(crate) request_id: u64,
+    pub(crate) turn: u64,
     pub(crate) role: ChatDisplayRole,
     pub(crate) text: String,
     pub(crate) provider_use: Option<ProviderUse>,
@@ -120,34 +113,6 @@ pub(crate) struct ChatDisplayMessage {
     pub(crate) terminal_message: Option<String>,
     pub(crate) tools: ChatToolHistory,
     pub(crate) proposals: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct ChatAttempt {
-    pub(crate) logical_request_id: u64,
-    pub(crate) prompt: String,
-    pub(crate) tools: ChatToolSnapshot,
-    pub(crate) preference: AIProviderPreference,
-    pub(crate) availability: ProviderAvailability,
-    pub(crate) tried: Vec<AIProvider>,
-    pub(crate) initial_provider: AIProvider,
-    pub(crate) current_provider: AIProvider,
-    pub(crate) first_failure: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct CloudFallbackConsent {
-    pub(crate) previous_request_id: u64,
-    pub(crate) attempt: ChatAttempt,
-    pub(crate) candidate: AIProvider,
-    pub(crate) reason: String,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct PendingCloudFallbackPolicyUpdate {
-    pub(crate) request_id: u64,
-    pub(crate) policy: CloudFallbackPolicy,
-    pub(crate) consent: CloudFallbackConsent,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -160,59 +125,17 @@ pub(crate) struct DiagnosticAnalysisDisplay {
     pub(crate) busy: bool,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct DiagnosticAnalysisAttempt {
-    pub(crate) generation: DiagnosticAnalysisGeneration,
-    pub(crate) tried: Vec<AIProvider>,
-    pub(crate) initial_provider: AIProvider,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct PendingDiagnosticAnalysis {
-    pub(crate) request_id: u64,
-    pub(crate) attempt: DiagnosticAnalysisAttempt,
-}
-
 #[derive(Clone, Debug, Default)]
 pub(crate) struct IssuePrioritizationDisplay {
     pub(crate) text: Option<String>,
     pub(crate) provider_use: Option<ProviderUse>,
-    pub(crate) grounding: Option<GroundingTrace>,
     pub(crate) cached: bool,
     pub(crate) error: Option<String>,
     pub(crate) busy: bool,
-    /// Epoch of the committed issue evidence this text describes. A result
-    /// from an older detection pass is never rendered over newer evidence.
-    pub(crate) committed_epoch: u64,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct IssuePrioritizationAttempt {
-    pub(crate) generation: IssuePrioritizationGeneration,
-    pub(crate) tried: Vec<AIProvider>,
-    pub(crate) initial_provider: AIProvider,
-    pub(crate) committed_epoch: u64,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct PendingIssuePrioritization {
-    pub(crate) request_id: u64,
-    pub(crate) attempt: IssuePrioritizationAttempt,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct FixPlanAttempt {
-    pub(crate) generation: FixPlanGeneration,
-    pub(crate) tried: Vec<AIProvider>,
-    pub(crate) initial_provider: AIProvider,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct PendingFixPlan {
-    pub(crate) request_id: u64,
-    pub(crate) attempt: FixPlanAttempt,
-}
-
+/// The catalog ids one fix-plan row (or its "review together" batch) names,
+/// pinned to the fingerprints the plan was generated against.
 #[derive(Clone, Debug)]
 pub(crate) struct FixPlanActionSelection {
     pub(crate) actions: Vec<ActionRequest>,
@@ -288,13 +211,18 @@ impl Page {
     pub(crate) fn from_tag(tag: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|page| page.tag() == tag)
     }
+
+    /// Whether this page consumes one-second telemetry.
+    pub(crate) const fn consumes_live_telemetry(self) -> bool {
+        matches!(self, Self::Monitor | Self::Processes)
+    }
 }
 
 /// Reactor presentation state for one expanded History task.
 ///
 /// The native history contract remains the source of the raw payloads. The
-/// structured JSON projection is computed once on the background completion
-/// path so rebuilding the WinUI tree never reparses large diagnostic output.
+/// structured JSON projection is computed once, when the engine's task-diff
+/// event arrives, so rebuilding the WinUI tree never reparses large output.
 #[derive(Clone, Debug)]
 pub(crate) struct HistoryTaskDiffProjection {
     pub(crate) detail: TaskDiffDetail,
@@ -307,12 +235,6 @@ pub(crate) struct HistoryTrendBadge {
     pub(crate) description: String,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct PendingActionApproval {
-    pub(crate) proposal: ActionProposal,
-    pub(crate) return_surface: ActionReviewSurface,
-}
-
 impl From<TaskDiffDetail> for HistoryTaskDiffProjection {
     fn from(detail: TaskDiffDetail) -> Self {
         let differences = find_json_differences(&detail.previous_output, &detail.current_output);
@@ -323,91 +245,10 @@ impl From<TaskDiffDetail> for HistoryTaskDiffProjection {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DiagnosticSnapshot {
-    pub(crate) results: Vec<DiagnosticTaskResult>,
-    pub(crate) scan_kind: Option<ScanKind>,
-    pub(crate) task_ids: Vec<String>,
-    pub(crate) session_id: Option<String>,
-    pub(crate) duration_ms: u64,
-    pub(crate) total: usize,
-    pub(crate) completed: usize,
-    pub(crate) errors: usize,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TargetedDiagnosticOverlay {
-    pub(crate) target_task_id: String,
-    pub(crate) base: DiagnosticSnapshot,
-    pub(crate) staged_result: Option<DiagnosticTaskResult>,
-}
-
-impl TargetedDiagnosticOverlay {
-    pub(crate) fn for_committed_session(
-        scan_kind: ScanKind,
-        task_ids: &[String],
-        base: DiagnosticSnapshot,
-    ) -> Option<Self> {
-        let [target_task_id] = task_ids else {
-            return None;
-        };
-        (scan_kind == ScanKind::Targeted && base.session_id.is_some()).then(|| Self {
-            target_task_id: target_task_id.clone(),
-            base,
-            staged_result: None,
-        })
-    }
-
-    pub(crate) fn stage(&mut self, result: DiagnosticTaskResult) {
-        if result.task_id == self.target_task_id {
-            self.staged_result = Some(result);
-        }
-    }
-
-    pub(crate) fn staged_counts(&self) -> (usize, usize) {
-        self.staged_result
-            .as_ref()
-            .map_or((0, 0), |result| (1, usize::from(!result.success)))
-    }
-
-    pub(crate) fn rollback(self) -> DiagnosticSnapshot {
-        self.base
-    }
-
-    pub(crate) fn commit(
-        &self,
-        replacement: DiagnosticTaskResult,
-        catalog: &[DiagnosticTask],
-    ) -> Result<DiagnosticSnapshot, String> {
-        let results = merge_targeted_diagnostic_result(
-            self.base.results.clone(),
-            &self.target_task_id,
-            replacement,
-            self.base.session_id.as_deref(),
-            catalog,
-        )?;
-        let mut task_ids = self.base.task_ids.clone();
-        if !task_ids
-            .iter()
-            .any(|task_id| task_id == &self.target_task_id)
-        {
-            task_ids.push(self.target_task_id.clone());
-        }
-        let completed = results.len();
-        let errors = results.iter().filter(|result| !result.success).count();
-        Ok(DiagnosticSnapshot {
-            results,
-            scan_kind: self.base.scan_kind,
-            total: task_ids.len(),
-            task_ids,
-            session_id: self.base.session_id.clone(),
-            duration_ms: self.base.duration_ms,
-            completed,
-            errors,
-        })
-    }
-}
-
+/// What the shell must do with a rendered export payload once it arrives.
+///
+/// The destination was chosen before the render was requested (the picker
+/// answers first, #140), so this is a pure "where does the payload go".
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PendingExportAction {
     ShareToWindowsForum,
@@ -420,124 +261,6 @@ pub(crate) enum PendingExportAction {
     SaveToFile {
         path: ValidatedExportPath,
     },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PendingExport {
-    pub(crate) request_id: u64,
-    pub(crate) action: PendingExportAction,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ExportWriteKind {
-    File,
-    SupportPackage,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ProviderCatalogUiState {
-    pub(crate) catalog: Option<ModelCatalog>,
-    pub(crate) loading: bool,
-    pub(crate) error: Option<String>,
-    pub(crate) blocked: Option<String>,
-    pub(crate) stale: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PendingProviderCatalogRequest {
-    pub(crate) request_id: u64,
-    pub(crate) provider: AIProvider,
-    pub(crate) setup_index: usize,
-    pub(crate) dialog_epoch: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PendingProviderKeyChange {
-    pub(crate) request_id: u64,
-    pub(crate) provider: ProviderKeyId,
-    pub(crate) index: usize,
-    pub(crate) store: bool,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct SubscriptionAuthUiState {
-    pub(crate) status: Option<SubscriptionAuthStatus>,
-    pub(crate) operation: Option<SubscriptionAuthOperation>,
-    pub(crate) error: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PendingSubscriptionAuth {
-    pub(crate) operation_id: u64,
-    pub(crate) provider: SubscriptionAuthProvider,
-    pub(crate) operation: SubscriptionAuthOperation,
-    pub(crate) dialog_epoch: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SubscriptionInstallPrompt {
-    Winget {
-        provider: SubscriptionAuthProvider,
-        dialog_epoch: u64,
-    },
-    VendorFallback {
-        provider: SubscriptionAuthProvider,
-        reason: SubscriptionInstallFallbackReason,
-        dialog_epoch: u64,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PendingSubscriptionInstall {
-    pub(crate) request_id: u64,
-    pub(crate) provider: SubscriptionAuthProvider,
-    pub(crate) method: SubscriptionInstallMethod,
-    pub(crate) dialog_epoch: u64,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DiagnosticScanPolicy {
-    pub(crate) auto_save: bool,
-    pub(crate) max_concurrent_tasks: usize,
-    pub(crate) history_tag: String,
-}
-
-impl DiagnosticScanPolicy {
-    pub(crate) fn snapshot(
-        settings: &AppSettings,
-        scan_kind: ScanKind,
-        targeted_rerun: bool,
-    ) -> Self {
-        Self {
-            // A one-row rerun updates the currently committed scan in place.
-            // Persisting it as a separate one-row history entry would both lose
-            // the scan context and diverge from the shipping Tauri behavior.
-            auto_save: settings.auto_save && !targeted_rerun,
-            max_concurrent_tasks: scan_concurrency_from_settings(settings.max_concurrent_tasks),
-            history_tag: scan_kind_history_tag(scan_kind).to_string(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HistoryRetentionPolicy {
-    pub(crate) retain_history: bool,
-    pub(crate) history_limit: u32,
-}
-
-impl From<&AppSettings> for HistoryRetentionPolicy {
-    fn from(settings: &AppSettings) -> Self {
-        Self {
-            retain_history: settings.retain_history,
-            history_limit: settings.history_limit,
-        }
-    }
-}
-
-pub(crate) struct PendingSettingsSave {
-    pub(crate) request_id: u64,
-    pub(crate) dialog_epoch: u64,
-    pub(crate) submitted: AppSettings,
 }
 
 pub(crate) const MONITOR_HISTORY_SAMPLES: usize = 60;
@@ -645,6 +368,17 @@ mod tests {
                     "{previous:?} -> {next:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn only_the_live_surfaces_consume_telemetry() {
+        for page in Page::ALL {
+            assert_eq!(
+                page.consumes_live_telemetry(),
+                matches!(page, Page::Monitor | Page::Processes),
+                "{page:?}"
+            );
         }
     }
 }

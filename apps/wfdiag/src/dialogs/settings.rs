@@ -11,13 +11,14 @@ use crate::app::policy::{
     selected_setting_index, subscription_auth_provider_for_setup,
     subscription_install_progress_label,
 };
-use crate::app::state::{ProviderCatalogUiState, SubscriptionAuthUiState};
 use crate::screens::ai::view::primary_button_resources;
 use crate::widgets::badges::status_pill;
 use crate::widgets::chrome::fa_icon_label;
 use crate::widgets::icons;
 use crate::widgets::icons::FaIcon;
 use crate::widgets::palette_colors::Palette;
+use wfdiag_app::domain::catalog::CatalogState as ProviderCatalogUiState;
+use wfdiag_app::domain::subscriptions::AccountState as SubscriptionAuthUiState;
 use wfdiag_native_ai_chat::workers::subscription_auth::SubscriptionAuthState;
 use wfdiag_native_ai_chat::workers::subscription_install::SubscriptionInstallProgress;
 use wfdiag_native_ai_chat::{SubscriptionAuthOperation, SubscriptionAuthProvider};
