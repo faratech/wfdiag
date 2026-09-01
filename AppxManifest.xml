@@ -25,9 +25,10 @@
     <!-- Both Universal and Desktop required for WinRT AI APIs (Phi Silica) -->
     <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.26100.0" MaxVersionTested="10.0.26226.0" />
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26226.0" />
-    <!-- Windows App SDK framework used by the Store MSIX bundle workflow -->
-    <PackageDependency Name="Microsoft.WindowsAppRuntime.1.8"
-                       MinVersion="8000.675.1142.0"
+    <!-- Windows App SDK framework: the native WinUI 3 shell (windows-reactor) targets the 2.x
+         line; the pinned value is single-sourced from reactor-baselines/manifest.json (reactor_pin). -->
+    <PackageDependency Name="Microsoft.WindowsAppRuntime.2"
+                       MinVersion="2.4.0.0"
                        Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
   </Dependencies>
 
@@ -36,7 +37,7 @@
   </Resources>
 
   <Applications>
-    <Application Id="App" Executable="wfdiag-tauri.exe" EntryPoint="Windows.FullTrustApplication">
+    <Application Id="App" Executable="wfdiag.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
         DisplayName="WindowsForum Diagnostics"
         Description="Professional Windows System Diagnostic Tool"

@@ -637,3 +637,39 @@ Only after these gates pass should a separate cutover change make Reactor the
 shipping entry point. Removal of React, Vite, Tauri, Node-dependent CI, and
 `dist` staging belongs to a later cleanup change after a signed rollback tag
 has been created.
+
+## Cutover decision (2026-09-01)
+
+The owner decided on 2026-09-01 that the next release ships the native WinUI 3
+shell (`apps/wfdiag`, binary `wfdiag.exe`) as the production UI, and settled the
+three gates that were waiting on Microsoft rather than on this repository:
+
+1. **Reactor release.** `windows-reactor` and `windows-reactor-setup` still publish
+   only the placeholder `0.0.0` on crates.io (re-checked 2026-09-01; upstream has
+   moved three commits past the pin). The release ships on the reviewed, exact
+   windows-rs revision `1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8` (Reactor 0.100.0
+   source). The pin is a revision, never a branch; it is recorded in the root
+   `Cargo.lock`; `scripts/check-external-gates.py` keeps watching crates.io so the
+   move to an official release happens as a normal dependency update later.
+2. **Windows App Runtime.** `AppxManifest.xml` now depends on
+   `Microsoft.WindowsAppRuntime.2` (MinVersion `2.4.0.0`), the line the pinned
+   Reactor stages. The pin is single-sourced from
+   `reactor-baselines/manifest.json` (`reactor_pin.windows_app_runtime_framework`
+   / `windows_app_runtime_min_version`) and read by `scripts/bump-version.py`,
+   `scripts/check-reactor-readiness.py`, and `scripts/check-external-gates.py`.
+   On-device AI keeps working because `wfdiag-native-phi` resolves the AI Text
+   DLL from whichever `Microsoft.WindowsAppRuntime*` package the app depends on;
+   this must still be validated on Copilot+ hardware (`aion_store_validation`).
+3. **Window lifecycle and global accelerators.** The isolated Win32 interop in
+   `apps/wfdiag/src/window_support.rs` and `instance_support.rs` (cached HWND,
+   revisioned lifecycle snapshots, close-to-tray, tray menu, the keyboard hook
+   delivering Ctrl+K / Ctrl+1..6 / Ctrl+/ / Ctrl+Shift+Q / Ctrl+Shift+F) is the
+   accepted implementation for this release. Official Reactor APIs for both
+   remain tracked follow-ups, not blockers.
+
+The Tauri shell (`src-tauri`) stays buildable as a rollback until a later
+cleanup release removes it. The remaining cutover gates
+(`current_baseline_capture`, `native_control_parity`, `aion_store_validation`,
+`store_packaging_validation`, `direct_distribution_validation`) and every
+`backend_parity` surface still flip only on real x64/ARM64 hardware evidence
+(see `docs/validation/clean-machine-protocol.md`).

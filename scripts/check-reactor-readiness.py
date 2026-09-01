@@ -968,7 +968,7 @@ def _check_store_manifest(
         report.add(
             "runtime.alignment",
             "blocker",
-            "Store uses Windows App Runtime 1.8 while the pinned Reactor revision stages 2.4; do not cut over until one runtime strategy passes Store and on-device AI validation",
+            "Store manifest and the pinned Reactor revision declare different Windows App Runtime frameworks; do not cut over until one runtime strategy passes Store and on-device AI validation",
             store_framework=runtime_dependencies[0],
             reactor_framework=target_framework,
             reactor_runtime_release=target_release,

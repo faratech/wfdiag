@@ -7,7 +7,7 @@ cutover review:
 1. crates.io watch — has `windows-reactor` published a real (non-placeholder)
    release? Any version above 0.0.0 makes `cutover.official_reactor_release`
    actionable.
-2. Runtime drift — Store manifest `PackageDependency` (1.8 line) vs the Reactor
+2. Runtime drift — Store manifest `PackageDependency` vs the Reactor
    staging pin (`Microsoft.WindowsAppRuntime.2` / 2.4.0) vs the frameworks
    installed on this host (when -HostFrameworks is supplied).
 3. Packaging pre-flight — presence of the artifacts and manifests the

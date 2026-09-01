@@ -18,9 +18,19 @@ APPX_TARGET_DEVICE_FAMILY_MIN_VERSIONS = {
     "Windows.Desktop": "10.0.17763.0",
 }
 
-APPX_PACKAGE_DEPENDENCY_MIN_VERSIONS = {
-    "Microsoft.WindowsAppRuntime.1.8": "8000.675.1142.0",
-}
+
+
+def _windows_app_runtime_pin(script_dir: Path) -> dict[str, str]:
+    """Single source for the Windows App Runtime framework pin.
+
+    reactor-baselines/manifest.json (reactor_pin) is read by this script, by
+    scripts/check-reactor-readiness.py, and by scripts/check-external-gates.py,
+    so the manifest, the readiness gate, and the drift watcher can never
+    disagree about which framework line the Store package depends on.
+    """
+    manifest = json.loads((script_dir / "reactor-baselines" / "manifest.json").read_text(encoding="utf-8"))
+    pin = manifest["reactor_pin"]
+    return {pin["windows_app_runtime_framework"]: pin["windows_app_runtime_min_version"]}
 
 
 def update_json_file(file_path: Path, new_version: str, dry_run: bool) -> bool:
@@ -214,7 +224,7 @@ def validate_appx_manifest_version_invariants(content: str, file_path: Path) -> 
         node.attrib.get("Name"): node.attrib.get("MinVersion")
         for node in root.findall(".//{*}PackageDependency")
     }
-    for name, expected in APPX_PACKAGE_DEPENDENCY_MIN_VERSIONS.items():
+    for name, expected in _windows_app_runtime_pin(file_path.resolve().parent).items():
         actual = dependencies.get(name)
         if actual != expected:
             print(

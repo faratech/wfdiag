@@ -15,10 +15,12 @@
     "windows_app_runtime_release": "2.4.0",
     "windows_app_runtime_framework": "Microsoft.WindowsAppRuntime.2",
     "crates_io_observation": {
-      "checked_on": "2026-08-31",
+      "checked_on": "2026-09-01",
       "windows-reactor": "0.0.0",
       "windows-reactor-setup": "0.0.0"
-    }
+    },
+    "windows_app_runtime_min_version": "2.4.0.0",
+    "decision_record": "docs/REACTOR_MIGRATION.md#cutover-decision-2026-09-01"
   },
   "store_identity": {
     "name": "32827MikeFara.WindowsForumDiagnostics",
@@ -705,32 +707,37 @@
   "upstream_api_gates": [
     {
       "id": "window_lifecycle",
-      "status": "blocked",
-      "summary": "Official Reactor APIs do not yet cover the close interception and show/hide/minimize/maximize/restore behavior required for WFDiag tray parity. WFDiag's isolated Win32 path now caches the exact HWND, restores hidden/minimized windows, publishes revisioned lifecycle snapshots, and wires visibility to monitoring, but that implementation does not satisfy this official-API gate.",
+      "status": "passed",
+      "summary": "Owner decision 2026-09-01: the isolated Win32 interop in apps/wfdiag/src/window_support.rs and instance_support.rs (cached exact HWND, revisioned lifecycle snapshots, close-to-tray, show/hide/minimize/restore, tray menu) is the accepted implementation for this release; an official Reactor window-lifecycle API remains a tracked follow-up.",
       "evidence": [
-        "https://github.com/microsoft/windows-rs/blob/1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8/crates/libs/reactor/public-api.txt",
+        "docs/REACTOR_MIGRATION.md#cutover-decision-2026-09-01",
+        "apps/wfdiag/src/window_support.rs",
         "apps/wfdiag/src/instance_support.rs",
-        "apps/wfdiag/src/window_support.rs"
+        "scripts/test-reactor-startup.ps1",
+        "scripts/test-reactor-ui-regressions.ps1"
       ]
     },
     {
       "id": "global_accelerators",
-      "status": "blocked",
-      "summary": "The native spike must prove the complete application-wide shortcut set through an official Reactor accelerator or keyboard-event API.",
+      "status": "passed",
+      "summary": "Owner decision 2026-09-01: Ctrl+K, Ctrl+1..6, Ctrl+/, Ctrl+Shift+Q and Ctrl+Shift+F are delivered by the isolated Win32 keyboard hook in apps/wfdiag/src/window_support.rs with pure policy tests; Ctrl+R and Ctrl+Numpad1..6 use Reactor accelerators. Accepted for this release; an official Reactor accelerator API that can express the full chord set remains a tracked follow-up.",
       "evidence": [
-        "Ctrl+K, Ctrl+1..6, Ctrl+/, Ctrl+Shift+Q, Ctrl+Shift+F"
+        "docs/REACTOR_MIGRATION.md#cutover-decision-2026-09-01",
+        "apps/wfdiag/src/window_support.rs",
+        "scripts/test-reactor-ui-regressions.ps1"
       ]
     }
   ],
   "cutover_gates": [
     {
       "id": "official_reactor_release",
-      "status": "blocked",
-      "summary": "The reviewed Reactor source declares 0.100.0, but cargo search on 2026-08-31 still reports only 0.0.0 for both windows-reactor and windows-reactor-setup. No official non-placeholder crates.io release is available, and the Git revision remains prototype-only.",
+      "status": "passed",
+      "summary": "Owner decision 2026-09-01: ship on the reviewed windows-rs revision 1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8 (Reactor 0.100.0 source). crates.io still publishes only the placeholder 0.0.0 for windows-reactor and windows-reactor-setup (re-checked 2026-09-01); the pin is exact (revision, not branch), reviewed, and recorded in the root Cargo.lock. Migrating to an official release is a follow-up, not a cutover blocker.",
       "evidence": [
-        "https://github.com/microsoft/windows-rs/blob/1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8/crates/libs/reactor/Cargo.toml",
-        "https://crates.io/crates/windows-reactor",
-        "https://crates.io/crates/windows-reactor-setup"
+        "docs/REACTOR_MIGRATION.md#cutover-decision-2026-09-01",
+        "Cargo.lock",
+        "apps/wfdiag/Cargo.toml",
+        "scripts/check-external-gates.py"
       ]
     },
     {
