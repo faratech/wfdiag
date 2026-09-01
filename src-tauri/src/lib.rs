@@ -2,7 +2,6 @@
 
 mod action_broker;
 pub mod ai_evidence;
-mod architecture;
 mod commands;
 pub mod diagnostic_events;
 pub mod diagnostics;
@@ -14,19 +13,16 @@ mod issue_catalog;
 mod native_diagnostics;
 pub use wfdiag_native_monitor as native_monitor;
 pub use wfdiag_native_remediation::remediation;
+#[cfg(windows)]
+// Tauri command wrapper over the shared package-identity/LAF-aware runtime.
+pub mod phi_silica;
 pub mod results_storage;
-mod security;
 #[cfg(windows)]
 mod sparse_identity;
 pub mod state;
 pub mod timestamp;
 mod tray;
 mod update_check;
-#[cfg(windows)]
-mod wmi_native;
-
-// Tauri command wrapper over the shared package-identity/LAF-aware runtime.
-pub mod phi_silica;
 
 // Unified AI service layer
 mod ai_chat;

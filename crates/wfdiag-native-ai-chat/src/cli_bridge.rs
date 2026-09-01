@@ -265,7 +265,11 @@ pub async fn run_headless_bounded(
             .get_program()
             .to_string_lossy()
             .to_ascii_lowercase();
-        if program.ends_with(".cmd") || program.ends_with(".bat") {
+        // `program` is already ASCII-lowercased above, so the case-sensitive
+        // suffix check is exactly what we want here (clippy false positive).
+        #[allow(clippy::case_sensitive_file_extension_comparisons)]
+        let is_batch_shim = program.ends_with(".cmd") || program.ends_with(".bat");
+        if is_batch_shim {
             // Rust >= 1.77 refuses to spawn batch files with arguments, so a
             // where.exe fallback that only found an npm shim would otherwise
             // fail with an opaque spawn error.
