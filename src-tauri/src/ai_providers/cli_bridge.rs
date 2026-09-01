@@ -762,6 +762,23 @@ pub async fn run_headless(
 ) -> Result<std::process::Output, String> {
     #[cfg(windows)]
     {
+        let program = cmd
+            .as_std()
+            .get_program()
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        if program.ends_with(".cmd") || program.ends_with(".bat") {
+            // Rust >= 1.77 refuses to spawn batch files with arguments, so a
+            // where.exe fallback that only found an npm shim would otherwise
+            // fail with an opaque spawn error.
+            return Err(format!(
+                "{what} resolved to the batch shim '{program}', which cannot receive arguments. \
+Install the native executable (for example via the official installer) and retry."
+            ));
+        }
+    }
+    #[cfg(windows)]
+    {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
