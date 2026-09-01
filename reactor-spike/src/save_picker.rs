@@ -517,9 +517,25 @@ fn canonical_candidate(path: &Path) -> Result<PathBuf, SavePickerError> {
 }
 
 fn canonical_existing_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    // Roots are stable for an `ExportPathPolicy`'s lifetime, and one
+    // support-package export validates several paths against the same
+    // policy. Cache canonicalization per raw root, same reasoning (and
+    // success-only caching) as `known_folder`'s cache above.
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     roots
         .iter()
-        .filter_map(|root| root.canonicalize().ok())
+        .filter_map(|root| {
+            if let Some(cached) = cache.lock().ok().and_then(|c| c.get(root).cloned()) {
+                return Some(cached);
+            }
+            let canonical = root.canonicalize().ok()?;
+            if let Ok(mut cache) = cache.lock() {
+                cache.insert(root.clone(), canonical.clone());
+            }
+            Some(canonical)
+        })
         .collect()
 }
 

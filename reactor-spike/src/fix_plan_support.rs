@@ -508,8 +508,11 @@ async fn one_shot(
     match provider {
         AIProvider::None => Err("No AI provider available".to_string()),
         AIProvider::PhiSilica => {
-            wfdiag_native_phi::generate_response(&format!("{PLAN_SYSTEM}\n\nPLAN TASK\n{prompt}"))
-                .await
+            wfdiag_native_phi::generate_response(
+                &format!("{PLAN_SYSTEM}\n\nPLAN TASK\n{prompt}"),
+                || false,
+            )
+            .await
         }
         AIProvider::OpenAI
         | AIProvider::FoundryLocal

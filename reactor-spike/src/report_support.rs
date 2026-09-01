@@ -380,7 +380,10 @@ impl ReportProviderResolver for TurnReportResolver {
         Box::pin(async move {
             if provider == AIProvider::PhiSilica {
                 return Ok(ResolvedReportProvider {
-                    chat: Arc::new(PhiChatProvider),
+                    // No per-report cancellation token is threaded to this
+                    // resolver yet; Default never cancels early, same
+                    // behavior as before this adapter took a cancel field.
+                    chat: Arc::new(PhiChatProvider::default()),
                     config_fingerprint: "provider=phi_silica;runtime=windows_ai".to_string(),
                     requested_model: None,
                 });

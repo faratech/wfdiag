@@ -5,11 +5,9 @@
 //! stale-completion guards, Store-compatible issue projections, canonical
 //! remediation snapshots, and the deterministic 2.5.8 visual fixture.
 
-use std::collections::HashMap;
-
 use wfdiag_native_issues::{
     Issue, IssueDetectionCompleted, IssueDetectionRequest, IssueSeverity, IssueStatus,
-    RemediationSummary, TaskResult, Timestamp, catalog, remediation_summaries,
+    RemediationSummary, SharedScanEvidence, Timestamp, catalog, remediation_summaries,
 };
 
 /// Identity captured when an issue-detection request is enqueued.
@@ -39,7 +37,7 @@ pub(crate) fn prepare_issue_detection(
     request_id: u64,
     committed_epoch: u64,
     session_id: String,
-    results: HashMap<String, TaskResult>,
+    results: SharedScanEvidence,
     now: Timestamp,
     temp_file_count: Option<usize>,
 ) -> PreparedIssueDetection {
@@ -368,7 +366,8 @@ pub(crate) fn fixture_258_issues() -> Vec<Issue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
     use wfdiag_native_diagnostics::DiagnosticOutput;
 
     fn test_issue(id: &str, status: IssueStatus, severity: IssueSeverity, detected: bool) -> Issue {
@@ -406,14 +405,16 @@ mod tests {
 
     #[test]
     fn request_preparation_moves_the_authoritative_map_and_pairs_the_guard() {
-        let result = DiagnosticOutput {
+        let result = Arc::new(DiagnosticOutput {
             success: true,
             output: "{\"ok\":true}".to_string(),
             error: None,
             duration_ms: 17,
-        };
-        let results: HashMap<String, DiagnosticOutput> =
-            HashMap::from([("logical_disk".to_string(), result.clone())]);
+        });
+        let results = Arc::new(HashMap::from([(
+            "logical_disk".to_string(),
+            Arc::clone(&result),
+        )]));
         let prepared = prepare_issue_detection(
             41,
             9,
@@ -433,6 +434,10 @@ mod tests {
         );
         assert_eq!(prepared.request.request_id, 41);
         assert_eq!(prepared.request.results.get("logical_disk"), Some(&result));
+        assert!(Arc::ptr_eq(
+            prepared.request.results.get("logical_disk").unwrap(),
+            &result
+        ));
         assert_eq!(prepared.request.results.len(), 1);
         assert_eq!(prepared.request.now.timestamp(), 1_788_076_800);
         assert_eq!(prepared.request.temp_file_count, Some(1_069));

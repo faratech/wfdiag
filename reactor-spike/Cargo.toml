@@ -14,7 +14,7 @@ self-contained = []
 settings-test-path = []
 
 [dependencies]
-serde_json = "1.0.151"
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
 semver = "1"
 tokio = { version = "1.52.0", features = ["rt-multi-thread"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -39,6 +39,8 @@ windows = { version = "0.62", features = [
     "Globalization_DateTimeFormatting",
     "System_UserProfile",
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
     "UI_Notifications",
     "Win32_System_Com",
     "Win32_System_SystemInformation",
@@ -48,6 +50,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
+windows-core = { git = "https://github.com/microsoft/windows-rs", rev = "1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8" }
 windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8" }
 
 [build-dependencies]

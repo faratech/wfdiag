@@ -1057,9 +1057,10 @@ async fn one_shot(
     match provider {
         AIProvider::None => Err("No AI provider available".to_string()),
         AIProvider::PhiSilica => {
-            wfdiag_native_phi::generate_response(&format!(
-                "{PHI_ONE_SHOT_POLICY}\n\nANALYSIS TASK\n{prompt}"
-            ))
+            wfdiag_native_phi::generate_response(
+                &format!("{PHI_ONE_SHOT_POLICY}\n\nANALYSIS TASK\n{prompt}"),
+                || false,
+            )
             .await
         }
         AIProvider::OpenAI

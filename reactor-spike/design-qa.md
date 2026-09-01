@@ -56,7 +56,9 @@ about 0.996 and its mean absolute RGB error is below one channel value.
   workspace structure, and the Settings top modal are represented with native controls.
 - Native title/navigation/buttons/inputs/settings, pane collapse, theme switching, process
   filtering, monitor pause/resume/refresh, keyboard refresh, and accessibility names exist without
-  a browser host.
+  a browser host. The isolated window subclass also supplies the shipping Ctrl+K, main-row
+  Ctrl+1..6, Ctrl+/, and Ctrl+Shift+Q/F chords with component-level editable/overlay/scan guards;
+  this does not close the official Reactor accelerator gate.
 - `NativeMonitorRuntime` now delivers live CPU, memory, storage, network, GPU, and NPU samples into
   Reactor through `wfdiag-ui-core`; the Tauri emitter is not used by the native shell.
 - The live Processes page now passes ARM64 expanded-desktop load, pause/resume, refresh, filtering,
@@ -68,6 +70,25 @@ about 0.996 and its mean absolute RGB error is below one channel value.
   evidence. The combined review retains the Store frame on the left and this live frame on the
   right.
 
+## Source-level parity completed after the captured candidate
+
+- Targeted diagnostic reruns are overlay transactions: they preserve the committed scan and append
+  or replace only the completed task, refresh issues from the merged evidence, skip rerun auto-save,
+  and roll back unchanged on failure or cancellation.
+- History task details render bounded structured JSON leaf changes above the raw side-by-side
+  documents, and comparison rows render recurring-failure trend badges.
+- Settings seeds the provider setup pane from configured fields, follows explicit Active AI choices,
+  blocks unusable or unknown Phi selections at selection/Save time, and keeps the Phi setup pane
+  reachable. The Anthropic default remains `claude-sonnet-5`.
+- Codex and Claude Code installation is an explicit Settings flow. The allowlisted winget path
+  cannot silently fall back to the mutable vendor bootstrap, which requires a distinct second
+  confirmation; a Windows Job Object contains the complete installer process tree for cancellation
+  and teardown.
+
+These are implemented and covered by focused source tests, but they are not visual, accessibility,
+performance, packaging, or live-device approvals. Their matching Store states and success/error/
+cancellation interactions still require the matrices below.
+
 ## Remaining parity work
 
 - Complete acceptance review and any final pixel corrections for the newly paired empty,
@@ -75,14 +96,16 @@ about 0.996 and its mean absolute RGB error is below one channel value.
 - Complete same-state evidence for light/system/high-contrast themes, reduced motion, keyboard
   focus, and 100%/150%/200% DPI on native x64 and ARM64 Windows.
 - Complete compact/collapsed and x64 runtime coverage for Processes. Replace the remaining
-  fixture-only issue and AI paths and finish History, Settings, export, remediation, scan
-  persistence, tray, notification, clipboard, packaged-update validation, and single-instance
-  backend/desktop-service adapters.
+  fixture-only issue and AI evidence and complete live success/error/cancellation validation for
+  History, Settings (including provider auth/install and Phi readiness), export, remediation,
+  targeted reruns, scan persistence, shortcuts, tray, notification, clipboard, packaged updates,
+  and single-instance behavior.
 - Validate UI Automation roles, names, keyboard traversal, text scaling, high contrast, and screen
   reader output on the candidate runtime.
 - Finish clean-machine framework-dependent Store/MSIX and self-contained direct-installer matrices.
-- Resolve the pinned Reactor revision's upstream window lifecycle and accelerator gaps, or carry a
-  reviewed native extension until an official usable release supplies them.
+- Resolve the pinned Reactor revision's upstream window lifecycle and accelerator gaps. The current
+  reviewed Win32 isolation preserves behavior, but cannot substitute for the official-Reactor-API
+  release gate.
 
 Native WinUI and the CSS implementation do not use the same font rasterizer, focus visuals, input
 chrome, or backdrop pipeline. Small raster-level differences can remain even after all measured

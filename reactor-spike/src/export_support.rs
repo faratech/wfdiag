@@ -3,7 +3,7 @@
 //! Report rendering remains in `wfdiag-native-export`. This module owns only
 //! shell concerns that should not live in that deterministic crate: resolving
 //! the current user's date/time presentation, putting already-rendered text on
-//! the clipboard, and launching the one fixed WindowsForum compose target.
+//! the clipboard, and launching closed WindowsForum/email compose targets.
 //!
 //! Clipboard calls must be made from Reactor's focused UI dispatcher. WinUI
 //! has already initialized WinRT on that thread; this helper deliberately does
@@ -12,6 +12,7 @@
 use std::error::Error;
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use wfdiag_native_export::{EmailPayload, render_email_compose_uri};
 use windows::ApplicationModel::DataTransfer::{
     Clipboard, ClipboardContentOptions, DataPackage, DataPackageOperation,
 };
@@ -61,6 +62,9 @@ pub enum ExportDeliveryError {
     ExternalLaunchFailed {
         code: isize,
     },
+    EmailComposeLaunchFailed {
+        code: isize,
+    },
 }
 
 impl fmt::Display for ExportDeliveryError {
@@ -79,6 +83,12 @@ impl fmt::Display for ExportDeliveryError {
                 write!(
                     formatter,
                     "Windows could not open the WindowsForum new-thread page (ShellExecute code {code})"
+                )
+            }
+            Self::EmailComposeLaunchFailed { code } => {
+                write!(
+                    formatter,
+                    "Windows could not open a new email draft (ShellExecute code {code})"
                 )
             }
         }
@@ -256,11 +266,20 @@ pub const fn resolve_export_external_url(action: ExportExternalAction) -> &'stat
 pub fn launch_export_external_action(
     action: ExportExternalAction,
 ) -> Result<(), ExportDeliveryError> {
+    let target = resolve_export_external_url(action);
+    let code = shell_execute_open(target);
+    if code <= 32 {
+        Err(ExportDeliveryError::ExternalLaunchFailed { code })
+    } else {
+        Ok(())
+    }
+}
+
+fn shell_execute_open(target: &str) -> isize {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     use windows::core::PCWSTR;
 
-    let target = resolve_export_external_url(action);
     let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
     let target: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
     let result = unsafe {
@@ -273,9 +292,23 @@ pub fn launch_export_external_action(
             SW_SHOWNORMAL,
         )
     };
-    let code = result.0 as isize;
+    result.0 as isize
+}
+
+/// Open the user's registered mail app with a new, unsent email draft.
+///
+/// The target is constructed from the shared [`EmailPayload`] by
+/// [`render_email_compose_uri`]: it has no recipient, carries only the short
+/// paste instruction, and percent-encodes every query component. The full
+/// report is never placed on the command line or in the URI. This function
+/// does not write the clipboard and cannot send mail; the caller must invoke
+/// it only after an explicit user action and after successfully copying
+/// [`EmailPayload::clipboard_body`] with [`write_text_to_clipboard`].
+pub fn launch_email_compose_draft(payload: &EmailPayload) -> Result<(), ExportDeliveryError> {
+    let target = render_email_compose_uri(payload);
+    let code = shell_execute_open(&target);
     if code <= 32 {
-        Err(ExportDeliveryError::ExternalLaunchFailed { code })
+        Err(ExportDeliveryError::EmailComposeLaunchFailed { code })
     } else {
         Ok(())
     }
@@ -316,6 +349,17 @@ mod tests {
             resolve_export_external_url(ExportExternalAction::WindowsForumNewThread),
             "https://windowsforum.com/forums/windows-help-and-support.302/post-thread"
         );
+    }
+
+    #[test]
+    fn email_compose_failure_never_echoes_payload_text() {
+        let error = ExportDeliveryError::EmailComposeLaunchFailed { code: 31 }.to_string();
+        assert_eq!(
+            error,
+            "Windows could not open a new email draft (ShellExecute code 31)"
+        );
+        assert!(!error.contains("subject"));
+        assert!(!error.contains("diagnostic"));
     }
 
     #[test]

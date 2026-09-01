@@ -216,7 +216,8 @@ unsafe extern "system" fn on_activation_event(_context: *mut c_void, timed_out: 
     // Re-arm before publishing: a SetEvent arriving after this reset fires a
     // fresh callback, while a signal consumed here is published below. Reset
     // and publish are both idempotent, so concurrent callbacks are harmless.
-    let _ = ResetEvent(*event);
+    // SAFETY: event is a valid process-owned handle.
+    let _ = unsafe { ResetEvent(*event) };
     ACTIVATION_PENDING.store(true, Ordering::Release);
     let _ = window_support::post_ui_wake();
 }

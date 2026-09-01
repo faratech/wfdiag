@@ -39,8 +39,9 @@ only evidence-backed `passed` entries allow the checker to go green.
 title area, navigation rail, status bar, settings `ContentDialog`, and six
 native pages: Diagnostics, Live Monitor, Processes, AI Analysis, Issues, and
 History. Reactor builders create the real WinUI controls directly. Component
-messages own navigation, theme, responsive state, process filtering, monitor
-pause/resume, fixture chat, settings, and backend event projection.
+messages own navigation, theme, responsive state, process filtering,
+lifecycle-aware monitor pause/resume, live AI chat/report flows, deterministic
+visual fixtures, settings, and backend event projection.
 
 There is intentionally no compatibility host around the React UI. Migrating a
 screen means rebuilding its semantics and layout with Reactor controls, then
@@ -67,8 +68,10 @@ approximating the source depth without a browser renderer.
 The feasibility spike pins both `windows-reactor` and
 `windows-reactor-setup` to the reviewed `windows-rs` commit
 `1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8`. The source identifies the
-Reactor API as 0.100.0, but the usable release was not on crates.io when the
-spike was created. A branch, tag, or floating Git dependency is prohibited.
+Reactor API as 0.100.0. A fresh `cargo search` on 2026-08-31 still reports
+only the placeholder `0.0.0` releases for both crates, so the usable API is
+not available from crates.io. A branch, tag, or floating Git dependency is
+prohibited.
 
 The pin is prototype-only. Production requires an official, non-placeholder
 release that contains the APIs WFDiag validated. Update the expected version,
@@ -126,9 +129,16 @@ native Monitor cards without Tauri IPC. It also owns a
 `NativeDiagnosticRuntime`: Quick and Full scans run the existing Windows
 collectors on the Tokio worker, publish native progress/results, support
 task-granular cancellation, reject stale-session writes, and preserve the last
-usable snapshot when a replacement scan cannot start. The monitor runtime has
-a separate nonblocking process-query command so full inventory work never
-runs on the WinUI thread or bloats telemetry snapshots. The live Processes
+usable snapshot when a replacement scan cannot start. A targeted rerun against
+a committed scan now uses an overlay transaction: progress is staged without
+mutating the committed rows, the one authoritative completed result replaces
+or appends only its task, the prior session/scan kind/task IDs are retained,
+and a previously absent target is appended. Issue detection receives the
+complete merged evidence. Targeted reruns never
+create a one-row auto-save record, and start/run/cancel/delivery failures restore
+the prior snapshot unchanged. The monitor runtime has a separate nonblocking
+process-query command so full inventory work never runs on the WinUI thread or
+bloats telemetry snapshots. The live Processes
 screen now consumes that command with debounced filtering, sortable columns,
 selection/details, 100-row paging, native virtualization, periodic refresh,
 and request IDs that discard stale completions. Post-fix ARM64 desktop testing
@@ -138,10 +148,12 @@ reports. A responsive explicit row width compensates for WinUI
 `ItemsRepeater`'s desired-width arrangement so every realized row aligns with
 the fixed table header.
 
-Deterministic fixture mode remains isolated for visual QA. Diagnostics are
-still marked partial because task selection, result-detail interaction,
-issue projection, export/share, and every production error path are not
-complete. Processes remains partial until compact/collapsed
+Deterministic fixture mode remains isolated for visual QA. Diagnostics also
+wire Settings-backed custom Quick Scan selection, selectable result details,
+authoritative post-scan issue projection, Store-compatible optional history
+auto-save, and native export/share entry points. Diagnostics remain partial
+until the complete admin/non-admin, cancellation-race, collector-error,
+x64/ARM64, interaction, and accessibility matrices pass. Processes remains partial until compact/collapsed
 and x64 runtime coverage, accessibility, long-run refresh, and its complete
 error-state matrix pass. Backend integration is complete only when every command,
 stream, cancellation path, confirmation, persistence, and error state operates
@@ -160,8 +172,21 @@ authoritative session snapshot, retain the Store's cancellable 500 ms auto-save
 window, convert explicitly into the history contract, and use live settings for
 auto-save, concurrency, custom Quick Scan selection, retention, and retention
 limit. Auto-save failures remain scoped and nonfatal, while deterministic visual
-modes never open history storage. Drill-down, tags/labels, trends, destructive
-clear confirmation, and the full error/accessibility matrix remain open.
+modes never open history storage. The live History page now edits tags, loads
+failure trends, edits a user label independently from metadata tags, and clears
+all history behind explicit destructive confirmation. Label and filter fallback
+matches the Store flow (`label` -> first tag -> `Scan`). Regressed, recovered,
+and output-changed tasks all render as expandable rows; expanding one lazily
+requests only that task's stored outputs, rejects stale request generations,
+and shows explicit loading/error state plus side-by-side previous/current text.
+When both outputs are JSON, the detail also renders bounded leaf-level Added,
+Removed, and Changed rows (with an overflow count) above the raw documents;
+non-JSON output retains the side-by-side fallback. Comparison rows now carry the
+same recurring-failure trend badge policy as the shipping screen. A refreshed
+list also recomputes an existing comparison when its latest-scan baseline
+changes. The live loading/error/x64/ARM64/accessibility interaction matrix
+remains open.
+
 `wfdiag-native-settings` owns the canonical settings schema and typed provider
 credential operations while Tauri adapters preserve the existing JSON path,
 atomic writer, DPAPI/keyring identifiers, validation order, and secret
@@ -172,9 +197,19 @@ snapshot and preview theme, while Save commits only the exact payload acknowledg
 by a matching successful worker response. ARM64 self-contained automation passed
 cancel/reopen and save/restart against an isolated byte-for-byte copy of the Store
 settings file, with the real Store file unchanged and no WebView or crash evidence.
-Settings remains `partial` until provider credential entry/clearing, live model
-discovery and subscription setup, settings-driven tray/startup/notification side
-effects, x64 runtime, accessibility, and the complete validation/error matrix pass.
+Saved close-to-tray state now updates the live window hook and saved notification
+state gates scan-completion toasts. A one-use startup gate reads the persisted
+`scan_on_startup` value, waits for both settings and system initialization to
+finish, then starts exactly one Quick Scan; deterministic visual mode always
+suppresses it. The provider setup browser seeds from the actually configured
+draft/provider fields when Settings opens and follows an explicit Active AI
+selection, while Auto still permits browsing another setup pane without
+changing activation. Phi selection and Save are guarded by the live
+availability/readiness state and backend reason; its setup pane remains
+accessible even when Phi cannot be activated. Settings remains `partial` until
+live startup-scan evidence, provider-specific model-catalog and subscription
+account/install-flow validation, side-effect interaction testing, x64 runtime,
+accessibility, and the complete validation/error matrix pass.
 
 `wfdiag-native-ai-provider` owns the exact provider/preference/status wire
 contracts, capability table, local-first routing policy, Store-identity
@@ -183,58 +218,140 @@ Ollama/custom endpoint probes, and a nonblocking typed worker for status,
 selection, cache clearing, and model discovery. `ProviderManagementService`
 is now constructed by Tauri from the same reusable settings adapter and an
 explicit `ProviderProbeBundle`. Reactor now instantiates the same service with
-the shared settings adapter and concrete Foundry, Ollama, custom-endpoint, and
-Codex/Claude CLI probes. `wfdiag-native-phi` is the sole owner of the reviewed
-Windows AI projection, package-identity gate, LAF/token policy, activation
-fallback, model cache, readiness, prompt-fit, and generation path. Its
-`WindowsPhiStatusSource` runs the real shipping probe off the async worker and
-returns the established Store-required result before any WinRT/DLL/LAF work in
-an unpackaged process. Tauri retains only command adapters over this crate.
-This surface remains `partial` until the full provider/model/bridge/loading/
-error matrix is rendered. Chat/report streaming, credential values, fallback
-consent, and the Phi-to-Aion API transition remain separate gates.
+the shared settings adapter and concrete Phi, Foundry Local, Ollama, custom
+endpoint, and Codex/Claude CLI probes, then renders the resolved provider state
+in the native AI workspace. `wfdiag-native-phi` is the sole owner of the
+reviewed Windows AI projection, package-identity gate, LAF/token policy,
+activation fallback, model cache, readiness, prompt-fit, and generation path.
+Its `WindowsPhiStatusSource` runs the real shipping probe off the async worker
+and returns the established Store-required result before any WinRT/DLL/LAF
+work in an unpackaged process. Tauri retains only command adapters over this
+crate. Reactor also wires the cloud-fallback consent policy: an Auto-selected
+local provider may retry a clean failure only after the persisted Allow choice
+or an Ask → Allow decision; Never is persisted, explicit provider selections
+never fall back, and every local-to-cloud transition is disclosed with
+`ProviderUse` fallback attribution. The native Settings dialog now drives a
+cancellable off-UI model-catalog worker from the current draft endpoint, CLI
+path, and available credential state. It renders Refresh/Cancel, selectable
+catalog results, blocked/loading/error state, and a stale-last-successful-list
+fallback while retaining manual model entry. Codex/Claude account status and
+cancellable sign-in/sign-out operations have a typed worker and component
+handlers. Settings renders Check, Sign in, Sign out, and Cancel controls with
+operation status, detail, and errors; account checks also participate in catalog
+refresh. Anthropic's empty-model default remains exactly
+`claude-sonnet-5` in the shared catalog service and the Reactor Settings hint.
+Reactor now also exposes the shared subscription CLI installer only through an
+explicit Settings action. The allowlisted Codex/Claude winget package requires
+confirmation; missing or failed winget produces a structured vendor-fallback
+offer that requires a second, method-specific confirmation and is never invoked
+silently. Installation runs off the UI thread in a Windows Job Object, so
+cancellation, timeout, runtime drop, or worker teardown terminates the complete
+winget/PowerShell process tree rather than only its direct child. This surface
+remains `partial` until provider-specific live catalog/account/browser/install/
+error evidence, accessibility, and the Phi-to-Aion transition pass their live
+matrices.
 
 `wfdiag-native-issues` now owns the sole issue catalog and deterministic
 detectors and exposes a nonblocking, request-ID-based detection worker with a
-read-only remediation metadata snapshot. `wfdiag-native-export` preserves the
-shipping JSON, text, HTML, WindowsForum, clipboard, and email renderers behind
-a UI-neutral worker. These are also `partial`: Reactor has not yet submitted
-completed scans to Issues or delivered exports through native pickers,
-clipboard, filesystem, and allowlisted link operations.
+read-only remediation metadata snapshot. Reactor commits every finalized
+authoritative scan into that worker, guards completions by request/session/
+epoch, renders the returned issues and maintenance actions, and refreshes them
+after every successful remediation even if the user navigated away while it
+was running. `wfdiag-native-export` preserves
+the shipping JSON, text, HTML, WindowsForum, clipboard, and email renderers
+behind a UI-neutral worker. Reactor wires its native save picker, path/format
+validation, background file write, clipboard copy, and allowlisted
+WindowsForum launch. Picker cancellation remains a silent no-op, while actual
+dialog/path failures retain their detail and appear in the native status UI.
+The shared email payload now also produces a recipient-free, fully
+percent-encoded `mailto:` draft URI that never contains the full diagnostic
+report, and Reactor owns a typed `ShellExecuteW` adapter that can open only
+that unsent draft after an explicit user action. The visible Email Report
+command now queues the shared email renderer; successful completion copies the
+full report body to the Windows clipboard and opens only the recipient-free
+unsent draft, while render, clipboard, and shell-launch failures retain a typed
+user-visible status.
+Issues stays `partial` until its populated/empty/error/
+remediation-refresh and device, interaction, and accessibility matrices pass.
+Export stays `partial` until the picker/error/write/clipboard/browser/mail,
+external-client, device, and accessibility matrices pass.
 
-**Progress note (2026-08-30, desktop-integration pass).** The extraction and
-wiring frontier moved substantially in one reviewed series:
+**Progress note (updated 2026-08-31, AI/lifecycle integration pass).** The
+extraction and wiring frontier moved substantially across the reviewed series:
 
 - `wfdiag-native-ai-report` is authoritative: src-tauri's report command now
   delegates to it (wire-identical events, pinned by tests), and the Reactor
-  shell generates native reports through the same service (streaming, cache,
-  cancel; comparison baselines and compact reroute still open).
+  shell starts its report worker by default and generates through the same
+  service. Streaming, cancellation, provider attribution, cache identity, and
+  exactly-one terminal delivery plus cached-body rehydration are wired for the
+  full provider set. Reactor resolves the newest different stored scan on the
+  history worker for changed-since-last-scan evidence, and the shared compact
+  evidence plus Auto Phi-to-next-local reroute policies are pinned by tests.
 - The shared chat-completions client moved into `wfdiag-native-ai-chat`
   (re-exported by src-tauri), with `resolve_compat_config` +
   `CompatChatProvider` + `provider_config_fingerprint` in the compat layer.
-  The Reactor chat sends real streaming turns against live DPAPI-backed
-  settings; tools and the cancel button are follow-ups.
+  Reactor starts the chat worker by default and resolves each turn from live
+  DPAPI-backed settings. OpenAI, Anthropic, Gemini, and DeepSeek API providers;
+  Foundry Local, Ollama, and custom OpenAI-compatible endpoints; signed-in
+  Codex and Claude Code subscriptions; and package-bound Phi all route through
+  their shared transports. Auto clean-failure retry honors persisted
+  Ask/Allow/Never cloud consent, explicit provider selection never falls back,
+  and the UI discloses the local-to-cloud transition with fallback attribution.
+  Immediate in-flight cancellation, exactly-one terminal projection,
+  backend-owned conversation context/New Conversation, and the canonical
+  exact-ten bounded tool catalog are wired. The catalog is
+  `run_diagnostic`, `search_windows_knowledge`, `get_scan_summary`,
+  `request_full_scan`, `get_detected_issues`, `compare_with_previous_scan`,
+  `get_live_stats`, `list_remediations`, `list_scan_history`, and
+  `stage_remediation`. Its closed parser rejects unknown operations, IDs,
+  properties, and unbounded text. Full Scan and remediation tools create only
+  typed consent/proposal events; neither can start a scan or execute a fix.
 - The save picker is wired end to end (format → owner-validated dialog →
-  `SavedReport` render → background write), closing the export/file-dialog
-  gap in both `backend_parity` surfaces.
+  `SavedReport` render → background write). Cancellation and typed picker
+  failure are distinct; only cancellation is silent, while failures surface in
+  the status UI.
 - Remediation execution extracted to `wfdiag-native-remediation` (with the
-  tier confirm gate and injectable runner); the shell's maintenance and
-  per-issue Run buttons execute through it, Repair behind an explicit
-  confirmation dialog whose preview is catalog-constants-only.
+  tier confirm gate and injectable runner). Maintenance, per-issue Run, and AI
+  staging now enter the same opaque action broker: catalog-only preview,
+  expiring one-use proposal, current-state fingerprint revalidation, explicit
+  approval, and a second Repair confirmation before the shared engine runs.
+- Issue assistance is native end to end. Ask AI immediately sends structured
+  current-issue evidence into chat. Prioritize / Propose fix plan runs on a
+  cancellable off-UI worker, shares Tauri's bounded catalog-ID-only prompt and
+  strict parser, displays provider/fallback attribution, discards stale scan or
+  catalog results, and can pass only revalidated issue/remediation pairs into
+  the same tiered action broker. The model has no execution capability.
 - Elevation moved into the crate (`elevation::relaunch_self_elevated`) and
   powers restart-as-administrator; single instance (mutex + activation
   event) and scan-completion toasts (AUMID-bound, silent-unpackaged) are
   live; tray + close-to-tray + Show/Hide/Quick Scan/Exit run through the
   isolated Win32 subclass in `reactor-spike/src/window_support.rs` per the
-  owner-approved interop interpretation of the lifecycle gate.
-- Command palette and shortcut help render as native dialogs (titlebar
-  entry points); the accelerator set is expressible only up to
-  Ctrl+R/Ctrl+Numpad1..6 — the pinned `AcceleratorKey` enum lacks main-row
-  digits, `K`, `/`, and Shift, which is the concrete upstream evidence for
+  owner-approved interop interpretation of the lifecycle gate. The exact
+  Reactor HWND is cached independently of visibility, restore/show targets
+  that handle, and an atomic revisioned lifecycle snapshot now feeds window
+  visibility/focus/minimize changes back to the component. Monitoring pauses
+  while the window is unusable and resumes with a refresh only when the pause
+  was lifecycle-owned.
+- Command palette and shortcut help render as native dialogs. Ctrl+R and
+  Ctrl+Numpad1..6 retain Reactor accelerators; the isolated Win32 window
+  subclass supplies the otherwise-unrepresentable Ctrl+K, main-row Ctrl+1..6,
+  Ctrl+/, Ctrl+Shift+Q, and Ctrl+Shift+F chords through the UI-thread lifecycle
+  poll. Component policy blocks commands behind overlays, suppresses non-palette
+  shortcuts in editable controls, and blocks scan shortcuts while a scan is
+  active. The pinned `AcceleratorKey` enum still lacks main-row digits, `K`,
+  `/`, and Shift, so this shipping-behavior fallback does not close
   `upstream.global_accelerators`.
-- Settings gained DPAPI-backed provider key entry/clear and Quick Scan task
-  customization; History gained tags editing and a destructive clear behind
-  an explicit confirmation.
+- Settings gained DPAPI-backed provider key entry/clear, live cancellable model
+  catalogs with manual fallback, configured-provider setup seeding, Phi
+  readiness selection/Save gates, and Quick Scan task customization. Typed
+  subscription status/sign-in/sign-out/cancel operations and the confirmed,
+  process-tree-contained winget/vendor installer are integrated; live CLI,
+  browser, account, and installer evidence remains open. Anthropic's default is
+  pinned to `claude-sonnet-5`. History gained independent label and tag editing,
+  all-category comparison rows, lazy side-by-side task details, bounded
+  structured JSON leaf diffs, recurring-failure trend badges, and destructive
+  clear behind an explicit confirmation. Targeted diagnostic reruns now commit
+  through the full-scan overlay transaction described above.
 
 **Live validation (2026-08-30, ARM64 self-contained, debug).** A native
 host build of the full current candidate passed
@@ -393,15 +510,21 @@ manifest:
 
 - `window_lifecycle`: close interception, close-to-tray, show/hide,
   minimize/maximize/restore, activation, and focus behavior sufficient to
-  preserve the current tray and single-instance lifecycle.
+  preserve the current tray and single-instance lifecycle. The isolated Win32
+  implementation now caches the exact HWND, publishes coherent revisioned
+  lifecycle snapshots, restores hidden/minimized windows, and drives monitor
+  pause/resume, but this does not satisfy the official-Reactor-API gate.
 - `global_accelerators`: native application-wide handling for Ctrl+K,
   Ctrl+1 through Ctrl+6, Ctrl+/, Ctrl+Shift+Q, and Ctrl+Shift+F, including
-  correct behavior while focus is inside text controls and dialogs.
+  correct behavior while focus is inside text controls and dialogs. The
+  isolated Win32 subclass implements those chords today with pure policy tests,
+  but the gate deliberately remains open until an official Reactor API and the
+  required live keyboard/focus evidence exist.
 
 A gate may be changed to `passed` only with an official release/revision,
 links to the upstream API or change, and automated plus manual WFDiag evidence.
 
-## Validation system (2026-08-30)
+## Validation system (2026-08-31)
 
 The remaining-gate evidence is produced by a dedicated harness (owner goal:
 1:1 functionality and rendering parity, measured rather than asserted):
@@ -409,19 +532,34 @@ The remaining-gate evidence is produced by a dedicated harness (owner goal:
 - `scripts/lib/ReactorUia.psm1` — shared UIA/process helpers (hermetic
   launch, unique-button wait+invoke, status-text scanning, crash events,
   graceful close, combined-image sheets, WebView guard).
+- `crates/wfdiag-native-ai-chat/tests/ai_flows.rs`, the bounded-tool unit tests,
+  and `scripts/test-reactor-ai-flows.ps1` form the mandatory hermetic AI gates.
+  The Rust suite exercises the shared streaming client, tool loop,
+  cancellation, all ten schemas, and strict parsing against a local mock. The
+  Windows UIA suite owns an isolated settings file and OpenAI-compatible mock,
+  requires the custom provider to become active, and validates real streaming
+  chat, mid-stream cancellation, the exact-ten tool-name contract, a
+  `list_remediations` round trip returning the native `open_disk_cleanup`
+  catalog ID, streamed report content, and forced report regeneration matching
+  the React/Tauri UI contract. Shared report-service tests separately pin the
+  cache fast path and inline cached body. The Windows workflow builds with
+  `settings-test-path` and runs all of these without `continue-on-error`;
+  no-provider is a failure.
 - `scripts/test-reactor-chat.ps1` / `-report.ps1` / `-remediation.ps1` —
-  tiered interactive suites over the live candidate (provider tiers degrade
-  to "skipped: no provider"). They target the validation automation surface
-  added to the shell: chat composer/Send/Stop, report
-  Generate/Cancel/Regenerate, per-row Run ("Run {label}"), the Repair
-  confirmation dialog, and the "Refresh processes" button. Chat cancel and
-  the read-only `get_system_overview` tool were implemented so they can be
-  validated (tool answers are grounded in the injected system snapshot).
+  supplemental interactive suites over live providers and system state. Chat
+  and report now return failure when no provider is executable. These suites
+  target the same chat composer/Send/Stop, report Generate/Cancel/Regenerate,
+  per-row Run ("Run {label}"), Repair confirmation, and process-refresh
+  automation surfaces; hosted-runner execution remains informational until
+  its non-hermetic provider/hardware and UIA matrix is stable.
 - `scripts/capture-reactor-variants.ps1` +
   `reactor-baselines/variants.json` + `scripts/check-variants.py` — theme
   and reduced-motion variant captures over deterministic fixture states,
   plus the open rendering-defect list (seeded with the owner-reported
-  process-list refresh divergence).
+  process-list refresh divergence). Reduced-motion capture snapshots and
+  verifies restoration of the session-only animation setting; orchestrated
+  validation writes its manifest and PNGs under the report directory rather
+  than changing the tracked baseline document.
 - `scripts/test-reactor-process-refresh-parity.ps1` — the defect target #1:
   Processes-screen triptych (initial / mid-refresh / refreshed) with
   Store-left/Reactor-right combined sheets.
@@ -431,8 +569,9 @@ The remaining-gate evidence is produced by a dedicated harness (owner goal:
 - `scripts/check-external-gates.py` — crates.io release watch, runtime
   alignment drift, packaging pre-flight (exit 1 when an external change
   becomes actionable).
-- `scripts/validate-reactor.ps1 -Suite flows|visual|x64|gates|all` —
-  orchestrator; reports land under `validation-reports/`.
+- `scripts/validate-reactor.ps1 -Suite startup|live-system|about|flows|visual|x64|readiness|gates|all`
+  — orchestrator; `all` includes every listed suite and reports land under
+  `validation-reports/`.
 - `docs/validation/clean-machine-protocol.md` — the manual protocol for
   clean-machine and Store certification gates, with a sign-off table.
 
@@ -458,9 +597,10 @@ The current expected blockers are:
 - Windows App Runtime 1.8 and Reactor's 2.4 target are not aligned.
 - An official usable Reactor release is not selected.
 - Window lifecycle and global accelerator APIs are not proven upstream.
-- The native component is still fixture-driven and is not wired to the full
-  production backend command/event, persistence, cancellation, confirmation,
-  or desktop-service surface.
+- The native component now wires major production command/event, persistence,
+  AI cancellation/tool/report-cache, and desktop-lifecycle paths, but the
+  remaining backend surfaces and the complete success/error/accessibility
+  matrices have not all passed native Windows evidence review.
 - Aion/Store, framework-dependent Store packaging, and self-contained direct
   packaging have not passed the required device matrices.
 

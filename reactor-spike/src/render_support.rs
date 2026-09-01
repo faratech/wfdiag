@@ -55,7 +55,10 @@ fn monitor_graph_points(series: &[f64], max: f64) -> Vec<(f64, f64)> {
 
 fn push_line_to(path: &mut String, x: f64, y: f64) {
     // Three decimal places are well below a physical pixel after the Viewbox
-    // transform while keeping the per-sample geometry compact.
+    // transform while keeping the per-sample geometry compact. One `write!`
+    // per point remains (the buffer below is pre-sized so this no longer
+    // reallocates); that per-point cost is inherent float-to-text formatting
+    // for the geometry the OS actually needs, not wasted work to remove.
     write!(path, " L{x:.3} {y:.3}").expect("writing to a String cannot fail");
 }
 

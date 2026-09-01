@@ -1146,8 +1146,9 @@ impl WorkerState {
         cancel: &CancellationToken,
     ) -> Result<ResolvedChat, String> {
         if provider == AIProvider::PhiSilica {
+            let cancel = cancel.clone();
             return Ok(ResolvedChat {
-                chat: Box::new(PhiChatProvider),
+                chat: Box::new(PhiChatProvider::new(move || cancel.is_cancelled())),
                 requested_model: None,
             });
         }
