@@ -99,7 +99,6 @@ impl WfdiagShell {
                 .expected_task_ids
                 .clone_from(&snapshot.scan.task_ids);
             self.diagnostics.scan_kind = snapshot.scan.scan_kind;
-            self.diagnostics.session_id = snapshot.scan.session_id.clone();
             self.diagnostics.duration_ms = snapshot.scan.duration_ms;
             self.diagnostics.total = snapshot.scan.total;
             self.diagnostics.completed = snapshot.scan.completed;
@@ -233,12 +232,6 @@ impl WfdiagShell {
             if let Some(update) = snapshot.update.available.as_ref() {
                 self.update_notice.info = Some(update.clone());
             }
-
-            // Runner failures the engine recorded at start, surfaced where the
-            // corresponding surface looks for them.
-            self.settings.provider_setup_error = snapshot
-                .worker_error(WorkerKind::Provider)
-                .map(str::to_string);
         }
         self.app = Some(app);
         self.prune_action_expansion();

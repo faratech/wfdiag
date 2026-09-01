@@ -17,7 +17,6 @@ pub(crate) struct DiagnosticsScreen {
     pub(crate) expected_task_ids: Vec<String>,
     pub(crate) task_statuses: HashMap<String, TaskProgressStatus>,
     pub(crate) scan_kind: Option<ScanKind>,
-    pub(crate) session_id: Option<String>,
     pub(crate) duration_ms: u64,
     pub(crate) total: usize,
     pub(crate) completed: usize,

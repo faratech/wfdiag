@@ -105,7 +105,6 @@ impl PaletteDialog {
                                 .is_enabled(enabled)
                                 .automation_name(automation_label)
                                 .automation_id(automation_id)
-                                .element_ref(&self.result_references[index])
                                 .on_click(execute)
                                 .content(
                                     Grid::new()

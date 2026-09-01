@@ -31,7 +31,6 @@ pub(crate) struct SettingsDialog {
     pub(crate) credential_transaction: ProviderCredentialTransaction,
     pub(crate) provider_key_busy: bool,
     pub(crate) provider_setup_index: usize,
-    pub(crate) provider_setup_error: Option<String>,
     pub(crate) provider_catalogs: Vec<CatalogState>,
 
     // ---- subscription CLIs ------------------------------------------------
@@ -59,7 +58,6 @@ impl SettingsDialog {
             credential_transaction: ProviderCredentialTransaction::new(),
             provider_key_busy: false,
             provider_setup_index,
-            provider_setup_error: None,
             provider_catalogs: (0..PROVIDER_SETUP_LABELS.len())
                 .map(|_| CatalogState::default())
                 .collect(),
