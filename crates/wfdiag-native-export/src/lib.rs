@@ -11,7 +11,8 @@ mod runtime;
 
 pub use renderer::{
     EmailPayload, ExportMetadata, ExportPayload, ExportRequestKind, ExportTask, ReportFormat,
-    format_json_value, render_email, render_forum_clipboard, render_report, render_saved_report,
+    SupportPackagePayload, format_json_value, render_email, render_email_compose_uri,
+    render_forum_clipboard, render_report, render_saved_report, render_support_package,
     render_windows_forum_post,
 };
 pub use runtime::{ExportCompleted, ExportError, ExportRequest, ExportRuntime};

@@ -165,7 +165,25 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "wfdiag-native-issues",
  "windows",
+]
+
+[[package]]
+name = "wfdiag-native-issues"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "wfdiag-remediation-catalog",
+]
+
+[[package]]
+name = "wfdiag-remediation-catalog"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

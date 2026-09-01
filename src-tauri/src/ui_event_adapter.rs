@@ -4,6 +4,7 @@ use crate::diagnostic_events::{
     DiagnosticEmitFuture, DiagnosticEvent, DiagnosticEventSink, DiagnosticTaskStatus,
 };
 use crate::native_monitor::{MonitorEmission, MonitorEmitter, SystemStats as NativeSystemStats};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use wfdiag_ui_core::{
     DiagnosticTaskResult, TaskProgress, TaskProgressStatus, UiEvent, UiEventPublisher,
@@ -51,14 +52,11 @@ impl DiagnosticEventSink for UiBusDiagnosticEventSink {
                     success: progress.success,
                 }),
                 DiagnosticEvent::Result(result) => {
-                    UiEvent::DiagnosticResult(DiagnosticTaskResult {
-                        session_id: result.session_id.unwrap_or_default(),
-                        task_id: result.task_id,
-                        success: result.result.success,
-                        output: result.result.output,
-                        error: result.result.error,
-                        duration_ms: result.result.duration_ms,
-                    })
+                    UiEvent::DiagnosticResult(DiagnosticTaskResult::new(
+                        result.session_id.unwrap_or_default(),
+                        result.task_id,
+                        Arc::new(result.result),
+                    ))
                 }
             };
 
@@ -132,14 +130,16 @@ mod tests {
         assert_eq!(
             receiver.drain(),
             vec![
-                UiEvent::DiagnosticResult(DiagnosticTaskResult {
-                    session_id: "scan-7".into(),
-                    task_id: "cpu".into(),
-                    success: true,
-                    output: "{\"Name\":\"Example CPU\"}".into(),
-                    error: None,
-                    duration_ms: 17,
-                }),
+                UiEvent::DiagnosticResult(DiagnosticTaskResult::new(
+                    "scan-7",
+                    "cpu",
+                    Arc::new(TaskResult {
+                        success: true,
+                        output: "{\"Name\":\"Example CPU\"}".into(),
+                        error: None,
+                        duration_ms: 17,
+                    }),
+                )),
                 UiEvent::TaskProgress(TaskProgress {
                     session_id: "scan-7".into(),
                     task_id: "cpu".into(),

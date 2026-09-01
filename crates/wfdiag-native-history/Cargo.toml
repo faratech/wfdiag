@@ -9,10 +9,11 @@ publish = false
 
 [dependencies]
 anyhow = "1.0"
-serde = { version = "1.0.229", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.145"
 thiserror = "2.0"
 tokio = { version = "1.52.0", features = ["rt", "sync", "time"] }
+wfdiag-native-issues = { path = "../wfdiag-native-issues" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

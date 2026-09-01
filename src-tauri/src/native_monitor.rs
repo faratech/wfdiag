@@ -6,15 +6,20 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::windows::ffi::OsStringExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::interval;
 use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation};
 use windows::Win32::Foundation::{HANDLE, UNICODE_STRING};
-use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+use windows::Win32::NetworkManagement::IpHelper::{
+    FreeMibTable, GetExtendedTcpTable, GetExtendedUdpTable, GetIfTable2, MIB_IF_TABLE2,
+    MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID, MIB_UDP6ROW_OWNER_PID, MIB_UDPROW_OWNER_PID,
+    TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
+};
 use windows::Win32::Storage::FileSystem::{
     GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDriveStringsW, GetVolumeInformationW,
 };
@@ -72,6 +77,42 @@ thread_local! {
 // DATA STRUCTURES
 // ============================================================================
 
+/// Selects the work owned by the one-second system telemetry loop.
+///
+/// `Legacy` preserves the Tauri monitor contract, including its small
+/// `top_processes` projection. Native shells should use `SystemOnly` and let
+/// the Processes screen request its independent two-second snapshot instead.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum MonitorProfile {
+    Legacy { include_process_adapter_stats: bool },
+    SystemOnly,
+}
+
+impl Default for MonitorProfile {
+    fn default() -> Self {
+        Self::Legacy {
+            include_process_adapter_stats: false,
+        }
+    }
+}
+
+impl MonitorProfile {
+    #[inline]
+    const fn includes_processes(self) -> bool {
+        matches!(self, Self::Legacy { .. })
+    }
+
+    #[inline]
+    const fn includes_process_adapter_stats(self) -> bool {
+        matches!(
+            self,
+            Self::Legacy {
+                include_process_adapter_stats: true
+            }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemStats {
     pub cpu_utilization: f32,
@@ -106,9 +147,10 @@ pub struct SystemStats {
     pub npu_memory_used_mb: f64,
     pub npu_memory_total_mb: f64,
     pub top_processes: Vec<ProcessInfo>,
-    /// All processes (kept for internal use). No frontend consumer reads this, so it is
-    /// NOT serialized — otherwise the full process list would be encoded into every
-    /// `system-stats` event (~1 Hz) and transferred/parsed for nothing.
+    /// Deprecated compatibility field. Process snapshots now belong to
+    /// `list_processes`, so live telemetry always leaves this empty and avoids
+    /// cloning the complete process table for every projected frame.
+    #[deprecated(note = "use SystemMonitor::list_processes for full process snapshots")]
     #[serde(skip)]
     pub all_processes: Vec<ProcessInfo>,
     pub timestamp: i64,
@@ -314,10 +356,16 @@ pub struct ProcessRow {
 
 impl From<ProcessInfo> for ProcessRow {
     fn from(process: ProcessInfo) -> Self {
+        Self::from(&process)
+    }
+}
+
+impl From<&ProcessInfo> for ProcessRow {
+    fn from(process: &ProcessInfo) -> Self {
         Self {
             pid: process.pid,
             parent_pid: process.parent_pid,
-            name: process.name,
+            name: process.name.clone(),
             cpu_percent: process.cpu_percent,
             memory_percent: process.memory_percent,
             memory_mb: process.memory_mb,
@@ -328,7 +376,7 @@ impl From<ProcessInfo> for ProcessRow {
             npu_memory_mb: (process.npu_memory_mb > 0.0).then_some(process.npu_memory_mb),
             cpu_time_secs: process.cpu_time_secs,
             start_time: process.start_time,
-            status: process.status,
+            status: process.status.clone(),
             thread_count: process.thread_count,
             handle_count: process.handle_count,
             priority: process.priority,
@@ -460,6 +508,8 @@ struct CachedNpuUtilization {
 
 #[derive(Clone)]
 struct FastStats {
+    profile: MonitorProfile,
+    captured_at: Instant,
     cpu_utilization: f32,
     per_cpu_utilization: Vec<f32>,
     cpu_frequency: u64,
@@ -471,7 +521,6 @@ struct FastStats {
     network_upload_kb: f64,
     network_download_kb: f64,
     top_processes: Vec<ProcessInfo>,
-    all_processes: Vec<ProcessInfo>,
     disk_read_bytes: u64,
     disk_write_bytes: u64,
     adapter_snapshot: crate::adapter_monitor::AdapterSnapshot,
@@ -484,6 +533,21 @@ struct FastStats {
 type NetworkBytes = HashMap<String, (u64, u64)>;
 type ProcessCpuTimes = HashMap<u32, (u64, u64, Instant)>;
 
+const FAST_STATS_MIN_AGE: Duration = Duration::from_millis(750);
+pub const PROCESS_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(2);
+
+struct ProcessSnapshot {
+    processes: Vec<ProcessInfo>,
+    captured_at: i64,
+    captured_instant: Instant,
+}
+
+impl ProcessSnapshot {
+    fn is_fresh_at(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.captured_instant) < PROCESS_SNAPSHOT_INTERVAL
+    }
+}
+
 struct NetworkState {
     bytes: NetworkBytes,
     last_update: Instant,
@@ -494,14 +558,19 @@ pub struct SystemMonitor {
     monitoring: Arc<Mutex<bool>>,
     pdh_state: Arc<std::sync::Mutex<PdhState>>,
     previous_network: Arc<Mutex<NetworkState>>,
+    // The legacy top-process sampler and the Processes page must never mutate
+    // the same CPU-delta baseline. Each cadence owns one history exclusively.
     previous_processes: Arc<Mutex<ProcessCpuTimes>>,
+    process_snapshot_history: Arc<Mutex<ProcessCpuTimes>>,
+    process_snapshot: Arc<Mutex<Option<ProcessSnapshot>>>,
+    process_snapshot_refresh: Arc<Mutex<()>>,
     update_interval: Arc<Mutex<Duration>>,
     // Cached slow-changing data
     cached_disks: Arc<Mutex<Option<CachedDiskInfo>>>,
     cached_npu_util: Arc<Mutex<Option<CachedNpuUtilization>>>,
     // Cached fast-changing data
     cached_fast_stats: Arc<Mutex<Option<FastStats>>>,
-    include_process_adapter_stats: Arc<AtomicBool>,
+    monitor_profile: Arc<RwLock<MonitorProfile>>,
     // Tick counter for tiered refresh
     tick_count: Arc<AtomicU64>,
     // Async update flags
@@ -556,11 +625,14 @@ impl SystemMonitor {
                 last_update: Instant::now(),
             })),
             previous_processes: Arc::new(Mutex::new(HashMap::new())),
+            process_snapshot_history: Arc::new(Mutex::new(HashMap::new())),
+            process_snapshot: Arc::new(Mutex::new(None)),
+            process_snapshot_refresh: Arc::new(Mutex::new(())),
             update_interval: Arc::new(Mutex::new(Duration::from_secs(1))),
             cached_disks: Arc::new(Mutex::new(None)),
             cached_npu_util: Arc::new(Mutex::new(None)),
             cached_fast_stats: Arc::new(Mutex::new(None)),
-            include_process_adapter_stats: Arc::new(AtomicBool::new(false)),
+            monitor_profile: Arc::new(RwLock::new(MonitorProfile::default())),
             tick_count: Arc::new(AtomicU64::new(0)),
             disk_update_in_progress: Arc::new(AtomicBool::new(false)),
             npu_update_in_progress: Arc::new(AtomicBool::new(false)),
@@ -570,7 +642,20 @@ impl SystemMonitor {
         }
     }
 
+    /// Start the legacy Tauri-compatible telemetry profile.
     pub async fn start_monitoring(&self, include_process_adapter_stats: bool) {
+        self.start_monitoring_with_profile(MonitorProfile::Legacy {
+            include_process_adapter_stats,
+        })
+        .await;
+    }
+
+    /// Start one-second sampling with an explicit work profile.
+    ///
+    /// `MonitorProfile::SystemOnly` guarantees that the live telemetry path
+    /// does not enumerate processes. Full process data remains available from
+    /// `list_processes` on its independent two-second snapshot cadence.
+    pub async fn start_monitoring_with_profile(&self, profile: MonitorProfile) {
         // Single-owner: supersede any previously-running loop. Bump the generation so a
         // still-running old loop exits on its next tick even if `monitoring` is re-armed
         // below, and abort its task handle for immediate teardown. This makes repeated
@@ -587,8 +672,10 @@ impl SystemMonitor {
         let mut monitoring = self.monitoring.lock().await;
         *monitoring = true;
         drop(monitoring);
-        self.include_process_adapter_stats
-            .store(include_process_adapter_stats, Ordering::Relaxed);
+        *self
+            .monitor_profile
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = profile;
 
         let emitter = Arc::clone(&self.emitter);
         let monitoring_flag = Arc::clone(&self.monitoring);
@@ -600,7 +687,7 @@ impl SystemMonitor {
         let cached_disks = Arc::clone(&self.cached_disks);
         let cached_npu_util = Arc::clone(&self.cached_npu_util);
         let cached_fast_stats = Arc::clone(&self.cached_fast_stats);
-        let include_process_adapter_stats = Arc::clone(&self.include_process_adapter_stats);
+        let monitor_profile = Arc::clone(&self.monitor_profile);
         let tick_count = Arc::clone(&self.tick_count);
         let disk_update_in_progress = Arc::clone(&self.disk_update_in_progress);
         let npu_update_in_progress = Arc::clone(&self.npu_update_in_progress);
@@ -669,9 +756,8 @@ impl SystemMonitor {
             let pdh_clone = Arc::clone(&self.pdh_state);
             let net_clone = Arc::clone(&self.previous_network);
             let proc_clone = Arc::clone(&self.previous_processes);
-            let include_adapter_stats = self.include_process_adapter_stats.load(Ordering::Relaxed);
             let initial = tokio::task::spawn_blocking(move || {
-                compute_fast_stats(&pdh_clone, &net_clone, &proc_clone, include_adapter_stats)
+                compute_fast_stats(&pdh_clone, &net_clone, &proc_clone, profile)
             })
             .await
             .ok();
@@ -718,7 +804,7 @@ impl SystemMonitor {
                     &cached_disks,
                     &cached_npu_util,
                     &cached_fast_stats,
-                    &include_process_adapter_stats,
+                    &monitor_profile,
                     &disk_update_in_progress,
                     &npu_update_in_progress,
                     &fast_update_in_progress,
@@ -763,7 +849,7 @@ impl SystemMonitor {
             &self.cached_disks,
             &self.cached_npu_util,
             &self.cached_fast_stats,
-            &self.include_process_adapter_stats,
+            &self.monitor_profile,
             &self.disk_update_in_progress,
             &self.npu_update_in_progress,
             &self.fast_update_in_progress,
@@ -774,10 +860,32 @@ impl SystemMonitor {
 
     /// Query the complete current process set for the Processes screen. The
     /// high-frequency monitor event deliberately stays small; full enumeration
-    /// happens only on demand and is filtered/sorted before crossing IPC.
+    /// happens only on demand and is filtered/sorted before crossing IPC. A
+    /// capture is reused for two seconds so search, sort, and pagination do not
+    /// perturb the per-process CPU delta or trigger redundant enumeration.
     pub async fn list_processes(&self, query: ProcessQuery) -> ProcessPage {
-        let processes = get_all_processes(&self.previous_processes).await;
-        paginate_processes(processes, query)
+        let _refresh_owner = self.process_snapshot_refresh.lock().await;
+        let now = Instant::now();
+
+        {
+            let snapshot = self.process_snapshot.lock().await;
+            if let Some(snapshot) = snapshot.as_ref()
+                && snapshot.is_fresh_at(now)
+            {
+                return paginate_process_snapshot(&snapshot.processes, snapshot.captured_at, query);
+            }
+        }
+
+        let processes = get_all_processes(&self.process_snapshot_history).await;
+        let captured_at = unix_timestamp_secs();
+        let mut snapshot = self.process_snapshot.lock().await;
+        *snapshot = Some(ProcessSnapshot {
+            processes,
+            captured_at,
+            captured_instant: now,
+        });
+        let snapshot = snapshot.as_ref().expect("process snapshot was just stored");
+        paginate_process_snapshot(&snapshot.processes, snapshot.captured_at, query)
     }
 
     #[allow(dead_code)]
@@ -907,7 +1015,7 @@ async fn collect_stats_optimized(
     cached_disks: &Arc<Mutex<Option<CachedDiskInfo>>>,
     cached_npu_util: &Arc<Mutex<Option<CachedNpuUtilization>>>,
     cached_fast_stats: &Arc<Mutex<Option<FastStats>>>,
-    include_process_adapter_stats: &Arc<AtomicBool>,
+    monitor_profile: &Arc<RwLock<MonitorProfile>>,
     disk_update_in_progress: &Arc<AtomicBool>,
     npu_update_in_progress: &Arc<AtomicBool>,
     fast_update_in_progress: &Arc<AtomicBool>,
@@ -919,7 +1027,7 @@ async fn collect_stats_optimized(
         previous_network,
         previous_processes,
         cached_fast_stats,
-        include_process_adapter_stats,
+        monitor_profile,
         fast_update_in_progress,
     )
     .await;
@@ -986,6 +1094,7 @@ async fn collect_stats_optimized(
     let (npu_memory_used, npu_memory_total) =
         d3d_npu.map(|npu| npu.meter_memory()).unwrap_or_default();
 
+    #[allow(deprecated)]
     SystemStats {
         cpu_utilization: fast_stats.cpu_utilization,
         per_cpu_utilization: fast_stats.per_cpu_utilization,
@@ -1015,11 +1124,8 @@ async fn collect_stats_optimized(
         npu_memory_used_mb: npu_memory_used as f64 / (1024.0 * 1024.0),
         npu_memory_total_mb: npu_memory_total as f64 / (1024.0 * 1024.0),
         top_processes: fast_stats.top_processes,
-        all_processes: fast_stats.all_processes,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0),
+        all_processes: Vec::new(),
+        timestamp: unix_timestamp_secs(),
     }
 }
 
@@ -1030,7 +1136,7 @@ fn compute_fast_stats(
     pdh_state: &Arc<std::sync::Mutex<PdhState>>,
     previous_network: &Arc<Mutex<NetworkState>>,
     previous_processes: &Arc<Mutex<ProcessCpuTimes>>,
-    include_process_adapter_stats: bool,
+    profile: MonitorProfile,
 ) -> FastStats {
     // 1. CPU & Swap (PDH)
     let cpu_count = *CPU_COUNT.get_or_init(|| unsafe {
@@ -1053,21 +1159,31 @@ fn compute_fast_stats(
     let (network_upload_kb, network_download_kb) =
         futures::executor::block_on(async { get_network_stats(previous_network).await });
 
-    // 4. Adapter and process stats. Refreshing the D3DKMT adapter state first
-    // lets per-process stats share the same detected adapter topology.
+    // 4. Adapter stats are part of system telemetry. Process enumeration is
+    // profile-gated: native shells use SystemOnly and let the Processes page
+    // own its slower, independent snapshot cadence.
     let adapter_snapshot = crate::adapter_monitor::refresh();
-    let (all_procs, disk_read_bytes, disk_write_bytes) = futures::executor::block_on(async {
-        get_top_processes_optimized(
-            memory_total,
-            previous_processes,
-            include_process_adapter_stats,
+    let (top_processes, disk_read_bytes, disk_write_bytes) = if profile.includes_processes() {
+        let (processes, disk_read_bytes, disk_write_bytes) = futures::executor::block_on(async {
+            get_top_processes_optimized(
+                memory_total,
+                previous_processes,
+                profile.includes_process_adapter_stats(),
+            )
+            .await
+        });
+        (
+            select_top_processes(&processes, profile.includes_process_adapter_stats()),
+            disk_read_bytes,
+            disk_write_bytes,
         )
-        .await
-    });
-
-    let top_processes = select_top_processes(&all_procs, include_process_adapter_stats);
+    } else {
+        (Vec::new(), 0, 0)
+    };
 
     FastStats {
+        profile,
+        captured_at: Instant::now(),
         cpu_utilization,
         per_cpu_utilization,
         cpu_frequency,
@@ -1079,7 +1195,6 @@ fn compute_fast_stats(
         network_upload_kb,
         network_download_kb,
         top_processes,
-        all_processes: all_procs,
         disk_read_bytes,
         disk_write_bytes,
         adapter_snapshot,
@@ -1146,26 +1261,43 @@ async fn get_fast_stats_cached(
     previous_network: &Arc<Mutex<NetworkState>>,
     previous_processes: &Arc<Mutex<ProcessCpuTimes>>,
     cached: &Arc<Mutex<Option<FastStats>>>,
-    include_process_adapter_stats: &Arc<AtomicBool>,
+    monitor_profile: &Arc<RwLock<MonitorProfile>>,
     update_in_progress: &Arc<AtomicBool>,
 ) -> FastStats {
-    // If no update is in progress, spawn one
-    if !update_in_progress.swap(true, std::sync::atomic::Ordering::Acquire) {
+    let profile = *monitor_profile
+        .read()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let should_refresh = {
+        let cache = cached.lock().await;
+        cache.as_ref().is_none_or(|stats| {
+            stats.profile != profile || stats.captured_at.elapsed() >= FAST_STATS_MIN_AGE
+        })
+    };
+
+    // At most one update owns each profile's CPU/network delta at a time. The
+    // freshness gate also prevents the immediate post-seed tick from taking a
+    // near-zero process delta and replacing the meaningful first sample.
+    if should_refresh && !update_in_progress.swap(true, Ordering::Acquire) {
         let pdh_clone = Arc::clone(pdh_state);
         let net_clone = Arc::clone(previous_network);
         let proc_clone = Arc::clone(previous_processes);
         let cached_clone = Arc::clone(cached);
         let flag_clone = Arc::clone(update_in_progress);
-        let include_adapter_stats = include_process_adapter_stats.load(Ordering::Relaxed);
+        let profile_state = Arc::clone(monitor_profile);
 
         tokio::spawn(async move {
             let stats = tokio::task::spawn_blocking(move || {
-                compute_fast_stats(&pdh_clone, &net_clone, &proc_clone, include_adapter_stats)
+                compute_fast_stats(&pdh_clone, &net_clone, &proc_clone, profile)
             })
             .await
             .ok();
 
-            if let Some(new_stats) = stats {
+            let current_profile = *profile_state
+                .read()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if let Some(new_stats) = stats
+                && current_profile == profile
+            {
                 let mut cache_lock = cached_clone.lock().await;
                 *cache_lock = Some(new_stats);
             }
@@ -1176,23 +1308,28 @@ async fn get_fast_stats_cached(
 
     // Return cached value or default
     let cache = cached.lock().await;
-    cache.clone().unwrap_or(FastStats {
-        cpu_utilization: 0.0,
-        per_cpu_utilization: Vec::new(),
-        cpu_frequency: 0,
-        memory_total: 0,
-        memory_used: 0,
-        memory_available: 0,
-        swap_total: 0,
-        swap_used: 0,
-        network_upload_kb: 0.0,
-        network_download_kb: 0.0,
-        top_processes: Vec::new(),
-        all_processes: Vec::new(),
-        disk_read_bytes: 0,
-        disk_write_bytes: 0,
-        adapter_snapshot: crate::adapter_monitor::AdapterSnapshot::default(),
-    })
+    cache
+        .as_ref()
+        .filter(|stats| stats.profile == profile)
+        .cloned()
+        .unwrap_or(FastStats {
+            profile,
+            captured_at: Instant::now(),
+            cpu_utilization: 0.0,
+            per_cpu_utilization: Vec::new(),
+            cpu_frequency: 0,
+            memory_total: 0,
+            memory_used: 0,
+            memory_available: 0,
+            swap_total: 0,
+            swap_used: 0,
+            network_upload_kb: 0.0,
+            network_download_kb: 0.0,
+            top_processes: Vec::new(),
+            disk_read_bytes: 0,
+            disk_write_bytes: 0,
+            adapter_snapshot: crate::adapter_monitor::AdapterSnapshot::default(),
+        })
 }
 
 // ============================================================================
@@ -1767,6 +1904,10 @@ async fn get_top_processes_optimized(
     previous_processes: &Arc<Mutex<ProcessCpuTimes>>,
     include_process_adapter_stats: bool,
 ) -> (Vec<ProcessInfo>, u64, u64) {
+    // Own the CPU baseline for the entire capture, not just the final update.
+    // This prevents two captures from observing the same old baseline and then
+    // writing near-simultaneous timestamps that make the next delta jitter.
+    let mut prev = previous_processes.lock().await;
     let native_procs = query_all_processes_optimized();
     let current_pids: HashSet<u32> = native_procs.iter().map(|process| process.pid).collect();
     let now = Instant::now();
@@ -1781,7 +1922,6 @@ async fn get_top_processes_optimized(
     let adapter_stats =
         crate::adapter_monitor::process_stats(&adapter_processes, include_process_adapter_stats);
 
-    let mut prev = previous_processes.lock().await;
     prune_process_cpu_times(&mut prev, &current_pids);
     let mut processes = Vec::with_capacity(native_procs.len());
     let mut total_disk_read = 0u64;
@@ -1917,16 +2057,27 @@ pub async fn get_all_processes(
     processes
 }
 
-fn paginate_processes(mut processes: Vec<ProcessInfo>, query: ProcessQuery) -> ProcessPage {
+#[cfg(test)]
+fn paginate_processes(processes: Vec<ProcessInfo>, query: ProcessQuery) -> ProcessPage {
+    paginate_process_snapshot(&processes, unix_timestamp_secs(), query)
+}
+
+fn paginate_process_snapshot(
+    processes: &[ProcessInfo],
+    captured_at: i64,
+    query: ProcessQuery,
+) -> ProcessPage {
     let search = query.search.trim().to_lowercase();
-    if !search.is_empty() {
-        processes.retain(|process| {
-            process.name_lower.contains(&search)
+    let mut processes: Vec<&ProcessInfo> = processes
+        .iter()
+        .filter(|process| {
+            search.is_empty()
+                || process.name_lower.contains(&search)
                 || process.command_lower.contains(&search)
                 || process.pid.to_string().contains(&search)
                 || process.status.to_ascii_lowercase().contains(&search)
-        });
-    }
+        })
+        .collect();
 
     let compare_float = |left: f32, right: f32| {
         left.partial_cmp(&right)
@@ -1975,14 +2126,18 @@ fn paginate_processes(mut processes: Vec<ProcessInfo>, query: ProcessQuery) -> P
         .collect();
 
     ProcessPage {
-        captured_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs() as i64),
+        captured_at,
         total,
         offset,
         limit,
         items,
     }
+}
+
+fn unix_timestamp_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs() as i64)
 }
 
 #[inline]
@@ -1995,43 +2150,221 @@ fn filetime_to_unix(filetime: u64) -> u64 {
 // ============================================================================
 
 pub async fn get_network_connections() -> Vec<NetworkConnection> {
-    let executor = crate::security::SecureCommandExecutor::new();
-    let output = match executor.execute_command("netstat", &["-an"]) {
-        Ok(output) => output,
-        Err(_) => return vec![],
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_network_connections(&stdout)
+    query_native_network_connections()
 }
 
-/// Parse `netstat -an` output. Pure for testability. Handles BOTH row
-/// shapes Windows prints: TCP has a trailing state column
-/// (`TCP 0.0.0.0:135 0.0.0.0:0 LISTENING`) while UDP has none
-/// (`UDP 0.0.0.0:123 *:*`) — requiring 4 tokens silently dropped every
-/// UDP entry from the list.
-fn parse_network_connections(stdout: &str) -> Vec<NetworkConnection> {
-    stdout
-        .lines()
-        .skip(4)
-        .filter_map(
-            |line| match line.split_whitespace().collect::<Vec<&str>>().as_slice() {
-                [proto, local, remote, state, ..] => Some(NetworkConnection {
-                    protocol: (*proto).to_string(),
-                    local_addr: (*local).to_string(),
-                    remote_addr: (*remote).to_string(),
-                    status: (*state).to_string(),
+const AF_INET_V4: u32 = 2;
+const AF_INET_V6: u32 = 23;
+const ERROR_INSUFFICIENT_BUFFER_CODE: u32 = 122;
+
+fn query_native_network_connections() -> Vec<NetworkConnection> {
+    let mut connections = Vec::new();
+
+    if let Some(buffer) = query_ip_helper_table(|table, size| unsafe {
+        GetExtendedTcpTable(table, size, true, AF_INET_V4, TCP_TABLE_OWNER_PID_ALL, 0)
+    }) {
+        connections.extend(
+            ip_helper_rows::<MIB_TCPROW_OWNER_PID>(&buffer)
+                .iter()
+                .map(|row| NetworkConnection {
+                    protocol: "TCP".to_string(),
+                    local_addr: format_ipv4_endpoint(row.dwLocalAddr, row.dwLocalPort),
+                    remote_addr: format_ipv4_remote_endpoint(row.dwRemoteAddr, row.dwRemotePort),
+                    status: tcp_state_name(row.dwState).to_string(),
                 }),
-                [proto, local, remote] => Some(NetworkConnection {
-                    protocol: (*proto).to_string(),
-                    local_addr: (*local).to_string(),
-                    remote_addr: (*remote).to_string(),
-                    status: "NONE".to_string(),
+        );
+    }
+
+    if let Some(buffer) = query_ip_helper_table(|table, size| unsafe {
+        GetExtendedTcpTable(table, size, true, AF_INET_V6, TCP_TABLE_OWNER_PID_ALL, 0)
+    }) {
+        connections.extend(
+            ip_helper_rows::<MIB_TCP6ROW_OWNER_PID>(&buffer)
+                .iter()
+                .map(|row| NetworkConnection {
+                    protocol: "TCP".to_string(),
+                    local_addr: format_ipv6_endpoint(
+                        row.ucLocalAddr,
+                        row.dwLocalScopeId,
+                        row.dwLocalPort,
+                    ),
+                    remote_addr: format_ipv6_remote_endpoint(
+                        row.ucRemoteAddr,
+                        row.dwRemoteScopeId,
+                        row.dwRemotePort,
+                    ),
+                    status: tcp_state_name(row.dwState).to_string(),
                 }),
-                _ => None,
-            },
-        )
-        .collect()
+        );
+    }
+
+    if let Some(buffer) = query_ip_helper_table(|table, size| unsafe {
+        GetExtendedUdpTable(table, size, true, AF_INET_V4, UDP_TABLE_OWNER_PID, 0)
+    }) {
+        connections.extend(
+            ip_helper_rows::<MIB_UDPROW_OWNER_PID>(&buffer)
+                .iter()
+                .map(|row| NetworkConnection {
+                    protocol: "UDP".to_string(),
+                    local_addr: format_ipv4_endpoint(row.dwLocalAddr, row.dwLocalPort),
+                    remote_addr: String::from("—"),
+                    status: "BOUND".to_string(),
+                }),
+        );
+    }
+
+    if let Some(buffer) = query_ip_helper_table(|table, size| unsafe {
+        GetExtendedUdpTable(table, size, true, AF_INET_V6, UDP_TABLE_OWNER_PID, 0)
+    }) {
+        connections.extend(
+            ip_helper_rows::<MIB_UDP6ROW_OWNER_PID>(&buffer)
+                .iter()
+                .map(|row| NetworkConnection {
+                    protocol: "UDP".to_string(),
+                    local_addr: format_ipv6_endpoint(
+                        row.ucLocalAddr,
+                        row.dwLocalScopeId,
+                        row.dwLocalPort,
+                    ),
+                    remote_addr: String::from("—"),
+                    status: "BOUND".to_string(),
+                }),
+        );
+    }
+
+    // IP Helper returns listeners before many active sockets on typical
+    // systems. Put useful peer-to-peer rows first so a bounded UI preview does
+    // not look like ten identical wildcard addresses.
+    connections.sort_by(|left, right| {
+        network_connection_display_rank(left)
+            .cmp(&network_connection_display_rank(right))
+            .then_with(|| left.protocol.cmp(&right.protocol))
+            .then_with(|| left.local_addr.cmp(&right.local_addr))
+            .then_with(|| left.remote_addr.cmp(&right.remote_addr))
+    });
+
+    connections
+}
+
+fn network_connection_display_rank(connection: &NetworkConnection) -> u8 {
+    match connection.status.as_str() {
+        "ESTABLISHED" => 0,
+        "SYN_SENT" | "SYN_RECEIVED" | "CLOSE_WAIT" | "FIN_WAIT_1" | "FIN_WAIT_2" | "CLOSING"
+        | "LAST_ACK" => 1,
+        "TIME_WAIT" => 2,
+        "LISTENING" => 3,
+        "BOUND" => 4,
+        _ => 5,
+    }
+}
+
+fn query_ip_helper_table(
+    mut query: impl FnMut(Option<*mut std::ffi::c_void>, *mut u32) -> u32,
+) -> Option<Vec<u32>> {
+    let mut byte_len = 0u32;
+    let initial = query(None, &mut byte_len);
+    if initial != 0 && initial != ERROR_INSUFFICIENT_BUFFER_CODE {
+        return None;
+    }
+
+    // DWORD storage supplies the alignment required by every OWNER_PID row.
+    for _ in 0..3 {
+        let words = (byte_len as usize).div_ceil(std::mem::size_of::<u32>());
+        let mut buffer = vec![0u32; words.max(1)];
+        let status = query(Some(buffer.as_mut_ptr().cast()), &mut byte_len as *mut u32);
+        if status == 0 {
+            return Some(buffer);
+        }
+        if status != ERROR_INSUFFICIENT_BUFFER_CODE {
+            return None;
+        }
+    }
+
+    None
+}
+
+fn ip_helper_rows<T>(buffer: &[u32]) -> &[T] {
+    if buffer.is_empty()
+        || std::mem::size_of::<T>() == 0
+        || std::mem::align_of::<T>() > std::mem::align_of::<u32>()
+    {
+        return &[];
+    }
+
+    let available =
+        (std::mem::size_of_val(buffer) - std::mem::size_of::<u32>()) / std::mem::size_of::<T>();
+    let count = (buffer[0] as usize).min(available);
+    let rows = unsafe { buffer.as_ptr().add(1).cast::<T>() };
+    // SAFETY: GetExtended*Table writes a DWORD count followed by `count`
+    // OWNER_PID rows. `available` bounds corrupt/racing counts to the allocated
+    // buffer, and DWORD storage provides the rows' four-byte alignment.
+    unsafe { std::slice::from_raw_parts(rows, count) }
+}
+
+fn format_ipv4_endpoint(address: u32, port: u32) -> String {
+    let address = Ipv4Addr::from(u32::from_be(address));
+    let port = u16::from_be(port as u16);
+    if address.is_unspecified() {
+        format!("All interfaces:{port}")
+    } else {
+        format!("{address}:{port}")
+    }
+}
+
+fn format_ipv4_remote_endpoint(address: u32, port: u32) -> String {
+    let address = Ipv4Addr::from(u32::from_be(address));
+    let port = u16::from_be(port as u16);
+    if address.is_unspecified() && port == 0 {
+        "—".to_string()
+    } else if address.is_unspecified() {
+        format!("*:{port}")
+    } else {
+        format!("{address}:{port}")
+    }
+}
+
+fn format_ipv6_endpoint(address: [u8; 16], scope_id: u32, port: u32) -> String {
+    let address = Ipv6Addr::from(address);
+    let port = u16::from_be(port as u16);
+    if address.is_unspecified() {
+        format!("All interfaces:{port}")
+    } else if scope_id == 0 {
+        format!("[{address}]:{port}")
+    } else {
+        format!("[{address}%{scope_id}]:{port}")
+    }
+}
+
+fn format_ipv6_remote_endpoint(address: [u8; 16], scope_id: u32, port: u32) -> String {
+    let address = Ipv6Addr::from(address);
+    let port = u16::from_be(port as u16);
+    if address.is_unspecified() && port == 0 {
+        "—".to_string()
+    } else if address.is_unspecified() {
+        format!("*:{port}")
+    } else if scope_id == 0 {
+        format!("[{address}]:{port}")
+    } else {
+        format!("[{address}%{scope_id}]:{port}")
+    }
+}
+
+fn tcp_state_name(state: u32) -> &'static str {
+    match state {
+        1 => "CLOSED",
+        2 => "LISTENING",
+        3 => "SYN_SENT",
+        4 => "SYN_RECEIVED",
+        5 => "ESTABLISHED",
+        6 => "FIN_WAIT_1",
+        7 => "FIN_WAIT_2",
+        8 => "CLOSE_WAIT",
+        9 => "CLOSING",
+        10 => "LAST_ACK",
+        11 => "TIME_WAIT",
+        12 => "DELETE_TCB",
+        _ => "UNKNOWN",
+    }
 }
 
 // ============================================================================
@@ -2667,6 +3000,62 @@ mod tests {
     }
 
     #[test]
+    fn monitor_profiles_make_process_demand_explicit() {
+        let basic = MonitorProfile::Legacy {
+            include_process_adapter_stats: false,
+        };
+        let extended = MonitorProfile::Legacy {
+            include_process_adapter_stats: true,
+        };
+
+        assert!(basic.includes_processes());
+        assert!(!basic.includes_process_adapter_stats());
+        assert!(extended.includes_processes());
+        assert!(extended.includes_process_adapter_stats());
+        assert!(!MonitorProfile::SystemOnly.includes_processes());
+        assert!(!MonitorProfile::SystemOnly.includes_process_adapter_stats());
+    }
+
+    #[test]
+    fn process_snapshot_expires_on_the_two_second_boundary() {
+        let captured_instant = Instant::now();
+        let snapshot = ProcessSnapshot {
+            processes: Vec::new(),
+            captured_at: 123,
+            captured_instant,
+        };
+
+        assert!(snapshot.is_fresh_at(captured_instant));
+        assert!(
+            snapshot.is_fresh_at(
+                captured_instant + PROCESS_SNAPSHOT_INTERVAL - Duration::from_millis(1)
+            )
+        );
+        assert!(!snapshot.is_fresh_at(captured_instant + PROCESS_SNAPSHOT_INTERVAL));
+    }
+
+    #[test]
+    fn process_snapshot_pagination_preserves_capture_time() {
+        let processes = vec![
+            process(1, "alpha.exe", 5.0, 10.0),
+            process(2, "beta.exe", 20.0, 30.0),
+        ];
+
+        let page = paginate_process_snapshot(
+            &processes,
+            1_234_567,
+            ProcessQuery {
+                search: "beta".to_string(),
+                ..ProcessQuery::default()
+            },
+        );
+
+        assert_eq!(page.captured_at, 1_234_567);
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].pid, 2);
+    }
+
+    #[test]
     fn programmatic_process_query_default_uses_the_ui_page_size() {
         let query = ProcessQuery::default();
 
@@ -2748,31 +3137,51 @@ mod tests {
     }
 
     #[test]
-    fn netstat_parsing_keeps_udp_rows() {
-        let sample = "\nActive Connections\n\n  Proto  Local Address          Foreign Address        State\n  \
-                      TCP    0.0.0.0:135            0.0.0.0:0              LISTENING\n  \
-                      TCP    127.0.0.1:49710        127.0.0.1:49711        ESTABLISHED\n  \
-                      UDP    0.0.0.0:123            *:*\n  \
-                      UDP    [::1]:1900             *:*\n";
-        let parsed = parse_network_connections(sample);
-        let udp: Vec<&NetworkConnection> = parsed
-            .iter()
-            .filter(|c| c.protocol.eq_ignore_ascii_case("udp"))
-            .collect();
+    fn native_network_rows_format_addresses_ports_and_states() {
+        assert_eq!(format_ipv4_endpoint(0x0100_007f, 0x5000), "127.0.0.1:80");
+        assert_eq!(format_ipv4_endpoint(0, 0x5000), "All interfaces:80");
+        assert_eq!(format_ipv4_remote_endpoint(0, 0), "—");
         assert_eq!(
-            udp.len(),
-            2,
-            "both UDP rows must survive parsing: {parsed:?}"
+            format_ipv6_endpoint(Ipv6Addr::LOCALHOST.octets(), 0, 0x9001),
+            "[::1]:400"
         );
-        assert_eq!(udp[0].local_addr, "0.0.0.0:123");
-        assert_eq!(udp[0].status, "NONE");
+        assert_eq!(
+            format_ipv6_endpoint(Ipv6Addr::UNSPECIFIED.octets(), 0, 0x5000),
+            "All interfaces:80"
+        );
+        assert_eq!(
+            format_ipv6_remote_endpoint(Ipv6Addr::UNSPECIFIED.octets(), 0, 0),
+            "—"
+        );
+        assert_eq!(
+            format_ipv6_endpoint("fe80::1".parse::<Ipv6Addr>().unwrap().octets(), 7, 0x5000,),
+            "[fe80::1%7]:80"
+        );
+        assert_eq!(tcp_state_name(2), "LISTENING");
+        assert_eq!(tcp_state_name(5), "ESTABLISHED");
+        assert_eq!(tcp_state_name(u32::MAX), "UNKNOWN");
+    }
 
-        let tcp: Vec<&NetworkConnection> = parsed
-            .iter()
-            .filter(|c| c.protocol.eq_ignore_ascii_case("tcp"))
-            .collect();
-        assert_eq!(tcp.len(), 2);
-        assert_eq!(tcp[0].status, "LISTENING");
+    #[test]
+    fn active_network_connections_sort_ahead_of_wildcard_listeners() {
+        let connection = |status: &str, local: &str, remote: &str| NetworkConnection {
+            protocol: "TCP".to_string(),
+            local_addr: local.to_string(),
+            remote_addr: remote.to_string(),
+            status: status.to_string(),
+        };
+        let mut connections = [
+            connection("BOUND", "All interfaces:5353", "—"),
+            connection("LISTENING", "All interfaces:445", "—"),
+            connection("TIME_WAIT", "192.0.2.10:51000", "198.51.100.20:443"),
+            connection("ESTABLISHED", "192.0.2.10:51001", "198.51.100.20:443"),
+        ];
+        connections.sort_by_key(network_connection_display_rank);
+
+        assert_eq!(connections[0].status, "ESTABLISHED");
+        assert_eq!(connections[1].status, "TIME_WAIT");
+        assert_eq!(connections[2].status, "LISTENING");
+        assert_eq!(connections[3].status, "BOUND");
     }
 
     fn npu_evidence(name: &str) -> NpuAdapterEvidence {

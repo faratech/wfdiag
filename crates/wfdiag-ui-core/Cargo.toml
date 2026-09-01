@@ -8,7 +8,8 @@ license-file = "../../LICENSE"
 
 [dependencies]
 event-listener = "5.4.2"
-serde = { version = "1.0.229", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive", "rc"] }
+wfdiag-native-issues = { path = "../wfdiag-native-issues" }
 wfdiag-remediation-catalog = { path = "../wfdiag-remediation-catalog" }
 
 [dev-dependencies]

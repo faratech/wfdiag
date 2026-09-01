@@ -10,6 +10,7 @@ mod diagnostics;
 #[allow(dead_code, clippy::all, clippy::pedantic)]
 #[path = "../../../src-tauri/src/error.rs"]
 mod error;
+mod fix_plan;
 #[allow(clippy::all, clippy::pedantic)]
 pub mod issue_catalog;
 #[allow(clippy::all, clippy::pedantic)]
@@ -20,7 +21,14 @@ mod runtime;
 #[path = "../../../src-tauri/src/timestamp.rs"]
 pub mod timestamp;
 
-pub use diagnostics::{DiagnosticTask, TaskResult};
+pub use diagnostics::{
+    DiagnosticTask, ScanEvidence, SharedScanEvidence, SharedTaskResult, TaskResult,
+    TaskResultLookup, ordered_scan_evidence,
+};
+pub use fix_plan::{
+    FixPlanEntry, MAX_FIX_PLAN_ENTRIES, MAX_FIX_PLAN_NOTES_CHARS, MAX_FIX_PLAN_RATIONALE_CHARS,
+    ParsedFixPlan, build_fix_plan_prompt, parse_fix_plan,
+};
 pub use issue_catalog::{
     DetectCtx, DetectFn, Detection, DetectionOutcome, Issue, IssueSeverity, IssueSpec, IssueStatus,
     catalog, detect_all_with,

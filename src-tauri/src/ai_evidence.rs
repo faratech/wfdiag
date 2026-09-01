@@ -10,6 +10,7 @@ use crate::issue_catalog::{Issue, IssueSeverity, IssueStatus, catalog};
 use crate::results_storage::{ComparisonResult, TaskChange};
 use serde::Serialize;
 use serde_json::Value;
+use std::borrow::Borrow;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
@@ -93,12 +94,12 @@ pub(crate) struct CompactEvidence {
     pub rendered: String,
 }
 
-pub(crate) struct EvidenceRequest<'a> {
+pub(crate) struct EvidenceRequest<'a, R = TaskResult> {
     pub question: &'a str,
     pub scan_id: Option<&'a str>,
     pub captured_at: Option<&'a str>,
     pub age_minutes: Option<u64>,
-    pub results: &'a HashMap<String, TaskResult>,
+    pub results: &'a HashMap<String, R>,
     pub issues: &'a [Issue],
     pub comparison: Option<&'a ComparisonResult>,
     /// Task/issue ids explicitly attached by the UI or selected by a tool.
@@ -172,10 +173,13 @@ struct Candidate {
 /// Build a deterministic evidence packet whose rendered form is guaranteed to
 /// fit `policy.max_chars`. If even the exact question plus mandatory coverage
 /// metadata cannot fit, this returns an error instead of losing the question.
-pub(crate) fn build_compact_evidence(
-    request: EvidenceRequest<'_>,
+pub(crate) fn build_compact_evidence<R>(
+    request: EvidenceRequest<'_, R>,
     policy: EvidencePolicy,
-) -> Result<CompactEvidence, EvidenceBuildError> {
+) -> Result<CompactEvidence, EvidenceBuildError>
+where
+    R: Borrow<TaskResult>,
+{
     if request.question.trim().is_empty() {
         return Err(EvidenceBuildError::EmptyQuestion);
     }
@@ -258,10 +262,23 @@ pub(crate) fn build_compact_evidence(
     })
 }
 
-fn coverage_summary(results: &HashMap<String, TaskResult>, issues: &[Issue]) -> CoverageSummary {
+fn coverage_summary<R>(results: &HashMap<String, R>, issues: &[Issue]) -> CoverageSummary
+where
+    R: Borrow<TaskResult>,
+{
+    let (collected_tasks, failed_tasks) =
+        results
+            .values()
+            .fold((0, 0), |(collected, failed), result| {
+                if result.borrow().success {
+                    (collected + 1, failed)
+                } else {
+                    (collected, failed + 1)
+                }
+            });
     let mut coverage = CoverageSummary {
-        collected_tasks: results.values().filter(|result| result.success).count(),
-        failed_tasks: results.values().filter(|result| !result.success).count(),
+        collected_tasks,
+        failed_tasks,
         total_checks: issues.len(),
         ..CoverageSummary::default()
     };
@@ -275,12 +292,15 @@ fn coverage_summary(results: &HashMap<String, TaskResult>, issues: &[Issue]) -> 
     coverage
 }
 
-fn build_candidates(
-    request: &EvidenceRequest<'_>,
+fn build_candidates<R>(
+    request: &EvidenceRequest<'_, R>,
     preferred: &HashSet<&str>,
     question_terms: &BTreeSet<String>,
     policy: EvidencePolicy,
-) -> Vec<Candidate> {
+) -> Vec<Candidate>
+where
+    R: Borrow<TaskResult>,
+{
     let issue_defaults: HashMap<&str, IssueSeverity> = catalog()
         .iter()
         .map(|spec| (spec.id, spec.default_severity))
@@ -356,6 +376,7 @@ fn build_candidates(
     let mut sorted_results: Vec<_> = request.results.iter().collect();
     sorted_results.sort_by_key(|(task_id, _)| task_id.as_str());
     for (task_id, result) in sorted_results {
+        let result = result.borrow();
         let explicitly_preferred = preferred.contains(task_id.as_str());
         let output_excerpt = relevance_excerpt(&result.output, 4_096);
         let relevance = relevance_score(
@@ -1038,7 +1059,7 @@ mod tests {
 
     #[test]
     fn explicit_source_precedes_critical_and_critical_precedes_warning() {
-        let results = HashMap::new();
+        let results: HashMap<String, TaskResult> = HashMap::new();
         let issues = vec![
             issue(
                 "warning_issue",
@@ -1121,7 +1142,7 @@ mod tests {
 
     #[test]
     fn phi_sized_budget_keeps_question_coverage_and_a_high_priority_record() {
-        let results = HashMap::new();
+        let results: HashMap<String, TaskResult> = HashMap::new();
         let issues = vec![issue(
             "low_disk_space",
             IssueSeverity::Critical,

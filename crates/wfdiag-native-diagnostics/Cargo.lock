@@ -511,6 +511,7 @@ version = "0.1.0"
 dependencies = [
  "event-listener",
  "serde",
+ "wfdiag-native-issues",
  "wfdiag-remediation-catalog",
 ]
 

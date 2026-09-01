@@ -7,7 +7,9 @@
 //! so detectors can never drift from their metadata, and catalog invariants
 //! are enforced by tests instead of hand-pinned id lists.
 
+#[cfg(test)]
 use crate::diagnostics::TaskResult;
+use crate::diagnostics::TaskResultLookup;
 use crate::issue_detector as det;
 use crate::remediation::RemediationSummary;
 use crate::timestamp::Timestamp;
@@ -57,7 +59,7 @@ pub enum IssueStatus {
 /// injected so every detector is deterministic in tests (no env probing, no
 /// wall-clock reads inside detection logic).
 pub struct DetectCtx<'a> {
-    pub results: &'a HashMap<String, TaskResult>,
+    pub results: &'a dyn TaskResultLookup,
     pub now: Timestamp,
     /// Entry count of the user's temp directory; None = unknown (not detected)
     pub temp_file_count: Option<usize>,
@@ -548,7 +550,7 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
     for task_id in spec.source_tasks {
         let result = ctx
             .results
-            .get(*task_id)
+            .get_task_result(task_id)
             .ok_or_else(|| format!("diagnostic '{}' was not run", task_id))?;
         if !result.success {
             return Err(result
@@ -941,7 +943,7 @@ mod tests {
 
     #[test]
     fn empty_context_yields_full_sweep_with_no_detections() {
-        let results = HashMap::new();
+        let results: HashMap<String, TaskResult> = HashMap::new();
         let ctx = DetectCtx {
             results: &results,
             now: test_support::fixed_now(),

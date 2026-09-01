@@ -1,15 +1,15 @@
-use crate::{ExportPayload, ExportRequestKind, ExportTask, TaskResult, renderer::render_request};
-use std::collections::HashMap;
+use crate::{ExportPayload, ExportRequestKind, ExportTask, renderer::render_request};
 use std::fmt;
 use std::sync::{Arc, mpsc};
 use std::thread;
+use wfdiag_native_issues::SharedScanEvidence;
 
 /// One owned request queued from a native UI thread.
 #[derive(Debug, Clone)]
 pub struct ExportRequest {
     pub request_id: u64,
     pub kind: ExportRequestKind,
-    pub results: Arc<HashMap<String, TaskResult>>,
+    pub results: SharedScanEvidence,
 }
 
 /// Terminal response for one export request.
@@ -88,8 +88,11 @@ impl ExportRuntime {
                 while let Ok(command) = command_rx.recv() {
                     match command {
                         WorkerCommand::Generate(request) => {
-                            let result =
-                                render_request(&request.kind, &request.results, &worker_tasks);
+                            let result = render_request(
+                                &request.kind,
+                                request.results.as_ref(),
+                                &worker_tasks,
+                            );
                             if reply_tx
                                 .send(ExportCompleted {
                                     request_id: request.request_id,
@@ -160,21 +163,29 @@ impl Drop for ExportRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExportMetadata, ReportFormat, render_report, render_saved_report};
+    use crate::{
+        ExportMetadata, ReportFormat, TaskResult, render_email, render_report, render_saved_report,
+        render_support_package,
+    };
+    use std::collections::HashMap;
     use std::time::Duration;
 
-    #[test]
-    fn worker_matches_the_pure_renderer_and_preserves_request_id() {
-        let tasks = vec![ExportTask::new("os_info", "Operating System", "System")];
-        let results = HashMap::from([(
+    fn shared_results() -> SharedScanEvidence {
+        Arc::new(HashMap::from([(
             "os_info".to_string(),
-            TaskResult {
+            Arc::new(TaskResult {
                 success: true,
                 output: r#"{"edition":"Pro"}"#.to_string(),
                 error: None,
                 duration_ms: 5,
-            },
-        )]);
+            }),
+        )]))
+    }
+
+    #[test]
+    fn worker_matches_the_pure_renderer_and_preserves_request_id() {
+        let tasks = vec![ExportTask::new("os_info", "Operating System", "System")];
+        let results = shared_results();
         let expected = render_report(ReportFormat::Text, true, &results, &tasks).unwrap();
         let (runtime, replies) = ExportRuntime::start(tasks).unwrap();
         runtime
@@ -184,7 +195,7 @@ mod tests {
                     format: ReportFormat::Text,
                     include_raw: true,
                 },
-                results: Arc::new(results),
+                results,
             })
             .unwrap();
         let completed = replies.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -196,15 +207,7 @@ mod tests {
     #[test]
     fn worker_routes_saved_report_metadata_and_preserves_request_id() {
         let tasks = vec![ExportTask::new("os_info", "Operating System", "System")];
-        let results = HashMap::from([(
-            "os_info".to_string(),
-            TaskResult {
-                success: true,
-                output: r#"{"edition":"Pro"}"#.to_string(),
-                error: None,
-                duration_ms: 5,
-            },
-        )]);
+        let results = shared_results();
         let metadata = ExportMetadata {
             generated: "8/30/2026, 1:02:03 PM".to_string(),
             local_date: "8/30/2026".to_string(),
@@ -223,12 +226,64 @@ mod tests {
                     include_raw: true,
                     metadata,
                 },
-                results: Arc::new(results),
+                results,
             })
             .unwrap();
         let completed = replies.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(completed.request_id, 43);
         assert_eq!(completed.result, Ok(ExportPayload::Report(expected)));
+        runtime.shutdown().unwrap();
+    }
+
+    #[test]
+    fn worker_routes_email_payload_without_putting_the_report_in_the_draft_body() {
+        let tasks = vec![ExportTask::new("os_info", "Operating System", "System")];
+        let results = shared_results();
+        let metadata = ExportMetadata {
+            generated: "8/30/2026, 1:02:03 PM".to_string(),
+            local_date: "8/30/2026".to_string(),
+            computer_name: "TEST-PC".to_string(),
+            os_version: "Windows 11 Pro (25H2)".to_string(),
+            is_admin: true,
+        };
+        let expected = render_email(&metadata, &results, &tasks);
+        let (runtime, replies) = ExportRuntime::start(tasks).unwrap();
+        runtime
+            .enqueue(ExportRequest {
+                request_id: 44,
+                kind: ExportRequestKind::Email { metadata },
+                results,
+            })
+            .unwrap();
+
+        let completed = replies.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        assert_eq!(completed.request_id, 44);
+        assert_eq!(completed.result, Ok(ExportPayload::Email(expected)));
+        runtime.shutdown().unwrap();
+    }
+
+    #[test]
+    fn worker_routes_one_atomic_support_package_payload() {
+        let tasks = vec![ExportTask::new("os_info", "Operating System", "System")];
+        let results = shared_results();
+        let expected = render_support_package(true, &results, &tasks).unwrap();
+        let (runtime, replies) = ExportRuntime::start(tasks).unwrap();
+        runtime
+            .enqueue(ExportRequest {
+                request_id: 45,
+                kind: ExportRequestKind::SupportPackage { include_raw: true },
+                results,
+            })
+            .unwrap();
+
+        let completed = replies.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        assert_eq!(completed.request_id, 45);
+        assert_eq!(
+            completed.result,
+            Ok(ExportPayload::SupportPackage(expected))
+        );
         runtime.shutdown().unwrap();
     }
 }

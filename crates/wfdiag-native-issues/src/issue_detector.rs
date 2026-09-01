@@ -13,7 +13,7 @@ use serde_json::Value;
 /// Parse the diagnostic output for `task_id` as a JSON array, if the task
 /// succeeded. The common shape for WMI-backed tasks.
 fn task_array(ctx: &DetectCtx, task_id: &str) -> Option<Vec<Value>> {
-    let result = ctx.results.get(task_id)?;
+    let result = ctx.results.get_task_result(task_id)?;
     if !result.success {
         return None;
     }
@@ -22,7 +22,7 @@ fn task_array(ctx: &DetectCtx, task_id: &str) -> Option<Vec<Value>> {
 
 /// Parse the diagnostic output for `task_id` as a JSON object.
 fn task_object(ctx: &DetectCtx, task_id: &str) -> Option<Value> {
-    let result = ctx.results.get(task_id)?;
+    let result = ctx.results.get_task_result(task_id)?;
     if !result.success {
         return None;
     }

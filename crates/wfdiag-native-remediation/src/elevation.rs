@@ -11,6 +11,24 @@
 /// user dismissed the UAC prompt, and `Err` on a real failure.
 #[cfg(windows)]
 pub fn relaunch_self_elevated() -> Result<bool, String> {
+    relaunch_self_elevated_inner(None)
+}
+
+/// Relaunch the running executable elevated with one trusted internal flag.
+///
+/// The flag is deliberately restricted to an ASCII command-line switch. This
+/// keeps the ShellExecute parameter unambiguous without exposing a general
+/// argument-quoting or caller-controlled command surface.
+#[cfg(windows)]
+pub fn relaunch_self_elevated_with_flag(flag: &str) -> Result<bool, String> {
+    if !valid_relaunch_flag(flag) {
+        return Err("The administrator relaunch flag is invalid".to_string());
+    }
+    relaunch_self_elevated_inner(Some(flag))
+}
+
+#[cfg(windows)]
+fn relaunch_self_elevated_inner(flag: Option<&str>) -> Result<bool, String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_CANCELLED};
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
@@ -18,8 +36,8 @@ pub fn relaunch_self_elevated() -> Result<bool, String> {
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     use windows::core::{HRESULT, PCWSTR};
 
-    let exe =
-        std::env::current_exe().map_err(|e| format!("Could not resolve the running program path: {e}"))?;
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("Could not resolve the running program path: {e}"))?;
     // Run the elevated copy from its own directory rather than inheriting this
     // process's working directory, so it can't pick up a hijacked DLL/exe from
     // an attacker-controlled CWD (same reasoning as security::trusted_system_program).
@@ -29,6 +47,11 @@ pub fn relaunch_self_elevated() -> Result<bool, String> {
         |s: &std::ffi::OsStr| -> Vec<u16> { s.encode_wide().chain(std::iter::once(0)).collect() };
     let exe_w = to_wide(exe.as_os_str());
     let dir_w = dir.as_deref().map(|d| to_wide(d.as_os_str()));
+    let parameters_w = flag.map(|flag| {
+        flag.encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    });
     let verb_w: Vec<u16> = "runas\0".encode_utf16().collect();
 
     // ShellExecuteEx may route through COM (shell extensions); this blocking
@@ -46,6 +69,9 @@ pub fn relaunch_self_elevated() -> Result<bool, String> {
     info.fMask = SEE_MASK_NOASYNC;
     info.lpVerb = PCWSTR(verb_w.as_ptr());
     info.lpFile = PCWSTR(exe_w.as_ptr());
+    info.lpParameters = parameters_w
+        .as_ref()
+        .map_or(PCWSTR::null(), |parameters| PCWSTR(parameters.as_ptr()));
     info.lpDirectory = dir_w
         .as_ref()
         .map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr()));
@@ -65,7 +91,10 @@ pub fn relaunch_self_elevated() -> Result<bool, String> {
                 // User clicked "No" on the UAC prompt — deliberate, not an error.
                 Ok(false)
             } else if code == HRESULT::from_win32(ERROR_ACCESS_DENIED.0) {
-                Err("Windows denied elevation. Try launching the app as administrator manually.".to_string())
+                Err(
+                    "Windows denied elevation. Try launching the app as administrator manually."
+                        .to_string(),
+                )
             } else {
                 Err(format!("Could not relaunch with administrator rights: {e}"))
             }
@@ -77,4 +106,39 @@ pub fn relaunch_self_elevated() -> Result<bool, String> {
 #[cfg(not(windows))]
 pub fn relaunch_self_elevated() -> Result<bool, String> {
     Err("Administrator restart is only available on Windows".to_string())
+}
+
+/// Non-Windows builds have no elevation path; validate the same restricted
+/// flag surface before reporting the platform boundary.
+#[cfg(not(windows))]
+pub fn relaunch_self_elevated_with_flag(flag: &str) -> Result<bool, String> {
+    if !valid_relaunch_flag(flag) {
+        return Err("The administrator relaunch flag is invalid".to_string());
+    }
+    Err("Administrator restart is only available on Windows".to_string())
+}
+
+fn valid_relaunch_flag(flag: &str) -> bool {
+    flag.len() > 2
+        && flag.starts_with("--")
+        && flag
+            .bytes()
+            .skip(2)
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_relaunch_flag;
+
+    #[test]
+    fn elevated_relaunch_accepts_only_one_unquoted_internal_switch() {
+        assert!(valid_relaunch_flag("--wfdiag-elevated-relaunch"));
+        assert!(valid_relaunch_flag("--test_2"));
+        assert!(!valid_relaunch_flag(""));
+        assert!(!valid_relaunch_flag("wfdiag-elevated-relaunch"));
+        assert!(!valid_relaunch_flag("--two flags"));
+        assert!(!valid_relaunch_flag("--quoted\"flag"));
+        assert!(!valid_relaunch_flag("--path\\escape"));
+    }
 }

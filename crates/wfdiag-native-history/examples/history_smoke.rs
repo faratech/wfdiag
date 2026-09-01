@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use wfdiag_native_history::{
     DiagnosticTask, HistoryRuntimeConfig, NativeHistoryRuntime, ScanRecord, TaskResult, Timestamp,
 };
@@ -12,12 +13,12 @@ fn scan(id: &str, timestamp: &str, success: bool) -> ScanRecord {
         is_admin: false,
         results: HashMap::from([(
             "os_info".to_string(),
-            TaskResult {
+            Arc::new(TaskResult {
                 success,
                 output: if success { "ok" } else { "failed" }.to_string(),
                 error: None,
                 duration_ms: 1,
-            },
+            }),
         )]),
         task_count: 1,
         success_count: usize::from(success),

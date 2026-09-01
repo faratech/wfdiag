@@ -142,7 +142,7 @@ pub static REMEDIATIONS: [RemediationMetadata; REMEDIATION_COUNT] = [
     RemediationMetadata {
         id: "open_device_manager",
         label: "Open Device Manager",
-        description: "Opens Device Manager (devmgmt.msc) to inspect flagged devices.",
+        description: "Opens Device Manager to inspect flagged devices.",
         tier: RemediationTier::OpenTool,
         admin_required: false,
         requires_restart: false,
@@ -375,7 +375,7 @@ mod tests {
                 {"id":"open_task_manager","label":"Open Task Manager","description":"Opens Task Manager (taskmgr.exe) to inspect processes and startup apps.","tier":"open_tool","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
                 {"id":"open_windows_update","label":"Open Windows Update","description":"Opens Settings > Windows Update (ms-settings:windowsupdate).","tier":"open_tool","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
                 {"id":"open_security_center","label":"Open Windows Security","description":"Opens the Windows Security app (windowsdefender://).","tier":"open_tool","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
-                {"id":"open_device_manager","label":"Open Device Manager","description":"Opens Device Manager (devmgmt.msc) to inspect flagged devices.","tier":"open_tool","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
+                {"id":"open_device_manager","label":"Open Device Manager","description":"Opens Device Manager to inspect flagged devices.","tier":"open_tool","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
                 {"id":"open_system_protection","label":"Open System Protection","description":"Opens System Protection settings (SystemPropertiesProtection.exe) to manage restore points.","tier":"open_tool","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
                 {"id":"flush_dns","label":"Flush DNS cache","description":"Runs 'ipconfig /flushdns' to clear cached DNS lookups.","tier":"auto_safe","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":true,"batch_eligible":true,"cancellable":true},
                 {"id":"clear_icon_cache","label":"Rebuild icon & thumbnail cache","description":"Deletes IconCache.db and Explorer thumbnail caches; they rebuild on next sign-in.","tier":"auto_safe","admin_required":false,"requires_restart":true,"long_running":false,"maintenance":true,"batch_eligible":false,"cancellable":true},

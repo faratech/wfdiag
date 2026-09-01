@@ -344,7 +344,10 @@ impl SecureCommandExecutor {
 
     pub fn create_secure_command(&self, executable: &str) -> Result<Command> {
         let program = trusted_system_program(executable)?;
+        #[cfg(windows)]
         let mut cmd = Command::new(program);
+        #[cfg(not(windows))]
+        let cmd = Command::new(program);
 
         #[cfg(windows)]
         {

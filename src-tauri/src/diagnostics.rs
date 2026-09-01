@@ -14,6 +14,16 @@ pub struct DiagnosticTask {
 
 pub use wfdiag_native_issues::TaskResult;
 
+#[cfg(test)]
+pub(crate) fn task_result(success: bool, output: String, duration_ms: u64) -> TaskResult {
+    TaskResult {
+        success,
+        output,
+        error: None,
+        duration_ms,
+    }
+}
+
 pub fn get_all_tasks() -> Vec<DiagnosticTask> {
     vec![
         // System Information

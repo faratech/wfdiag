@@ -305,8 +305,12 @@ pub fn remediations() -> &'static [RemediationSpec] {
         RemediationSpec {
             metadata: remediation_catalog::OPEN_DEVICE_MANAGER,
             run: RunKind::Spawn {
-                program: "mmc.exe",
-                args: &["devmgmt.msc"],
+                // Directly creating mmc.exe returns ERROR_ELEVATION_REQUIRED
+                // for a standard-user process on current Windows 11 builds.
+                // The canonical Control Panel route opens Device Manager in
+                // its supported read-only standard-user mode instead.
+                program: "control.exe",
+                args: &["/name", "Microsoft.DeviceManager"],
             },
         },
         RemediationSpec {
@@ -1314,6 +1318,22 @@ mod tests {
         assert_eq!(
             *runner.calls.lock().unwrap(),
             vec!["spawn:taskmgr.exe ".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn device_manager_uses_the_standard_user_control_panel_route() {
+        let runner = RecordingRunner::default();
+        let outcome = execute("open_device_manager", false, &runner)
+            .await
+            .unwrap();
+        let FixOutcome::Completed { result } = outcome else {
+            panic!()
+        };
+        assert!(result.success);
+        assert_eq!(
+            *runner.calls.lock().unwrap(),
+            vec!["spawn:control.exe /name Microsoft.DeviceManager".to_string()]
         );
     }
 

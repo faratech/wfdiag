@@ -36,14 +36,17 @@ fn task_progress_wire_shape_is_stable() {
 
 #[test]
 fn diagnostic_result_wire_shape_is_stable() {
-    let event = UiEvent::DiagnosticResult(DiagnosticTaskResult {
-        session_id: "scan-7".into(),
-        task_id: "cpu".into(),
+    let shared = std::sync::Arc::new(wfdiag_native_issues::TaskResult {
         success: false,
         output: "partial evidence".into(),
         error: Some("counter unavailable".into()),
         duration_ms: 42,
     });
+    let event = UiEvent::DiagnosticResult(DiagnosticTaskResult::new(
+        "scan-7",
+        "cpu",
+        std::sync::Arc::clone(&shared),
+    ));
 
     let value = serde_json::to_value(&event).unwrap();
     assert_eq!(
@@ -61,7 +64,29 @@ fn diagnostic_result_wire_shape_is_stable() {
         })
     );
     assert_eq!(serde_json::from_value::<UiEvent>(value).unwrap(), event);
+    let UiEvent::DiagnosticResult(result) = &event else {
+        unreachable!("constructed a diagnostic result")
+    };
+    assert!(std::sync::Arc::ptr_eq(&result.result, &shared));
     assert!(event.is_lossless());
+}
+
+#[test]
+fn diagnostic_result_without_error_keeps_the_omitted_wire_field() {
+    let event = UiEvent::DiagnosticResult(DiagnosticTaskResult::new(
+        "scan-8",
+        "memory",
+        std::sync::Arc::new(wfdiag_native_issues::TaskResult {
+            success: true,
+            output: "ok".into(),
+            error: None,
+            duration_ms: 7,
+        }),
+    ));
+
+    let value = serde_json::to_value(&event).unwrap();
+    assert!(value["payload"].get("error").is_none());
+    assert_eq!(serde_json::from_value::<UiEvent>(value).unwrap(), event);
 }
 
 #[test]

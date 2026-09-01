@@ -1,5 +1,5 @@
 use crate::{
-    DetectCtx, Issue, RemediationSummary, TaskResult, Timestamp, catalog, detect_all_with,
+    DetectCtx, Issue, RemediationSummary, SharedScanEvidence, Timestamp, catalog, detect_all_with,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -13,7 +13,7 @@ use std::thread;
 #[derive(Debug, Clone)]
 pub struct IssueDetectionRequest {
     pub request_id: u64,
-    pub results: HashMap<String, TaskResult>,
+    pub results: SharedScanEvidence,
     pub now: Timestamp,
     pub temp_file_count: Option<usize>,
 }
@@ -144,7 +144,7 @@ impl IssueRuntime {
                     match command {
                         WorkerCommand::Detect(request) => {
                             let ctx = DetectCtx {
-                                results: &request.results,
+                                results: request.results.as_ref(),
                                 now: request.now,
                                 temp_file_count: request.temp_file_count,
                             };
@@ -229,7 +229,7 @@ impl Drop for IssueRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::IssueStatus;
+    use crate::{IssueStatus, TaskResult};
     use std::time::Duration;
 
     fn complete_remediation_catalog() -> Vec<RemediationSummary> {
@@ -239,15 +239,15 @@ mod tests {
     fn low_disk_request(request_id: u64) -> IssueDetectionRequest {
         IssueDetectionRequest {
             request_id,
-            results: HashMap::from([(
+            results: Arc::new(HashMap::from([(
                 "logical_disk".to_string(),
-                TaskResult {
+                Arc::new(TaskResult {
                     success: true,
                     output: r#"[{"Name":"C:","FreeSpace":5,"Size":100}]"#.to_string(),
                     error: None,
                     duration_ms: 3,
-                },
-            )]),
+                }),
+            )])),
             now: Timestamp::from_secs(1_781_264_000),
             temp_file_count: Some(1),
         }
@@ -263,7 +263,7 @@ mod tests {
             .collect();
         let direct_request = low_disk_request(0);
         let direct_ctx = DetectCtx {
-            results: &direct_request.results,
+            results: direct_request.results.as_ref(),
             now: direct_request.now,
             temp_file_count: direct_request.temp_file_count,
         };

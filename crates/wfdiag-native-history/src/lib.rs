@@ -28,6 +28,17 @@ mod timestamp;
 pub mod diagnostics {
     use serde::{Deserialize, Serialize};
     use std::sync::{OnceLock, RwLock};
+    pub type TaskResult = wfdiag_native_issues::SharedTaskResult;
+
+    #[cfg(test)]
+    pub fn task_result(success: bool, output: String, duration_ms: u64) -> TaskResult {
+        std::sync::Arc::new(wfdiag_native_issues::TaskResult {
+            success,
+            output,
+            error: None,
+            duration_ms,
+        })
+    }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct DiagnosticTask {
@@ -36,14 +47,6 @@ pub mod diagnostics {
         pub description: String,
         pub category: String,
         pub admin_required: bool,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct TaskResult {
-        pub success: bool,
-        pub output: String,
-        pub error: Option<String>,
-        pub duration_ms: u64,
     }
 
     fn catalog() -> &'static RwLock<Vec<DiagnosticTask>> {
@@ -84,7 +87,7 @@ pub mod commands {
 #[path = "../../../src-tauri/src/results_storage.rs"]
 mod storage;
 
-pub use diagnostics::{DiagnosticTask, TaskResult, set_default_task_catalog};
+pub use diagnostics::{DiagnosticTask, set_default_task_catalog};
 pub use encrypted_storage::EncryptedStorage;
 pub use runtime::{HistoryReply, HistoryRuntimeConfig, HistoryRuntimeError, NativeHistoryRuntime};
 pub use storage::{
@@ -92,6 +95,9 @@ pub use storage::{
     TaskChangeSummary, TaskDiffDetail, TaskTrend,
 };
 pub use timestamp::Timestamp;
+pub use wfdiag_native_issues::{
+    ScanEvidence, SharedScanEvidence, SharedTaskResult, TaskResult, ordered_scan_evidence,
+};
 
 #[cfg(test)]
 mod contract_tests {
@@ -120,6 +126,12 @@ mod contract_tests {
 
     #[test]
     fn scan_record_matches_the_shipping_json_contract() {
+        let shared_result = std::sync::Arc::new(TaskResult {
+            success: true,
+            output: "ok".to_string(),
+            error: None,
+            duration_ms: 5,
+        });
         let record = ScanRecord {
             id: "scan_contract".to_string(),
             timestamp: Timestamp::from_iso_string("2026-08-30T12:00:00Z").expect("timestamp"),
@@ -128,12 +140,7 @@ mod contract_tests {
             is_admin: true,
             results: HashMap::from([(
                 "os_info".to_string(),
-                TaskResult {
-                    success: true,
-                    output: "ok".to_string(),
-                    error: None,
-                    duration_ms: 5,
-                },
+                std::sync::Arc::clone(&shared_result),
             )]),
             task_count: 1,
             success_count: 1,
@@ -142,7 +149,7 @@ mod contract_tests {
             label: Some("Baseline".to_string()),
             tags: vec!["stable".to_string()],
         };
-        let value = serde_json::to_value(record).expect("serialize scan record");
+        let value = serde_json::to_value(&record).expect("serialize scan record");
         assert_eq!(value["timestamp"], "2026-08-30T12:00:00Z");
         assert_eq!(value["results"]["os_info"]["duration_ms"], 5);
         assert_eq!(value["label"], "Baseline");
@@ -150,5 +157,10 @@ mod contract_tests {
         assert!(value.get("task_count").is_some());
         assert!(value.get("success_count").is_some());
         assert!(value.get("failure_count").is_some());
+        let cloned = record.clone();
+        assert!(std::sync::Arc::ptr_eq(
+            &cloned.results["os_info"],
+            &shared_result
+        ));
     }
 }

@@ -8,7 +8,7 @@ license-file = "../../LICENSE"
 publish = false
 
 [dependencies]
-serde = { version = "1.0.229", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive", "rc"] }
 # Shipping enables preserve_order transitively. Make it explicit here so a
 # standalone native shell preserves JSON object field order byte-for-byte.
 serde_json = { version = "1.0.145", features = ["preserve_order"] }

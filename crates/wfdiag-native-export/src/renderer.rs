@@ -2,6 +2,7 @@
 
 use crate::ExportError;
 use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use wfdiag_native_issues::TaskResult;
 
@@ -72,6 +73,52 @@ pub struct EmailPayload {
     pub mailto_body: String,
 }
 
+/// The three undecorated report bodies written by Store 2.5.8's Generate
+/// Support Package action. Delivery remains shell-owned so every destination
+/// can be validated immediately before the files are written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupportPackagePayload {
+    pub json: String,
+    pub text: String,
+    pub html: String,
+}
+
+const URI_COMPONENT_HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+fn push_uri_component(output: &mut String, value: &str) {
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            output.push(char::from(byte));
+        } else {
+            output.push('%');
+            output.push(char::from(URI_COMPONENT_HEX[usize::from(byte >> 4)]));
+            output.push(char::from(URI_COMPONENT_HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+}
+
+/// Build the bounded `mailto:` draft URI for a rendered email payload.
+///
+/// The URI deliberately has no recipient and includes only the short compose
+/// body. The full diagnostic report remains in [`EmailPayload::clipboard_body`]
+/// for an explicit clipboard write by the UI shell. Every subject/body byte is
+/// encoded as an RFC 3986 query component, so machine names, locale text, `&`,
+/// `?`, percent signs, line breaks, and Unicode cannot introduce another
+/// `mailto` field or alter the URI structure.
+///
+/// Constructing this URI does not launch a mail client or send anything.
+#[must_use]
+pub fn render_email_compose_uri(payload: &EmailPayload) -> String {
+    let mut uri = String::with_capacity(
+        "mailto:?subject=&body=".len() + payload.subject.len() + payload.mailto_body.len(),
+    );
+    uri.push_str("mailto:?subject=");
+    push_uri_component(&mut uri, &payload.subject);
+    uri.push_str("&body=");
+    push_uri_component(&mut uri, &payload.mailto_body);
+    uri
+}
+
 /// Typed request variants supported by the worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportRequestKind {
@@ -98,6 +145,11 @@ pub enum ExportRequestKind {
     Email {
         metadata: ExportMetadata,
     },
+    /// Generate the raw JSON, text, and HTML trio used by the shipping
+    /// support-package action in one immutable worker request.
+    SupportPackage {
+        include_raw: bool,
+    },
 }
 
 /// Typed payload returned by pure rendering or the worker.
@@ -107,6 +159,7 @@ pub enum ExportPayload {
     WindowsForumPost(String),
     ForumClipboard(String),
     Email(EmailPayload),
+    SupportPackage(SupportPackagePayload),
 }
 
 /// Format JSON values into the established human-readable text projection.
@@ -174,12 +227,14 @@ fn html_escape(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn redacted_json_results(
-    results: &HashMap<String, TaskResult>,
-) -> HashMap<String, serde_json::Value> {
+fn redacted_json_results<R>(results: &HashMap<String, R>) -> HashMap<String, serde_json::Value>
+where
+    R: Borrow<TaskResult>,
+{
     results
         .iter()
         .map(|(task_id, result)| {
+            let result = result.borrow();
             let value = serde_json::json!({
                 "success": result.success,
                 "error": result.error,
@@ -194,10 +249,13 @@ fn task_map(tasks: &[ExportTask]) -> HashMap<String, &ExportTask> {
     tasks.iter().map(|task| (task.id.clone(), task)).collect()
 }
 
-fn grouped_results<'a>(
-    results: &'a HashMap<String, TaskResult>,
+fn grouped_results<'a, R>(
+    results: &'a HashMap<String, R>,
     tasks: &'a HashMap<String, &'a ExportTask>,
-) -> HashMap<String, Vec<(&'a String, &'a TaskResult)>> {
+) -> HashMap<String, Vec<(&'a String, &'a TaskResult)>>
+where
+    R: Borrow<TaskResult>,
+{
     let mut by_category: HashMap<String, Vec<(&String, &TaskResult)>> = HashMap::new();
 
     for (task_id, result) in results {
@@ -205,18 +263,21 @@ fn grouped_results<'a>(
             by_category
                 .entry(task.category.clone())
                 .or_default()
-                .push((task_id, result));
+                .push((task_id, result.borrow()));
         }
     }
 
     by_category
 }
 
-fn render_text(
-    results: &HashMap<String, TaskResult>,
+fn render_text<R>(
+    results: &HashMap<String, R>,
     tasks: &HashMap<String, &ExportTask>,
     include_raw: bool,
-) -> String {
+) -> String
+where
+    R: Borrow<TaskResult>,
+{
     let mut text = String::new();
     let results_by_category = grouped_results(results, tasks);
 
@@ -262,11 +323,14 @@ fn render_text(
     text
 }
 
-fn render_html(
-    results: &HashMap<String, TaskResult>,
+fn render_html<R>(
+    results: &HashMap<String, R>,
     tasks: &HashMap<String, &ExportTask>,
     include_raw: bool,
-) -> String {
+) -> String
+where
+    R: Borrow<TaskResult>,
+{
     let mut html = String::new();
     html.push_str("<!DOCTYPE html>\n<html>\n<head>\n");
     html.push_str("<meta charset=\"UTF-8\">\n");
@@ -345,12 +409,15 @@ fn render_html(
 /// # Errors
 ///
 /// Returns [`ExportError::Serialization`] if JSON serialization fails.
-pub fn render_report(
+pub fn render_report<R>(
     format: ReportFormat,
     include_raw: bool,
-    results: &HashMap<String, TaskResult>,
+    results: &HashMap<String, R>,
     tasks: &[ExportTask],
-) -> Result<String, ExportError> {
+) -> Result<String, ExportError>
+where
+    R: Borrow<TaskResult> + Serialize,
+{
     let tasks = task_map(tasks);
     match format {
         ReportFormat::Json if include_raw => serde_json::to_string_pretty(results)
@@ -373,13 +440,16 @@ pub fn render_report(
 /// # Errors
 ///
 /// Returns [`ExportError::Serialization`] if JSON serialization fails.
-pub fn render_saved_report(
+pub fn render_saved_report<R>(
     format: ReportFormat,
     include_raw: bool,
     metadata: &ExportMetadata,
-    results: &HashMap<String, TaskResult>,
+    results: &HashMap<String, R>,
     tasks: &[ExportTask],
-) -> Result<String, ExportError> {
+) -> Result<String, ExportError>
+where
+    R: Borrow<TaskResult> + Serialize,
+{
     let report = render_report(format, include_raw, results, tasks)?;
     if format != ReportFormat::Text {
         return Ok(report);
@@ -397,11 +467,14 @@ pub fn render_saved_report(
 
 /// Render the shipping `WindowsForum` post body. Delivery remains with the UI.
 #[must_use]
-pub fn render_windows_forum_post(
+pub fn render_windows_forum_post<R>(
     metadata: &ExportMetadata,
-    results: &HashMap<String, TaskResult>,
+    results: &HashMap<String, R>,
     tasks: &[ExportTask],
-) -> String {
+) -> String
+where
+    R: Borrow<TaskResult>,
+{
     let content = render_text(results, &task_map(tasks), false);
     format!(
         "[B]WindowsForum Diagnostic Report[/B]\n[CODE]\nGenerated: {}\nComputer: {}\nOS: {}\nAdmin Mode: {}\n\n{}\n[/CODE]\n\n[I]Generated using WindowsForum Diagnostics Tool[/I]",
@@ -415,11 +488,14 @@ pub fn render_windows_forum_post(
 
 /// Render the raw `[CODE]` clipboard payload used by Copy Report.
 #[must_use]
-pub fn render_forum_clipboard(
+pub fn render_forum_clipboard<R>(
     metadata: &ExportMetadata,
-    results: &HashMap<String, TaskResult>,
+    results: &HashMap<String, R>,
     tasks: &[ExportTask],
-) -> String {
+) -> String
+where
+    R: Borrow<TaskResult>,
+{
     let content = render_text(results, &task_map(tasks), true);
     format!(
         "[CODE]\n=== WindowsForum Diagnostic Report ===\nGenerated: {}\nComputer: {}\nOS: {}\nAdmin Mode: {}\n{}\n[/CODE]",
@@ -433,11 +509,14 @@ pub fn render_forum_clipboard(
 
 /// Render the shipping email subject, clipboard body, and short mail body.
 #[must_use]
-pub fn render_email(
+pub fn render_email<R>(
     metadata: &ExportMetadata,
-    results: &HashMap<String, TaskResult>,
+    results: &HashMap<String, R>,
     tasks: &[ExportTask],
-) -> EmailPayload {
+) -> EmailPayload
+where
+    R: Borrow<TaskResult>,
+{
     let content = render_text(results, &task_map(tasks), false);
     EmailPayload {
         subject: format!(
@@ -452,11 +531,34 @@ pub fn render_email(
     }
 }
 
-pub(crate) fn render_request(
-    kind: &ExportRequestKind,
-    results: &HashMap<String, TaskResult>,
+/// Render the shipping support-package trio from one diagnostic snapshot.
+///
+/// # Errors
+///
+/// Returns [`ExportError::Serialization`] if JSON serialization fails.
+pub fn render_support_package<R>(
+    include_raw: bool,
+    results: &HashMap<String, R>,
     tasks: &[ExportTask],
-) -> Result<ExportPayload, ExportError> {
+) -> Result<SupportPackagePayload, ExportError>
+where
+    R: Borrow<TaskResult> + Serialize,
+{
+    Ok(SupportPackagePayload {
+        json: render_report(ReportFormat::Json, include_raw, results, tasks)?,
+        text: render_report(ReportFormat::Text, include_raw, results, tasks)?,
+        html: render_report(ReportFormat::Html, include_raw, results, tasks)?,
+    })
+}
+
+pub(crate) fn render_request<R>(
+    kind: &ExportRequestKind,
+    results: &HashMap<String, R>,
+    tasks: &[ExportTask],
+) -> Result<ExportPayload, ExportError>
+where
+    R: Borrow<TaskResult> + Serialize,
+{
     match kind {
         ExportRequestKind::Report {
             format,
@@ -476,6 +578,9 @@ pub(crate) fn render_request(
         )),
         ExportRequestKind::Email { metadata } => {
             Ok(ExportPayload::Email(render_email(metadata, results, tasks)))
+        }
+        ExportRequestKind::SupportPackage { include_raw } => {
+            render_support_package(*include_raw, results, tasks).map(ExportPayload::SupportPackage)
         }
     }
 }
@@ -624,6 +729,37 @@ mod tests {
     }
 
     #[test]
+    fn support_package_request_renders_all_three_raw_formats_from_one_snapshot() {
+        let results = results(r#"{"edition":"Pro"}"#);
+        let payload = render_request(
+            &ExportRequestKind::SupportPackage { include_raw: true },
+            &results,
+            &tasks(),
+        )
+        .unwrap();
+        let ExportPayload::SupportPackage(package) = payload else {
+            panic!("support-package request returned the wrong payload variant");
+        };
+
+        assert_eq!(
+            package.json,
+            render_report(ReportFormat::Json, true, &results, &tasks()).unwrap()
+        );
+        assert_eq!(
+            package.text,
+            render_report(ReportFormat::Text, true, &results, &tasks()).unwrap()
+        );
+        assert_eq!(
+            package.html,
+            render_report(ReportFormat::Html, true, &results, &tasks()).unwrap()
+        );
+        for body in [&package.json, &package.text, &package.html] {
+            assert!(!body.contains("Computer: TEST-PC"));
+            assert!(!body.contains("Admin Mode: Yes"));
+        }
+    }
+
+    #[test]
     fn invalid_json_and_failure_semantics_are_unchanged() {
         let raw = render_report(ReportFormat::Text, true, &results("not json"), &tasks()).unwrap();
         assert!(raw.ends_with("not json\n\n"));
@@ -740,6 +876,47 @@ mod tests {
                 mailto_body: "[Report copied to clipboard - paste here with Ctrl+V]".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn email_compose_uri_has_no_recipient_and_never_embeds_the_full_report() {
+        let email = EmailPayload {
+            subject: "Diagnostic Report - TEST-PC - 8/30/2026".to_string(),
+            clipboard_body: "private full diagnostic output".to_string(),
+            mailto_body: "[Report copied to clipboard - paste here with Ctrl+V]".to_string(),
+        };
+
+        let uri = render_email_compose_uri(&email);
+
+        assert_eq!(
+            uri,
+            concat!(
+                "mailto:?subject=Diagnostic%20Report%20-%20TEST-PC%20-%208%2F30%2F2026",
+                "&body=%5BReport%20copied%20to%20clipboard%20-%20paste%20here%20with%20Ctrl%2BV%5D"
+            )
+        );
+        assert!(!uri.contains("private"));
+        assert!(!uri.contains("mailto:someone"));
+    }
+
+    #[test]
+    fn email_compose_uri_encodes_delimiters_controls_and_unicode() {
+        let email = EmailPayload {
+            subject: "PC & support? 100% 🖥\r\nCc: attacker@example.test".to_string(),
+            clipboard_body: "not part of the URI".to_string(),
+            mailto_body: "Paste\nwith Ctrl+V & review".to_string(),
+        };
+
+        let uri = render_email_compose_uri(&email);
+
+        assert_eq!(uri.matches('&').count(), 1);
+        assert!(uri.starts_with("mailto:?subject="));
+        assert!(uri.contains("%26%20support%3F%20100%25"));
+        assert!(uri.contains("%F0%9F%96%A5%0D%0ACc%3A%20attacker%40example.test"));
+        assert!(uri.ends_with("body=Paste%0Awith%20Ctrl%2BV%20%26%20review"));
+        assert!(!uri.contains('\r'));
+        assert!(!uri.contains('\n'));
+        assert!(!uri.contains("not part of the URI"));
     }
 
     #[test]
