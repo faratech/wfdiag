@@ -3,6 +3,13 @@
 //! This crate is the framework-neutral Cargo boundary for the shipping
 //! collectors: it deliberately has no dependency on Tauri, `WebView2`, or
 //! Reactor.
+//!
+//! Because the whole crate is `cfg(windows)`, the portable application
+//! facade (`wfdiag-app`) mirrors `ProcessQuery`, `ProcessPage`, `ProcessRow`,
+//! and `NetworkConnection` in its `ports` module and converts at the Windows
+//! boundary. A field added to any of those types here must be mirrored
+//! there (the facade's `ports/native.rs` conversions will fail to compile
+//! otherwise, which is the intended safety net).
 
 #![cfg(windows)]
 

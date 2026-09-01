@@ -239,7 +239,9 @@ impl UiWakeHandler {
         Self(Arc::new(handler))
     }
 
-    fn call(&self) {
+    /// Invoke the handler. Public so a host-side facade can forward its own
+    /// wake signal through the same handler type instead of mirroring it.
+    pub fn call(&self) {
         (self.0)();
     }
 }
