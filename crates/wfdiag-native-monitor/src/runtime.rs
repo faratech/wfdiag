@@ -349,8 +349,7 @@ impl NativeMonitorRuntime {
                                     let monitor = Arc::clone(&monitor);
                                     tokio::spawn(async move {
                                         let page = monitor.list_processes(request.query).await;
-                                        let _ =
-                                            request.reply.send(ProcessQueryOutcome::Page(page));
+                                        let _ = request.reply.send(ProcessQueryOutcome::Page(page));
                                     });
                                 }
                             }

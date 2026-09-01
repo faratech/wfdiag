@@ -299,11 +299,10 @@ impl ProviderManagementBackend for ProviderManagementService {
             // probes are in flight. Deliberately uncached: key-set flags must
             // reflect a just-completed credential save on the next probe.
             let configuration_source = std::sync::Arc::clone(&self.probes.configuration);
-            let configuration = tokio::task::spawn_blocking(move || {
-                configuration_source.snapshot()
-            })
-            .await
-            .unwrap_or_default();
+            let configuration =
+                tokio::task::spawn_blocking(move || configuration_source.snapshot())
+                    .await
+                    .unwrap_or_default();
             let phi_probe = self.probes.phi.probe();
             let foundry_probe = self
                 .probes
@@ -378,11 +377,10 @@ impl ProviderManagementBackend for ProviderManagementService {
             // probes are in flight. Deliberately uncached: key-set flags must
             // reflect a just-completed credential save on the next probe.
             let configuration_source = std::sync::Arc::clone(&self.probes.configuration);
-            let configuration = tokio::task::spawn_blocking(move || {
-                configuration_source.snapshot()
-            })
-            .await
-            .unwrap_or_default();
+            let configuration =
+                tokio::task::spawn_blocking(move || configuration_source.snapshot())
+                    .await
+                    .unwrap_or_default();
             let endpoint = self
                 .probes
                 .ollama

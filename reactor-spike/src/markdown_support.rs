@@ -436,8 +436,7 @@ fn parse_non_code_inline(text: &str, output: &mut Vec<MarkdownInline>) {
     let mut plain_start = 0;
     while cursor < text.len() {
         if text[cursor..].starts_with("**")
-            && let Some(relative) =
-                bounded_tail(text, cursor + 2, MAX_INLINE_SPAN_CHARS).find("**")
+            && let Some(relative) = bounded_tail(text, cursor + 2, MAX_INLINE_SPAN_CHARS).find("**")
         {
             let close = cursor + 2 + relative;
             let content = &text[cursor + 2..close];

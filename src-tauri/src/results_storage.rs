@@ -309,7 +309,10 @@ impl ScanStorage {
             .map_err(|e| DiagError::storage("list_scans", e.to_string()))?;
 
         let mut unreadable = Vec::new();
-        for scan_id in scan_ids.into_iter().filter(|id| id != SUMMARY_INDEX_ID && id != UNREADABLE_INDEX_ID) {
+        for scan_id in scan_ids
+            .into_iter()
+            .filter(|id| id != SUMMARY_INDEX_ID && id != UNREADABLE_INDEX_ID)
+        {
             match self.load_scan(&scan_id) {
                 Ok(scan) => {
                     summaries.push(Self::summary_for(&scan));

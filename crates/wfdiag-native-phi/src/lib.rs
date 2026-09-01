@@ -83,8 +83,8 @@ impl ChatProvider for PhiChatProvider {
     {
         Box::pin(async move {
             let is_cancelled = self.is_cancelled.clone();
-            let text = generate_response(&flatten_chat_request(request), move || is_cancelled())
-                .await?;
+            let text =
+                generate_response(&flatten_chat_request(request), move || is_cancelled()).await?;
             let _ = tx.send(text.clone()).await;
             Ok(ChatTurn {
                 text,

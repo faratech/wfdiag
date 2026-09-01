@@ -71,11 +71,7 @@ pub fn monitor_graph_geometry(series: &[f64], max: f64) -> MonitorGraphGeometry 
     // skip the repeated growth reallocations (~16 bytes per path segment).
     let mut area = String::with_capacity(points.len() * 16 + 32);
     area.push_str("F1 M0.000 ");
-    write!(
-        area,
-        "{MONITOR_GRAPH_HEIGHT:.3}",
-    )
-    .expect("writing to a String cannot fail");
+    write!(area, "{MONITOR_GRAPH_HEIGHT:.3}",).expect("writing to a String cannot fail");
     for &(x, y) in &points {
         push_line_to(&mut area, x, y);
     }

@@ -611,7 +611,11 @@ mod tests {
         }
 
         let live_comparison = runtime
-            .request_compare_current_to_latest(std::sync::Arc::new(scan("live", "2026-06-12T12:00:00Z", true)))
+            .request_compare_current_to_latest(std::sync::Arc::new(scan(
+                "live",
+                "2026-06-12T12:00:00Z",
+                true,
+            )))
             .expect("queue live comparison")
             .await
             .expect("worker reply")
@@ -622,7 +626,11 @@ mod tests {
         assert_eq!(live_comparison.new_successes.len(), 1);
 
         let autosaved_current = runtime
-            .request_compare_current_to_latest(std::sync::Arc::new(scan("newer", "2026-06-12T12:00:00Z", false)))
+            .request_compare_current_to_latest(std::sync::Arc::new(scan(
+                "newer",
+                "2026-06-12T12:00:00Z",
+                false,
+            )))
             .expect("queue autosaved-current comparison")
             .await
             .expect("worker reply")
@@ -637,7 +645,11 @@ mod tests {
             .expect("worker reply")
             .expect("clear");
         let empty = runtime
-            .request_compare_current_to_latest(std::sync::Arc::new(scan("after-clear", "2026-06-12T13:00:00Z", true)))
+            .request_compare_current_to_latest(std::sync::Arc::new(scan(
+                "after-clear",
+                "2026-06-12T13:00:00Z",
+                true,
+            )))
             .expect("queue empty comparison")
             .await
             .expect("worker reply")

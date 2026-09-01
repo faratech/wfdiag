@@ -392,7 +392,8 @@ pub const TRAY_MENU_INTENT_SHOW: u8 = 0;
 /// See [`TRAY_MENU_INTENT_SHOW`].
 pub const TRAY_MENU_INTENT_HIDE: u8 = 1;
 
-static TRAY_MENU_INTENT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(TRAY_MENU_INTENT_SHOW);
+static TRAY_MENU_INTENT: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(TRAY_MENU_INTENT_SHOW);
 
 /// Take and clear the captured show/hide intent for the pending
 /// `TRAY_COMMAND_SHOW`.

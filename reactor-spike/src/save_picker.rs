@@ -411,9 +411,7 @@ fn known_folder(folder: &windows::core::GUID) -> Result<PathBuf, SavePickerError
     unsafe { CoTaskMemFree(Some(raw.0.cast())) };
     let resolved = value.map(PathBuf::from);
     if let Ok(resolved) = &resolved
-        && let Ok(mut cache) = CACHE
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
+        && let Ok(mut cache) = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock()
     {
         cache.insert(*folder, resolved.clone());
     }
