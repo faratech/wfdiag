@@ -65,6 +65,7 @@ wfdiag-native-export = { workspace = true }
 wfdiag-native-history = { workspace = true }
 wfdiag-native-issues = { workspace = true }
 wfdiag-native-monitor = { workspace = true }
+wfdiag-native-ai-analysis = { workspace = true }
 wfdiag-native-ai-provider = { workspace = true }
 wfdiag-native-ai-chat = { workspace = true }
 wfdiag-native-ai-report = { workspace = true }

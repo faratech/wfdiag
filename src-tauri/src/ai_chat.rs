@@ -270,7 +270,7 @@ fn needs_mandatory_grounding(user_query: &str, _os_output: Option<&str>) -> bool
     // Only user-authored intent controls network access. Appending the local
     // OS record here would make words like "Version" and "Build" turn nearly
     // every unrelated question into a WindowsForum request.
-    crate::ai_grounding::needs_live_grounding(user_query)
+    crate::ai_grounding::needs_live_grounding(&[user_query])
 }
 
 async fn pre_ground_chat(
@@ -317,7 +317,9 @@ async fn pre_ground_chat(
     });
 
     let start = Instant::now();
-    match crate::ai_grounding::search_grounding_cancellable(query, max_chars, cancel).await {
+    // The caller has already checked `network_grounding_enabled()`; the
+    // canonical search performs the request it is asked for.
+    match crate::ai_grounding::search_windows_knowledge(query, max_chars, cancel).await {
         Ok(grounding) => {
             emitter.tool(&ToolPayload {
                 session_id: session_id.to_string(),

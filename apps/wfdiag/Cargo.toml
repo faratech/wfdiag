@@ -22,6 +22,7 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 semver = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-util = { workspace = true, features = ["rt"] }
+wfdiag-native-ai-analysis = { workspace = true }
 wfdiag-native-ai-chat = { workspace = true }
 wfdiag-native-ai-report = { workspace = true }
 wfdiag-native-remediation = { workspace = true }

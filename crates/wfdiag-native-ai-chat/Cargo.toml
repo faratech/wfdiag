@@ -18,16 +18,17 @@ process-wrap = { workspace = true, features = ["creation-flags", "job-object", "
 reqwest = { workspace = true, features = ["json", "native-tls", "stream"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { workspace = true, features = ["compat"] }
 wfdiag-native-ai-provider = { workspace = true }
+# Worker runtimes read non-secret settings and the per-provider CLI paths.
+wfdiag-native-settings = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_System_Threading"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-wfdiag-native-settings = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 
 [lints]

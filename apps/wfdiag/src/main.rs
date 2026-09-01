@@ -1,9 +1,7 @@
 #![windows_subsystem = "windows"]
 
-mod analysis_support;
 mod chat_support;
 mod export_support;
-mod fix_plan_support;
 mod fixtures;
 mod focus_support;
 mod icons;
@@ -22,10 +20,6 @@ mod window_support;
 #[allow(dead_code, non_snake_case, non_upper_case_globals)]
 mod winui_focus_bindings;
 
-use analysis_support::{
-    AnalysisRoute, AnalysisWorkerEvent, DiagnosticAnalysisGeneration, GroundingTrace,
-    GroundingTraceSource, IssuePrioritizationGeneration, NativeAnalysisRuntime,
-};
 use chat_support::{
     ChatScanSnapshot, ChatToolActivity, ChatToolActivityState, ChatToolHistory, ChatToolPorts,
     ChatToolSnapshot, ChatWorkerEvent, NativeChatRuntime,
@@ -33,10 +27,6 @@ use chat_support::{
 use export_support::{
     current_export_date_strings, launch_email_compose_draft, launch_export_external_action,
     write_text_to_clipboard,
-};
-use fix_plan_support::{
-    FixPlanGeneration, FixPlanRoute, FixPlanWorkerEvent, NativeFixPlanRuntime, ValidatedFixPlan,
-    initial_fix_plan_route,
 };
 use icons::FaIcon;
 use markdown_render::{MarkdownStyle, render_markdown_lite};
@@ -57,6 +47,12 @@ use subscription_auth_support::{
 use subscription_install_support::{
     SubscriptionInstallFallbackReason, SubscriptionInstallMethod, SubscriptionInstallProgress,
     SubscriptionInstallRuntime, SubscriptionInstallStage, SubscriptionInstallWorkerEvent,
+};
+use wfdiag_native_ai_analysis::{
+    AnalysisRoute, AnalysisWorkerEvent, DiagnosticAnalysisGeneration, FixPlanGeneration,
+    FixPlanRoute, FixPlanWorkerEvent, GroundingTrace, GroundingTraceSource,
+    IssuePrioritizationGeneration, NativeAnalysisRuntime, NativeFixPlanRuntime, ValidatedFixPlan,
+    initial_fix_plan_route,
 };
 use wfdiag_native_ai_chat::{
     ProviderUse, SubscriptionAuthOperation, SubscriptionAuthProvider, SubscriptionAuthStatus,
@@ -4530,6 +4526,7 @@ impl WfdiagSpike {
             Arc::new(FoundryCliEndpointSource::new()),
             Arc::new(ReqwestOllamaSource),
             self.ai_worker_cache.clone(),
+            Arc::new(ui_wake_support::notify),
         )
         .map_err(|error| format!("Native diagnostic AI could not start: {error}"))?;
         self.analysis_receiver = Some(Arc::new(Mutex::new(receiver)));
@@ -4546,6 +4543,7 @@ impl WfdiagSpike {
             settings,
             Arc::new(FoundryCliEndpointSource::new()),
             Arc::new(ReqwestOllamaSource),
+            Arc::new(ui_wake_support::notify),
         )
         .map_err(|error| format!("Native AI fix planning could not start: {error}"))?;
         self.fix_plan_receiver = Some(Arc::new(Mutex::new(receiver)));

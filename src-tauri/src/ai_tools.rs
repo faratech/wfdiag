@@ -363,8 +363,10 @@ impl AppToolExecutor {
             .get("query")
             .and_then(Value::as_str)
             .ok_or_else(|| "search_windows_knowledge requires a query".to_string())?;
-        crate::ai_grounding::search_grounding_cancellable(query, self.max_result_chars, cancel)
-            .await
+        if !crate::commands::settings::network_grounding_enabled() {
+            return Err("Network grounding is disabled in Settings".to_string());
+        }
+        crate::ai_grounding::search_windows_knowledge(query, self.max_result_chars, cancel).await
     }
 
     async fn get_detected_issues(&self) -> Result<String, String> {

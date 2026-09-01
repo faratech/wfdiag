@@ -507,35 +507,11 @@ fn generate_cache_key(
 
 pub(crate) use wfdiag_native_ai_provider::provider_config_fingerprint;
 
-/// How many characters of diagnostic DATA a one-shot prompt may embed for a
-/// provider — roughly half its whole-request budget (the rest is template,
-/// system prompt and output headroom). Phi Silica lands at ~1,250, close to
-/// its long-proven 1,200, and its hard 2,500-char prompt clamp still applies
-/// as the final guard; cloud providers get the full 20k data window.
-fn one_shot_data_budget(provider: AIProvider) -> usize {
-    let budget = crate::ai_providers::capabilities(provider).context_budget_chars;
-    (budget / 2).clamp(800, 20_000)
-}
-
-fn one_shot_grounding_budget(provider: AIProvider, data_budget: usize) -> usize {
-    if provider == AIProvider::PhiSilica {
-        650
-    } else {
-        (data_budget / 3).clamp(1_200, 5_000)
-    }
-}
-
-fn one_shot_effective_data_budget(
-    provider: AIProvider,
-    data_budget: usize,
-    grounding: Option<&str>,
-) -> usize {
-    if provider == AIProvider::PhiSilica && grounding.is_some() {
-        800
-    } else {
-        data_budget
-    }
-}
+// The one-shot budget policy is shared with the native shell so a prompt is
+// built identically in both surfaces.
+use wfdiag_native_ai_analysis::{
+    one_shot_data_budget, one_shot_effective_data_budget, one_shot_grounding_budget,
+};
 
 /// Analyze with the appropriate provider. Credentials are resolved
 /// exclusively from backend secure storage.

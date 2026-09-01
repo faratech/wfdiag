@@ -25,6 +25,12 @@ mod subscription_auth;
 mod subscription_catalog;
 mod subscription_install;
 
+// Off-UI worker runtimes plus the pure tool text and JSON envelopes a host
+// binds to its own domain types.
+pub mod runtime;
+pub mod tools;
+pub mod workers;
+
 /// Adapter shim: the included shipping client refers to the provider enum by
 /// its historical backend path.
 pub mod ai_service {
@@ -53,9 +59,19 @@ pub use bounded_tools::*;
 pub use compat_provider::CompatChatProvider;
 pub use contract::*;
 pub use engine::*;
-pub use grounding::search_windows_knowledge;
+pub use grounding::{
+    AnalysisGrounding, GroundingDemand, GroundingMode, GroundingQuery, GroundingTrace,
+    GroundingTraceSource, analysis_grounding, analysis_grounding_cancellable,
+    analysis_needs_live_grounding, build_safe_query, chat_grounding_query, ground_query,
+    grounding_demand, needs_live_grounding, search_windows_knowledge,
+    trace_from_rendered_grounding,
+};
 pub use model::*;
 pub use provider_config::*;
+pub use runtime::{
+    CHAT_SESSION_ID, ChatResolveFuture, ChatToolActivity, ChatToolActivityState, ChatToolHistory,
+    ChatTurnTools, ChatWorkerEvent, NativeChatRuntime, ProviderResolver, ResolvedChatProvider,
+};
 pub use subscription_auth::{
     SubscriptionAuthController, SubscriptionAuthError, SubscriptionAuthOperation,
     SubscriptionAuthProvider, SubscriptionAuthState, SubscriptionAuthStatus,
@@ -65,6 +81,9 @@ pub use subscription_install::{
     SubscriptionInstallController, SubscriptionInstallError, SubscriptionInstallFallbackReason,
     SubscriptionInstallMethod, SubscriptionInstallProgress, SubscriptionInstallRequest,
     SubscriptionInstallStage, SubscriptionInstallStatus,
+};
+pub use workers::{
+    ActiveRequestSlot, WorkerWake, build_worker_runtime, no_wake, reap_worker, send_worker_event,
 };
 
 /// Render the retained provider-neutral conversation for transports whose

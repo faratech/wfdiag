@@ -33,7 +33,6 @@ pub mod ai_providers;
 mod ai_report;
 mod ai_service;
 mod ai_tools;
-mod mcp_client;
 
 #[cfg(windows)]
 pub mod ui_event_adapter;
