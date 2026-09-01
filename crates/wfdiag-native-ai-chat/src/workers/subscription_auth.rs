@@ -1,30 +1,29 @@
-//! Off-UI subscription account runtime for Reactor provider setup.
+//! Off-UI subscription account runtime for provider setup.
 //!
 //! Status, sign-in and sign-out run on a dedicated worker through the genuine
-//! Codex/Claude CLIs. Mutations can begin only through explicit methods on
-//! this handle; there is intentionally no install operation. Cancellation is
+//! Codex/Claude CLIs. Mutations can begin only through explicit methods on this
+//! handle; there is intentionally no install operation. Cancellation is
 //! out-of-band so it can kill a login child without waiting behind it.
 
-#![deny(unsafe_code)]
-
-use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use wfdiag_native_ai_chat::{
-    ProcessSubscriptionModelCatalogSource, SubscriptionAuthController, SubscriptionAuthError,
-    SubscriptionAuthOperation, SubscriptionAuthProvider, SubscriptionAuthStatus,
-};
 use wfdiag_native_ai_provider::ProcessSubscriptionCliStatusSource;
 use wfdiag_native_settings::{AppSettings, SettingsService};
 
-use crate::ui_wake_support::NotifySenderExt;
+use crate::workers::{
+    ActiveRequestSlot, WorkerWake, build_worker_runtime, reap_worker, send_worker_event,
+};
+use crate::{
+    ProcessSubscriptionModelCatalogSource, SubscriptionAuthController, SubscriptionAuthError,
+    SubscriptionAuthOperation, SubscriptionAuthProvider, SubscriptionAuthStatus,
+};
 
-pub use wfdiag_native_ai_chat::SubscriptionAuthState;
+pub use crate::SubscriptionAuthState;
 
-/// Typed account lifecycle events drained by the Reactor component.
+/// Typed account lifecycle events drained by the host component.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionAuthWorkerEvent {
     Ack {
@@ -77,79 +76,12 @@ enum AuthCommand {
     },
 }
 
-#[derive(Clone)]
-struct ActiveOperation {
-    operation_id: u64,
-    cancellation: CancellationToken,
-}
-
-type ActiveSlot = Arc<Mutex<Option<ActiveOperation>>>;
-
-fn active_slot() -> ActiveSlot {
-    Arc::new(Mutex::new(None))
-}
-
-fn register_active(active: &ActiveSlot, operation_id: u64) -> Option<CancellationToken> {
-    let mut slot = active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if slot.is_some() {
-        return None;
-    }
-    let cancellation = CancellationToken::new();
-    *slot = Some(ActiveOperation {
-        operation_id,
-        cancellation: cancellation.clone(),
-    });
-    Some(cancellation)
-}
-
-fn clear_active(active: &ActiveSlot, operation_id: u64) {
-    let mut slot = active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if slot
-        .as_ref()
-        .is_some_and(|operation| operation.operation_id == operation_id)
-    {
-        *slot = None;
-    }
-}
-
-fn cancel_active(active: &ActiveSlot, operation_id: u64) -> bool {
-    let slot = active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(cancellation) = slot
-        .as_ref()
-        .filter(|operation| operation.operation_id == operation_id)
-        .map(|operation| operation.cancellation.clone())
-    else {
-        return false;
-    };
-    drop(slot);
-    cancellation.cancel();
-    true
-}
-
-fn cancel_any(active: &ActiveSlot) {
-    let slot = active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let cancellation = slot
-        .as_ref()
-        .map(|operation| operation.cancellation.clone());
-    drop(slot);
-    if let Some(cancellation) = cancellation {
-        cancellation.cancel();
-    }
-}
-
 struct WorkerState {
     settings: SettingsService,
     controller: SubscriptionAuthController,
-    events: std_mpsc::Sender<SubscriptionAuthWorkerEvent>,
-    active: ActiveSlot,
+    events: mpsc::Sender<SubscriptionAuthWorkerEvent>,
+    wake: WorkerWake,
+    active: ActiveRequestSlot,
 }
 
 impl WorkerState {
@@ -161,11 +93,15 @@ impl WorkerState {
         draft_cli_path: Option<String>,
         cancellation: CancellationToken,
     ) {
-        let _ = self.events.send_and_wake(SubscriptionAuthWorkerEvent::Ack {
-            operation_id,
-            provider,
-            operation,
-        });
+        send_worker_event(
+            &self.events,
+            &self.wake,
+            SubscriptionAuthWorkerEvent::Ack {
+                operation_id,
+                provider,
+                operation,
+            },
+        );
         let settings = self.settings.load_nonsecret_settings().unwrap_or_default();
         let path = effective_cli_path(provider, draft_cli_path, &settings);
         let result = match operation {
@@ -190,7 +126,7 @@ impl WorkerState {
         if operation != SubscriptionAuthOperation::Status {
             ProcessSubscriptionModelCatalogSource::new().invalidate(shared_provider);
         }
-        clear_active(&self.active, operation_id);
+        self.active.clear(operation_id);
         let event = match result {
             Ok(status) if operation == SubscriptionAuthOperation::Status => {
                 SubscriptionAuthWorkerEvent::StatusLoaded {
@@ -217,7 +153,7 @@ impl WorkerState {
                 message: error.to_string(),
             },
         };
-        let _ = self.events.send_and_wake(event);
+        send_worker_event(&self.events, &self.wake, event);
     }
 }
 
@@ -235,37 +171,35 @@ fn effective_cli_path(
         })
 }
 
-fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-}
-
 /// UI-thread handle for explicit subscription account actions.
 pub struct SubscriptionAuthRuntime {
-    commands: Option<std_mpsc::Sender<AuthCommand>>,
+    commands: Option<mpsc::Sender<AuthCommand>>,
     worker: Option<JoinHandle<()>>,
-    active: ActiveSlot,
+    active: ActiveRequestSlot,
 }
 
 impl SubscriptionAuthRuntime {
     /// Start a side-effect-free persistent worker.
+    ///
+    /// # Errors
+    /// When the worker thread or its Tokio runtime cannot be created.
     pub fn start(
         settings: SettingsService,
-    ) -> std::io::Result<(Self, std_mpsc::Receiver<SubscriptionAuthWorkerEvent>)> {
-        let (commands, command_rx) = std_mpsc::channel::<AuthCommand>();
-        let (events, event_rx) = std_mpsc::channel::<SubscriptionAuthWorkerEvent>();
-        let active = active_slot();
-        let worker_active = Arc::clone(&active);
-        let runtime = build_runtime()?;
+        wake: WorkerWake,
+    ) -> std::io::Result<(Self, mpsc::Receiver<SubscriptionAuthWorkerEvent>)> {
+        let (commands, command_rx) = mpsc::channel::<AuthCommand>();
+        let (events, event_rx) = mpsc::channel::<SubscriptionAuthWorkerEvent>();
+        let active = ActiveRequestSlot::new();
+        let worker_active = active.clone();
+        let runtime = build_worker_runtime()?;
         let worker = std::thread::Builder::new()
-            .name("wfdiag-reactor-subscription-auth".to_string())
+            .name("wfdiag-native-subscription-auth".to_string())
             .spawn(move || {
                 let state = WorkerState {
                     settings,
                     controller: SubscriptionAuthController::new(),
                     events,
+                    wake,
                     active: worker_active,
                 };
                 while let Ok(command) = command_rx.recv() {
@@ -298,6 +232,7 @@ impl SubscriptionAuthRuntime {
     }
 
     /// Queue a read-only status refresh.
+    #[must_use]
     pub fn request_status(
         &self,
         operation_id: u64,
@@ -313,6 +248,7 @@ impl SubscriptionAuthRuntime {
     }
 
     /// Explicitly start the vendor's own sign-in flow.
+    #[must_use]
     pub fn start_sign_in(
         &self,
         operation_id: u64,
@@ -328,6 +264,7 @@ impl SubscriptionAuthRuntime {
     }
 
     /// Explicitly ask the vendor CLI to sign out.
+    #[must_use]
     pub fn start_sign_out(
         &self,
         operation_id: u64,
@@ -352,7 +289,7 @@ impl SubscriptionAuthRuntime {
         let Some(commands) = self.commands.as_ref() else {
             return false;
         };
-        let Some(cancellation) = register_active(&self.active, operation_id) else {
+        let Some(cancellation) = self.active.register(operation_id, None) else {
             return false;
         };
         if commands
@@ -368,7 +305,7 @@ impl SubscriptionAuthRuntime {
             true
         } else {
             cancellation.cancel();
-            clear_active(&self.active, operation_id);
+            self.active.clear(operation_id);
             false
         }
     }
@@ -376,25 +313,40 @@ impl SubscriptionAuthRuntime {
     /// Cancel the matching operation directly rather than queueing behind it.
     #[must_use]
     pub fn cancel(&self, operation_id: u64) -> bool {
-        cancel_active(&self.active, operation_id)
+        self.active.cancel(operation_id)
+    }
+
+    /// Cancel any in-flight operation, stop the worker, and wait up to
+    /// `budget`.
+    ///
+    /// Returns `false` when the worker was still running when the budget
+    /// expired; the handle has already been handed to a detached reaper either
+    /// way, so the caller never blocks past `budget`.
+    pub fn stop_and_join(&mut self, budget: Duration) -> bool {
+        self.cancel_and_release();
+        let Some(worker) = self.worker.take() else {
+            return true;
+        };
+        let (done, finished) = mpsc::channel();
+        reap_worker(worker, Some(done));
+        finished.recv_timeout(budget).is_ok()
+    }
+
+    fn cancel_and_release(&mut self) {
+        if let Some(cancellation) = self.active.take() {
+            cancellation.cancel();
+        }
+        self.commands = None;
     }
 }
 
 impl Drop for SubscriptionAuthRuntime {
     fn drop(&mut self) {
-        cancel_any(&self.active);
-        self.commands = None;
-        {
-            let mut active = self
-                .active
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *active = None;
-        }
+        self.cancel_and_release();
         if let Some(worker) = self.worker.take() {
             // An in-flight request that ignores cancellation (a hung vendor
             // CLI, a slow provider probe) must not extend graceful close.
-            crate::teardown_support::reap_worker(worker);
+            reap_worker(worker, None);
         }
     }
 }

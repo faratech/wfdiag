@@ -8,12 +8,8 @@ mod icons;
 mod instance_support;
 mod markdown_render;
 mod notification_support;
-mod provider_setup_support;
 mod report_support;
 mod save_picker;
-mod subscription_auth_support;
-mod subscription_install_support;
-mod teardown_support;
 mod ui_wake_support;
 mod update_support;
 mod window_support;
@@ -21,8 +17,7 @@ mod window_support;
 mod winui_focus_bindings;
 
 use chat_support::{
-    ChatScanSnapshot, ChatToolActivity, ChatToolActivityState, ChatToolHistory, ChatToolPorts,
-    ChatToolSnapshot, ChatWorkerEvent, NativeChatRuntime,
+    ChatScanSnapshot, ChatToolPorts, ChatToolSnapshot, NativeChatRuntime, start_chat_runtime,
 };
 use export_support::{
     current_export_date_strings, launch_email_compose_draft, launch_export_external_action,
@@ -30,8 +25,7 @@ use export_support::{
 };
 use icons::FaIcon;
 use markdown_render::{MarkdownStyle, render_markdown_lite};
-use provider_setup_support::{ModelCatalog, ProviderSetupRuntime, ProviderSetupWorkerEvent};
-use report_support::{NativeReportRuntime, ReportGeneration, ReportScan, ReportWorkerEvent};
+use report_support::start_report_runtime;
 use save_picker::{
     SavePickerError, SavePickerOutcome, SupportPackagePickerOutcome, ValidatedExportPath,
     ValidatedSupportPackagePaths,
@@ -41,21 +35,25 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock, RwLock, mpsc};
 use std::time::{Duration, Instant, SystemTime};
-use subscription_auth_support::{
-    SubscriptionAuthRuntime, SubscriptionAuthState, SubscriptionAuthWorkerEvent,
-};
-use subscription_install_support::{
-    SubscriptionInstallFallbackReason, SubscriptionInstallMethod, SubscriptionInstallProgress,
-    SubscriptionInstallRuntime, SubscriptionInstallStage, SubscriptionInstallWorkerEvent,
-};
 use wfdiag_native_ai_analysis::{
     AnalysisRoute, AnalysisWorkerEvent, DiagnosticAnalysisGeneration, FixPlanGeneration,
     FixPlanRoute, FixPlanWorkerEvent, GroundingTrace, GroundingTraceSource,
     IssuePrioritizationGeneration, NativeAnalysisRuntime, NativeFixPlanRuntime, ValidatedFixPlan,
     initial_fix_plan_route,
 };
+use wfdiag_native_ai_chat::workers::provider_setup::{
+    ModelCatalog, ProviderSetupRuntime, ProviderSetupWorkerEvent,
+};
+use wfdiag_native_ai_chat::workers::subscription_auth::{
+    SubscriptionAuthRuntime, SubscriptionAuthState, SubscriptionAuthWorkerEvent,
+};
+use wfdiag_native_ai_chat::workers::subscription_install::{
+    SubscriptionInstallFallbackReason, SubscriptionInstallMethod, SubscriptionInstallProgress,
+    SubscriptionInstallRuntime, SubscriptionInstallStage, SubscriptionInstallWorkerEvent,
+};
 use wfdiag_native_ai_chat::{
-    ProviderUse, SubscriptionAuthOperation, SubscriptionAuthProvider, SubscriptionAuthStatus,
+    ChatToolActivity, ChatToolActivityState, ChatToolHistory, ChatWorkerEvent, ProviderUse,
+    SubscriptionAuthOperation, SubscriptionAuthProvider, SubscriptionAuthStatus,
 };
 use wfdiag_native_ai_provider::{
     AIProvider, AIProviderPreference, AIProviderStatus, FoundryCliEndpointSource,
@@ -65,6 +63,9 @@ use wfdiag_native_ai_provider::{
     ProviderProbeBundle, ProviderSelectionState, ProviderStatusReply, ReqwestOllamaSource,
     SettingsServiceProviderConfigurationSource, SharedAiCache, next_auto_local_route,
     next_fallback_candidate, parse_provider_preference, provider_preference_for_runtime,
+};
+use wfdiag_native_ai_report::{
+    NativeReportRuntime, ReportGeneration, ReportScan, ReportWorkerEvent,
 };
 use wfdiag_native_diagnostics::{
     DiagnosticOutput, DiagnosticRuntime, DiagnosticTask, NativeDiagnosticRuntime, ScanEvidence,
@@ -4487,7 +4488,7 @@ impl WfdiagSpike {
         }
         let settings = self.ai_worker_startup_settings(AiWorkerKind::Chat)?;
         let tools = ChatToolPorts::shipping(self.history_runtime.as_ref().map(Arc::clone));
-        let (runtime, receiver) = NativeChatRuntime::start_with_ports(
+        let (runtime, receiver) = start_chat_runtime(
             settings,
             Arc::new(FoundryCliEndpointSource::new()),
             Arc::new(ReqwestOllamaSource),
@@ -4504,7 +4505,7 @@ impl WfdiagSpike {
             return Ok(());
         }
         let settings = self.ai_worker_startup_settings(AiWorkerKind::Report)?;
-        let (runtime, receiver) = NativeReportRuntime::start(
+        let (runtime, receiver) = start_report_runtime(
             settings,
             Arc::new(FoundryCliEndpointSource::new()),
             Arc::new(ReqwestOllamaSource),
@@ -10194,6 +10195,7 @@ impl Component for WfdiagSpike {
                 settings.clone(),
                 Arc::new(FoundryCliEndpointSource::new()),
                 Arc::new(ReqwestOllamaSource),
+                Arc::new(ui_wake_support::notify),
             ) {
                 Ok((runtime, receiver)) => {
                     let receiver = Arc::new(Mutex::new(receiver));
@@ -10222,7 +10224,10 @@ impl Component for WfdiagSpike {
         ) = if deterministic_visual {
             (None, None, None, None)
         } else if let Some(settings) = settings_service.as_ref() {
-            match SubscriptionAuthRuntime::start(settings.clone()) {
+            match SubscriptionAuthRuntime::start(
+                settings.clone(),
+                Arc::new(ui_wake_support::notify),
+            ) {
                 Ok((runtime, receiver)) => {
                     let receiver = Arc::new(Mutex::new(receiver));
                     (Some(runtime), Some(receiver), None, None)
@@ -10252,7 +10257,7 @@ impl Component for WfdiagSpike {
         ) = if deterministic_visual {
             (None, None, None, None)
         } else {
-            match SubscriptionInstallRuntime::start() {
+            match SubscriptionInstallRuntime::start(Arc::new(ui_wake_support::notify)) {
                 Ok((runtime, receiver)) => {
                     let receiver = Arc::new(Mutex::new(receiver));
                     (Some(runtime), Some(receiver), None, None)

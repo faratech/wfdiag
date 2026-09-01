@@ -17,8 +17,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use wfdiag_native_ai_chat::{
-    ChatEmitter, ChatMessage, ChatProvider, ChatRole, DeltaPayload, DonePayload, ErrorPayload,
-    ProviderUse, ToolExecutor, ToolFuture, ToolPayload, TurnStatus, run_chat_turn,
+    ChatEmitter, ChatMessage, ChatRole, DeltaPayload, DonePayload, ErrorPayload, ProviderUse,
+    ToolExecutor, ToolFuture, ToolPayload, TurnStatus, run_chat_turn,
 };
 use wfdiag_native_ai_provider::{
     AIProvider, AIProviderPreference, ProviderCaps, SharedAiCache, capabilities,
@@ -41,8 +41,12 @@ mod results_storage {
     pub use wfdiag_native_history::{ComparisonResult, TaskChange};
 }
 pub mod evidence;
+pub mod runtime;
 
 use evidence::{EvidencePolicy, EvidenceRequest, build_compact_evidence};
+pub use runtime::{
+    NativeReportRuntime, ReportGeneration, ReportResolverFactory, ReportWorkerEvent,
+};
 
 const REPORT_SYSTEM: &str = "You are the AI assistant inside wfdiag, a Windows diagnostics app. \
     Write a scan health report for the PC's owner from the provided scan data ONLY — never \
@@ -126,21 +130,12 @@ pub type ReportFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Concrete provider call resolved by the host from secure settings. Secrets
 /// remain inside `chat`; only a non-secret fingerprint participates in cache
 /// identity.
-pub struct ResolvedReportProvider {
-    pub chat: Arc<dyn ChatProvider>,
-    pub config_fingerprint: String,
-    pub requested_model: Option<String>,
-}
-
-impl std::fmt::Debug for ResolvedReportProvider {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ResolvedReportProvider")
-            .field("config_fingerprint", &self.config_fingerprint)
-            .field("requested_model", &self.requested_model)
-            .finish_non_exhaustive()
-    }
-}
+///
+/// Identical to the chat runtime's resolved provider, so a host that wires
+/// both writes one resolution: the two resolver *traits* stay separate because
+/// only reports carry routing-policy questions (preference, Auto local
+/// reroute) back to the core.
+pub use wfdiag_native_ai_chat::ResolvedChatProvider as ResolvedReportProvider;
 
 /// Provider routing/configuration boundary. The report core owns the policy:
 /// Auto may move a Phi-wide report to the next private/local provider, but it
@@ -668,7 +663,9 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
-    use wfdiag_native_ai_chat::{ChatRequest, ChatTurn, FinishReason, ProviderExecutionClass};
+    use wfdiag_native_ai_chat::{
+        ChatProvider, ChatRequest, ChatTurn, FinishReason, ProviderExecutionClass,
+    };
     use wfdiag_native_issues::{IssueSeverity, IssueStatus};
 
     fn result(success: bool, output: &str, error: Option<&str>) -> TaskResult {

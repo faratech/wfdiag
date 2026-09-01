@@ -1,30 +1,30 @@
-//! Off-UI provider setup and live model-catalog runtime for Reactor.
+//! Off-UI provider setup and live model-catalog runtime.
 //!
-//! The component submits one typed draft and drains typed events. Settings
-//! and DPAPI credential reads, local-provider discovery, HTTP requests, and
+//! The host submits one typed draft and drains typed events. Settings and
+//! DPAPI credential reads, local-provider discovery, HTTP requests, and
 //! subscription CLI processes all execute on a dedicated worker. This module
 //! exposes no login, logout, install, or model-execution operation.
 
-#![deny(unsafe_code)]
-
-use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use wfdiag_native_ai_chat::ProcessSubscriptionModelCatalogSource;
 use wfdiag_native_ai_provider::{
     AIProvider, FoundryEndpointSource, ModelCatalogRequest, ModelCatalogService, OllamaSource,
     SettingsProviderKeySource, SubscriptionModelCatalogSource,
 };
 use wfdiag_native_settings::SettingsService;
 
-use crate::ui_wake_support::NotifySenderExt;
+use crate::ProcessSubscriptionModelCatalogSource;
+use crate::workers::{
+    ActiveRequestSlot, WorkerWake, build_worker_runtime, reap_worker, send_worker_event,
+};
 
 pub use wfdiag_native_ai_provider::ModelCatalog;
 
-/// Events drained by the Reactor component on its UI thread.
+/// Events drained by the host component on its UI thread.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProviderSetupWorkerEvent {
     Ack {
@@ -68,72 +68,6 @@ enum ProviderSetupCommand {
 }
 
 #[derive(Clone)]
-struct ActiveRequest {
-    request_id: u64,
-    cancel: CancellationToken,
-}
-
-type ActiveSlot = Arc<Mutex<Option<ActiveRequest>>>;
-
-fn active_slot() -> ActiveSlot {
-    Arc::new(Mutex::new(None))
-}
-
-fn register_active(active: &ActiveSlot, request_id: u64) -> Option<CancellationToken> {
-    let mut slot = active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if slot.is_some() {
-        return None;
-    }
-    let cancel = CancellationToken::new();
-    *slot = Some(ActiveRequest {
-        request_id,
-        cancel: cancel.clone(),
-    });
-    Some(cancel)
-}
-
-fn clear_active(active: &ActiveSlot, request_id: u64) {
-    let mut slot = active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if slot
-        .as_ref()
-        .is_some_and(|request| request.request_id == request_id)
-    {
-        *slot = None;
-    }
-}
-
-fn cancel_active(active: &ActiveSlot, request_id: u64) -> bool {
-    let slot = active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(cancel) = slot
-        .as_ref()
-        .filter(|request| request.request_id == request_id)
-        .map(|request| request.cancel.clone())
-    else {
-        return false;
-    };
-    drop(slot);
-    cancel.cancel();
-    true
-}
-
-fn cancel_any(active: &ActiveSlot) {
-    let slot = active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let cancel = slot.as_ref().map(|request| request.cancel.clone());
-    drop(slot);
-    if let Some(cancel) = cancel {
-        cancel.cancel();
-    }
-}
-
-#[derive(Clone)]
 struct ProviderSetupPorts {
     settings: SettingsService,
     foundry: Arc<dyn FoundryEndpointSource>,
@@ -155,8 +89,9 @@ impl ProviderSetupPorts {
 
 struct WorkerState {
     ports: ProviderSetupPorts,
-    events: std_mpsc::Sender<ProviderSetupWorkerEvent>,
-    active: ActiveSlot,
+    events: mpsc::Sender<ProviderSetupWorkerEvent>,
+    wake: WorkerWake,
+    active: ActiveRequestSlot,
 }
 
 impl WorkerState {
@@ -167,17 +102,21 @@ impl WorkerState {
         cancel: CancellationToken,
     ) {
         let provider = request.provider;
-        let _ = self.events.send_and_wake(ProviderSetupWorkerEvent::Ack {
-            request_id,
-            provider,
-        });
+        send_worker_event(
+            &self.events,
+            &self.wake,
+            ProviderSetupWorkerEvent::Ack {
+                request_id,
+                provider,
+            },
+        );
         let service = self.ports.service();
         let result = tokio::select! {
             biased;
             () = cancel.cancelled() => None,
             result = service.list(request) => Some(result),
         };
-        clear_active(&self.active, request_id);
+        self.active.clear(request_id);
         let event = match result {
             None => ProviderSetupWorkerEvent::Cancelled {
                 request_id,
@@ -194,38 +133,36 @@ impl WorkerState {
                 message,
             },
         };
-        let _ = self.events.send_and_wake(event);
+        send_worker_event(&self.events, &self.wake, event);
     }
-}
-
-fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
 }
 
 /// UI-thread handle for provider setup model discovery.
 pub struct ProviderSetupRuntime {
-    commands: Option<std_mpsc::Sender<ProviderSetupCommand>>,
+    commands: Option<mpsc::Sender<ProviderSetupCommand>>,
     worker: Option<JoinHandle<()>>,
-    active: ActiveSlot,
+    active: ActiveRequestSlot,
 }
 
 impl ProviderSetupRuntime {
     /// Start the persistent worker. Construction has no discovery, auth, or
     /// install side effect; processes/network are touched only by
     /// [`Self::list_models`].
+    ///
+    /// # Errors
+    /// When the worker thread or its Tokio runtime cannot be created.
     pub fn start(
         settings: SettingsService,
         foundry: Arc<dyn FoundryEndpointSource>,
         ollama: Arc<dyn OllamaSource>,
-    ) -> std::io::Result<(Self, std_mpsc::Receiver<ProviderSetupWorkerEvent>)> {
+        wake: WorkerWake,
+    ) -> std::io::Result<(Self, mpsc::Receiver<ProviderSetupWorkerEvent>)> {
         Self::start_with_subscriptions(
             settings,
             foundry,
             ollama,
             Arc::new(ProcessSubscriptionModelCatalogSource::new()),
+            wake,
         )
     }
 
@@ -234,14 +171,15 @@ impl ProviderSetupRuntime {
         foundry: Arc<dyn FoundryEndpointSource>,
         ollama: Arc<dyn OllamaSource>,
         subscriptions: Arc<dyn SubscriptionModelCatalogSource>,
-    ) -> std::io::Result<(Self, std_mpsc::Receiver<ProviderSetupWorkerEvent>)> {
-        let (commands, command_rx) = std_mpsc::channel::<ProviderSetupCommand>();
-        let (events, event_rx) = std_mpsc::channel::<ProviderSetupWorkerEvent>();
-        let active = active_slot();
-        let worker_active = Arc::clone(&active);
-        let runtime = build_runtime()?;
+        wake: WorkerWake,
+    ) -> std::io::Result<(Self, mpsc::Receiver<ProviderSetupWorkerEvent>)> {
+        let (commands, command_rx) = mpsc::channel::<ProviderSetupCommand>();
+        let (events, event_rx) = mpsc::channel::<ProviderSetupWorkerEvent>();
+        let active = ActiveRequestSlot::new();
+        let worker_active = active.clone();
+        let runtime = build_worker_runtime()?;
         let worker = std::thread::Builder::new()
-            .name("wfdiag-reactor-provider-setup".to_string())
+            .name("wfdiag-native-provider-setup".to_string())
             .spawn(move || {
                 let state = WorkerState {
                     ports: ProviderSetupPorts {
@@ -251,6 +189,7 @@ impl ProviderSetupRuntime {
                         subscriptions,
                     },
                     events,
+                    wake,
                     active: worker_active,
                 };
                 while let Ok(command) = command_rx.recv() {
@@ -277,11 +216,12 @@ impl ProviderSetupRuntime {
     /// Queue one live catalog request. Returns `false` if another request is
     /// active or the worker has stopped. The draft API key is moved directly
     /// to the worker and is never included in a worker event.
+    #[must_use]
     pub fn list_models(&self, request_id: u64, request: ModelCatalogRequest) -> bool {
         let Some(commands) = self.commands.as_ref() else {
             return false;
         };
-        let Some(cancel) = register_active(&self.active, request_id) else {
+        let Some(cancel) = self.active.register(request_id, None) else {
             return false;
         };
         if commands
@@ -295,7 +235,7 @@ impl ProviderSetupRuntime {
             true
         } else {
             cancel.cancel();
-            clear_active(&self.active, request_id);
+            self.active.clear(request_id);
             false
         }
     }
@@ -303,25 +243,39 @@ impl ProviderSetupRuntime {
     /// Cancel directly, without queueing behind a slow HTTP or CLI call.
     #[must_use]
     pub fn cancel(&self, request_id: u64) -> bool {
-        cancel_active(&self.active, request_id)
+        self.active.cancel(request_id)
+    }
+
+    /// Cancel any in-flight request, stop the worker, and wait up to `budget`.
+    ///
+    /// Returns `false` when the worker was still running when the budget
+    /// expired; the handle has already been handed to a detached reaper either
+    /// way, so the caller never blocks past `budget`.
+    pub fn stop_and_join(&mut self, budget: Duration) -> bool {
+        self.cancel_and_release();
+        let Some(worker) = self.worker.take() else {
+            return true;
+        };
+        let (done, finished) = mpsc::channel();
+        reap_worker(worker, Some(done));
+        finished.recv_timeout(budget).is_ok()
+    }
+
+    fn cancel_and_release(&mut self) {
+        if let Some(cancel) = self.active.take() {
+            cancel.cancel();
+        }
+        self.commands = None;
     }
 }
 
 impl Drop for ProviderSetupRuntime {
     fn drop(&mut self) {
-        cancel_any(&self.active);
-        self.commands = None;
-        {
-            let mut active = self
-                .active
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *active = None;
-        }
+        self.cancel_and_release();
         if let Some(worker) = self.worker.take() {
             // An in-flight request that ignores cancellation (a hung vendor
             // CLI, a slow provider probe) must not extend graceful close.
-            crate::teardown_support::reap_worker(worker);
+            reap_worker(worker, None);
         }
     }
 }
@@ -329,7 +283,9 @@ impl Drop for ProviderSetupRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workers::no_wake;
     use std::collections::HashMap;
+    use std::sync::Mutex;
     use wfdiag_native_ai_provider::{BackendFuture, SubscriptionCli};
     use wfdiag_native_settings::{
         AllowAllSettings, CredentialStorage, ProviderKeyId, SettingsError, SettingsStorage,
@@ -415,15 +371,23 @@ mod tests {
         )
     }
 
-    #[test]
-    fn model_discovery_runs_off_thread_and_emits_typed_catalog() {
-        let (runtime, events) = ProviderSetupRuntime::start_with_subscriptions(
+    fn runtime() -> (
+        ProviderSetupRuntime,
+        mpsc::Receiver<ProviderSetupWorkerEvent>,
+    ) {
+        ProviderSetupRuntime::start_with_subscriptions(
             settings(),
             Arc::new(FakeFoundry),
             Arc::new(FakeOllama),
             Arc::new(PendingSubscriptions),
+            no_wake(),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn model_discovery_runs_off_thread_and_emits_typed_catalog() {
+        let (runtime, events) = runtime();
         assert!(runtime.list_models(
             41,
             ModelCatalogRequest {
@@ -456,13 +420,7 @@ mod tests {
 
     #[test]
     fn cancellation_is_out_of_band_and_busy_requests_fail_closed() {
-        let (runtime, events) = ProviderSetupRuntime::start_with_subscriptions(
-            settings(),
-            Arc::new(FakeFoundry),
-            Arc::new(FakeOllama),
-            Arc::new(PendingSubscriptions),
-        )
-        .unwrap();
+        let (runtime, events) = runtime();
         assert!(runtime.list_models(7, ModelCatalogRequest::new(AIProvider::CodexCli)));
         assert!(!runtime.list_models(8, ModelCatalogRequest::new(AIProvider::Ollama)));
         assert!(runtime.cancel(7));
@@ -474,5 +432,23 @@ mod tests {
             events.recv_timeout(Duration::from_secs(1)).unwrap(),
             ProviderSetupWorkerEvent::Cancelled { request_id: 7, .. }
         ));
+    }
+
+    #[test]
+    fn stop_and_join_cancels_the_pending_request_and_is_idempotent() {
+        let (mut runtime, events) = runtime();
+        assert!(runtime.list_models(9, ModelCatalogRequest::new(AIProvider::CodexCli)));
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(1)).unwrap(),
+            ProviderSetupWorkerEvent::Ack { request_id: 9, .. }
+        ));
+
+        assert!(runtime.stop_and_join(Duration::from_secs(2)));
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(1)).unwrap(),
+            ProviderSetupWorkerEvent::Cancelled { request_id: 9, .. }
+        ));
+        assert!(!runtime.list_models(10, ModelCatalogRequest::new(AIProvider::Ollama)));
+        assert!(runtime.stop_and_join(Duration::from_millis(1)));
     }
 }

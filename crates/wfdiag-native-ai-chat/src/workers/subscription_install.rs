@@ -1,36 +1,32 @@
-//! Off-UI, confirmation-preserving subscription CLI installer for Reactor.
+//! Off-UI, confirmation-preserving subscription CLI installer.
 //!
 //! This adapter owns no installation policy. It carries the UI's two explicit
 //! approvals into [`SubscriptionInstallController`], keeps one cancellation
 //! token per accepted request, and projects the shared controller's typed
-//! progress and terminal outcomes onto a standard channel drained by the
-//! Reactor component. Dropping the runtime cancels and joins its active
-//! request, which in turn closes the shared installer's Windows Job Object.
-
-#![deny(unsafe_code)]
+//! progress and terminal outcomes onto a standard channel drained by the host
+//! component. Tearing the runtime down cancels its active request, which in
+//! turn closes the shared installer's Windows Job Object.
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use wfdiag_native_ai_chat::{ProcessSubscriptionModelCatalogSource, SubscriptionInstallController};
 use wfdiag_native_ai_provider::ProcessSubscriptionCliStatusSource;
 
-use crate::ui_wake_support::NotifySenderExt;
-
-pub use wfdiag_native_ai_chat::{
-    SubscriptionAuthProvider, SubscriptionInstallError, SubscriptionInstallFallbackReason,
-    SubscriptionInstallMethod, SubscriptionInstallProgress, SubscriptionInstallRequest,
-    SubscriptionInstallStage, SubscriptionInstallStatus,
+use crate::workers::{
+    ActiveRequestSlot, WorkerWake, build_worker_runtime, reap_worker, send_worker_event,
 };
-// Kept as part of the adapter's public type surface for shells that consume
-// the verified status without importing the shared chat crate directly.
-#[allow(unused_imports)]
-pub use wfdiag_native_ai_chat::SubscriptionAuthState;
+use crate::{ProcessSubscriptionModelCatalogSource, SubscriptionInstallController};
+
+pub use crate::{
+    SubscriptionAuthProvider, SubscriptionAuthState, SubscriptionInstallError,
+    SubscriptionInstallFallbackReason, SubscriptionInstallMethod, SubscriptionInstallProgress,
+    SubscriptionInstallRequest, SubscriptionInstallStage, SubscriptionInstallStatus,
+};
 
 type InstallFuture<'a> = Pin<
     Box<
@@ -68,7 +64,7 @@ impl InstallBackend for SharedInstallBackend {
     }
 }
 
-/// Typed events drained on Reactor's UI thread. Every event carries the
+/// Typed events drained on the host's UI thread. Every event carries the
 /// request ID so a dialog epoch can reject stale progress and terminal state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionInstallWorkerEvent {
@@ -136,76 +132,11 @@ enum InstallCommand {
     },
 }
 
-#[derive(Clone)]
-struct ActiveRequest {
-    request_id: u64,
-    cancellation: CancellationToken,
-}
-
-type ActiveSlot = Arc<Mutex<Option<ActiveRequest>>>;
-
-fn active_slot() -> ActiveSlot {
-    Arc::new(Mutex::new(None))
-}
-
-fn register_active(active: &ActiveSlot, request_id: u64) -> Option<CancellationToken> {
-    let mut slot = active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if slot.is_some() {
-        return None;
-    }
-    let cancellation = CancellationToken::new();
-    *slot = Some(ActiveRequest {
-        request_id,
-        cancellation: cancellation.clone(),
-    });
-    Some(cancellation)
-}
-
-fn clear_active(active: &ActiveSlot, request_id: u64) {
-    let mut slot = active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if slot
-        .as_ref()
-        .is_some_and(|request| request.request_id == request_id)
-    {
-        *slot = None;
-    }
-}
-
-fn cancel_active(active: &ActiveSlot, request_id: u64) -> bool {
-    let slot = active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(cancellation) = slot
-        .as_ref()
-        .filter(|request| request.request_id == request_id)
-        .map(|request| request.cancellation.clone())
-    else {
-        return false;
-    };
-    drop(slot);
-    cancellation.cancel();
-    true
-}
-
-fn cancel_any(active: &ActiveSlot) {
-    let slot = active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let cancellation = slot.as_ref().map(|request| request.cancellation.clone());
-    drop(slot);
-    if let Some(cancellation) = cancellation {
-        cancellation.cancel();
-    }
-}
-
 struct WorkerState {
     backend: Arc<dyn InstallBackend>,
-    events: std_mpsc::Sender<SubscriptionInstallWorkerEvent>,
-    active: ActiveSlot,
+    events: mpsc::Sender<SubscriptionInstallWorkerEvent>,
+    wake: WorkerWake,
+    active: ActiveRequestSlot,
 }
 
 impl WorkerState {
@@ -217,19 +148,26 @@ impl WorkerState {
     ) {
         let provider = request.provider;
         let method = request.method;
-        let _ = self
-            .events
-            .send_and_wake(SubscriptionInstallWorkerEvent::Ack {
+        send_worker_event(
+            &self.events,
+            &self.wake,
+            SubscriptionInstallWorkerEvent::Ack {
                 request_id,
                 provider,
                 method,
-            });
+            },
+        );
         let progress_events = self.events.clone();
+        let progress_wake = Arc::clone(&self.wake);
         let progress: ProgressSink = Arc::new(move |progress| {
-            let _ = progress_events.send_and_wake(SubscriptionInstallWorkerEvent::Progress {
-                request_id,
-                progress,
-            });
+            send_worker_event(
+                &progress_events,
+                &progress_wake,
+                SubscriptionInstallWorkerEvent::Progress {
+                    request_id,
+                    progress,
+                },
+            );
         });
         let result = self.backend.install(request, cancellation, progress).await;
 
@@ -239,7 +177,7 @@ impl WorkerState {
         ProcessSubscriptionCliStatusSource::new().invalidate(shared_provider);
         ProcessSubscriptionModelCatalogSource::new().invalidate(shared_provider);
 
-        clear_active(&self.active, request_id);
+        self.active.clear(request_id);
         let terminal = match result {
             Ok(status) => SubscriptionInstallWorkerEvent::Installed { request_id, status },
             Err(SubscriptionInstallError::VendorFallbackConfirmationRequired {
@@ -264,45 +202,45 @@ impl WorkerState {
             },
         };
         debug_assert!(terminal.is_terminal());
-        let _ = self.events.send_and_wake(terminal);
+        send_worker_event(&self.events, &self.wake, terminal);
     }
-}
-
-fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
 }
 
 /// UI-thread handle for explicit subscription CLI installs.
 pub struct SubscriptionInstallRuntime {
-    commands: Option<std_mpsc::Sender<InstallCommand>>,
+    commands: Option<mpsc::Sender<InstallCommand>>,
     worker: Option<JoinHandle<()>>,
-    active: ActiveSlot,
+    active: ActiveRequestSlot,
 }
 
 impl SubscriptionInstallRuntime {
     /// Start a side-effect-free persistent worker. No probe or process occurs
     /// until one of the two explicit install methods is called.
-    pub fn start() -> std::io::Result<(Self, std_mpsc::Receiver<SubscriptionInstallWorkerEvent>)> {
-        Self::start_with_backend(Arc::new(SharedInstallBackend::default()))
+    ///
+    /// # Errors
+    /// When the worker thread or its Tokio runtime cannot be created.
+    pub fn start(
+        wake: WorkerWake,
+    ) -> std::io::Result<(Self, mpsc::Receiver<SubscriptionInstallWorkerEvent>)> {
+        Self::start_with_backend(Arc::new(SharedInstallBackend::default()), wake)
     }
 
     fn start_with_backend(
         backend: Arc<dyn InstallBackend>,
-    ) -> std::io::Result<(Self, std_mpsc::Receiver<SubscriptionInstallWorkerEvent>)> {
-        let (commands, command_rx) = std_mpsc::channel::<InstallCommand>();
-        let (events, event_rx) = std_mpsc::channel::<SubscriptionInstallWorkerEvent>();
-        let active = active_slot();
-        let worker_active = Arc::clone(&active);
-        let runtime = build_runtime()?;
+        wake: WorkerWake,
+    ) -> std::io::Result<(Self, mpsc::Receiver<SubscriptionInstallWorkerEvent>)> {
+        let (commands, command_rx) = mpsc::channel::<InstallCommand>();
+        let (events, event_rx) = mpsc::channel::<SubscriptionInstallWorkerEvent>();
+        let active = ActiveRequestSlot::new();
+        let worker_active = active.clone();
+        let runtime = build_worker_runtime()?;
         let worker = std::thread::Builder::new()
-            .name("wfdiag-reactor-subscription-install".to_string())
+            .name("wfdiag-native-subscription-install".to_string())
             .spawn(move || {
                 let state = WorkerState {
                     backend,
                     events,
+                    wake,
                     active: worker_active,
                 };
                 while let Ok(command) = command_rx.recv() {
@@ -327,6 +265,7 @@ impl SubscriptionInstallRuntime {
     }
 
     /// Queue the allowlisted winget package after the first confirmation.
+    #[must_use]
     pub fn install_with_winget(
         &self,
         request_id: u64,
@@ -341,6 +280,7 @@ impl SubscriptionInstallRuntime {
 
     /// Queue the mutable vendor bootstrap. Both installation confirmation and
     /// the distinct fallback confirmation remain explicit inputs.
+    #[must_use]
     pub fn install_with_vendor_fallback(
         &self,
         request_id: u64,
@@ -358,7 +298,7 @@ impl SubscriptionInstallRuntime {
         let Some(commands) = self.commands.as_ref() else {
             return false;
         };
-        let Some(cancellation) = register_active(&self.active, request_id) else {
+        let Some(cancellation) = self.active.register(request_id, None) else {
             return false;
         };
         if commands
@@ -372,7 +312,7 @@ impl SubscriptionInstallRuntime {
             true
         } else {
             cancellation.cancel();
-            clear_active(&self.active, request_id);
+            self.active.clear(request_id);
             false
         }
     }
@@ -381,25 +321,39 @@ impl SubscriptionInstallRuntime {
     /// cancel the current installer.
     #[must_use]
     pub fn cancel(&self, request_id: u64) -> bool {
-        cancel_active(&self.active, request_id)
+        self.active.cancel(request_id)
+    }
+
+    /// Cancel any in-flight install, stop the worker, and wait up to `budget`.
+    ///
+    /// Returns `false` when the worker was still running when the budget
+    /// expired; the handle has already been handed to a detached reaper either
+    /// way, so the caller never blocks past `budget`.
+    pub fn stop_and_join(&mut self, budget: Duration) -> bool {
+        self.cancel_and_release();
+        let Some(worker) = self.worker.take() else {
+            return true;
+        };
+        let (done, finished) = mpsc::channel();
+        reap_worker(worker, Some(done));
+        finished.recv_timeout(budget).is_ok()
+    }
+
+    fn cancel_and_release(&mut self) {
+        if let Some(cancellation) = self.active.take() {
+            cancellation.cancel();
+        }
+        self.commands = None;
     }
 }
 
 impl Drop for SubscriptionInstallRuntime {
     fn drop(&mut self) {
-        cancel_any(&self.active);
-        self.commands = None;
-        {
-            let mut active = self
-                .active
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *active = None;
-        }
+        self.cancel_and_release();
         if let Some(worker) = self.worker.take() {
             // An in-flight request that ignores cancellation (a hung vendor
             // CLI, a slow provider probe) must not extend graceful close.
-            crate::teardown_support::reap_worker(worker);
+            reap_worker(worker, None);
         }
     }
 }
@@ -407,7 +361,9 @@ impl Drop for SubscriptionInstallRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workers::no_wake;
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct ScriptedBackend {
@@ -480,7 +436,7 @@ mod tests {
             emit_progress: true,
         });
         let (runtime, events) =
-            SubscriptionInstallRuntime::start_with_backend(backend.clone()).unwrap();
+            SubscriptionInstallRuntime::start_with_backend(backend.clone(), no_wake()).unwrap();
         assert!(runtime.install_with_winget(41, SubscriptionAuthProvider::Codex, true));
 
         assert_eq!(
@@ -534,7 +490,7 @@ mod tests {
             emit_progress: false,
         });
         let (runtime, events) =
-            SubscriptionInstallRuntime::start_with_backend(backend.clone()).unwrap();
+            SubscriptionInstallRuntime::start_with_backend(backend.clone(), no_wake()).unwrap();
         assert!(runtime.install_with_vendor_fallback(52, provider, true, false));
         assert!(matches!(
             events.recv_timeout(Duration::from_secs(1)).unwrap(),
@@ -562,7 +518,8 @@ mod tests {
         let backend = Arc::new(PendingBackend {
             cancellation_observed: Arc::clone(&observed),
         });
-        let (runtime, events) = SubscriptionInstallRuntime::start_with_backend(backend).unwrap();
+        let (runtime, events) =
+            SubscriptionInstallRuntime::start_with_backend(backend, no_wake()).unwrap();
         assert!(runtime.install_with_winget(61, SubscriptionAuthProvider::Codex, true));
         assert!(!runtime.install_with_winget(62, SubscriptionAuthProvider::Codex, true));
         assert!(!runtime.cancel(62));
@@ -580,12 +537,13 @@ mod tests {
     }
 
     #[test]
-    fn dropping_runtime_cancels_and_joins_the_active_request() {
+    fn stopping_the_runtime_cancels_and_joins_the_active_request() {
         let observed = Arc::new(AtomicBool::new(false));
         let backend = Arc::new(PendingBackend {
             cancellation_observed: Arc::clone(&observed),
         });
-        let (runtime, events) = SubscriptionInstallRuntime::start_with_backend(backend).unwrap();
+        let (mut runtime, events) =
+            SubscriptionInstallRuntime::start_with_backend(backend, no_wake()).unwrap();
         assert!(runtime.install_with_vendor_fallback(
             71,
             SubscriptionAuthProvider::ClaudeCode,
@@ -597,8 +555,14 @@ mod tests {
             SubscriptionInstallWorkerEvent::Ack { request_id: 71, .. }
         ));
 
-        drop(runtime);
+        // The bounded stop observes the cancelled install before returning;
+        // Drop performs the same cancellation without waiting for the join.
+        assert!(runtime.stop_and_join(Duration::from_secs(2)));
         assert!(observed.load(Ordering::Acquire));
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(1)).unwrap(),
+            SubscriptionInstallWorkerEvent::Cancelled { request_id: 71, .. }
+        ));
     }
 
     #[test]

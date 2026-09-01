@@ -5626,13 +5626,19 @@ dependencies = [
 name = "wfdiag-app"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "tokio",
+ "tokio-util",
+ "wfdiag-native-ai-analysis",
+ "wfdiag-native-ai-chat",
  "wfdiag-native-ai-provider",
+ "wfdiag-native-ai-report",
  "wfdiag-native-diagnostics",
  "wfdiag-native-export",
  "wfdiag-native-history",
  "wfdiag-native-issues",
  "wfdiag-native-monitor",
+ "wfdiag-native-remediation",
  "wfdiag-native-settings",
  "wfdiag-native-system",
  "wfdiag-native-update",
