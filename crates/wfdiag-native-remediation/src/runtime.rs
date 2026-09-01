@@ -1,106 +1,34 @@
-//! Native remediation action runtime for the Reactor shell.
+//! Framework-neutral action runtime: workers, run projection, cancellation.
 //!
-//! The UI can only stage catalog IDs into an immutable preview and later approve
-//! that preview by its opaque ID. The worker owns the proposal store, consumes
-//! each grant exactly once, revalidates current scan/catalog/issue evidence at
-//! the execution boundary, and is the only place that can reach `RealRunner`.
+//! The UI can only stage catalog IDs into an immutable preview and later
+//! approve that preview by its opaque ID. The worker owns the proposal store,
+//! consumes each grant exactly once through [`crate::broker::ActionBroker`],
+//! revalidates current scan/catalog/issue evidence at the execution boundary,
+//! and is the only place that reaches [`RealCatalogExecutor`].
 
-#![deny(unsafe_code)]
-
-use std::collections::{HashMap, HashSet, VecDeque, hash_map::RandomState};
-use std::future::Future;
-use std::hash::{BuildHasher, Hash, Hasher};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::VecDeque;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use tokio_util::sync::CancellationToken;
-use wfdiag_native_remediation::remediation::{
-    FixCompletionStatus, FixResult, RealRunner, RemediationSummary, RemediationTier,
-    execute_authorized, find, remediations,
+
+use crate::broker::{
+    ActionApproval, ActionBroker, ActionGrant, ActionPrepareInput, ActionProposal, ActionSnapshot,
+    AuthorizationError, AuthorizedActionExecutor, RealCatalogExecutor, now_ms, opaque_id,
 };
+use crate::remediation::{FixCompletionStatus, FixResult, RemediationSummary};
 
-use crate::ui_wake_support::NotifySenderExt;
+pub use wfdiag_ui_core::contract::ActionItemStatus;
 
-pub const ACTION_PROPOSAL_TTL_MS: u64 = 10 * 60 * 1_000;
-pub const MAX_BATCH_ACTIONS: usize = 5;
-const MAX_PENDING_PROPOSALS: usize = 100;
 const MAX_ACTION_HISTORY: usize = 50;
-const ACTION_CATALOG_SCHEMA_VERSION: u32 = 1;
 
-/// One catalog action requested by an app-owned UI flow or validated AI plan.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ActionRequest {
-    pub remediation_id: String,
-    pub issue_id: Option<String>,
-}
-
-/// A detected issue and its sole catalog-authorized remediation, if any.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DetectedIssueRemediation {
-    pub issue_id: String,
-    pub remediation_id: Option<String>,
-}
-
-/// Authoritative app snapshot captured at a prepare or approve boundary.
-///
-/// Callers must rebuild this from the currently committed diagnostic session;
-/// a proposal never carries mutable references back into component state.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ActionSnapshot {
-    pub scan_fingerprint: String,
-    pub catalog_fingerprint: String,
-    pub detected_issues: Vec<DetectedIssueRemediation>,
-    pub is_admin: bool,
-}
-
-/// Preparation input. Optional expected fingerprints bind an AI fix plan to
-/// the evidence/catalog versions from which it was generated.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ActionPrepareInput {
-    pub actions: Vec<ActionRequest>,
-    pub expected_scan_fingerprint: Option<String>,
-    pub expected_catalog_fingerprint: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ApprovalScope {
-    Exact,
-    Batch,
-}
-
-/// Immutable, catalog-derived data that the UI must review before approval.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ActionPreview {
-    pub remediation: RemediationSummary,
-    pub issue_id: Option<String>,
-    pub steps: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ActionProposal {
-    pub proposal_id: String,
-    pub approval_scope: ApprovalScope,
-    pub actions: Vec<ActionPreview>,
-    pub scan_fingerprint: String,
-    pub catalog_fingerprint: String,
-    pub created_at_ms: u64,
-    pub expires_at_ms: u64,
-}
-
-/// Repair proposals require the caller to enter the explicit confirmed path
-/// after showing the immutable proposal. Non-Repair proposals use `Reviewed`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ActionApproval {
-    Reviewed,
-    RepairConfirmed,
-}
+/// Notification invoked after a worker event is queued. Native shells use it
+/// to schedule one UI-thread drain instead of polling each receiver.
+pub type ActionWakeHandler = Arc<dyn Fn() + Send + Sync + 'static>;
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // consumed by the next main.rs lifecycle-projection integration
 pub struct ActionExecutionItem {
     pub remediation: RemediationSummary,
     pub issue_id: Option<String>,
@@ -108,31 +36,18 @@ pub struct ActionExecutionItem {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // consumed by the next main.rs lifecycle-projection integration
 pub struct ActionExecution {
     pub run_id: String,
     pub proposal_id: String,
     pub items: Vec<ActionExecutionItem>,
     /// Full terminal projection. `items` remains for the already-integrated
-    /// Reactor status path; new UI should render this summary instead.
+    /// per-item status path; new UI should render this summary instead.
     pub summary: ActionRunSummary,
 }
 
-/// Per-catalog-item lifecycle. This deliberately mirrors the shipping
-/// action-broker projection so Reactor can reuse the same UI semantics.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ActionItemStatus {
-    Pending,
-    Running,
-    Succeeded,
-    Partial,
-    Failed,
-    Cancelled,
-    Skipped,
-}
-
 /// Aggregate lifecycle for one approved proposal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionRunStatus {
     Running,
     CancelRequested,
@@ -155,30 +70,35 @@ impl ActionRunStatus {
 /// One action's live/terminal projection. `FixResult` is preserved verbatim,
 /// including per-step succeeded/already-satisfied/failed/cancelled detail and
 /// the requires-restart flag.
-#[derive(Clone, Debug)]
-#[allow(dead_code)] // full shipping-compatible projection is not rendered yet
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionItemRun {
     pub remediation_id: String,
     pub label: String,
     pub cancellable: bool,
     pub status: ActionItemStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<FixResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-/// Addressable, rehydratable run state compatible with the shipping React
-/// `ActionRunSummary` shape.
-#[derive(Clone, Debug)]
-#[allow(dead_code)] // full shipping-compatible projection is not rendered yet
+/// Addressable, rehydratable run state. This is the payload both shells
+/// render, so its serialized shape is a pinned wire contract.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionRunSummary {
     pub run_id: String,
     pub proposal_id: String,
-    /// Audit metadata only. No public method accepts this as authority.
+    /// Backend-generated one-use authorization identifier. It is audit
+    /// metadata, not a capability accepted by any entry point.
     pub authorization_id: String,
     pub status: ActionRunStatus,
     pub actions: Vec<ActionItemRun>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub current_index: Option<usize>,
     pub approved_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at_ms: Option<u64>,
     pub scan_fingerprint: String,
     pub catalog_fingerprint: String,
@@ -196,15 +116,96 @@ impl ActionRunSummary {
     }
 }
 
+/// The initial projection for a freshly consumed grant. Both shells build
+/// their run record from this so the two projections cannot drift.
+#[must_use]
+pub fn initial_run_summary(
+    run_id: String,
+    grant: &ActionGrant,
+    approved_at_ms: u64,
+) -> ActionRunSummary {
+    let proposal = grant.proposal();
+    ActionRunSummary {
+        run_id,
+        proposal_id: proposal.proposal_id.clone(),
+        authorization_id: grant.authorization_id().to_string(),
+        status: ActionRunStatus::Running,
+        actions: proposal
+            .actions
+            .iter()
+            .map(|action| ActionItemRun {
+                remediation_id: action.remediation.id.clone(),
+                label: action.remediation.label.clone(),
+                cancellable: action.remediation.cancellable,
+                status: ActionItemStatus::Pending,
+                result: None,
+                error: None,
+            })
+            .collect(),
+        current_index: None,
+        approved_at_ms,
+        completed_at_ms: None,
+        scan_fingerprint: proposal.scan_fingerprint.clone(),
+        catalog_fingerprint: proposal.catalog_fingerprint.clone(),
+    }
+}
+
+/// A late cancel must not rewrite work that already finished.
+#[must_use]
+pub fn cancellation_applies(actions: &[ActionItemRun], requested: bool) -> bool {
+    let has_cancelled_item = actions
+        .iter()
+        .any(|action| action.status == ActionItemStatus::Cancelled);
+    let has_unfinished_item = actions.iter().any(|action| {
+        matches!(
+            action.status,
+            ActionItemStatus::Pending | ActionItemStatus::Running
+        )
+    });
+    has_cancelled_item || (requested && has_unfinished_item)
+}
+
+/// Aggregate a finished run's per-item statuses into one terminal status.
+#[must_use]
+pub fn completed_run_status(actions: &[ActionItemRun], was_cancelled: bool) -> ActionRunStatus {
+    if was_cancelled {
+        return ActionRunStatus::Cancelled;
+    }
+    let succeeded = actions
+        .iter()
+        .filter(|action| action.status == ActionItemStatus::Succeeded)
+        .count();
+    let partial = actions
+        .iter()
+        .any(|action| action.status == ActionItemStatus::Partial);
+    let failed = actions
+        .iter()
+        .any(|action| action.status == ActionItemStatus::Failed);
+    if partial || (failed && succeeded > 0) {
+        ActionRunStatus::Partial
+    } else if failed {
+        ActionRunStatus::Failed
+    } else {
+        ActionRunStatus::Succeeded
+    }
+}
+
+/// Map one engine result onto its per-item projection status.
+#[must_use]
+pub const fn item_status_for(completion: FixCompletionStatus) -> ActionItemStatus {
+    match completion {
+        FixCompletionStatus::Succeeded => ActionItemStatus::Succeeded,
+        FixCompletionStatus::Partial => ActionItemStatus::Partial,
+        FixCompletionStatus::Failed => ActionItemStatus::Failed,
+        FixCompletionStatus::Cancelled => ActionItemStatus::Cancelled,
+    }
+}
+
 /// A live update from the action runtime. The request ID correlates initial
-/// authorization with the component's existing pending-request identity;
-/// rehydrated history intentionally contains only the stable summary.
+/// authorization with the caller's pending-request identity; rehydrated
+/// history intentionally contains only the stable summary.
 #[derive(Clone, Debug)]
 pub struct ActionRunEvent {
-    // Stable correlation metadata for consumers that perform stale-event
-    // rejection. The current component subscribes once per runtime and only
-    // needs the summary; other support-module consumers still require it.
-    #[allow(dead_code)]
     pub request_id: u64,
     pub summary: ActionRunSummary,
 }
@@ -219,7 +220,7 @@ pub struct ActionRuntimeSnapshot {
     pub active_run: Option<ActionRunSummary>,
 }
 
-/// Typed worker events drained by the component.
+/// Typed worker events drained by the shell.
 #[derive(Clone, Debug)]
 pub enum ActionWorkerEvent {
     Prepared {
@@ -241,7 +242,8 @@ pub enum ActionWorkerEvent {
 }
 
 impl ActionWorkerEvent {
-    /// The originating execute's identity, for stale-event rejection.
+    /// The originating request's identity, for stale-event rejection.
+    #[must_use]
     pub const fn request_id(&self) -> u64 {
         match self {
             Self::Prepared { request_id, .. }
@@ -249,378 +251,6 @@ impl ActionWorkerEvent {
             | Self::Failed { request_id, .. }
             | Self::NeedsRepairConfirmation { request_id, .. } => *request_id,
         }
-    }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-fn stable_fingerprint<T: Hash + ?Sized>(value: &T) -> String {
-    struct Fnv64(u64);
-
-    impl Hasher for Fnv64 {
-        fn write(&mut self, bytes: &[u8]) {
-            for byte in bytes {
-                self.0 ^= u64::from(*byte);
-                self.0 = self.0.wrapping_mul(0x100000001b3);
-            }
-        }
-
-        fn finish(&self) -> u64 {
-            self.0
-        }
-    }
-
-    let mut hasher = Fnv64(0xcbf29ce484222325);
-    value.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
-/// Fingerprint of every security-relevant catalog field and immutable preview
-/// step. Callers put this value into each authoritative snapshot.
-#[must_use]
-pub fn current_action_catalog_fingerprint() -> String {
-    let material = remediations()
-        .iter()
-        .map(|spec| {
-            format!(
-                "{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}",
-                spec.id,
-                spec.label,
-                spec.description,
-                spec.tier,
-                spec.admin_required,
-                spec.requires_restart,
-                spec.long_running,
-                spec.maintenance,
-                spec.cancellable(),
-                spec.preview_steps().join("\u{1e}")
-            )
-        })
-        .collect::<Vec<_>>();
-    stable_fingerprint(&(ACTION_CATALOG_SCHEMA_VERSION, material))
-}
-
-fn opaque_id(prefix: &'static str) -> String {
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-    let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let thread_id = std::thread::current().id();
-    let process_id = std::process::id();
-
-    // RandomState is independently keyed from the operating system. The
-    // timestamp/counter guarantee distinct input while the hidden keys keep
-    // proposal IDs opaque without adding another package dependency.
-    let first = RandomState::new().hash_one((prefix, stamp, sequence, process_id, thread_id));
-    let second = RandomState::new().hash_one((first, stamp, sequence.rotate_left(23), process_id));
-    format!("{prefix}_{first:016x}{second:016x}")
-}
-
-fn validate_snapshot(snapshot: &ActionSnapshot) -> Result<(), String> {
-    if snapshot.scan_fingerprint.trim().is_empty() {
-        return Err("The authoritative scan fingerprint is missing".to_string());
-    }
-    if snapshot.catalog_fingerprint != current_action_catalog_fingerprint() {
-        return Err("The authoritative remediation catalog fingerprint is stale".to_string());
-    }
-
-    let mut issue_ids = HashSet::new();
-    for issue in &snapshot.detected_issues {
-        if issue.issue_id.trim().is_empty() {
-            return Err("A detected issue is missing its catalog ID".to_string());
-        }
-        if !issue_ids.insert(issue.issue_id.as_str()) {
-            return Err(format!(
-                "Detected issue '{}' appears more than once in the authoritative snapshot",
-                issue.issue_id
-            ));
-        }
-        if issue
-            .remediation_id
-            .as_deref()
-            .is_some_and(|remediation_id| remediation_id.trim().is_empty())
-        {
-            return Err(format!(
-                "Detected issue '{}' has an empty remediation ID",
-                issue.issue_id
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn build_proposal(
-    input: ActionPrepareInput,
-    snapshot: &ActionSnapshot,
-    created_at_ms: u64,
-) -> Result<ActionProposal, String> {
-    validate_snapshot(snapshot)?;
-    if input.actions.is_empty() {
-        return Err("At least one action is required".to_string());
-    }
-    if input.actions.len() > MAX_BATCH_ACTIONS {
-        return Err(format!(
-            "At most {MAX_BATCH_ACTIONS} actions can be approved together"
-        ));
-    }
-    if input
-        .expected_scan_fingerprint
-        .as_deref()
-        .is_some_and(|expected| expected != snapshot.scan_fingerprint)
-    {
-        return Err("The scan changed after this plan was created".to_string());
-    }
-    if input
-        .expected_catalog_fingerprint
-        .as_deref()
-        .is_some_and(|expected| expected != snapshot.catalog_fingerprint)
-    {
-        return Err("The remediation catalog changed after this plan was created".to_string());
-    }
-
-    let batch = input.actions.len() > 1;
-    let mut seen = HashSet::new();
-    let mut actions = Vec::with_capacity(input.actions.len());
-    for request in input.actions {
-        if !seen.insert(request.remediation_id.clone()) {
-            return Err(format!(
-                "Remediation '{}' appears more than once",
-                request.remediation_id
-            ));
-        }
-        let spec = find(&request.remediation_id)
-            .ok_or_else(|| format!("Unknown remediation '{}'", request.remediation_id))?;
-        if batch && !spec.batch_eligible() {
-            return Err(format!(
-                "'{}' requires exact approval and cannot be included in a batch",
-                spec.label
-            ));
-        }
-
-        match request.issue_id.as_deref() {
-            Some(issue_id) => {
-                let issue = snapshot
-                    .detected_issues
-                    .iter()
-                    .find(|issue| issue.issue_id == issue_id)
-                    .ok_or_else(|| {
-                        format!("Issue '{issue_id}' is not detected in the current scan")
-                    })?;
-                if issue.remediation_id.as_deref() != Some(spec.id) {
-                    return Err(format!(
-                        "Remediation '{}' is not mapped to issue '{issue_id}'",
-                        spec.id
-                    ));
-                }
-            }
-            None if !spec.maintenance => {
-                return Err(format!(
-                    "Remediation '{}' requires a currently detected issue",
-                    spec.id
-                ));
-            }
-            None => {}
-        }
-
-        actions.push(ActionPreview {
-            remediation: spec.summary(),
-            issue_id: request.issue_id,
-            steps: spec.preview_steps(),
-        });
-    }
-
-    Ok(ActionProposal {
-        proposal_id: opaque_id("proposal"),
-        approval_scope: if batch {
-            ApprovalScope::Batch
-        } else {
-            ApprovalScope::Exact
-        },
-        actions,
-        scan_fingerprint: snapshot.scan_fingerprint.clone(),
-        catalog_fingerprint: snapshot.catalog_fingerprint.clone(),
-        created_at_ms,
-        expires_at_ms: created_at_ms.saturating_add(ACTION_PROPOSAL_TTL_MS),
-    })
-}
-
-struct StoredProposal {
-    proposal: ActionProposal,
-    consumed: bool,
-}
-
-#[derive(Debug)]
-struct ActionGrant {
-    authorization_id: String,
-    proposal: ActionProposal,
-}
-
-#[derive(Debug)]
-enum AuthorizationError {
-    RepairConfirmationRequired(ActionProposal),
-    Rejected(String),
-}
-
-#[derive(Default)]
-struct ActionBroker {
-    proposals: HashMap<String, StoredProposal>,
-}
-
-impl ActionBroker {
-    fn prepare(
-        &mut self,
-        input: ActionPrepareInput,
-        snapshot: &ActionSnapshot,
-        current_time_ms: u64,
-    ) -> Result<ActionProposal, String> {
-        self.proposals.retain(|_, stored| {
-            !stored.consumed && stored.proposal.expires_at_ms > current_time_ms
-        });
-        if self.proposals.len() >= MAX_PENDING_PROPOSALS {
-            return Err(
-                "Too many action previews are pending; finish or dismiss one first".to_string(),
-            );
-        }
-        let proposal = build_proposal(input, snapshot, current_time_ms)?;
-        self.proposals.insert(
-            proposal.proposal_id.clone(),
-            StoredProposal {
-                proposal: proposal.clone(),
-                consumed: false,
-            },
-        );
-        Ok(proposal)
-    }
-
-    fn authorize(
-        &mut self,
-        proposal_id: &str,
-        snapshot: &ActionSnapshot,
-        approval: ActionApproval,
-        approved_at_ms: u64,
-    ) -> Result<ActionGrant, AuthorizationError> {
-        validate_snapshot(snapshot).map_err(AuthorizationError::Rejected)?;
-        let stored = self.proposals.get_mut(proposal_id).ok_or_else(|| {
-            AuthorizationError::Rejected(
-                "Action preview was not found, was used, or expired".to_string(),
-            )
-        })?;
-        if stored.consumed {
-            return Err(AuthorizationError::Rejected(
-                "This action preview has already been approved".to_string(),
-            ));
-        }
-        if stored.proposal.expires_at_ms <= approved_at_ms {
-            return Err(AuthorizationError::Rejected(
-                "This action preview expired. Review the action again.".to_string(),
-            ));
-        }
-        if stored.proposal.scan_fingerprint != snapshot.scan_fingerprint {
-            return Err(AuthorizationError::Rejected(
-                "The scan changed after this action was reviewed".to_string(),
-            ));
-        }
-        if stored.proposal.catalog_fingerprint != snapshot.catalog_fingerprint {
-            return Err(AuthorizationError::Rejected(
-                "The remediation catalog changed after this action was reviewed".to_string(),
-            ));
-        }
-
-        for action in &stored.proposal.actions {
-            let spec = find(&action.remediation.id).ok_or_else(|| {
-                AuthorizationError::Rejected(format!(
-                    "Remediation '{}' is no longer in the catalog",
-                    action.remediation.id
-                ))
-            })?;
-            if spec.summary() != action.remediation || spec.preview_steps() != action.steps {
-                return Err(AuthorizationError::Rejected(format!(
-                    "Remediation '{}' changed after this action was reviewed",
-                    action.remediation.id
-                )));
-            }
-            match action.issue_id.as_deref() {
-                Some(issue_id) => {
-                    let still_valid = snapshot.detected_issues.iter().any(|issue| {
-                        issue.issue_id == issue_id
-                            && issue.remediation_id.as_deref() == Some(spec.id)
-                    });
-                    if !still_valid {
-                        return Err(AuthorizationError::Rejected(format!(
-                            "Issue '{issue_id}' changed after this action was reviewed"
-                        )));
-                    }
-                }
-                None if !spec.maintenance => {
-                    return Err(AuthorizationError::Rejected(format!(
-                        "Remediation '{}' is no longer available as maintenance",
-                        spec.id
-                    )));
-                }
-                None => {}
-            }
-        }
-        if stored
-            .proposal
-            .actions
-            .iter()
-            .any(|action| action.remediation.admin_required)
-            && !snapshot.is_admin
-        {
-            return Err(AuthorizationError::Rejected(
-                "This action requires administrator rights".to_string(),
-            ));
-        }
-        if stored
-            .proposal
-            .actions
-            .iter()
-            .any(|action| action.remediation.tier == RemediationTier::Repair)
-            && approval != ActionApproval::RepairConfirmed
-        {
-            return Err(AuthorizationError::RepairConfirmationRequired(
-                stored.proposal.clone(),
-            ));
-        }
-
-        // The private grant is created and the proposal consumed in one
-        // operation; no executable catalog ID is returned to the caller.
-        stored.consumed = true;
-        Ok(ActionGrant {
-            authorization_id: opaque_id("grant"),
-            proposal: stored.proposal.clone(),
-        })
-    }
-
-    fn discard(&mut self, proposal_id: &str) {
-        if self
-            .proposals
-            .get(proposal_id)
-            .is_some_and(|stored| !stored.consumed)
-        {
-            self.proposals.remove(proposal_id);
-        }
-    }
-
-    fn pending(&mut self, current_time_ms: u64) -> Vec<ActionProposal> {
-        self.proposals.retain(|_, stored| {
-            !stored.consumed && stored.proposal.expires_at_ms > current_time_ms
-        });
-        let mut proposals = self
-            .proposals
-            .values()
-            .map(|stored| stored.proposal.clone())
-            .collect::<Vec<_>>();
-        proposals.sort_by_key(|proposal| proposal.created_at_ms);
-        proposals
     }
 }
 
@@ -647,30 +277,44 @@ struct ActionRunRecord {
     cancel: CancellationToken,
 }
 
+/// A consumed grant bound to one reserved run slot.
 #[derive(Debug)]
-struct AuthorizedRun {
+pub struct AuthorizedRun {
     request_id: u64,
     run_id: String,
     grant: ActionGrant,
     cancel: CancellationToken,
 }
 
+impl AuthorizedRun {
+    #[must_use]
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+}
+
+/// Proposal store, bounded run history, and live subscribers.
 #[derive(Default)]
-struct ActionRuntimeState {
+pub struct ActionRuntimeState {
     broker: ActionBroker,
     runs: VecDeque<ActionRunRecord>,
     active_run_id: Option<String>,
     subscribers: Vec<std_mpsc::Sender<ActionRunEvent>>,
+    wake: Option<ActionWakeHandler>,
 }
 
 impl ActionRuntimeState {
-    fn publish(&mut self, event: ActionRunEvent) {
+    fn publish(&mut self, event: &ActionRunEvent) {
+        let wake = self.wake.clone();
         self.subscribers
-            .retain(|subscriber| subscriber.send_and_wake(event.clone()).is_ok());
+            .retain(|subscriber| subscriber.send(event.clone()).is_ok());
+        if let Some(wake) = wake {
+            wake();
+        }
     }
 
     fn publish_summary(&mut self, request_id: u64, summary: ActionRunSummary) {
-        self.publish(ActionRunEvent {
+        self.publish(&ActionRunEvent {
             request_id,
             summary,
         });
@@ -688,30 +332,7 @@ impl ActionRuntimeState {
 
         let run_id = opaque_id("run");
         let cancel = CancellationToken::new();
-        let summary = ActionRunSummary {
-            run_id: run_id.clone(),
-            proposal_id: grant.proposal.proposal_id.clone(),
-            authorization_id: grant.authorization_id.clone(),
-            status: ActionRunStatus::Running,
-            actions: grant
-                .proposal
-                .actions
-                .iter()
-                .map(|action| ActionItemRun {
-                    remediation_id: action.remediation.id.clone(),
-                    label: action.remediation.label.clone(),
-                    cancellable: action.remediation.cancellable,
-                    status: ActionItemStatus::Pending,
-                    result: None,
-                    error: None,
-                })
-                .collect(),
-            current_index: None,
-            approved_at_ms,
-            completed_at_ms: None,
-            scan_fingerprint: grant.proposal.scan_fingerprint.clone(),
-            catalog_fingerprint: grant.proposal.catalog_fingerprint.clone(),
-        };
+        let summary = initial_run_summary(run_id.clone(), &grant, approved_at_ms);
         self.active_run_id = Some(run_id.clone());
         self.runs.push_back(ActionRunRecord {
             request_id,
@@ -850,92 +471,50 @@ fn lock_state(state: &Mutex<ActionRuntimeState>) -> MutexGuard<'_, ActionRuntime
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-type ExecutionFuture<'a> = Pin<Box<dyn Future<Output = Result<FixResult, String>> + Send + 'a>>;
-
-trait AuthorizedActionExecutor: Send + Sync {
-    fn execute<'a>(
-        &'a self,
-        remediation_id: &'a str,
-        cancel: &'a CancellationToken,
-    ) -> ExecutionFuture<'a>;
-}
-
-struct RealCatalogExecutor;
-
-impl AuthorizedActionExecutor for RealCatalogExecutor {
-    fn execute<'a>(
-        &'a self,
-        remediation_id: &'a str,
-        cancel: &'a CancellationToken,
-    ) -> ExecutionFuture<'a> {
-        Box::pin(async move { execute_authorized(remediation_id, &RealRunner, cancel).await })
+fn send_and_wake<T>(
+    sender: &std_mpsc::Sender<T>,
+    wake: Option<&ActionWakeHandler>,
+    event: T,
+) -> bool {
+    if sender.send(event).is_err() {
+        return false;
     }
-}
-
-#[cfg(test)]
-async fn execute_grant(
-    grant: ActionGrant,
-    executor: &dyn AuthorizedActionExecutor,
-) -> ActionExecution {
-    let state = Arc::new(Mutex::new(ActionRuntimeState::default()));
-    let authorized = lock_state(&state)
-        .record_grant(0, grant, now_ms())
-        .expect("fresh test execution state cannot have an active run");
-    execute_authorized_run(state, authorized, executor).await
-}
-
-fn cancellation_applies(actions: &[ActionItemRun], requested: bool) -> bool {
-    let has_cancelled_item = actions
-        .iter()
-        .any(|action| action.status == ActionItemStatus::Cancelled);
-    let has_unfinished_item = actions.iter().any(|action| {
-        matches!(
-            action.status,
-            ActionItemStatus::Pending | ActionItemStatus::Running
-        )
-    });
-    has_cancelled_item || (requested && has_unfinished_item)
-}
-
-fn completed_run_status(actions: &[ActionItemRun], was_cancelled: bool) -> ActionRunStatus {
-    if was_cancelled {
-        return ActionRunStatus::Cancelled;
+    if let Some(wake) = wake {
+        wake();
     }
-    let succeeded = actions
-        .iter()
-        .filter(|action| action.status == ActionItemStatus::Succeeded)
-        .count();
-    let partial = actions
-        .iter()
-        .any(|action| action.status == ActionItemStatus::Partial);
-    let failed = actions
-        .iter()
-        .any(|action| action.status == ActionItemStatus::Failed);
-    if partial || (failed && succeeded > 0) {
-        ActionRunStatus::Partial
-    } else if failed {
-        ActionRunStatus::Failed
-    } else {
-        ActionRunStatus::Succeeded
-    }
+    true
+}
+
+/// Join `worker` on a detached thread rather than the calling (UI) thread: the
+/// executor may still be inside one more blocking, non-cancellable step.
+fn reap_worker(worker: JoinHandle<()>) {
+    let _ = std::thread::Builder::new()
+        .name("wfdiag-action-reaper".to_string())
+        .spawn(move || {
+            let _ = worker.join();
+        });
 }
 
 async fn execute_authorized_run(
-    state: Arc<Mutex<ActionRuntimeState>>,
+    state: &Arc<Mutex<ActionRuntimeState>>,
     authorized: AuthorizedRun,
     executor: &dyn AuthorizedActionExecutor,
 ) -> ActionExecution {
     let run_id = authorized.run_id.clone();
-    let proposal_id = authorized.grant.proposal.proposal_id.clone();
-    let actions = authorized.grant.proposal.actions;
-    let mut items = Vec::with_capacity(actions.len());
+    let proposal_id = authorized.grant.proposal().proposal_id.clone();
+    let action_count = authorized.grant.proposal().actions.len();
+    let mut items = Vec::with_capacity(action_count);
 
-    for (index, action) in actions.into_iter().enumerate() {
+    for index in 0..action_count {
         if authorized.cancel.is_cancelled() {
             break;
         }
+        let action = authorized
+            .grant
+            .action(index)
+            .expect("index came from the grant's own action count");
         {
-            let mut state = lock_state(&state);
+            let mut state = lock_state(state);
             let update = state.run_mut(&run_id).map(|record| {
                 record.summary.current_index = Some(index);
                 record.summary.actions[index].status = ActionItemStatus::Running;
@@ -948,20 +527,14 @@ async fn execute_authorized_run(
             }
         }
 
-        let result = executor
-            .execute(&action.remediation.id, &authorized.cancel)
-            .await;
+        let result = executor.execute(action, &authorized.cancel).await;
         let stop = {
-            let mut state = lock_state(&state);
+            let mut state = lock_state(state);
             let update = state.run_mut(&run_id).map(|record| {
                 let stop = match &result {
                     Ok(result) => {
-                        record.summary.actions[index].status = match result.completion_status {
-                            FixCompletionStatus::Succeeded => ActionItemStatus::Succeeded,
-                            FixCompletionStatus::Partial => ActionItemStatus::Partial,
-                            FixCompletionStatus::Failed => ActionItemStatus::Failed,
-                            FixCompletionStatus::Cancelled => ActionItemStatus::Cancelled,
-                        };
+                        record.summary.actions[index].status =
+                            item_status_for(result.completion_status);
                         record.summary.actions[index].result = Some(result.clone());
                         result.completion_status != FixCompletionStatus::Succeeded
                     }
@@ -982,8 +555,8 @@ async fn execute_authorized_run(
             }
         };
         items.push(ActionExecutionItem {
-            remediation: action.remediation,
-            issue_id: action.issue_id,
+            remediation: action.preview().remediation.clone(),
+            issue_id: action.preview().issue_id.clone(),
             result,
         });
         if stop {
@@ -992,7 +565,7 @@ async fn execute_authorized_run(
     }
 
     let summary = {
-        let mut state = lock_state(&state);
+        let mut state = lock_state(state);
         let update = state.run_mut(&run_id).map(|record| {
             // A late cancel must not rewrite a fully-completed successful run.
             let was_cancelled =
@@ -1037,21 +610,33 @@ pub struct NativeActionRuntime {
 }
 
 impl NativeActionRuntime {
-    /// Start the worker.
+    /// Start the workers.
+    ///
+    /// `wake` is invoked after each queued event so a native shell can
+    /// schedule one coalesced UI drain instead of polling; pass `None` in
+    /// portable tests.
     ///
     /// # Errors
-    /// When the worker thread cannot be spawned.
-    pub fn start() -> std::io::Result<(Self, std_mpsc::Receiver<ActionWorkerEvent>)> {
+    /// When a worker thread cannot be spawned.
+    #[allow(clippy::too_many_lines)] // Both worker loops wired in one place.
+    pub fn start(
+        wake: Option<ActionWakeHandler>,
+    ) -> std::io::Result<(Self, std_mpsc::Receiver<ActionWorkerEvent>)> {
         let (commands, command_rx) = std_mpsc::channel::<ActionCommand>();
         let (events, event_rx) = std_mpsc::channel::<ActionWorkerEvent>();
         let (executions, execution_rx) = std_mpsc::channel::<AuthorizedRun>();
-        let state = Arc::new(Mutex::new(ActionRuntimeState::default()));
+        let state = Arc::new(Mutex::new(ActionRuntimeState {
+            wake: wake.clone(),
+            ..ActionRuntimeState::default()
+        }));
 
         let command_state = Arc::clone(&state);
         let command_events = events.clone();
+        let command_wake = wake.clone();
         let command_worker = std::thread::Builder::new()
-            .name("wfdiag-reactor-actions".to_string())
+            .name("wfdiag-actions".to_string())
             .spawn(move || {
+                let wake = command_wake.as_ref();
                 while let Ok(command) = command_rx.recv() {
                     match command {
                         ActionCommand::Prepare {
@@ -1064,16 +649,24 @@ impl NativeActionRuntime {
                             now_ms(),
                         ) {
                             Ok(proposal) => {
-                                let _ = command_events.send_and_wake(ActionWorkerEvent::Prepared {
-                                    request_id,
-                                    proposal,
-                                });
+                                send_and_wake(
+                                    &command_events,
+                                    wake,
+                                    ActionWorkerEvent::Prepared {
+                                        request_id,
+                                        proposal,
+                                    },
+                                );
                             }
                             Err(message) => {
-                                let _ = command_events.send_and_wake(ActionWorkerEvent::Failed {
-                                    request_id,
-                                    message,
-                                });
+                                send_and_wake(
+                                    &command_events,
+                                    wake,
+                                    ActionWorkerEvent::Failed {
+                                        request_id,
+                                        message,
+                                    },
+                                );
                             }
                         },
                         ActionCommand::Approve {
@@ -1097,7 +690,9 @@ impl NativeActionRuntime {
                                             "The native remediation executor stopped".to_string();
                                         lock_state(&command_state)
                                             .fail_run(&run_id, message.clone());
-                                        let _ = command_events.send_and_wake(
+                                        send_and_wake(
+                                            &command_events,
+                                            wake,
                                             ActionWorkerEvent::Failed {
                                                 request_id,
                                                 message,
@@ -1106,7 +701,9 @@ impl NativeActionRuntime {
                                     }
                                 }
                                 Err(AuthorizationError::RepairConfirmationRequired(proposal)) => {
-                                    let _ = command_events.send_and_wake(
+                                    send_and_wake(
+                                        &command_events,
+                                        wake,
                                         ActionWorkerEvent::NeedsRepairConfirmation {
                                             request_id,
                                             proposal,
@@ -1114,16 +711,19 @@ impl NativeActionRuntime {
                                     );
                                 }
                                 Err(AuthorizationError::Rejected(message)) => {
-                                    let _ =
-                                        command_events.send_and_wake(ActionWorkerEvent::Failed {
+                                    send_and_wake(
+                                        &command_events,
+                                        wake,
+                                        ActionWorkerEvent::Failed {
                                             request_id,
                                             message,
-                                        });
+                                        },
+                                    );
                                 }
                             }
                         }
                         ActionCommand::Discard { proposal_id } => {
-                            lock_state(&command_state).broker.discard(&proposal_id);
+                            let _ = lock_state(&command_state).broker.discard(&proposal_id);
                         }
                     }
                 }
@@ -1131,35 +731,39 @@ impl NativeActionRuntime {
 
         let execution_state = Arc::clone(&state);
         let execution_worker = match std::thread::Builder::new()
-            .name("wfdiag-reactor-action-executor".to_string())
+            .name("wfdiag-action-executor".to_string())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
+                let wake = wake.as_ref();
+                let tokio_runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build();
                 while let Ok(authorized) = execution_rx.recv() {
                     let request_id = authorized.request_id;
-                    match &runtime {
-                        Ok(runtime) => {
-                            let execution = runtime.block_on(execute_authorized_run(
-                                Arc::clone(&execution_state),
-                                authorized,
-                                &RealCatalogExecutor,
-                            ));
-                            let _ = events.send_and_wake(ActionWorkerEvent::Done {
+                    if let Ok(tokio_runtime) = &tokio_runtime {
+                        let execution = tokio_runtime.block_on(execute_authorized_run(
+                            &execution_state,
+                            authorized,
+                            &RealCatalogExecutor,
+                        ));
+                        send_and_wake(
+                            &events,
+                            wake,
+                            ActionWorkerEvent::Done {
                                 request_id,
                                 execution,
-                            });
-                        }
-                        Err(_) => {
-                            let message =
-                                "Could not start the native remediation executor".to_string();
-                            lock_state(&execution_state)
-                                .fail_run(&authorized.run_id, message.clone());
-                            let _ = events.send_and_wake(ActionWorkerEvent::Failed {
+                            },
+                        );
+                    } else {
+                        let message = "Could not start the native remediation executor".to_string();
+                        lock_state(&execution_state).fail_run(&authorized.run_id, message.clone());
+                        send_and_wake(
+                            &events,
+                            wake,
+                            ActionWorkerEvent::Failed {
                                 request_id,
                                 message,
-                            });
-                        }
+                            },
+                        );
                     }
                 }
             }) {
@@ -1184,6 +788,7 @@ impl NativeActionRuntime {
     /// Stage catalog IDs into a reviewable immutable proposal.
     ///
     /// Returns `false` only when the worker queue is unavailable.
+    #[must_use]
     pub fn prepare(
         &self,
         request_id: u64,
@@ -1202,9 +807,10 @@ impl NativeActionRuntime {
     }
 
     /// Approve an opaque proposal against a freshly captured authoritative
-    /// snapshot. Repair proposals require `ActionApproval::RepairConfirmed`.
+    /// snapshot. Repair proposals require [`ActionApproval::RepairConfirmed`].
     ///
     /// Returns `false` only when the worker queue is unavailable.
+    #[must_use]
     pub fn approve(
         &self,
         request_id: u64,
@@ -1225,6 +831,7 @@ impl NativeActionRuntime {
     }
 
     /// Drop an unused proposal after the review UI is dismissed.
+    #[must_use]
     pub fn discard(&self, proposal_id: String) -> bool {
         self.commands.as_ref().is_some_and(|commands| {
             commands
@@ -1235,15 +842,16 @@ impl NativeActionRuntime {
 
     /// Signal cancellation without waiting behind the currently executing
     /// remediation. Cancellation is accepted only before a non-cancellable
-    /// catalog action starts, matching the shipping broker's safety rule.
-    #[allow(dead_code)] // main.rs integration follows this isolated runtime change
+    /// catalog action starts.
+    ///
+    /// # Errors
+    /// When the run is unknown or its current action cannot be stopped safely.
     pub fn cancel(&self, run_id: &str) -> Result<ActionRunSummary, String> {
         lock_state(&self.state).cancel_run(run_id)
     }
 
     /// Current projection for one addressable run.
     #[must_use]
-    #[allow(dead_code)] // main.rs integration follows this isolated runtime change
     pub fn get_status(&self, run_id: &str) -> Option<ActionRunSummary> {
         lock_state(&self.state)
             .run(run_id)
@@ -1253,14 +861,12 @@ impl NativeActionRuntime {
     /// Newest-first bounded in-memory audit history, retained across view
     /// unmount/remount for the lifetime of the native application.
     #[must_use]
-    #[allow(dead_code)] // direct-query compatibility; main uses subscribe_run_events snapshot
     pub fn list_history(&self) -> Vec<ActionRunSummary> {
         lock_state(&self.state).history()
     }
 
     /// Unconsumed, unexpired proposals for staged-action rehydration.
     #[must_use]
-    #[allow(dead_code)] // direct-query compatibility; main uses subscribe_run_events snapshot
     pub fn list_pending_proposals(&self) -> Vec<ActionProposal> {
         lock_state(&self.state).broker.pending(now_ms())
     }
@@ -1268,6 +874,7 @@ impl NativeActionRuntime {
     /// Atomically attach a live observer and capture pending/history/active
     /// state. The caller can render the snapshot, then drain events without a
     /// race window between those operations.
+    #[must_use]
     pub fn subscribe_run_events(
         &self,
     ) -> (std_mpsc::Receiver<ActionRunEvent>, ActionRuntimeSnapshot) {
@@ -1295,17 +902,15 @@ impl Drop for NativeActionRuntime {
             // "Not found" and "cannot be stopped safely" are both fine here.
             let _ = lock_state(&self.state).cancel_run(&run_id);
         }
-        let command_worker = self.command_worker.take();
-        let execution_worker = self.execution_worker.take();
         // Independent reapers keep graceful close off the UI thread: the
         // executor may be inside one more blocking step even after
         // cancellation, and the command worker exits on its own once the
         // sender above drops, disconnecting the executor's receive loop.
-        if let Some(worker) = command_worker {
-            crate::teardown_support::reap_worker(worker);
+        if let Some(worker) = self.command_worker.take() {
+            reap_worker(worker);
         }
-        if let Some(worker) = execution_worker {
-            crate::teardown_support::reap_worker(worker);
+        if let Some(worker) = self.execution_worker.take() {
+            reap_worker(worker);
         }
     }
 }
@@ -1313,9 +918,13 @@ impl Drop for NativeActionRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::broker::ACTION_PROPOSAL_TTL_MS;
+    use crate::broker::{
+        ActionPreview, ActionRequest, ApprovalScope, current_action_catalog_fingerprint,
+    };
+    use crate::remediation::{RemediationStepResult, RemediationStepStatus, find};
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;
-    use wfdiag_native_remediation::remediation::{RemediationStepResult, RemediationStepStatus};
 
     fn snapshot(scan_fingerprint: &str, is_admin: bool) -> ActionSnapshot {
         ActionSnapshot {
@@ -1323,20 +932,6 @@ mod tests {
             catalog_fingerprint: current_action_catalog_fingerprint(),
             detected_issues: Vec::new(),
             is_admin,
-        }
-    }
-
-    fn issue_snapshot(
-        scan_fingerprint: &str,
-        issue_id: &str,
-        remediation_id: &str,
-    ) -> ActionSnapshot {
-        ActionSnapshot {
-            detected_issues: vec![DetectedIssueRemediation {
-                issue_id: issue_id.to_string(),
-                remediation_id: Some(remediation_id.to_string()),
-            }],
-            ..snapshot(scan_fingerprint, true)
         }
     }
 
@@ -1360,23 +955,11 @@ mod tests {
         }
     }
 
+    /// A grant for run-projection tests. It uses the broker's test-only
+    /// constructor so these fixtures can cover tier combinations the approval
+    /// path refuses; the gate itself is tested in `broker`.
     fn grant(remediation_ids: &[&str]) -> ActionGrant {
-        ActionGrant {
-            authorization_id: opaque_id("test_grant"),
-            proposal: ActionProposal {
-                proposal_id: opaque_id("test_proposal"),
-                approval_scope: if remediation_ids.len() == 1 {
-                    ApprovalScope::Exact
-                } else {
-                    ApprovalScope::Batch
-                },
-                actions: remediation_ids.iter().map(|id| preview(id)).collect(),
-                scan_fingerprint: "scan-a".to_string(),
-                catalog_fingerprint: current_action_catalog_fingerprint(),
-                created_at_ms: 1_000,
-                expires_at_ms: 1_000 + ACTION_PROPOSAL_TTL_MS,
-            },
-        }
+        ActionGrant::for_tests(remediation_ids.iter().map(|id| preview(id)).collect())
     }
 
     fn fix_result(
@@ -1402,6 +985,14 @@ mod tests {
         }
     }
 
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
     struct SequenceExecutor {
         outcomes: Mutex<VecDeque<Result<FixResult, String>>>,
         calls: Mutex<Vec<String>>,
@@ -1419,10 +1010,13 @@ mod tests {
     impl AuthorizedActionExecutor for SequenceExecutor {
         fn execute<'a>(
             &'a self,
-            remediation_id: &'a str,
+            action: crate::broker::AuthorizedAction<'a>,
             _cancel: &'a CancellationToken,
-        ) -> ExecutionFuture<'a> {
-            self.calls.lock().unwrap().push(remediation_id.to_string());
+        ) -> crate::broker::ExecutionFuture<'a> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(action.remediation_id().to_string());
             let outcome = self
                 .outcomes
                 .lock()
@@ -1433,199 +1027,23 @@ mod tests {
         }
     }
 
-    fn rejected(result: Result<ActionGrant, AuthorizationError>) -> String {
-        match result {
-            Err(AuthorizationError::Rejected(message)) => message,
-            Err(AuthorizationError::RepairConfirmationRequired(_)) => {
-                panic!("expected a hard rejection, got a Repair confirmation request")
-            }
-            Ok(_) => panic!("expected authorization to be rejected"),
-        }
-    }
-
-    #[test]
-    fn proposal_expires_at_the_ttl_boundary() {
-        let mut broker = ActionBroker::default();
-        let current = snapshot("scan-a", true);
-        let proposal = broker
-            .prepare(request("flush_dns", None), &current, 1_000)
-            .unwrap();
-
-        let message = rejected(broker.authorize(
-            &proposal.proposal_id,
-            &current,
-            ActionApproval::Reviewed,
-            1_000 + ACTION_PROPOSAL_TTL_MS,
-        ));
-        assert!(message.contains("expired"));
-    }
-
-    #[test]
-    fn proposal_grant_is_one_use_and_replay_is_rejected() {
-        let mut broker = ActionBroker::default();
-        let current = snapshot("scan-a", true);
-        let proposal = broker
-            .prepare(request("flush_dns", None), &current, 1_000)
-            .unwrap();
-
-        broker
-            .authorize(
-                &proposal.proposal_id,
-                &current,
-                ActionApproval::Reviewed,
-                1_001,
-            )
-            .unwrap();
-        let message = rejected(broker.authorize(
-            &proposal.proposal_id,
-            &current,
-            ActionApproval::Reviewed,
-            1_002,
-        ));
-        assert!(message.contains("already been approved"));
-    }
-
-    #[test]
-    fn approval_rejects_stale_scan_and_catalog_snapshots() {
-        let current = snapshot("scan-a", true);
-
-        let mut scan_broker = ActionBroker::default();
-        let scan_proposal = scan_broker
-            .prepare(request("flush_dns", None), &current, 1_000)
-            .unwrap();
-        let changed_scan = snapshot("scan-b", true);
-        let message = rejected(scan_broker.authorize(
-            &scan_proposal.proposal_id,
-            &changed_scan,
-            ActionApproval::Reviewed,
-            1_001,
-        ));
-        assert!(message.contains("scan changed"));
-
-        let mut catalog_broker = ActionBroker::default();
-        let catalog_proposal = catalog_broker
-            .prepare(request("flush_dns", None), &current, 2_000)
-            .unwrap();
-        let mut changed_catalog = current.clone();
-        changed_catalog.catalog_fingerprint = "stale-catalog".to_string();
-        let message = rejected(catalog_broker.authorize(
-            &catalog_proposal.proposal_id,
-            &changed_catalog,
-            ActionApproval::Reviewed,
-            2_001,
-        ));
-        assert!(message.contains("catalog"));
-    }
-
-    #[test]
-    fn preparation_and_approval_reject_issue_remediation_mismatches() {
-        let current = issue_snapshot("scan-a", "cpu-pressure", "open_task_manager");
-        let mut broker = ActionBroker::default();
-        let error = broker
-            .prepare(
-                request("open_disk_cleanup", Some("cpu-pressure")),
-                &current,
-                1_000,
-            )
-            .unwrap_err();
-        assert!(error.contains("not mapped"));
-
-        let proposal = broker
-            .prepare(
-                request("open_task_manager", Some("cpu-pressure")),
-                &current,
-                1_001,
-            )
-            .unwrap();
-        let changed = issue_snapshot("scan-a", "cpu-pressure", "open_disk_cleanup");
-        let message = rejected(broker.authorize(
-            &proposal.proposal_id,
-            &changed,
-            ActionApproval::Reviewed,
-            1_002,
-        ));
-        assert!(message.contains("Issue 'cpu-pressure' changed"));
-
-        let unknown = broker
-            .prepare(request("not_in_the_catalog", None), &current, 1_003)
-            .unwrap_err();
-        assert!(unknown.contains("Unknown remediation"));
-    }
-
-    #[test]
-    fn repair_requires_explicit_confirmation_without_consuming_preview() {
-        let mut broker = ActionBroker::default();
-        let current = snapshot("scan-a", true);
-        let proposal = broker
-            .prepare(request("empty_recycle_bin", None), &current, 1_000)
-            .unwrap();
-
-        match broker.authorize(
-            &proposal.proposal_id,
-            &current,
-            ActionApproval::Reviewed,
-            1_001,
-        ) {
-            Err(AuthorizationError::RepairConfirmationRequired(review)) => {
-                assert_eq!(review, proposal);
-            }
-            Err(AuthorizationError::Rejected(message)) => {
-                panic!("unexpected rejection: {message}")
-            }
-            Ok(_) => panic!("Repair was authorized without explicit confirmation"),
-        }
-
-        broker
-            .authorize(
-                &proposal.proposal_id,
-                &current,
-                ActionApproval::RepairConfirmed,
-                1_002,
-            )
-            .unwrap();
-        let message = rejected(broker.authorize(
-            &proposal.proposal_id,
-            &current,
-            ActionApproval::RepairConfirmed,
-            1_003,
-        ));
-        assert!(message.contains("already been approved"));
-    }
-
-    #[test]
-    fn approval_rechecks_administrator_state() {
-        let mut broker = ActionBroker::default();
-        let elevated = snapshot("scan-a", true);
-        let proposal = broker
-            .prepare(request("sfc_scannow", None), &elevated, 1_000)
-            .unwrap();
-        let not_elevated = snapshot("scan-a", false);
-
-        let message = rejected(broker.authorize(
-            &proposal.proposal_id,
-            &not_elevated,
-            ActionApproval::RepairConfirmed,
-            1_001,
-        ));
-        assert!(message.contains("administrator"));
-    }
-
     #[derive(Default)]
     struct RecordingExecutor {
-        calls: std::sync::Mutex<Vec<String>>,
+        calls: Mutex<Vec<String>>,
     }
 
     impl AuthorizedActionExecutor for RecordingExecutor {
         fn execute<'a>(
             &'a self,
-            remediation_id: &'a str,
+            action: crate::broker::AuthorizedAction<'a>,
             _cancel: &'a CancellationToken,
-        ) -> ExecutionFuture<'a> {
-            self.calls.lock().unwrap().push(remediation_id.to_string());
+        ) -> crate::broker::ExecutionFuture<'a> {
+            let remediation_id = action.remediation_id().to_string();
+            self.calls.lock().unwrap().push(remediation_id.clone());
             let result = FixResult {
                 success: true,
                 message: "recorded".to_string(),
-                actions_taken: vec![remediation_id.to_string()],
+                actions_taken: vec![remediation_id],
                 requires_restart: false,
                 completion_status: FixCompletionStatus::Succeeded,
                 steps: Vec::new(),
@@ -1634,46 +1052,46 @@ mod tests {
         }
     }
 
+    struct WaitForCancellationExecutor {
+        started: Mutex<Option<std_mpsc::Sender<()>>>,
+    }
+
+    impl AuthorizedActionExecutor for WaitForCancellationExecutor {
+        fn execute<'a>(
+            &'a self,
+            action: crate::broker::AuthorizedAction<'a>,
+            cancel: &'a CancellationToken,
+        ) -> crate::broker::ExecutionFuture<'a> {
+            if let Some(started) = self.started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            let label = action.remediation_id().to_string();
+            Box::pin(async move {
+                cancel.cancelled().await;
+                Ok(fix_result(
+                    FixCompletionStatus::Cancelled,
+                    false,
+                    vec![step(&label, RemediationStepStatus::Cancelled)],
+                ))
+            })
+        }
+    }
+
     #[test]
-    fn successful_grant_executes_once_through_injected_executor() {
-        let mut broker = ActionBroker::default();
-        let current = snapshot("scan-a", true);
-        let proposal = broker
-            .prepare(request("flush_dns", None), &current, 1_000)
-            .unwrap();
-        let grant = broker
-            .authorize(
-                &proposal.proposal_id,
-                &current,
-                ActionApproval::Reviewed,
-                1_001,
-            )
-            .unwrap();
-        let executor = RecordingExecutor::default();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let execution = runtime.block_on(execute_grant(grant, &executor));
-
-        assert_eq!(execution.proposal_id, proposal.proposal_id);
-        assert_eq!(execution.items.len(), 1);
-        assert!(execution.items[0].result.is_ok());
-        assert_eq!(execution.summary.status, ActionRunStatus::Succeeded);
+    fn the_grant_fixture_carries_the_expected_preview() {
+        let grant = grant(&["flush_dns"]);
+        assert_eq!(grant.proposal().approval_scope, ApprovalScope::Exact);
         assert_eq!(
-            execution.summary.actions[0].status,
-            ActionItemStatus::Succeeded
+            grant.proposal().actions[0].steps,
+            preview("flush_dns").steps
         );
-        assert!(execution.summary.completed_at_ms.is_some());
-        assert_eq!(executor.calls.lock().unwrap().as_slice(), ["flush_dns"]);
-
-        let message = rejected(broker.authorize(
-            &proposal.proposal_id,
-            &current,
-            ActionApproval::Reviewed,
-            1_002,
-        ));
-        assert!(message.contains("already been approved"));
+        assert_eq!(
+            grant.proposal().expires_at_ms,
+            1_000 + ACTION_PROPOSAL_TTL_MS
+        );
+        assert_eq!(grant.actions().len(), 1);
+        assert_eq!(grant.action(0).unwrap().remediation_id(), "flush_dns");
+        assert!(grant.action(1).is_none());
     }
 
     #[test]
@@ -1714,15 +1132,7 @@ mod tests {
                 ],
             )),
         ]);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let execution = runtime.block_on(execute_authorized_run(
-            Arc::clone(&state),
-            authorized,
-            &executor,
-        ));
+        let execution = block_on(execute_authorized_run(&state, authorized, &executor));
 
         assert_eq!(execution.summary.status, ActionRunStatus::Partial);
         assert_eq!(execution.summary.current_index, None);
@@ -1779,15 +1189,7 @@ mod tests {
             )),
             Err("cache command failed".to_string()),
         ]);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let execution = runtime.block_on(execute_authorized_run(
-            Arc::clone(&state),
-            authorized,
-            &executor,
-        ));
+        let execution = block_on(execute_authorized_run(&state, authorized, &executor));
 
         assert_eq!(execution.summary.status, ActionRunStatus::Partial);
         assert_eq!(
@@ -1865,15 +1267,7 @@ mod tests {
         let cancelled = lock_state(&state).cancel_run(&run_id).unwrap();
         assert_eq!(cancelled.status, ActionRunStatus::CancelRequested);
         let executor = RecordingExecutor::default();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let execution = runtime.block_on(execute_authorized_run(
-            Arc::clone(&state),
-            authorized,
-            &executor,
-        ));
+        let execution = block_on(execute_authorized_run(&state, authorized, &executor));
 
         assert_eq!(execution.summary.status, ActionRunStatus::Cancelled);
         assert!(
@@ -1885,31 +1279,6 @@ mod tests {
         );
         assert!(execution.items.is_empty());
         assert!(executor.calls.lock().unwrap().is_empty());
-    }
-
-    struct WaitForCancellationExecutor {
-        started: Mutex<Option<std_mpsc::Sender<()>>>,
-    }
-
-    impl AuthorizedActionExecutor for WaitForCancellationExecutor {
-        fn execute<'a>(
-            &'a self,
-            remediation_id: &'a str,
-            cancel: &'a CancellationToken,
-        ) -> ExecutionFuture<'a> {
-            if let Some(started) = self.started.lock().unwrap().take() {
-                let _ = started.send(());
-            }
-            let action = remediation_id.to_string();
-            Box::pin(async move {
-                cancel.cancelled().await;
-                Ok(fix_result(
-                    FixCompletionStatus::Cancelled,
-                    false,
-                    vec![step(&action, RemediationStepStatus::Cancelled)],
-                ))
-            })
-        }
     }
 
     #[test]
@@ -1928,12 +1297,8 @@ mod tests {
             let executor = WaitForCancellationExecutor {
                 started: Mutex::new(Some(started_tx)),
             };
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            runtime.block_on(execute_authorized_run(
-                execution_state,
+            block_on(execute_authorized_run(
+                &execution_state,
                 authorized,
                 &executor,
             ))
@@ -1986,15 +1351,7 @@ mod tests {
             .unwrap();
         let run_id = authorized.run_id.clone();
         let executor = RecordingExecutor::default();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let execution = runtime.block_on(execute_authorized_run(
-            Arc::clone(&state),
-            authorized,
-            &executor,
-        ));
+        let execution = block_on(execute_authorized_run(&state, authorized, &executor));
         assert_eq!(execution.summary.status, ActionRunStatus::Succeeded);
 
         let after_cancel = lock_state(&state).cancel_run(&run_id).unwrap();
@@ -2057,6 +1414,43 @@ mod tests {
         );
     }
 
+    /// #185: the worker path refuses a Repair without the second confirmation
+    /// and never reserves a run slot for it.
+    #[test]
+    fn worker_authorization_refuses_an_unconfirmed_repair() {
+        let current = snapshot("scan-a", true);
+        let mut state = ActionRuntimeState::default();
+        let proposal = state
+            .broker
+            .prepare(request("sfc_scannow", None), &current, 1_000)
+            .unwrap();
+
+        let refused = state.authorize_run(
+            1,
+            &proposal.proposal_id,
+            &current,
+            ActionApproval::Reviewed,
+            1_001,
+        );
+        assert!(matches!(
+            refused,
+            Err(AuthorizationError::RepairConfirmationRequired(review)) if review == proposal
+        ));
+        assert!(state.active_run_id.is_none());
+        assert!(state.runs.is_empty());
+
+        state
+            .authorize_run(
+                2,
+                &proposal.proposal_id,
+                &current,
+                ActionApproval::RepairConfirmed,
+                1_002,
+            )
+            .unwrap();
+        assert!(state.active_run_id.is_some());
+    }
+
     #[test]
     fn history_is_newest_first_bounded_and_atomic_snapshot_keeps_pending_state() {
         let mut state = ActionRuntimeState::default();
@@ -2067,8 +1461,9 @@ mod tests {
             .unwrap();
         let mut run_ids = Vec::new();
         for index in 0..=MAX_ACTION_HISTORY {
+            let index = u64::try_from(index).unwrap();
             let authorized = state
-                .record_grant(index as u64, grant(&["flush_dns"]), index as u64)
+                .record_grant(index, grant(&["flush_dns"]), index)
                 .unwrap();
             run_ids.push(authorized.run_id.clone());
             state.fail_run(&authorized.run_id, format!("failure {index}"));
@@ -2152,13 +1547,34 @@ mod tests {
     }
 
     #[test]
+    fn run_summary_wire_shape_is_camel_case_and_skips_empty_optionals() {
+        let summary = ActionRunSummary {
+            run_id: "run_1".to_string(),
+            proposal_id: "proposal_1".to_string(),
+            authorization_id: "grant_1".to_string(),
+            status: ActionRunStatus::CancelRequested,
+            actions: vec![item(ActionItemStatus::Running)],
+            current_index: None,
+            approved_at_ms: 5,
+            completed_at_ms: None,
+            scan_fingerprint: "scan".to_string(),
+            catalog_fingerprint: "catalog".to_string(),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        assert_eq!(
+            json,
+            r#"{"runId":"run_1","proposalId":"proposal_1","authorizationId":"grant_1","status":"cancel_requested","actions":[{"remediationId":"test","label":"Test","cancellable":true,"status":"running"}],"approvedAtMs":5,"scanFingerprint":"scan","catalogFingerprint":"catalog"}"#
+        );
+    }
+
+    #[test]
     fn public_runtime_rehydrates_pending_proposals_without_executing_them() {
-        let (runtime, legacy_events) = NativeActionRuntime::start().unwrap();
+        let (runtime, legacy_events) = NativeActionRuntime::start(None).unwrap();
         let (run_events, initial) = runtime.subscribe_run_events();
         assert!(initial.pending_proposals.is_empty());
         assert!(initial.history.is_empty());
         assert!(initial.active_run.is_none());
-        assert!(runtime.prepare(123, request("flush_dns", None), snapshot("scan-a", true),));
+        assert!(runtime.prepare(123, request("flush_dns", None), snapshot("scan-a", true)));
         let prepared = match legacy_events.recv_timeout(Duration::from_secs(2)) {
             Ok(ActionWorkerEvent::Prepared { proposal, .. }) => proposal,
             Ok(other) => panic!("expected Prepared, got {other:?}"),
@@ -2174,5 +1590,18 @@ mod tests {
         assert!(runtime.list_history().is_empty());
         assert!(run_events.try_recv().is_err());
         assert!(runtime.discard(prepared.proposal_id));
+    }
+
+    #[test]
+    fn the_wake_handler_fires_for_every_queued_worker_event() {
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&wakes);
+        let (runtime, events) = NativeActionRuntime::start(Some(Arc::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        })))
+        .unwrap();
+        assert!(runtime.prepare(1, request("flush_dns", None), snapshot("scan-a", true)));
+        events.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(wakes.load(std::sync::atomic::Ordering::Relaxed) >= 1);
     }
 }

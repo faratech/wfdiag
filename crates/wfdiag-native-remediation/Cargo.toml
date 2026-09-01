@@ -15,6 +15,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 wfdiag-native-core = { workspace = true }
 wfdiag-native-issues = { workspace = true }
 wfdiag-remediation-catalog = { workspace = true }
+wfdiag-ui-core = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 encoding_rs = { workspace = true }
@@ -28,6 +29,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 
 [lints]

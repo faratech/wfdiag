@@ -19,6 +19,7 @@ use std::ops::Deref;
 use std::pin::Pin;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use wfdiag_native_core::security::trusted_system_program;
 use wfdiag_remediation_catalog as remediation_catalog;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,17 +66,6 @@ pub struct RemediationStepResult {
 /// Wire forms shared with native issue detection. Execution remains in this
 /// module and is never exposed by the portable metadata crate.
 pub use wfdiag_remediation_catalog::{RemediationMetadata, RemediationSummary, RemediationTier};
-
-/// Test-only shape for the removed boolean confirmation path. Keeping this in
-/// regression tests proves repair commands are never constructed pre-approval
-/// without carrying that legacy shape into production IPC.
-#[cfg(test)]
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-enum FixOutcome {
-    NeedsConfirmation { remediation: RemediationSummary },
-    Completed { result: FixResult },
-}
 
 pub struct CmdStep {
     pub program: &'static str,
@@ -198,7 +188,7 @@ pub struct RealRunner;
 
 impl CommandRunner for RealRunner {
     fn spawn(&self, program: &str, args: &[&str]) -> anyhow::Result<()> {
-        let mut cmd = std::process::Command::new(crate::security::trusted_system_program(program)?);
+        let mut cmd = std::process::Command::new(trusted_system_program(program)?);
         cmd.args(args);
         #[cfg(windows)]
         {
@@ -220,8 +210,7 @@ impl CommandRunner for RealRunner {
         cancel: &'a CancellationToken,
     ) -> RunFuture<'a> {
         Box::pin(async move {
-            let mut cmd =
-                tokio::process::Command::new(crate::security::trusted_system_program(program)?);
+            let mut cmd = tokio::process::Command::new(trusted_system_program(program)?);
             cmd.args(args);
             #[cfg(windows)]
             {
@@ -247,8 +236,8 @@ impl CommandRunner for RealRunner {
             };
             #[cfg(windows)]
             let (stdout, stderr) = (
-                crate::security::decode_windows_output(&output.stdout),
-                crate::security::decode_windows_output(&output.stderr),
+                wfdiag_native_core::security::decode_windows_output(&output.stdout),
+                wfdiag_native_core::security::decode_windows_output(&output.stderr),
             );
             #[cfg(not(windows))]
             let (stdout, stderr) = (
@@ -268,6 +257,9 @@ impl CommandRunner for RealRunner {
 // The catalog
 // ============================================================================
 
+// The whole vetted catalog is one auditable table on purpose: splitting it
+// would hide entries from a single-screen security review.
+#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn remediations() -> &'static [RemediationSpec] {
     &[
@@ -483,31 +475,16 @@ pub fn summary(remediation_id: &str) -> Option<RemediationSummary> {
 // Engine
 // ============================================================================
 
-/// Test-only adapter that preserves the old confirmation-gate regression
-/// checks. Production has no confirmation boolean; it enters through the
-/// action broker's consumed grant and calls `execute_authorized`.
-#[cfg(test)]
-async fn execute(
-    remediation_id: &str,
-    confirmed: bool,
-    runner: &dyn CommandRunner,
-) -> Result<FixOutcome, String> {
-    let spec =
-        find(remediation_id).ok_or_else(|| format!("Unknown remediation '{remediation_id}'"))?;
-    if spec.tier == RemediationTier::Repair && !confirmed {
-        return Ok(FixOutcome::NeedsConfirmation {
-            remediation: spec.summary(),
-        });
-    }
-    execute_authorized(remediation_id, runner, &CancellationToken::new())
-        .await
-        .map(|result| FixOutcome::Completed { result })
-}
-
-/// Authorized catalog execution with cooperative cancellation. The action
-/// broker is the only production caller; model and frontend strings never
-/// become programs, arguments, or a confirmation boolean.
-pub async fn execute_authorized(
+/// Authorized catalog execution with cooperative cancellation.
+///
+/// SECURITY: this is `pub(crate)` on purpose. The only way to reach it from
+/// outside the crate is [`crate::broker::RealCatalogExecutor`], whose
+/// signature demands a [`crate::broker::AuthorizedAction`] — a value that can
+/// only be minted by an [`crate::broker::ActionGrant`] the broker produced
+/// after it accepted the approval (Repair tiers included). Model and frontend
+/// strings never become programs, arguments, or a confirmation boolean.
+#[allow(clippy::too_many_lines)] // One exhaustive RunKind state machine.
+pub(crate) async fn execute_authorized(
     remediation_id: &str,
     runner: &dyn CommandRunner,
     cancel: &CancellationToken,
@@ -815,6 +792,9 @@ fn clear_icon_cache(cancel: &CancellationToken) -> anyhow::Result<FixResult> {
     })
 }
 
+// The single FFI call in this module: `SHEmptyRecycleBinW` has no safe binding
+// and takes only compile-time-constant flags plus two null pointers.
+#[allow(unsafe_code)]
 #[cfg(windows)]
 fn empty_recycle_bin(_cancel: &CancellationToken) -> anyhow::Result<FixResult> {
     use windows::Win32::UI::Shell::{
@@ -822,6 +802,8 @@ fn empty_recycle_bin(_cancel: &CancellationToken) -> anyhow::Result<FixResult> {
     };
     use windows::core::PCWSTR;
 
+    // SAFETY: null hwnd/root path are documented as "all drives, no owner
+    // window"; the flag bits are catalog constants.
     unsafe {
         SHEmptyRecycleBinW(
             None,
@@ -907,7 +889,6 @@ fn clear_temp_files(cancel: &CancellationToken) -> anyhow::Result<FixResult> {
 /// FAILURE exit (NET HELPMSG 3521 / 2182). For this reset those are no-op
 /// successes — recognize the benign messages (pure for testability).
 fn benign_service_state_output(output: &str) -> bool {
-    let text = output.to_lowercase();
     // Matched by phrase AND by NET HELPMSG number: localized Windows
     // translates the text but keeps the message number.
     const BENIGN_MARKERS: [&str; 5] = [
@@ -917,9 +898,14 @@ fn benign_service_state_output(output: &str) -> bool {
         "already running",
         "2182",
     ];
+    let text = output.to_lowercase();
     BENIGN_MARKERS.iter().any(|marker| text.contains(marker))
 }
 
+// Long by nature (stop -> clear -> start with per-step reporting), and the
+// `anyhow::Result` is required by the `RunKind::Custom` fn-pointer signature
+// even though this arm cannot fail early.
+#[allow(clippy::too_many_lines, clippy::unnecessary_wraps)]
 fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult> {
     // Stop -> clear download cache -> start. Bound service-control waits so a
     // hung SCM call cannot stall the remediation indefinitely.
@@ -928,7 +914,7 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
     // Returns (exit_ok, combined output) — the output lets callers tell a
     // real failure from a benign "already in target state" result.
     let run_quiet = |program: &str, args: &[&str]| -> anyhow::Result<(bool, String)> {
-        let mut cmd = std::process::Command::new(crate::security::trusted_system_program(program)?);
+        let mut cmd = std::process::Command::new(trusted_system_program(program)?);
         cmd.args(args);
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
@@ -1091,37 +1077,27 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
     })
 }
 
+/// Test doubles shared by this module's engine tests and the broker's
+/// approval-gate regression tests. Compiled only for `cfg(test)`.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod testing {
+    use super::{CmdOutput, CommandRunner, RunFuture};
     use std::sync::Mutex;
-
-    #[test]
-    fn benign_service_states_are_recognized() {
-        // `net stop` on an already-stopped service (English + message number)
-        assert!(benign_service_state_output(
-            "The Windows Update service is not started.\n\nNET HELPMSG 3521"
-        ));
-        // `net start` on an already-running service
-        assert!(benign_service_state_output(
-            "The wuauserv service is already running.\n\nNET HELPMSG 2182"
-        ));
-        assert!(benign_service_state_output(
-            "Der Dienst wurde bereits gestartet.\n\nNET HELPMSG 2182"
-        ));
-        // Real failures must stay failures.
-        assert!(!benign_service_state_output(
-            "System error 5 has occurred.\n\nAccess is denied."
-        ));
-        assert!(!benign_service_state_output(""));
-    }
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
 
     /// Records every call; never touches the system.
     #[derive(Default)]
-    struct RecordingRunner {
-        calls: Mutex<Vec<String>>,
-        fail_on: Option<&'static str>,
-        fail_args: Option<&'static str>,
+    pub(crate) struct RecordingRunner {
+        pub(crate) calls: Mutex<Vec<String>>,
+        pub(crate) fail_on: Option<&'static str>,
+        pub(crate) fail_args: Option<&'static str>,
+    }
+
+    impl RecordingRunner {
+        pub(crate) fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
     }
 
     impl CommandRunner for RecordingRunner {
@@ -1132,6 +1108,7 @@ mod tests {
                 .push(format!("spawn:{} {}", program, args.join(" ")));
             Ok(())
         }
+
         fn run<'a>(
             &'a self,
             program: &'a str,
@@ -1153,6 +1130,32 @@ mod tests {
                 })
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::RecordingRunner;
+    use super::*;
+
+    #[test]
+    fn benign_service_states_are_recognized() {
+        // `net stop` on an already-stopped service (English + message number)
+        assert!(benign_service_state_output(
+            "The Windows Update service is not started.\n\nNET HELPMSG 3521"
+        ));
+        // `net start` on an already-running service
+        assert!(benign_service_state_output(
+            "The wuauserv service is already running.\n\nNET HELPMSG 2182"
+        ));
+        assert!(benign_service_state_output(
+            "Der Dienst wurde bereits gestartet.\n\nNET HELPMSG 2182"
+        ));
+        // Real failures must stay failures.
+        assert!(!benign_service_state_output(
+            "System error 5 has occurred.\n\nAccess is denied."
+        ));
+        assert!(!benign_service_state_output(""));
     }
 
     #[test]
@@ -1206,7 +1209,7 @@ mod tests {
 
         // Every issue's remediation_id resolves to exactly one metadata and
         // trusted execution entry.
-        for issue in crate::issue_catalog::catalog() {
+        for issue in wfdiag_native_issues::catalog() {
             if let Some(remediation_id) = issue.remediation_id {
                 assert_eq!(
                     metadata_catalog
@@ -1254,33 +1257,19 @@ mod tests {
         }
     }
 
+    /// The tier gate is NOT here: it lives in `broker::ActionBroker::authorize`
+    /// (see `broker`'s `repair_*` tests). These cover the engine an already
+    /// authorized grant reaches.
     #[tokio::test]
-    async fn repair_tier_without_confirmation_runs_nothing() {
+    async fn authorized_repair_runs_steps_in_order() {
         let runner = RecordingRunner::default();
-        let outcome = execute("sfc_scannow", false, &runner).await.unwrap();
-        match outcome {
-            FixOutcome::NeedsConfirmation { remediation } => {
-                assert_eq!(remediation.id, "sfc_scannow");
-                assert_eq!(remediation.tier, RemediationTier::Repair);
-            }
-            FixOutcome::Completed { .. } => panic!("repair ran without confirmation"),
-        }
-        // The strongest guarantee: zero commands were even constructed
-        assert!(runner.calls.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn repair_tier_with_confirmation_runs_steps_in_order() {
-        let runner = RecordingRunner::default();
-        let outcome = execute("network_reset", true, &runner).await.unwrap();
-        let FixOutcome::Completed { result } = outcome else {
-            panic!("expected completion")
-        };
+        let result = execute_authorized("network_reset", &runner, &CancellationToken::new())
+            .await
+            .unwrap();
         assert!(result.success);
         assert!(result.requires_restart);
-        let calls = runner.calls.lock().unwrap();
         assert_eq!(
-            *calls,
+            runner.calls(),
             vec![
                 "run:netsh winsock reset".to_string(),
                 "run:netsh int ip reset".to_string(),
@@ -1289,52 +1278,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_safe_ignores_the_confirmed_flag() {
+    async fn authorized_auto_safe_runs_its_single_step() {
         let runner = RecordingRunner::default();
-        let outcome = execute("flush_dns", false, &runner).await.unwrap();
-        assert!(matches!(outcome, FixOutcome::Completed { .. }));
-        assert_eq!(
-            *runner.calls.lock().unwrap(),
-            vec!["run:ipconfig /flushdns".to_string()]
-        );
-    }
-
-    #[tokio::test]
-    async fn destructive_cleanups_require_confirmation() {
-        let runner = RecordingRunner::default();
-        for remediation_id in ["empty_recycle_bin", "clear_temp_files"] {
-            let outcome = execute(remediation_id, false, &runner).await.unwrap();
-            assert!(matches!(outcome, FixOutcome::NeedsConfirmation { .. }));
-        }
-        assert!(runner.calls.lock().unwrap().is_empty());
+        let result = execute_authorized("flush_dns", &runner, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(runner.calls(), vec!["run:ipconfig /flushdns".to_string()]);
     }
 
     #[tokio::test]
     async fn open_tool_spawns_without_waiting() {
         let runner = RecordingRunner::default();
-        let outcome = execute("open_task_manager", false, &runner).await.unwrap();
-        let FixOutcome::Completed { result } = outcome else {
-            panic!()
-        };
+        let result = execute_authorized("open_task_manager", &runner, &CancellationToken::new())
+            .await
+            .unwrap();
         assert!(result.success);
-        assert_eq!(
-            *runner.calls.lock().unwrap(),
-            vec!["spawn:taskmgr.exe ".to_string()]
-        );
+        assert_eq!(runner.calls(), vec!["spawn:taskmgr.exe ".to_string()]);
     }
 
     #[tokio::test]
     async fn device_manager_uses_the_standard_user_control_panel_route() {
         let runner = RecordingRunner::default();
-        let outcome = execute("open_device_manager", false, &runner)
+        let result = execute_authorized("open_device_manager", &runner, &CancellationToken::new())
             .await
             .unwrap();
-        let FixOutcome::Completed { result } = outcome else {
-            panic!()
-        };
         assert!(result.success);
         assert_eq!(
-            *runner.calls.lock().unwrap(),
+            runner.calls(),
             vec!["spawn:control.exe /name Microsoft.DeviceManager".to_string()]
         );
     }
@@ -1345,14 +1316,13 @@ mod tests {
             fail_on: Some("netsh"),
             ..Default::default()
         };
-        let outcome = execute("network_reset", true, &runner).await.unwrap();
-        let FixOutcome::Completed { result } = outcome else {
-            panic!()
-        };
+        let result = execute_authorized("network_reset", &runner, &CancellationToken::new())
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.message.contains("netsh winsock reset"));
         // First step failed (not ignore_failure) => second never ran
-        assert_eq!(runner.calls.lock().unwrap().len(), 1);
+        assert_eq!(runner.calls().len(), 1);
     }
 
     #[tokio::test]
@@ -1361,10 +1331,9 @@ mod tests {
             fail_args: Some("int ip reset"),
             ..Default::default()
         };
-        let outcome = execute("network_reset", true, &runner).await.unwrap();
-        let FixOutcome::Completed { result } = outcome else {
-            panic!()
-        };
+        let result = execute_authorized("network_reset", &runner, &CancellationToken::new())
+            .await
+            .unwrap();
         assert!(!result.success);
         assert_eq!(result.completion_status, FixCompletionStatus::Partial);
         assert_eq!(result.steps.len(), 2);
@@ -1394,8 +1363,12 @@ mod tests {
     #[tokio::test]
     async fn unknown_remediation_is_an_error() {
         let runner = RecordingRunner::default();
-        assert!(execute("nuke_everything", true, &runner).await.is_err());
-        assert!(runner.calls.lock().unwrap().is_empty());
+        assert!(
+            execute_authorized("nuke_everything", &runner, &CancellationToken::new())
+                .await
+                .is_err()
+        );
+        assert!(runner.calls().is_empty());
     }
 
     #[tokio::test]
@@ -1407,7 +1380,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.completion_status, FixCompletionStatus::Cancelled);
-        assert!(runner.calls.lock().unwrap().is_empty());
+        assert!(runner.calls().is_empty());
     }
 
     #[test]

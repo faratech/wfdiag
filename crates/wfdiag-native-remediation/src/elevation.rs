@@ -17,7 +17,7 @@ pub fn relaunch_self_elevated() -> Result<bool, String> {
 /// Relaunch the running executable elevated with one trusted internal flag.
 ///
 /// The flag is deliberately restricted to an ASCII command-line switch. This
-/// keeps the ShellExecute parameter unambiguous without exposing a general
+/// keeps the `ShellExecute` parameter unambiguous without exposing a general
 /// argument-quoting or caller-controlled command surface.
 #[cfg(windows)]
 pub fn relaunch_self_elevated_with_flag(flag: &str) -> Result<bool, String> {
@@ -63,7 +63,11 @@ fn relaunch_self_elevated_inner(flag: Option<&str>) -> Result<bool, String> {
     // Zeroed base is the canonical way to build SHELLEXECUTEINFOW (all fields
     // are null/0-valid, including the hIcon/hMonitor union).
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
-    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    // A compile-time struct size, orders of magnitude below u32::MAX.
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    }
     // NOASYNC: complete the launch before returning — we exit immediately after,
     // and an async in-process handler would be torn down mid-flight.
     info.fMask = SEE_MASK_NOASYNC;
@@ -77,7 +81,7 @@ fn relaunch_self_elevated_inner(flag: Option<&str>) -> Result<bool, String> {
         .map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr()));
     info.nShow = SW_SHOWNORMAL.0;
 
-    let result = unsafe { ShellExecuteExW(&mut info) };
+    let result = unsafe { ShellExecuteExW(&raw mut info) };
 
     if should_uninit {
         unsafe { CoUninitialize() };
