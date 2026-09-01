@@ -10,44 +10,21 @@ mod runtime;
 
 pub use runtime::*;
 
+// FFI-heavy collectors keep `unsafe` scoped to themselves; the workspace (and
+// this crate) denies `unsafe_code` everywhere else.
 #[cfg(windows)]
 #[allow(unsafe_code)]
-#[path = "../../../src-tauri/src/native_diagnostics.rs"]
-mod native_diagnostics;
+pub mod native_diagnostics;
 
-// The shared primitives compile once in `wfdiag-native-core`. The
-// `#[path]`-included shipping modules above and below still spell them
-// `crate::security` / `crate::timestamp` / `crate::wmi_native`, so those names
-// stay, pointing at the one implementation.
 #[cfg(windows)]
-#[allow(unused_imports)]
-mod security {
-    pub use wfdiag_native_core::security::*;
-}
-#[cfg(windows)]
-#[allow(unused_imports)]
-mod timestamp {
-    pub use wfdiag_native_core::timestamp::*;
-}
-#[cfg(windows)]
-#[allow(unused_imports)]
-mod wmi_native {
-    pub use wfdiag_native_core::wmi::*;
-}
+pub mod catalog;
 
 #[cfg(windows)]
 pub use wfdiag_native_monitor as native_monitor;
 
 #[cfg(windows)]
-#[allow(dead_code, unsafe_code)]
-#[path = "../../../src-tauri/src/diagnostics.rs"]
-mod diagnostics_impl;
-
-#[cfg(windows)]
 mod windows_executor {
-    use super::{
-        DiagnosticExecutor, DiagnosticFuture, DiagnosticOutput, DiagnosticTask, diagnostics_impl,
-    };
+    use super::{DiagnosticExecutor, DiagnosticFuture, DiagnosticOutput, DiagnosticTask, catalog};
 
     /// Runs the same native diagnostic collectors used by the shipping Tauri
     /// backend, but without linking any desktop UI framework.
@@ -56,7 +33,7 @@ mod windows_executor {
 
     impl DiagnosticExecutor for NativeDiagnosticExecutor {
         fn available_tasks(&self) -> Vec<DiagnosticTask> {
-            diagnostics_impl::get_all_tasks()
+            catalog::get_all_tasks()
                 .into_iter()
                 .map(|task| DiagnosticTask {
                     id: task.id,
@@ -70,7 +47,7 @@ mod windows_executor {
 
         fn execute(&self, task_id: String) -> DiagnosticFuture<'_> {
             Box::pin(async move {
-                let result = diagnostics_impl::run_diagnostic_task(&task_id).await;
+                let result = catalog::run_diagnostic_task(&task_id).await;
                 DiagnosticOutput {
                     success: result.success,
                     output: result.output,

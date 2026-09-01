@@ -925,7 +925,7 @@ pub fn prewarm_npu_cache() {
 
     // If NPU was detected, also discover LUID for utilization queries
     if npu_result.0 {
-        if let Ok(wmi_con) = crate::wmi_native::WmiConnection::new() {
+        if let Ok(wmi_con) = wfdiag_native_core::wmi::WmiConnection::new() {
             NPU_LUID.get_or_init(|| discover_npu_luid_with_wmi(&wmi_con));
         }
     } else {
@@ -992,7 +992,7 @@ pub fn initialize_static_caches() {
 
     // If NPU was detected, also discover LUID for utilization queries
     if npu_result.0 {
-        if let Ok(wmi_con) = crate::wmi_native::WmiConnection::new() {
+        if let Ok(wmi_con) = wfdiag_native_core::wmi::WmiConnection::new() {
             NPU_LUID.get_or_init(|| discover_npu_luid_with_wmi(&wmi_con));
         }
     } else {
@@ -1602,7 +1602,7 @@ fn get_memory_info() -> (u64, u64, u64, u64, u64) {
 
 /// Detect all disk types once and cache them
 fn detect_all_disk_types() -> HashMap<char, String> {
-    use crate::wmi_native::WmiConnection;
+    use wfdiag_native_core::wmi::WmiConnection;
 
     let mut types = HashMap::new();
 
@@ -2372,7 +2372,7 @@ fn tcp_state_name(state: u32) -> &'static str {
 // ============================================================================
 
 pub fn get_npu_utilization() -> Option<f32> {
-    use crate::wmi_native::WmiConnection;
+    use wfdiag_native_core::wmi::WmiConnection;
 
     // Check if we have a cached NPU LUID first (fast path)
     // Only create WMI connection if we have a LUID to query
@@ -2421,7 +2421,7 @@ pub fn get_npu_utilization() -> Option<f32> {
     None
 }
 
-fn discover_npu_luid_with_wmi(wmi_con: &crate::wmi_native::WmiConnection) -> Option<String> {
+fn discover_npu_luid_with_wmi(wmi_con: &wfdiag_native_core::wmi::WmiConnection) -> Option<String> {
     use std::collections::HashSet;
 
     if let Ok(results) =
@@ -2732,7 +2732,7 @@ fn detect_npu_dxcore() -> Option<(String, u32)> {
 /// bus-enumerator device whose name merely contains "NPU" cannot be
 /// promoted to a real NPU.
 fn detect_npu_pnp_device() -> Option<String> {
-    use crate::wmi_native::WmiConnection;
+    use wfdiag_native_core::wmi::WmiConnection;
 
     let wmi_con = WmiConnection::new().ok()?;
     let results = wmi_con
@@ -2777,7 +2777,7 @@ fn detect_npu_pnp_device() -> Option<String> {
 /// NOT device evidence — the NPU may be disabled or missing a driver — so
 /// it never sets `npu_available`; it only enriches the diagnostics text.
 fn detect_npu_cpu_hint() -> Option<String> {
-    use crate::wmi_native::WmiConnection;
+    use wfdiag_native_core::wmi::WmiConnection;
 
     let wmi_con = WmiConnection::new().ok()?;
     let cpu_results = wmi_con.query("SELECT Name FROM Win32_Processor").ok()?;
