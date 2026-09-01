@@ -18,6 +18,7 @@ mod report_support;
 mod save_picker;
 mod subscription_auth_support;
 mod subscription_install_support;
+mod teardown_support;
 mod ui_wake_support;
 mod update_support;
 mod window_support;
@@ -3593,6 +3594,10 @@ fn spawn_system_wait(
     context: &ComponentContext<WfdiagSpike>,
     receiver: Arc<Mutex<mpsc::Receiver<SystemCompleted>>>,
 ) -> ComponentTask {
+    // Invariant: this wait task is the ONLY consumer of `receiver`. The mutex
+    // exists so the runtime can hand the same receiver back for re-arming, not
+    // for concurrent reads — `recv_timeout` parks under the guard for up to
+    // 100 ms, which would stall a second consumer for that long.
     context.spawn_background_with_rejection(
         move |cancellation| loop {
             if cancellation.is_cancelled() {
@@ -3621,6 +3626,7 @@ fn spawn_issue_wait(
     context: &ComponentContext<WfdiagSpike>,
     receiver: Arc<Mutex<mpsc::Receiver<IssueDetectionCompleted>>>,
 ) -> ComponentTask {
+    // Single-consumer invariant: see `spawn_system_wait`.
     context.spawn_background_with_rejection(
         move |cancellation| loop {
             if cancellation.is_cancelled() {
@@ -3979,6 +3985,7 @@ fn spawn_export_wait(
     context: &ComponentContext<WfdiagSpike>,
     receiver: Arc<Mutex<mpsc::Receiver<ExportCompleted>>>,
 ) -> ComponentTask {
+    // Single-consumer invariant: see `spawn_system_wait`.
     context.spawn_background_with_rejection(
         move |cancellation| loop {
             if cancellation.is_cancelled() {
@@ -4255,9 +4262,12 @@ fn spawn_about_external_action(
 }
 
 impl WfdiagSpike {
-    /// Drain every continuously-lived native producer from the UI thread.
+    /// Drain the wake-driven native producers from the UI thread.
     /// Worker threads only enqueue typed data and post one coalesced WM_APP
     /// signal, so idle pages no longer retain a Reactor poll task per channel.
+    /// The system/issue/export completion channels are the exception: each is
+    /// owned by a dedicated wait task (see `spawn_system_wait` and siblings)
+    /// that parks on the receiver instead.
     fn drain_native_messages(&self) -> Vec<Message> {
         let mut messages = Vec::new();
         let mut saturated = false;
@@ -4596,6 +4606,23 @@ impl WfdiagSpike {
 
     fn about_dialog_is_current(&self, epoch: u64) -> bool {
         about_dialog_callback_is_current(self.about_open, self.about_dialog_epoch, epoch)
+    }
+
+    /// Re-arm the degraded-path instance/lifecycle watch.
+    ///
+    /// Only used when the kernel wait registration is unavailable. Dropping a
+    /// `ComponentTask` does NOT cancel its closure (windows-reactor keeps the
+    /// thread running), so re-arming without cancelling would accumulate live
+    /// 50 ms poll threads until the 64-slot background budget starts rejecting
+    /// every other spawn in the app.
+    fn arm_instance_watch(&mut self, context: &ComponentContext<Self>, lifecycle_revision: u64) {
+        if instance_support::activation_wake_registered() {
+            return;
+        }
+        if let Some(previous) = self.instance_wait.take() {
+            previous.cancel();
+        }
+        self.instance_wait = Some(spawn_instance_watch(context, lifecycle_revision));
     }
 
     fn open_about(&mut self) {
@@ -12355,12 +12382,7 @@ impl Component for WfdiagSpike {
             Message::InstanceActivated => {
                 // Another launch asked this instance to the foreground.
                 instance_support::activate_main_window();
-                if !instance_support::activation_wake_registered() {
-                    self.instance_wait = Some(spawn_instance_watch(
-                        context,
-                        self.window_lifecycle_revision,
-                    ));
-                }
+                self.arm_instance_watch(context, self.window_lifecycle_revision);
             }
             Message::WindowLifecycleChanged(observed) => {
                 // Coalesce rapid deactivate/reactivate or hide/show pairs so
@@ -12372,9 +12394,7 @@ impl Component for WfdiagSpike {
                 } else {
                     current
                 };
-                if !instance_support::activation_wake_registered() {
-                    self.instance_wait = Some(spawn_instance_watch(context, snapshot.revision));
-                }
+                self.arm_instance_watch(context, snapshot.revision);
                 self.apply_window_lifecycle(snapshot, context);
                 if snapshot.focused && self.palette_open {
                     // Re-activation (Alt+Tab, AppActivate, or an instance
@@ -12384,21 +12404,11 @@ impl Component for WfdiagSpike {
                 }
             }
             Message::GlobalShortcut(shortcut) => {
-                if !instance_support::activation_wake_registered() {
-                    self.instance_wait = Some(spawn_instance_watch(
-                        context,
-                        self.window_lifecycle_revision,
-                    ));
-                }
+                self.arm_instance_watch(context, self.window_lifecycle_revision);
                 self.handle_global_shortcut(shortcut, context);
             }
             Message::TrayCommand(command) => {
-                if !instance_support::activation_wake_registered() {
-                    self.instance_wait = Some(spawn_instance_watch(
-                        context,
-                        self.window_lifecycle_revision,
-                    ));
-                }
+                self.arm_instance_watch(context, self.window_lifecycle_revision);
                 match command {
                     window_support::TRAY_COMMAND_SHOW => {
                         match instance_support::main_window_hwnd() {
