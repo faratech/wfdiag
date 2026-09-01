@@ -173,7 +173,7 @@ fn ensure_mta_anchor() {
                     Ok(()) => log_phi_silica("Phi MTA anchor thread holds the apartment"),
                     Err(error) => log_phi_silica(&format!(
                         "Phi MTA anchor could not initialize WinRT: 0x{:08X}: {}",
-                        error.code().0 as u32,
+                        error.code().0.cast_unsigned(),
                         error.message()
                     )),
                 }
@@ -246,7 +246,7 @@ fn enter_winrt_apartment() -> WinRtApartment {
         Err(error) => {
             log_phi_silica(&format!(
                 "RoInitialize failed: 0x{:08X}: {}",
-                error.code().0 as u32,
+                error.code().0.cast_unsigned(),
                 error.message()
             ));
             WinRtApartment {
@@ -270,8 +270,8 @@ static BOOTSTRAPPER_INITIALIZED: std::sync::atomic::AtomicBool =
 #[cfg(windows)]
 static LAF_UNLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// LanguageModel creation is comparatively expensive and the runtime is most
-/// reliable with one generation at a time. The generated WinRT type is
+/// `LanguageModel` creation is comparatively expensive and the runtime is most
+/// reliable with one generation at a time. The generated `WinRT` type is
 /// Send+Sync; the mutex serializes inference and lets us invalidate a model
 /// after a genuine runtime failure without recreating it for every message.
 #[cfg(windows)]
@@ -314,7 +314,7 @@ fn try_cached_model_guard()
 }
 
 /// Unlock the Limited Access Feature for Phi Silica
-/// Returns (success, status_message)
+/// Returns `(success, status_message)`
 #[cfg(windows)]
 fn try_unlock_laf() -> (bool, String) {
     use std::sync::atomic::Ordering;
@@ -334,8 +334,7 @@ fn try_unlock_laf() -> (bool, String) {
 
     let feature_id = HSTRING::from(LAF_FEATURE_ID);
     let attestation = HSTRING::from(format!(
-        "{} has registered their use of {} with Microsoft and agrees to the terms of use.",
-        publisher_id, LAF_FEATURE_ID
+        "{publisher_id} has registered their use of {LAF_FEATURE_ID} with Microsoft and agrees to the terms of use."
     ));
 
     let try_token = |token_value: &str| {
@@ -345,10 +344,12 @@ fn try_unlock_laf() -> (bool, String) {
                 let status = result
                     .Status()
                     .unwrap_or(LimitedAccessFeatureStatus::Unknown);
+                // The catch-all covers `LimitedAccessFeatureStatus::Unknown`
+                // itself as well as any value a future Windows adds; both
+                // report "Unknown", exactly as before.
                 let status_name = match status {
                     LimitedAccessFeatureStatus::Available => "Available",
                     LimitedAccessFeatureStatus::AvailableWithoutToken => "AvailableWithoutToken",
-                    LimitedAccessFeatureStatus::Unknown => "Unknown",
                     LimitedAccessFeatureStatus::Unavailable => "Unavailable",
                     _ => "Unknown",
                 };
@@ -365,7 +366,7 @@ fn try_unlock_laf() -> (bool, String) {
                 }
             }
             Err(e) => {
-                let code = e.code().0 as u32;
+                let code = e.code().0.cast_unsigned();
                 (
                     false,
                     format!("LAF unlock failed: 0x{code:08X}: {}", e.message()),
@@ -404,9 +405,21 @@ fn try_unlock_laf() -> (bool, String) {
     )
 }
 
+/// `MddBootstrapInitialize2` function signature.
+#[cfg(windows)]
+type MddBootstrapInitialize2Fn = unsafe extern "system" fn(
+    major_minor_version: u32,
+    version_tag: windows::core::PCWSTR,
+    min_version: u64,
+    options: u32,
+) -> windows::core::HRESULT;
+
 /// Initialize Windows App SDK bootstrapper for AI APIs access
 /// This is required for unpackaged apps to access Windows App SDK features
 #[cfg(windows)]
+// Every path is deliberately tolerant today, but bootstrapper initialization is
+// a fallible contract and the `?` call sites must stay ready for a real failure.
+#[allow(clippy::unnecessary_wraps)]
 fn init_windows_app_sdk() -> Result<(), String> {
     use std::sync::atomic::Ordering;
     use windows::Win32::Foundation::HMODULE;
@@ -417,14 +430,6 @@ fn init_windows_app_sdk() -> Result<(), String> {
     if BOOTSTRAPPER_INITIALIZED.load(Ordering::SeqCst) {
         return Ok(());
     }
-
-    // MddBootstrapInitialize2 function signature
-    type MddBootstrapInitialize2Fn = unsafe extern "system" fn(
-        major_minor_version: u32,
-        version_tag: PCWSTR,
-        min_version: u64,
-        options: u32,
-    ) -> windows::core::HRESULT;
 
     unsafe {
         // Try to load the bootstrapper DLL
@@ -447,9 +452,9 @@ fn init_windows_app_sdk() -> Result<(), String> {
 
         // Try multiple Windows App SDK versions (1.8, 1.7, 1.6)
         let versions: [(u32, &str); 3] = [
-            (0x00010008, "1.8"),
-            (0x00010007, "1.7"),
-            (0x00010006, "1.6"),
+            (0x0001_0008, "1.8"),
+            (0x0001_0007, "1.7"),
+            (0x0001_0006, "1.6"),
         ];
 
         for (major_minor, _version_name) in versions {
@@ -460,8 +465,8 @@ fn init_windows_app_sdk() -> Result<(), String> {
             }
             // 0x80070032 = ERROR_NOT_SUPPORTED (packaged app, bootstrapper not needed)
             // 0x80040154 = CLASS_E_CLASSNOTREGISTERED
-            let code = hr.0 as u32;
-            if code == 0x80070032 {
+            let code = hr.0.cast_unsigned();
+            if code == 0x8007_0032 {
                 // Packaged app - bootstrapper not supported but not needed
                 return Ok(());
             }
@@ -478,7 +483,7 @@ fn get_app_directory() -> Option<std::path::PathBuf> {
     std::env::current_exe()
         .ok()?
         .parent()
-        .map(|p| p.to_path_buf())
+        .map(std::path::Path::to_path_buf)
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -507,8 +512,7 @@ fn framework_package_dirs() -> Vec<std::path::PathBuf> {
         let is_runtime = dep
             .Id()
             .and_then(|id| id.Name())
-            .map(|name| name.to_string().starts_with("Microsoft.WindowsAppRuntime"))
-            .unwrap_or(false);
+            .is_ok_and(|name| name.to_string().starts_with("Microsoft.WindowsAppRuntime"));
         if is_runtime && let Ok(path) = dep.InstalledPath() {
             dirs.push(std::path::PathBuf::from(path.to_string()));
         }
@@ -558,6 +562,8 @@ static AI_TEXT_DLL_MODULE: std::sync::OnceLock<AiTextDllHandle> = std::sync::Onc
 /// package graph when the process has identity), then from each candidate
 /// directory. Returns the module handle on the first success.
 #[cfg(windows)]
+// `{path:?}` is the existing on-disk debug-log format for these lines; keep it.
+#[allow(clippy::unnecessary_debug_formatting)]
 fn load_ai_dll(
     dll_name: &str,
     search_dirs: &[std::path::PathBuf],
@@ -571,10 +577,7 @@ fn load_ai_dll(
     // graph (framework package or the MSIX's own root), the supported path.
     let wide = HSTRING::from(dll_name);
     if let Ok(module) = unsafe { LoadLibraryW(PCWSTR::from_raw(wide.as_ptr())) } {
-        log_phi_silica(&format!(
-            "Loaded {} via package graph (bare name)",
-            dll_name
-        ));
+        log_phi_silica(&format!("Loaded {dll_name} via package graph (bare name)"));
         return Some(module);
     }
 
@@ -599,13 +602,11 @@ fn load_ai_dll(
             )
         } {
             Ok(module) => {
-                log_phi_silica(&format!("Loaded {} from {:?}", dll_name, dll_path));
+                log_phi_silica(&format!("Loaded {dll_name} from {dll_path:?}"));
                 return Some(module);
             }
             Err(e) => log_phi_silica(&format!(
-                "Failed to load {} from {:?}: {}",
-                dll_name,
-                dll_path,
+                "Failed to load {dll_name} from {dll_path:?}: {}",
                 e.message()
             )),
         }
@@ -626,7 +627,7 @@ fn try_direct_dll_activation() -> Result<(), String> {
     }
 
     let search_dirs = dll_search_dirs();
-    log_phi_silica(&format!("DLL search dirs: {:?}", search_dirs));
+    log_phi_silica(&format!("DLL search dirs: {search_dirs:?}"));
 
     // Load WindowsAppRuntime first so the Text DLL's static import resolves
     let _ = load_ai_dll("Microsoft.WindowsAppRuntime.dll", &search_dirs);
@@ -644,15 +645,14 @@ fn try_direct_dll_activation() -> Result<(), String> {
             "phi_silica",
             format!(
                 "Microsoft.Windows.AI.Text.dll could not be loaded from the framework package, \
-                 next to the exe, or ai-sdk-dlls\\{}",
-                DLL_ARCH
+                 next to the exe, or ai-sdk-dlls\\{DLL_ARCH}"
             ),
         )
         .into()),
     }
 }
 
-/// Create LanguageModel via standard WinRT activation (RoGetActivationFactory).
+/// Create `LanguageModel` via standard `WinRT` activation (`RoGetActivationFactory`).
 /// This is the supported path and works whenever the process has package
 /// identity — full MSIX install OR a developer-registered sparse package — with
 /// the Windows App SDK framework resolvable.
@@ -666,24 +666,24 @@ fn create_language_model_winrt(
     let op = LanguageModel::CreateAsync().map_err(|e| {
         format!(
             "CreateAsync (WinRT path) failed: 0x{:08X} {}",
-            e.code().0 as u32,
+            e.code().0.cast_unsigned(),
             e.message()
         )
     })?;
     wait_for_async_blocking(op, is_cancelled)
 }
 
-/// Create a LanguageModel, preferring the Microsoft-documented standard
-/// WinRT activation path (`LanguageModel::CreateAsync()` — every official
+/// Create a `LanguageModel`, preferring the Microsoft-documented standard
+/// `WinRT` activation path (`LanguageModel::CreateAsync()` — every official
 /// sample uses only this) and falling back to a direct
 /// `DllGetActivationFactory` call if that fails.
 ///
 /// Standard activation is the default as of 2026-08-23: a live test on a
-/// real Copilot+ device (pure PowerShell, zero WFDiag code, zero LAF
+/// real Copilot+ device (pure PowerShell, zero `WFDiag` code, zero LAF
 /// unlock attempted) showed `LanguageModel::GetReadyState()` succeeding
 /// cleanly via the standard path, which updates the older finding that
 /// justified direct-DLL-first (`RoGetActivationFactory` returning
-/// E_ACCESSDENIED for third-party apps even with identity — see CLAUDE.md's
+/// `E_ACCESSDENIED` for third-party apps even with identity — see CLAUDE.md's
 /// "Audit vs. official docs" note for the full history). Both paths still
 /// require registered package identity at the API level — an unpackaged
 /// process gets 0x80070005 from either, which is why loose builds don't
@@ -696,9 +696,8 @@ fn create_language_model_winrt(
 fn create_language_model(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<crate::windows_ai_bindings::LanguageModel, String> {
-    let force_direct_first = std::env::var("WFDIAG_ACTIVATION_ORDER")
-        .map(|v| v.eq_ignore_ascii_case("direct"))
-        .unwrap_or(false);
+    let force_direct_first =
+        std::env::var("WFDIAG_ACTIVATION_ORDER").is_ok_and(|v| v.eq_ignore_ascii_case("direct"));
 
     if force_direct_first {
         log_phi_silica(
@@ -711,13 +710,11 @@ fn create_language_model(
             }
             Err(direct_err) => {
                 log_phi_silica(&format!(
-                    "Direct DLL activation failed ({}); falling back to standard WinRT activation",
-                    direct_err
+                    "Direct DLL activation failed ({direct_err}); falling back to standard WinRT activation"
                 ));
                 create_language_model_winrt(is_cancelled).map_err(|winrt_err| {
                     format!(
-                        "Phi Silica model creation failed. Direct DLL path: {} | WinRT path: {}",
-                        direct_err, winrt_err
+                        "Phi Silica model creation failed. Direct DLL path: {direct_err} | WinRT path: {winrt_err}"
                     )
                 })
             }
@@ -731,13 +728,11 @@ fn create_language_model(
         }
         Err(winrt_err) => {
             log_phi_silica(&format!(
-                "Standard WinRT activation failed ({}); falling back to direct DLL activation",
-                winrt_err
+                "Standard WinRT activation failed ({winrt_err}); falling back to direct DLL activation"
             ));
             create_language_model_direct(is_cancelled).map_err(|direct_err| {
                 format!(
-                    "Phi Silica model creation failed. WinRT path: {} | Direct DLL path: {}",
-                    winrt_err, direct_err
+                    "Phi Silica model creation failed. WinRT path: {winrt_err} | Direct DLL path: {direct_err}"
                 )
             })
         }
@@ -775,7 +770,7 @@ fn prompt_fit_for_model(
     let usable_utf16_units = model.GetUsablePromptLength(&prompt).map_err(|error| {
         format!(
             "Phi Silica could not measure prompt fit: 0x{:08X}: {}",
-            error.code().0 as u32,
+            error.code().0.cast_unsigned(),
             error.message()
         )
     })?;
@@ -799,7 +794,7 @@ fn ensure_feature_ready(is_cancelled: &dyn Fn() -> bool) -> Result<(), String> {
             let operation = LanguageModel::EnsureReadyAsync().map_err(|error| {
                 format!(
                     "Could not start Phi Silica preparation: 0x{:08X}: {}",
-                    error.code().0 as u32,
+                    error.code().0.cast_unsigned(),
                     error.message()
                 )
             })?;
@@ -808,14 +803,14 @@ fn ensure_feature_ready(is_cancelled: &dyn Fn() -> bool) -> Result<(), String> {
             // the model mutex for the whole budget.
             let result = wait_for_async_with_progress_blocking_timeout(
                 operation,
-                std::time::Duration::from_secs(15 * 60),
+                std::time::Duration::from_mins(15),
                 "Phi Silica preparation",
                 is_cancelled,
             )?;
             let status = result.Status().map_err(|error| {
                 format!(
                     "Could not read Phi Silica preparation status: 0x{:08X}: {}",
-                    error.code().0 as u32,
+                    error.code().0.cast_unsigned(),
                     error.message()
                 )
             })?;
@@ -848,8 +843,8 @@ fn ensure_feature_ready(is_cancelled: &dyn Fn() -> bool) -> Result<(), String> {
         ),
         Ok(state) => Err(format!("Phi Silica returned unknown ready state {}", state.0)),
         Err(error) => {
-            let code = error.code().0 as u32;
-            if code == 0x80040154 || code == 0x80070005 {
+            let code = error.code().0.cast_unsigned();
+            if code == 0x8004_0154 || code == 0x8007_0005 {
                 // Some third-party packaged configurations cannot resolve the
                 // static factory through RoGetActivationFactory even though
                 // the direct DLL activation path works. Model creation below
@@ -901,13 +896,22 @@ fn prepare_phi_runtime(is_cancelled: &dyn Fn() -> bool) -> Result<WinRtApartment
 
 #[cfg(windows)]
 fn format_hresult(value: Option<windows_core::HRESULT>) -> String {
-    value
-        .map(|value| format!("0x{:08X}", value.0 as u32))
-        .unwrap_or_else(|| "unavailable".to_string())
+    value.map_or_else(
+        || "unavailable".to_string(),
+        |value| format!("0x{:08X}", value.0.cast_unsigned()),
+    )
 }
 
-/// Create LanguageModel using DllGetActivationFactory from bundled DLL
-/// This bypasses RoGetActivationFactory entirely, like CsWinRT does
+/// `DllGetActivationFactory` signature:
+/// `HRESULT DllGetActivationFactory(HSTRING classId, IActivationFactory** factory)`
+#[cfg(windows)]
+type DllGetActivationFactoryFn = unsafe extern "system" fn(
+    class_id: *mut std::ffi::c_void, // HSTRING (passed by value, it's a pointer)
+    factory: *mut *mut std::ffi::c_void, // IActivationFactory**
+) -> windows_core::HRESULT;
+
+/// Create `LanguageModel` using `DllGetActivationFactory` from bundled DLL
+/// This bypasses `RoGetActivationFactory` entirely, like `CsWinRT` does
 #[cfg(windows)]
 fn create_language_model_direct(
     is_cancelled: &dyn Fn() -> bool,
@@ -925,13 +929,6 @@ fn create_language_model_direct(
         .get()
         .map(|handle| handle.0)
         .ok_or_else(|| PhiError::ai_unavailable("phi_silica", "AI Text DLL not loaded"))?;
-
-    // DllGetActivationFactory signature:
-    // HRESULT DllGetActivationFactory(HSTRING classId, IActivationFactory** factory)
-    type DllGetActivationFactoryFn = unsafe extern "system" fn(
-        class_id: *mut std::ffi::c_void, // HSTRING (passed by value, it's a pointer)
-        factory: *mut *mut std::ffi::c_void, // IActivationFactory**
-    ) -> windows_core::HRESULT;
 
     let proc = unsafe { GetProcAddress(module, windows::core::s!("DllGetActivationFactory")) };
     let get_factory: DllGetActivationFactoryFn = match proc {
@@ -960,20 +957,22 @@ fn create_language_model_direct(
     let mut factory_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
 
     log_phi_silica(&format!(
-        "Calling DllGetActivationFactory with class: {}",
-        class_name
+        "Calling DllGetActivationFactory with class: {class_name}"
     ));
 
-    let hr = unsafe { get_factory(hstring_raw, &mut factory_ptr) };
+    let hr = unsafe { get_factory(hstring_raw, &raw mut factory_ptr) };
 
     if hr.is_err() {
         log_phi_silica(&format!(
             "DllGetActivationFactory failed: 0x{:08X}",
-            hr.0 as u32
+            hr.0.cast_unsigned()
         ));
         return Err(PhiError::ai_unavailable(
             "phi_silica",
-            format!("DllGetActivationFactory failed: 0x{:08X}", hr.0 as u32),
+            format!(
+                "DllGetActivationFactory failed: 0x{:08X}",
+                hr.0.cast_unsigned()
+            ),
         )
         .into());
     }
@@ -1003,12 +1002,15 @@ fn create_language_model_direct(
         let mut result = std::mem::zeroed();
         let vtable = statics.as_raw()
             as *const *const crate::windows_ai_bindings::ILanguageModelStatics_Vtbl;
-        let hr = ((**vtable).CreateAsync)(statics.as_raw(), &mut result);
+        let hr = ((**vtable).CreateAsync)(statics.as_raw(), &raw mut result);
         if hr.is_err() {
-            log_phi_silica(&format!("CreateAsync call failed: 0x{:08X}", hr.0 as u32));
+            log_phi_silica(&format!(
+                "CreateAsync call failed: 0x{:08X}",
+                hr.0.cast_unsigned()
+            ));
             return Err(PhiError::ai_unavailable(
                 "phi_silica",
-                format!("CreateAsync failed: 0x{:08X}", hr.0 as u32),
+                format!("CreateAsync failed: 0x{:08X}", hr.0.cast_unsigned()),
             )
             .into());
         }
@@ -1035,7 +1037,7 @@ fn create_language_model_direct(
     Ok(model)
 }
 
-/// Check Phi Silica availability using GetReadyState (like AI Dev Gallery does)
+/// Check Phi Silica availability using `GetReadyState` (like AI Dev Gallery does)
 #[cfg(windows)]
 // Returns (available, message, ready_state, error_code). ready_state carries the
 // AIFeatureReadyState on the success path; error_code carries the HRESULT/LAF string on
@@ -1046,6 +1048,9 @@ fn check_phi_silica_safe() -> (bool, String, Option<String>, Option<String>) {
 }
 
 #[cfg(windows)]
+// One linear LAF/activation state machine; splitting it would scatter the
+// ordering that CLAUDE.md pins down.
+#[allow(clippy::too_many_lines)]
 fn check_phi_silica_safe_for_identity(
     has_package_identity: bool,
 ) -> (bool, String, Option<String>, Option<String>) {
@@ -1082,32 +1087,26 @@ fn check_phi_silica_safe_for_identity(
     match try_direct_dll_activation() {
         Ok(()) => log_phi_silica("Direct DLL activation succeeded"),
         Err(e) => log_phi_silica(&format!(
-            "Direct DLL activation failed (continuing anyway): {}",
-            e
+            "Direct DLL activation failed (continuing anyway): {e}"
         )),
     }
 
     let build = get_windows_build().unwrap_or(0);
     let ubr = get_windows_ubr();
-    log_phi_silica(&format!(
-        "Windows build: {}.{}",
-        build,
-        ubr.map(|u| u.to_string())
-            .unwrap_or_else(|| "?".to_string())
-    ));
+    let ubr_text = ubr.map_or_else(|| "?".to_string(), |ubr| ubr.to_string());
+    log_phi_silica(&format!("Windows build: {build}.{ubr_text}"));
 
     // Try to unlock Limited Access Feature BEFORE accessing Phi Silica APIs
     let (laf_success, laf_message) = try_unlock_laf();
     log_phi_silica(&format!(
-        "LAF unlock: success={}, msg={}",
-        laf_success, laf_message
+        "LAF unlock: success={laf_success}, msg={laf_message}"
     ));
 
     // Store LAF status for error reporting
     let laf_status_str = if laf_success {
-        format!("LAF: OK ({})", laf_message)
+        format!("LAF: OK ({laf_message})")
     } else {
-        format!("LAF: FAILED ({})", laf_message)
+        format!("LAF: FAILED ({laf_message})")
     };
 
     // Phi Silica requires Windows 11 24H2 (build 26100+) with a Copilot+ PC
@@ -1116,8 +1115,7 @@ fn check_phi_silica_safe_for_identity(
         return (
             false,
             format!(
-                "Phi Silica requires Windows 11 24H2 or later (build 26100+). Current build: {}",
-                build
+                "Phi Silica requires Windows 11 24H2 or later (build 26100+). Current build: {build}"
             ),
             None,
             None,
@@ -1142,7 +1140,7 @@ fn check_phi_silica_safe_for_identity(
             if state == AIFeatureReadyState::Ready {
                 (
                     true,
-                    format!("Phi Silica is ready. Build: {}", build),
+                    format!("Phi Silica is ready. Build: {build}"),
                     Some("Ready".to_string()),
                     None,
                 )
@@ -1150,14 +1148,14 @@ fn check_phi_silica_safe_for_identity(
                 // Model needs to be downloaded/initialized
                 (
                     true,
-                    format!("Phi Silica available but not ready. Build: {}", build),
+                    format!("Phi Silica available but not ready. Build: {build}"),
                     Some("NotReady".to_string()),
                     None,
                 )
             } else if state == AIFeatureReadyState::DisabledByUser {
                 (
                     false,
-                    format!("Phi Silica disabled by user. Build: {}", build),
+                    format!("Phi Silica disabled by user. Build: {build}"),
                     Some("DisabledByUser".to_string()),
                     None,
                 )
@@ -1165,8 +1163,7 @@ fn check_phi_silica_safe_for_identity(
                 (
                     false,
                     format!(
-                        "Phi Silica not supported on this system (requires Copilot+ PC with NPU). Build: {}",
-                        build
+                        "Phi Silica not supported on this system (requires Copilot+ PC with NPU). Build: {build}"
                     ),
                     Some("NotSupportedOnCurrentSystem".to_string()),
                     None,
@@ -1182,7 +1179,7 @@ fn check_phi_silica_safe_for_identity(
         }
         Err(e) => {
             // GetReadyState failed → carry the HRESULT/LAF in error_code, ready_state None.
-            let code = e.code().0 as u32;
+            let code = e.code().0.cast_unsigned();
             log_phi_silica(&format!(
                 "GetReadyState FAILED: 0x{:08X} {}",
                 code,
@@ -1195,7 +1192,7 @@ fn check_phi_silica_safe_for_identity(
             // path instead. Before declaring Phi Silica unavailable, fall back to that same
             // direct path so the availability gate matches what inference can actually do
             // (otherwise we false-negative on working Copilot+ PCs).
-            if code == 0x80040154 || code == 0x80070005 {
+            if code == 0x8004_0154 || code == 0x8007_0005 {
                 log_phi_silica(
                     "GetReadyState blocked (Ro path); attempting direct DLL activation...",
                 );
@@ -1208,8 +1205,7 @@ fn check_phi_silica_safe_for_identity(
                         true,
                         format!(
                             "Phi Silica is ready but currently generating; try again shortly. \
-                             Build: {}",
-                            build
+                             Build: {build}"
                         ),
                         Some("Busy".to_string()),
                         None,
@@ -1221,58 +1217,49 @@ fn check_phi_silica_safe_for_identity(
                         return (
                             true,
                             format!(
-                                "Phi Silica is ready (via direct DLL activation). Build: {}",
-                                build
+                                "Phi Silica is ready (via direct DLL activation). Build: {build}"
                             ),
                             Some("Ready".to_string()),
                             None,
                         );
                     }
                     Err(direct_err) => {
-                        log_phi_silica(&format!(
-                            "Direct DLL activation also failed: {}",
-                            direct_err
-                        ));
+                        log_phi_silica(&format!("Direct DLL activation also failed: {direct_err}"));
                     }
                 }
             }
 
-            if code == 0x80040154 {
+            if code == 0x8004_0154 {
                 // CLASS_E_CLASSNOTREGISTERED - API not available
                 // This happens when the Windows AI runtime is not present
                 (
                     false,
                     format!(
-                        "Phi Silica API not registered (0x{:08X}). Build: {}. \
-                     Requires Copilot+ PC with Windows AI features enabled.",
-                        code, build
+                        "Phi Silica API not registered (0x{code:08X}). Build: {build}. \
+                     Requires Copilot+ PC with Windows AI features enabled."
                     ),
                     None,
-                    Some(format!("0x{:08X}", code)),
+                    Some(format!("0x{code:08X}")),
                 )
-            } else if code == 0x80070005 {
+            } else if code == 0x8007_0005 {
                 // E_ACCESSDENIED - LAF unlock may have failed
                 (
                     false,
                     format!(
-                        "Phi Silica access denied (0x80070005). {}. Build: {}.",
-                        laf_status_str, build
+                        "Phi Silica access denied (0x80070005). {laf_status_str}. Build: {build}."
                     ),
                     None,
-                    Some(format!("LAF_REQUIRED ({})", laf_status_str)),
+                    Some(format!("LAF_REQUIRED ({laf_status_str})")),
                 )
             } else {
                 (
                     false,
                     format!(
-                        "Failed to check Phi Silica: 0x{:08X}: {}. {}. Build: {}",
-                        code,
-                        e.message(),
-                        laf_status_str,
-                        build
+                        "Failed to check Phi Silica: 0x{code:08X}: {}. {laf_status_str}. Build: {build}",
+                        e.message()
                     ),
                     None,
-                    Some(format!("0x{:08X}", code)),
+                    Some(format!("0x{code:08X}")),
                 )
             }
         }
@@ -1281,6 +1268,7 @@ fn check_phi_silica_safe_for_identity(
 
 /// Check if Phi Silica is available on this device
 #[cfg(windows)]
+#[must_use]
 pub fn is_phi_silica_available() -> PhiSilicaStatus {
     let build = get_windows_build();
     let (available, message, ready_state, error_code) = check_phi_silica_safe();
@@ -1322,13 +1310,16 @@ fn async_poll_interval(elapsed: std::time::Duration) -> std::time::Duration {
     }
 }
 
-/// Blocking wait for an async operation - runs in spawn_blocking to be Send-safe
+/// Blocking wait for an async operation - runs in `spawn_blocking` to be Send-safe
 ///
 /// `is_cancelled` is honoured for the same reason the generation wait honours
 /// it (#205): `LanguageModel` creation can occupy the process-wide model mutex
 /// for up to two minutes, so an abandoned turn must be able to cancel the `WinRT`
 /// operation and release the lock instead of idling out the full budget.
 #[cfg(windows)]
+// Takes the WinRT operation by value on purpose: the wait owns it, releases it
+// when it returns, and no caller can poll a completed operation again.
+#[allow(clippy::needless_pass_by_value)]
 fn wait_for_async_blocking<T>(
     op: windows_future::IAsyncOperation<T>,
     is_cancelled: &dyn Fn() -> bool,
@@ -1363,7 +1354,7 @@ where
                     .map_err(|e| format!("Failed to get error: {}", e.message()))?;
                 return Err(PhiError::ai_unavailable(
                     "phi_silica",
-                    format!("Async operation failed: 0x{:08X}", hr.0 as u32),
+                    format!("Async operation failed: 0x{:08X}", hr.0.cast_unsigned()),
                 )
                 .into());
             }
@@ -1382,7 +1373,7 @@ where
                     )
                     .into());
                 }
-                if elapsed >= Duration::from_secs(2 * 60) {
+                if elapsed >= Duration::from_mins(2) {
                     let _ = info.Cancel();
                     return Err(PhiError::ai_unavailable(
                         "phi_silica",
@@ -1395,7 +1386,7 @@ where
             _ => {
                 return Err(PhiError::ai_unavailable(
                     "phi_silica",
-                    format!("Unknown async status: {:?}", status),
+                    format!("Unknown async status: {status:?}"),
                 )
                 .into());
             }
@@ -1418,7 +1409,7 @@ where
 /// regardless — polling `is_cancelled()` here (a plain closure, not
 /// `tokio_util::CancellationToken`, so this crate doesn't need that
 /// dependency just to check a bool) is what actually stops it and calls
-/// `IAsyncInfo::Cancel()` on the WinRT operation instead of idling out.
+/// `IAsyncInfo::Cancel()` on the `WinRT` operation instead of idling out.
 #[cfg(windows)]
 fn wait_for_async_with_progress_blocking<T, P>(
     op: windows_future::IAsyncOperationWithProgress<T, P>,
@@ -1437,6 +1428,9 @@ where
 }
 
 #[cfg(windows)]
+// Same ownership contract as `wait_for_async_blocking`: the wait consumes the
+// WinRT operation and releases it on return.
+#[allow(clippy::needless_pass_by_value)]
 fn wait_for_async_with_progress_blocking_timeout<T, P>(
     op: windows_future::IAsyncOperationWithProgress<T, P>,
     timeout: std::time::Duration,
@@ -1474,7 +1468,7 @@ where
                     .map_err(|e| format!("Failed to get error: {}", e.message()))?;
                 return Err(PhiError::ai_unavailable(
                     "phi_silica",
-                    format!("Async operation failed: 0x{:08X}", hr.0 as u32),
+                    format!("Async operation failed: 0x{:08X}", hr.0.cast_unsigned()),
                 )
                 .into());
             }
@@ -1509,7 +1503,7 @@ where
             _ => {
                 return Err(PhiError::ai_unavailable(
                     "phi_silica",
-                    format!("Unknown async status: {:?}", status),
+                    format!("Unknown async status: {status:?}"),
                 )
                 .into());
             }
@@ -1623,7 +1617,7 @@ pub async fn ensure_phi_silica_ready() -> Result<(), String> {
         Ok(())
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 #[cfg(not(windows))]
@@ -1638,6 +1632,12 @@ pub async fn ensure_phi_silica_ready() -> Result<(), String> {
 /// useful to callers assembling an evidence packet: if `fits` is false they
 /// can rebuild it with fewer whole records instead of chopping off the latest
 /// user question.
+///
+/// # Panics
+///
+/// Panics if the cached model is absent immediately after
+/// `ensure_cached_model_locked` reported success while this thread still holds
+/// the cache guard — an invariant violation rather than a runtime condition.
 #[cfg(windows)]
 pub async fn measure_prompt_fit(prompt: &str) -> Result<PhiPromptFit, String> {
     let prompt = prompt.to_string();
@@ -1716,14 +1716,14 @@ fn generate_with_model(
     let options = LanguageModelOptions::new().ok().and_then(|options| {
         let configured = options
             .SetTemperature(0.2)
-            .and_then(|_| options.SetTopP(0.9))
-            .and_then(|_| options.SetTopK(20));
+            .and_then(|()| options.SetTopP(0.9))
+            .and_then(|()| options.SetTopK(20));
         match configured {
             Ok(()) => Some(options),
             Err(error) => {
                 log_phi_silica(&format!(
                     "Phi Silica options are unavailable; using runtime defaults: 0x{:08X}: {}",
-                    error.code().0 as u32,
+                    error.code().0.cast_unsigned(),
                     error.message()
                 ));
                 None
@@ -1740,7 +1740,7 @@ fn generate_with_model(
     .map_err(|error| {
         GenerationFailure::runtime(format!(
             "Failed to start Phi Silica generation: 0x{:08X}: {}",
-            error.code().0 as u32,
+            error.code().0.cast_unsigned(),
             error.message()
         ))
     })?;
@@ -1758,7 +1758,7 @@ fn complete_generation_response(
     let status = response.Status().map_err(|error| {
         GenerationFailure::runtime(format!(
             "Failed to read Phi Silica response status: 0x{:08X}: {}",
-            error.code().0 as u32,
+            error.code().0.cast_unsigned(),
             error.message()
         ))
     })?;
@@ -1769,7 +1769,7 @@ fn complete_generation_response(
             .map_err(|error| {
                 GenerationFailure::runtime(format!(
                     "Failed to read Phi Silica response text: 0x{:08X}: {}",
-                    error.code().0 as u32,
+                    error.code().0.cast_unsigned(),
                     error.message()
                 ))
             });
@@ -1848,7 +1848,7 @@ pub async fn generate_response(
         result.map_err(|error| error.message)
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 #[cfg(not(windows))]
