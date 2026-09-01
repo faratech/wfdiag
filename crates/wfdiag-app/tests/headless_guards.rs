@@ -71,6 +71,81 @@ fn a_superseded_reply_is_dropped_and_only_the_newest_updates_the_snapshot() {
 }
 
 #[test]
+fn a_superseded_connection_reply_is_dropped_and_only_the_newest_updates_the_snapshot() {
+    use wfdiag_app::ports::monitor::NetworkConnection;
+
+    fn connection(local_addr: &str, status: &str) -> NetworkConnection {
+        NetworkConnection {
+            protocol: "TCP".to_string(),
+            local_addr: local_addr.to_string(),
+            remote_addr: "127.0.0.1:5001".to_string(),
+            status: status.to_string(),
+        }
+    }
+
+    let mocks = MockPorts::new();
+    mocks
+        .monitor
+        .set_connections(vec![connection("127.0.0.1:5000", "ESTABLISHED")]);
+    let mut harness = boot_with("guards_stale_connections", mocks);
+
+    // Two connection requests are issued without draining in between, so both
+    // replies are waiting when the host next drains (#198: the monitor port
+    // answers each request on its own thread, so an older reply can land
+    // after a newer one was issued). Only the newest may be applied.
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::RequestNetworkConnections)
+            .is_accepted()
+    );
+    harness.mocks.monitor.set_connections(vec![
+        connection("127.0.0.1:5000", "ESTABLISHED"),
+        connection("127.0.0.1:5353", "BOUND"),
+    ]);
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::RequestNetworkConnections)
+            .is_accepted()
+    );
+
+    let events = harness.pump_for("the connection lists", |event| {
+        matches!(
+            event,
+            AppEvent::Monitor(MonitorEvent::NetworkConnections(_))
+        )
+    });
+    let delivered: Vec<usize> = events
+        .iter()
+        .filter_map(|event| match event {
+            AppEvent::Monitor(MonitorEvent::NetworkConnections(connections)) => {
+                Some(connections.len())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        delivered,
+        [2],
+        "the older reply is dropped, not merely overwritten"
+    );
+    assert_eq!(
+        harness
+            .service
+            .snapshot()
+            .monitor
+            .connections
+            .as_ref()
+            .map(Vec::len),
+        Some(2)
+    );
+    // A superseded reply is a routine race, not a failure.
+    assert!(harness.service.snapshot().monitor.error.is_none());
+    harness.shutdown(Duration::from_secs(2));
+}
+
+#[test]
 fn a_reply_that_never_lands_becomes_a_typed_timeout() {
     let mocks = MockPorts::new();
     mocks.monitor.stall_process_queries(true);

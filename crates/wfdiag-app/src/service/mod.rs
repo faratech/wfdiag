@@ -238,6 +238,7 @@ pub struct AppService {
     provider_status_request: Option<RequestId>,
     update_request: Option<RequestId>,
     process_page_request: Option<RequestId>,
+    network_request_id: Option<RequestId>,
     issue_outstanding: bool,
     update_startup_due: Option<Instant>,
     started: bool,
@@ -355,6 +356,7 @@ impl AppService {
             provider_status_request: None,
             update_request: None,
             process_page_request: None,
+            network_request_id: None,
             issue_outstanding: false,
             update_startup_due: None,
             started: false,
@@ -1362,6 +1364,7 @@ impl AppService {
                 let Some(request) = self.requests.issue() else {
                     return DispatchOutcome::Rejected(RejectReason::IdentityExhausted);
                 };
+                self.network_request_id = Some(request);
                 self.replies
                     .register(WorkerKind::Monitor, request, reply, move |result| {
                         Internal::NetworkConnections {
@@ -1978,7 +1981,14 @@ impl AppService {
                 request,
                 connections,
             } => {
-                let _ = request;
+                // A reply for a request this service never made, or already
+                // superseded: dropping it is the guard (#198). The monitor
+                // port answers each request on its own thread, so an older
+                // reply can land after a newer one was issued.
+                if self.network_request_id != Some(request) {
+                    return;
+                }
+                self.network_request_id = None;
                 match connections {
                     Ok(connections) => {
                         self.snapshot.monitor.connections = Some(connections.clone());
