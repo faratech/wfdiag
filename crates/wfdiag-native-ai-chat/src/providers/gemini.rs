@@ -26,7 +26,7 @@ const LEGACY_CALL_PREFIX: &str = "wfdiag-gemini-legacy-";
 /// Resolve an explicit model or discover Google's best current general chat
 /// model. The early return is intentional: saved user choices never perform
 /// discovery and are never replaced by a provider-side catalog change.
-pub(crate) async fn resolve_model(configured: Option<String>, api_key: &str) -> String {
+pub async fn resolve_model(configured: Option<String>, api_key: &str) -> String {
     wfdiag_native_ai_provider::resolve_gemini_model(configured.as_deref(), api_key).await
 }
 

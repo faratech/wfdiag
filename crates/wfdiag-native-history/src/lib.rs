@@ -12,22 +12,6 @@ mod runtime;
 #[allow(unsafe_code)]
 mod encrypted_storage;
 
-// Shared primitives compile once in `wfdiag-native-core`. `results_storage.rs`
-// and `encrypted_storage.rs` still spell them `crate::error`,
-// `crate::timestamp` and `crate::fs_atomic`.
-#[allow(unused_imports)]
-mod error {
-    pub use wfdiag_native_core::error::*;
-}
-#[allow(unused_imports)]
-mod fs_atomic {
-    pub use wfdiag_native_core::fs_atomic::*;
-}
-#[allow(unused_imports)]
-mod timestamp {
-    pub use wfdiag_native_core::timestamp::*;
-}
-
 /// Minimal diagnostic contracts needed by the history format and comparison
 /// engine. They intentionally serialize identically to the shipping backend's
 /// contracts; the two UI shells can supply their own live task catalog.
@@ -90,9 +74,7 @@ pub mod commands {
     }
 }
 
-#[allow(dead_code, clippy::all, clippy::pedantic)]
-#[path = "../../../src-tauri/src/results_storage.rs"]
-mod storage;
+pub mod storage;
 
 pub use diagnostics::{DiagnosticTask, set_default_task_catalog};
 pub use encrypted_storage::EncryptedStorage;
@@ -101,7 +83,7 @@ pub use storage::{
     ComparisonResult, ComparisonSummary, ScanRecord, ScanStorage, ScanSummary, TaskChange,
     TaskChangeSummary, TaskDiffDetail, TaskTrend,
 };
-pub use timestamp::Timestamp;
+pub use wfdiag_native_core::timestamp::Timestamp;
 pub use wfdiag_native_issues::{
     ScanEvidence, SharedScanEvidence, SharedTaskResult, TaskResult, ordered_scan_evidence,
 };

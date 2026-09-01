@@ -9,7 +9,6 @@ pub mod diagnostics;
 // dpapi self-gates internally (non-Windows stubs); the module stays
 // cross-platform because ProviderKeyId names the keyring entries too
 mod dpapi;
-mod encrypted_storage;
 pub mod error;
 mod issue_catalog;
 mod native_diagnostics;
@@ -23,7 +22,6 @@ pub mod state;
 pub mod timestamp;
 mod tray;
 mod update_check;
-mod windows_native;
 #[cfg(windows)]
 mod wmi_native;
 
@@ -55,8 +53,7 @@ use crate::issue_catalog::Issue;
 use crate::ui_event_adapter::TauriMonitorEmitter;
 use native_monitor::{NetworkConnection, ProcessPage, ProcessQuery, SystemMonitor};
 use results_storage::{
-    ComparisonResult, ComparisonSummary, ScanRecord, ScanStorage, ScanSummary, TaskDiffDetail,
-    TaskTrend,
+    ComparisonResult, ComparisonSummary, ScanRecord, ScanSummary, TaskDiffDetail, TaskTrend,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, atomic::Ordering};
@@ -684,7 +681,13 @@ async fn save_current_scan(
             computer_name: system_info.computer_name,
             os_version: system_info.os_version,
             is_admin: system_info.is_admin,
-            results: session.results.clone(),
+            // The history crate's record holds shared results; the live
+            // session owns plain ones.
+            results: session
+                .results
+                .iter()
+                .map(|(task_id, result)| (task_id.clone(), Arc::new(result.clone())))
+                .collect(),
             task_count: session.results.len(),
             success_count,
             failure_count,
@@ -1052,7 +1055,7 @@ pub fn run() {
     }
 
     // Initialize scan storage gracefully - don't crash if it fails
-    let (scan_storage, scan_storage_error) = match ScanStorage::new() {
+    let (scan_storage, scan_storage_error) = match results_storage::open_default_storage() {
         Ok(storage) => (Some(storage), None),
         Err(e) => {
             eprintln!(

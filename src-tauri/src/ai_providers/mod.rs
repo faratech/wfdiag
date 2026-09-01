@@ -19,18 +19,18 @@
 //! `capabilities()` is the single source of truth for what each provider can
 //! do and how much context it gets.
 
-pub mod acp_bridge;
-pub mod anthropic;
 pub mod cli_bridge;
-pub mod deepseek;
 pub mod discovery;
 pub mod foundry;
-pub mod gemini;
 pub mod model_catalog;
 pub mod ollama;
 pub mod openai;
 pub mod phi;
-pub mod sse;
+
+// The cloud transports and the ACP/SSE plumbing they sit on compile once, in
+// the native chat crate; these re-exports keep every `crate::ai_providers::…`
+// path in this shell resolving unchanged.
+pub use wfdiag_native_ai_chat::providers::{anthropic, deepseek, gemini};
 
 use crate::ai_service::AIProvider;
 use crate::error::DiagError;

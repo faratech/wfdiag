@@ -36,38 +36,11 @@ pub mod ollama {
     pub use wfdiag_native_ai_provider::ollama_model_supports_tools as model_supports_tools;
 }
 
-// Included verbatim from the shipping backend so both shells compile the
-// exact same client; edit it there, never here.
-#[path = "../../../src-tauri/src/ai_providers/openai_compat.rs"]
-pub mod openai_compat;
+// Every provider transport lives in `providers`; both shells use these exact
+// clients. The historical flat paths stay valid through the re-exports below.
+pub mod providers;
 
-// The native cloud clients are included from their shipping source files so
-// Tauri and Reactor cannot drift in request shape, streaming, tool replay, or
-// provider-specific error handling.  These modules depend only on the shared
-// provider-neutral model above; neither desktop framework crosses this seam.
-#[path = "../../../src-tauri/src/ai_providers/anthropic.rs"]
-pub mod anthropic;
-#[path = "../../../src-tauri/src/ai_providers/deepseek.rs"]
-pub mod deepseek;
-#[allow(dead_code)]
-#[path = "../../../src-tauri/src/ai_providers/gemini.rs"]
-pub mod gemini;
-#[path = "../../../src-tauri/src/ai_providers/sse.rs"]
-mod sse;
-
-// The subscription transports are compiled from the shipping Tauri source
-// files. Their process bridge is implemented in this crate without desktop
-// framework dependencies, so Reactor and Tauri execute the same Codex and
-// Claude Code request/response code (including Claude's ACP streaming path).
-#[allow(dead_code)]
-#[path = "../../../src-tauri/src/ai_providers/acp_bridge.rs"]
-mod acp_bridge;
-#[allow(dead_code)]
-#[path = "../../../src-tauri/src/ai_providers/claude_cli.rs"]
-pub mod claude_cli;
-#[allow(dead_code)]
-#[path = "../../../src-tauri/src/ai_providers/codex.rs"]
-pub mod codex;
+pub use providers::{anthropic, claude_cli, codex, deepseek, gemini, openai_compat};
 
 /// Adapter shim used by the included subscription transports.
 mod phi {

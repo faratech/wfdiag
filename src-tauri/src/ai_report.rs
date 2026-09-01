@@ -180,7 +180,14 @@ pub async fn ai_generate_report(
                                     duration_ms: 0,
                                     label: None,
                                     tags: Vec::new(),
-                                    results: results.clone(),
+                                    // The history crate's record holds shared
+                                    // results; the session owns plain ones.
+                                    results: results
+                                        .iter()
+                                        .map(|(task_id, result)| {
+                                            (task_id.clone(), Arc::new(result.clone()))
+                                        })
+                                        .collect(),
                                 };
                                 Ok(Some((
                                     ScanStorage::compute_comparison(current, previous),

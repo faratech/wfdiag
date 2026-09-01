@@ -5,7 +5,7 @@ use crate::diagnostics::TaskResult;
 use crate::timestamp::Timestamp;
 use std::collections::HashMap;
 
-pub use wfdiag_native_issues::{Issue, IssueSeverity, IssueStatus, RemediationSummary, catalog};
+pub use wfdiag_native_issues::{Issue, IssueSeverity, IssueStatus, RemediationSummary};
 
 /// Shipping detection inputs retain the established timestamp type. The
 /// adapter converts it to the portable detector clock without copying the

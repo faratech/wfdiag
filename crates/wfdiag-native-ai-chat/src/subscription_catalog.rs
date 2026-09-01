@@ -5,7 +5,8 @@
 //! app-server JSONL protocol; Claude reads the model selector from an ACP
 //! session initialized without sending a prompt.
 
-use crate::{acp_bridge, cli_bridge};
+use crate::cli_bridge;
+use crate::providers::acp_bridge;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

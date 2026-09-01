@@ -176,7 +176,7 @@ impl EncryptedStorage {
         file_data.extend(encrypted_data);
 
         let file_path = self.storage_path.join(format!("{filename}.enc"));
-        crate::fs_atomic::write_file(&file_path, &file_data)
+        wfdiag_native_core::fs_atomic::write_file(&file_path, &file_data)
             .map_err(|error| anyhow!("Failed to write encrypted file: {error}"))
     }
 

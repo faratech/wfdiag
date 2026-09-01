@@ -40,9 +40,7 @@ mod issue_catalog {
 mod results_storage {
     pub use wfdiag_native_history::{ComparisonResult, TaskChange};
 }
-#[allow(dead_code, clippy::all, clippy::pedantic)]
-#[path = "../../../src-tauri/src/ai_evidence.rs"]
-mod evidence;
+pub mod evidence;
 
 use evidence::{EvidencePolicy, EvidenceRequest, build_compact_evidence};
 
