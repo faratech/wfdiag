@@ -25,7 +25,7 @@ use crate::state::AppState;
 use std::sync::{Arc, OnceLock};
 use tauri::{Emitter, State};
 use wfdiag_native_ai_report::{
-    ReportAck, ReportDeltaPayload, ReportDonePayload, ReportErrorPayload, ReportEmitter,
+    ReportAck, ReportDeltaPayload, ReportDonePayload, ReportEmitter, ReportErrorPayload,
     ReportProviderResolver, ReportRequest, ReportScan, ReportService, ResolvedReportProvider,
 };
 
@@ -88,7 +88,14 @@ impl ReportProviderResolver for TauriReportResolver {
             let config_fingerprint = provider_config_fingerprint(provider, &cfg);
             let requested_model = cfg.model.clone();
             Ok(ResolvedReportProvider {
-                chat: Arc::new(RealChatProvider { provider, cfg }),
+                // No per-report cancellation token is threaded to this
+                // resolver yet; `|| false` never cancels early, same
+                // behavior as before this field existed.
+                chat: Arc::new(RealChatProvider {
+                    provider,
+                    cfg,
+                    is_cancelled: Arc::new(|| false),
+                }),
                 config_fingerprint,
                 requested_model,
             })
@@ -139,9 +146,8 @@ pub async fn ai_generate_report(
 
     // Comparison baseline: explicit id, else the newest stored scan that is
     // not this session (auto-save may have stored the current scan already).
-    let explicit_previous_id = wfdiag_native_ai_report::explicit_previous_scan_id(
-        previous_scan_id.as_deref(),
-    );
+    let explicit_previous_id =
+        wfdiag_native_ai_report::explicit_previous_scan_id(previous_scan_id.as_deref());
     let comparison_info: Result<Option<(ComparisonResult, String)>, String> = {
         let storage = state.scan_storage.lock().await;
         match storage.as_ref() {
@@ -206,7 +212,12 @@ pub async fn ai_generate_report(
     let request = ReportRequest {
         scan: ReportScan {
             session_id,
-            results,
+            results: Arc::new(
+                results
+                    .into_iter()
+                    .map(|(task_id, result)| (task_id, Arc::new(result)))
+                    .collect(),
+            ),
         },
         comparison: portable_comparison,
         force_refresh: force_refresh.unwrap_or(false),

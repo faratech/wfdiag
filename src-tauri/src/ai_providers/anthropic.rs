@@ -18,8 +18,8 @@ use std::sync::OnceLock;
 use tokio::sync::{RwLock, mpsc};
 
 /// Default model when the `anthropicModel` setting is empty. Plain model id,
-/// no date suffix. Cheaper option: claude-haiku-4-5; stronger: claude-opus-4-8.
-pub const ANTHROPIC_DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+/// no date suffix. Cheaper option: claude-haiku-4-5; stronger: claude-opus-5.
+pub const ANTHROPIC_DEFAULT_MODEL: &str = wfdiag_native_ai_provider::ANTHROPIC_DEFAULT_MODEL;
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODELS_URL: &str = "https://api.anthropic.com/v1/models/";
@@ -172,7 +172,7 @@ pub(crate) fn build_messages_body(
                             requested_model,
                             content_blocks,
                         } if requested_model == model => Some(content_blocks.clone()),
-                        _ => None,
+                        ProviderReplay::Anthropic { .. } => None,
                     });
                 if let Some(content_blocks) = replay {
                     wire_messages.push(json!({
@@ -338,7 +338,7 @@ fn parse_message_response_for_model(v: &Value, requested_model: &str) -> Result<
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("unknown error");
-        return Err(format!("Anthropic API error: {}", message));
+        return Err(format!("Anthropic API error: {message}"));
     }
     let blocks = v
         .get("content")
@@ -376,8 +376,9 @@ fn request_builder(cfg: &ResolvedProviderConfig) -> reqwest::RequestBuilder {
         .timeout(std::time::Duration::from_secs(120))
 }
 
+#[allow(clippy::needless_pass_by_value)] // `Result::map_err` transfers ownership.
 fn friendly_transport_error(e: reqwest::Error) -> String {
-    format!("Anthropic request failed: {}", e)
+    format!("Anthropic request failed: {e}")
 }
 
 async fn check_http_status(response: reqwest::Response) -> Result<reqwest::Response, String> {
@@ -401,10 +402,7 @@ async fn check_http_status(response: reqwest::Response) -> Result<reqwest::Respo
         529 => " Anthropic is temporarily overloaded — retry shortly.",
         _ => "",
     };
-    Err(format!(
-        "Anthropic API error ({}): {}.{}",
-        status, detail, hint
-    ))
+    Err(format!("Anthropic API error ({status}): {detail}.{hint}"))
 }
 
 /// One-shot analysis (system + single user message).
@@ -436,7 +434,7 @@ pub async fn one_shot(
     let v: Value = response
         .json()
         .await
-        .map_err(|e| format!("Unexpected Anthropic response: {}", e))?;
+        .map_err(|e| format!("Unexpected Anthropic response: {e}"))?;
     let turn = parse_message_response_for_model(&v, model)?;
     match turn.finished {
         FinishReason::Stop if !turn.text.trim().is_empty() => Ok(turn.text),
@@ -484,6 +482,7 @@ fn append_string_field(block: &mut Value, field: &str, fragment: &str) -> Result
 }
 
 impl StreamAssembler {
+    #[allow(clippy::too_many_lines)] // One exhaustive state machine keeps SSE ordering explicit.
     fn apply(&mut self, event: &str, data: &str) -> Result<StreamAction, String> {
         match event {
             "message_start" => {
@@ -594,7 +593,7 @@ impl StreamAssembler {
                             })?;
                         open.input_json.push_str(fragment);
                     }
-                    Some("citations_delta") | Some("citation_delta") => {
+                    Some("citations_delta" | "citation_delta") => {
                         if let Some(citation) = delta.get("citation").cloned() {
                             let object = open.content.as_object_mut().ok_or_else(|| {
                                 "Anthropic text content block was not an object".to_string()

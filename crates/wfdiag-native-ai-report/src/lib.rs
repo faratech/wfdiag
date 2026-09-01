@@ -10,6 +10,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use serde::Serialize;
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
@@ -23,7 +24,9 @@ use wfdiag_native_ai_provider::{
     AIProvider, AIProviderPreference, ProviderCaps, SharedAiCache, capabilities,
 };
 use wfdiag_native_history::ComparisonResult;
-use wfdiag_native_issues::{DetectCtx, Issue, TaskResult, Timestamp, detect_all_with};
+use wfdiag_native_issues::{
+    DetectCtx, Issue, SharedScanEvidence, TaskResult, Timestamp, detect_all_with,
+};
 
 // Reuse the shipping deterministic evidence implementation verbatim. These
 // compatibility modules bind it to the canonical native contracts; the
@@ -106,7 +109,7 @@ pub trait ReportEmitter: Send + Sync + 'static {
 #[derive(Debug, Clone)]
 pub struct ReportScan {
     pub session_id: String,
-    pub results: HashMap<String, TaskResult>,
+    pub results: SharedScanEvidence,
 }
 
 /// All shell-independent data needed to prepare one report.
@@ -287,7 +290,7 @@ impl ReportService {
             (caps.context_budget_chars / 2).min(20_000)
         };
         let detect_ctx = DetectCtx {
-            results: &request.scan.results,
+            results: request.scan.results.as_ref(),
             now: request.detection_now,
             temp_file_count: None,
         };
@@ -590,12 +593,15 @@ pub fn resolve_loaded_report_baseline<T>(
 // delegates to (shared verbatim with the shipping backend) takes the same
 // concrete map, so generalizing here would only move the special case.
 #[allow(clippy::implicit_hasher)]
-pub fn build_report_context(
-    results: &HashMap<String, TaskResult>,
+pub fn build_report_context<R>(
+    results: &HashMap<String, R>,
     issues: &[Issue],
     comparison: Option<&ComparisonResult>,
     data_budget_chars: usize,
-) -> Result<String, String> {
+) -> Result<String, String>
+where
+    R: Borrow<TaskResult>,
+{
     let comparison_marker = comparison.map_or_else(
         || "COMPARISON none".to_string(),
         |value| {
@@ -632,11 +638,14 @@ pub fn build_report_context(
     .map_err(|error| format!("Could not assemble a safe AI report context: {error}"))
 }
 
-fn report_cache_hash(
-    results: &HashMap<String, TaskResult>,
+fn report_cache_hash<R>(
+    results: &HashMap<String, R>,
     previous_scan_id: Option<&str>,
     config_fingerprint: &str,
-) -> String {
+) -> String
+where
+    R: Borrow<TaskResult>,
+{
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -644,7 +653,7 @@ fn report_cache_hash(
     let mut ids: Vec<&String> = results.keys().collect();
     ids.sort();
     for id in ids {
-        let result = &results[id];
+        let result = results[id].borrow();
         id.hash(&mut hasher);
         result.success.hash(&mut hasher);
         result.output.hash(&mut hasher);
@@ -881,10 +890,10 @@ mod tests {
         ReportRequest {
             scan: ReportScan {
                 session_id: "scan_1".to_string(),
-                results: HashMap::from([(
+                results: Arc::new(HashMap::from([(
                     "os_info".to_string(),
-                    result(true, r#"{"Caption":"Windows 11"}"#, None),
-                )]),
+                    Arc::new(result(true, r#"{"Caption":"Windows 11"}"#, None)),
+                )])),
             },
             comparison: None,
             force_refresh: false,

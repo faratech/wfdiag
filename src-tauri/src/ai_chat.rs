@@ -174,6 +174,14 @@ impl ChatEmitter for SessionEmitter {
 pub struct RealChatProvider {
     pub provider: AIProvider,
     pub cfg: ResolvedProviderConfig,
+    /// Only consulted for Phi Silica: its generation runs in a
+    /// `spawn_blocking` closure that keeps holding the process-wide model
+    /// mutex even after this future is dropped on cancellation, so it needs
+    /// an explicit poll to release early. Other providers already cancel
+    /// correctly when this future is dropped (their in-flight HTTP request
+    /// is aborted), so this is unused for them. Pass `|| false` where no
+    /// turn-level cancellation applies (e.g. the report path).
+    pub is_cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 impl ChatProvider for RealChatProvider {
@@ -183,7 +191,14 @@ impl ChatProvider for RealChatProvider {
         tx: mpsc::Sender<String>,
     ) -> Pin<Box<dyn Future<Output = Result<ChatTurn, String>> + Send + 'a>> {
         Box::pin(async move {
-            crate::ai_providers::chat_stream(self.provider, &self.cfg, request, tx).await
+            crate::ai_providers::chat_stream(
+                self.provider,
+                &self.cfg,
+                request,
+                tx,
+                self.is_cancelled.clone(),
+            )
+            .await
         })
     }
 }
@@ -203,21 +218,6 @@ fn parse_non_tool_full_scan_request(text: &str) -> Option<String> {
         .trim();
     let reason_len = reason.chars().count();
     if reason.is_empty() || reason_len > 300 || reason.contains('\n') {
-        return None;
-    }
-    Some(reason.to_string())
-}
-
-#[cfg(test)]
-fn parse_tool_full_scan_request(text: &str) -> Option<String> {
-    let envelope = serde_json::from_str::<serde_json::Value>(text).ok()?;
-    if envelope.get("kind").and_then(serde_json::Value::as_str) != Some("scan_request")
-        || envelope.get("scanKind").and_then(serde_json::Value::as_str) != Some("full")
-    {
-        return None;
-    }
-    let reason = envelope.get("reason")?.as_str()?.trim();
-    if reason.is_empty() || reason.chars().count() > 300 {
         return None;
     }
     Some(reason.to_string())
@@ -812,6 +812,10 @@ fn spawn_chat_run(
                 let chat = RealChatProvider {
                     provider: cur_provider,
                     cfg: cur_cfg.clone(),
+                    is_cancelled: {
+                        let cancel = cancel.clone();
+                        Arc::new(move || cancel.is_cancelled())
+                    },
                 };
                 let outcome = if let Some(error) = evidence_error {
                     Err(error)
@@ -2160,6 +2164,10 @@ mod tests {
         );
         assert_eq!(first_rejected.len(), 1);
         assert_eq!(first_rejected[0].call.id, "s2");
+        assert_eq!(
+            first_rejected[0].reason,
+            "only one remediation proposal may be staged per turn"
+        );
         assert!(staged_remediation);
         assert_eq!(
             first_round
@@ -2201,6 +2209,10 @@ mod tests {
         );
         assert_eq!(first_rejected.len(), 1);
         assert_eq!(first_rejected[0].call.id, "f2");
+        assert_eq!(
+            first_rejected[0].reason,
+            "only one Full Scan request may be proposed per turn"
+        );
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].id, "f1");
         let (second, second_rejected) = select_tool_calls(

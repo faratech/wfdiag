@@ -95,18 +95,19 @@ async fn windows_cwd_is_spawnable(directory: &Path) -> bool {
     )
 }
 
-#[allow(clippy::unused_async)] // Windows validates candidates with an awaited child process.
 pub async fn bridge_workdir() -> Result<PathBuf, String> {
     if let Some(directory) = VALIDATED_WORKDIR.get() {
         // Best-effort recreate (the user may have deleted the directory after
         // validation); a real failure surfaces from the child spawn itself.
-        let _ = std::fs::create_dir_all(directory);
+        // This is the cache-hit fast path (every bridged call once warm), so
+        // it must not block the async runtime thread.
+        let _ = tokio::fs::create_dir_all(directory).await;
         return Ok(directory.clone());
     }
 
     let mut failures = Vec::new();
     for candidate in workdir_candidates() {
-        if let Err(error) = std::fs::create_dir_all(&candidate) {
+        if let Err(error) = tokio::fs::create_dir_all(&candidate).await {
             failures.push(format!("{}: {error}", candidate.display()));
             continue;
         }

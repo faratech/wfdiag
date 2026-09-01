@@ -29,8 +29,8 @@ use super::cli_bridge;
 const INIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// The adapter spawns the agent CLI underneath during session/new.
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
-/// One prompt turn. Must stay STRICTLY below ai_chat's whole-turn deadline
-/// (TURN_TIMEOUT_SECS = 180 s, which wraps everything including this) or the
+/// One prompt turn. Must stay STRICTLY below `ai_chat`'s whole-turn deadline
+/// (`TURN_TIMEOUT_SECS` = 180 s, which wraps everything including this) or the
 /// outer limit kills the turn first and its specific "prompt timed out"
 /// error — and the adapter cleanup it triggers — becomes unreachable.
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(170);
@@ -320,6 +320,7 @@ fn non_empty_distinct(value: &str, id: &str) -> Option<String> {
 /// be sanitized; it rides the documented `ANTHROPIC_MODEL` env var (the
 /// adapter has no model flag). Text chunks stream into `delta_tx` as they
 /// arrive when a sender is provided.
+#[allow(clippy::too_many_lines)] // Protocol handshake, race, and cleanup form one lifecycle.
 pub async fn claude_prompt(
     claude_path: &Path,
     payload: &str,

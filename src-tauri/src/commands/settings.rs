@@ -408,7 +408,7 @@ mod tests {
             gemini_api_key: Some("AIza-gem".into()),
             deepseek_api_key: Some("sk-deep".into()),
             custom_api_key: Some("sk-or-custom".into()),
-            anthropic_model: Some("claude-sonnet-4-6".into()),
+            anthropic_model: Some("claude-sonnet-5".into()),
             custom_endpoint: Some("https://openrouter.ai/api".into()),
             custom_model: Some("meta-llama/llama-4".into()),
             ollama_endpoint: Some("http://127.0.0.1:11434".into()),
@@ -416,7 +416,7 @@ mod tests {
             codex_cli_path: Some(r"C:\Tools\codex.exe".into()),
             codex_model: Some("gpt-5-codex".into()),
             claude_cli_path: Some(r"C:\Tools\claude.exe".into()),
-            claude_model: Some("claude-sonnet-4-6".into()),
+            claude_model: Some("claude-sonnet-5".into()),
             open_ai_model: Some("gpt-5-nano".into()),
             local_ai_model: Some("phi-4-mini".into()),
             ..AppSettings::default()
@@ -462,10 +462,7 @@ mod tests {
         assert!(on_disk.deepseek_api_key.is_none());
         assert!(on_disk.custom_api_key.is_none());
         // Non-secret provider config must survive
-        assert_eq!(
-            on_disk.anthropic_model.as_deref(),
-            Some("claude-sonnet-4-6")
-        );
+        assert_eq!(on_disk.anthropic_model.as_deref(), Some("claude-sonnet-5"));
         assert_eq!(
             on_disk.custom_endpoint.as_deref(),
             Some("https://openrouter.ai/api")

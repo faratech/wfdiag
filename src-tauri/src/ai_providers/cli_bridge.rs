@@ -26,8 +26,14 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use tauri::Emitter;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
+use wfdiag_native_ai_chat::{
+    SubscriptionAuthProvider, SubscriptionAuthState, SubscriptionInstallController,
+    SubscriptionInstallError, SubscriptionInstallFallbackReason, SubscriptionInstallMethod,
+    SubscriptionInstallRequest,
+};
 
 /// How long a cached availability probe stays fresh.
 const PROBE_TTL: Duration = Duration::from_secs(30);
@@ -124,18 +130,49 @@ fn probe_cache() -> &'static Mutex<HashMap<&'static str, (Instant, BridgeProbe)>
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+type ProbeInFlight = Mutex<HashMap<&'static str, std::sync::Arc<tokio::sync::Mutex<()>>>>;
+
+/// Per-binary async mutexes: concurrent cache misses share one probe instead
+/// of each spawning its own child process. Entries live for the process
+/// lifetime but are bounded by the key space (Codex + Claude Code).
+fn probe_in_flight() -> &'static ProbeInFlight {
+    static IN_FLIGHT: OnceLock<ProbeInFlight> = OnceLock::new();
+    IN_FLIGHT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_probe(binary: &'static str) -> Option<BridgeProbe> {
+    probe_cache().lock().ok().and_then(|cache| {
+        cache
+            .get(binary)
+            .filter(|(at, _)| at.elapsed() < PROBE_TTL)
+            .map(|(_, probe)| probe.clone())
+    })
+}
+
 /// Probe a bridged CLI with a short-lived cache so status refreshes and Auto
 /// routing don't spawn processes on every call.
 pub async fn probe(provider: AIProvider) -> BridgeProbe {
     let Some(spec) = spec_for(provider) else {
         return BridgeProbe::default();
     };
-    if let Ok(cache) = probe_cache().lock()
-        && let Some((at, probe)) = cache.get(spec.binary)
-        && at.elapsed() < PROBE_TTL
-    {
-        return probe.clone();
+    if let Some(probe) = cached_probe(spec.binary) {
+        return probe;
     }
+
+    // Single-flight: serialize concurrent misses per binary, then re-check
+    // the cache so followers adopt the leader's fresh result instead of each
+    // spawning their own child process.
+    let guard = {
+        let mut in_flight = probe_in_flight()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        in_flight.entry(spec.binary).or_default().clone()
+    };
+    let _permit = guard.lock().await;
+    if let Some(probe) = cached_probe(spec.binary) {
+        return probe;
+    }
+
     let (fresh, conclusive) = probe_uncached(provider, spec).await;
     // Cache definitive evidence only. A timed-out or failed status run says
     // nothing about sign-in; caching it as "signed out" made Auto routing
@@ -152,6 +189,17 @@ pub fn invalidate(provider: AIProvider) {
         && let Ok(mut cache) = probe_cache().lock()
     {
         cache.remove(spec.binary);
+    }
+    let shared_provider = match provider {
+        AIProvider::CodexCli => Some(wfdiag_native_ai_provider::SubscriptionCli::Codex),
+        AIProvider::ClaudeCode => Some(wfdiag_native_ai_provider::SubscriptionCli::ClaudeCode),
+        _ => None,
+    };
+    if let Some(shared_provider) = shared_provider {
+        wfdiag_native_ai_provider::ProcessSubscriptionCliStatusSource::new()
+            .invalidate(shared_provider);
+        wfdiag_native_ai_chat::ProcessSubscriptionModelCatalogSource::new()
+            .invalidate(shared_provider);
     }
 }
 
@@ -377,13 +425,16 @@ async fn windows_cwd_is_spawnable(dir: &Path) -> bool {
 pub async fn bridge_workdir() -> Result<PathBuf, String> {
     if let Some(dir) = VALIDATED_WORKDIR.get() {
         // Cheap self-heal if something deleted the directory since validation.
-        std::fs::create_dir_all(dir)
+        // This runs on the cache-hit fast path (every bridged call once
+        // warm), so it must not block the async runtime thread.
+        tokio::fs::create_dir_all(dir)
+            .await
             .map_err(|e| format!("Could not create {}: {}", dir.display(), e))?;
         return Ok(dir.clone());
     }
     let mut failures = Vec::new();
     for candidate in workdir_candidates() {
-        if let Err(error) = std::fs::create_dir_all(&candidate) {
+        if let Err(error) = tokio::fs::create_dir_all(&candidate).await {
             failures.push(format!("{}: {}", candidate.display(), error));
             continue;
         }
@@ -395,6 +446,13 @@ pub async fn bridge_workdir() -> Result<PathBuf, String> {
             ));
             continue;
         }
+        // A concurrent first call may have already won this OnceLock with a
+        // different (also-validated) candidate; that's a deterministic,
+        // benign race, not a failure to surface — every candidate here
+        // already passed the same spawn-validation, so whichever wins is
+        // equally usable, and this call still returns its own validated
+        // candidate either way rather than silently switching directories
+        // out from under its caller.
         let _ = VALIDATED_WORKDIR.set(candidate.clone());
         return Ok(candidate);
     }
@@ -809,6 +867,60 @@ fn sign_in_tokens() -> &'static Mutex<HashMap<&'static str, CancellationToken>> 
     TOKENS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn install_tokens() -> &'static Mutex<HashMap<&'static str, CancellationToken>> {
+    static TOKENS: OnceLock<Mutex<HashMap<&'static str, CancellationToken>>> = OnceLock::new();
+    TOKENS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn install_controller() -> &'static SubscriptionInstallController {
+    static CONTROLLER: OnceLock<SubscriptionInstallController> = OnceLock::new();
+    CONTROLLER.get_or_init(SubscriptionInstallController::new)
+}
+
+fn shared_auth_provider(provider: AIProvider) -> Result<SubscriptionAuthProvider, String> {
+    match provider {
+        AIProvider::CodexCli => Ok(SubscriptionAuthProvider::Codex),
+        AIProvider::ClaudeCode => Ok(SubscriptionAuthProvider::ClaudeCode),
+        _ => Err("This provider does not support subscription CLI installation".to_string()),
+    }
+}
+
+fn parse_install_method(method: Option<&str>) -> Result<SubscriptionInstallMethod, String> {
+    match method
+        .unwrap_or("winget")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "winget" => Ok(SubscriptionInstallMethod::Winget),
+        "vendor_power_shell" | "vendorpowershell" | "vendor_powershell" => {
+            Ok(SubscriptionInstallMethod::VendorPowerShell)
+        }
+        _ => Err("Unknown subscription CLI installation method".to_string()),
+    }
+}
+
+struct InstallTokenGuard(&'static str);
+
+impl Drop for InstallTokenGuard {
+    fn drop(&mut self) {
+        if let Ok(mut tokens) = install_tokens().lock() {
+            tokens.remove(self.0);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum BridgeInstallResponse {
+    Installed {
+        status: BridgeStatus,
+    },
+    VendorFallbackConfirmationRequired {
+        reason: SubscriptionInstallFallbackReason,
+    },
+}
+
 #[tauri::command]
 pub async fn ai_bridge_status(
     provider: String,
@@ -821,206 +933,77 @@ pub async fn ai_bridge_status(
     Ok(probe(provider).await.into())
 }
 
-/// Install budget: both vendors ship self-contained binaries (~50-100 MB);
-/// cold links can take minutes.
-const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
-
-/// Winget package IDs. Both CLIs publish official winget packages that need
-/// NO Node.js — the primary target systems never had Node installed.
-fn winget_package(provider: AIProvider) -> Option<&'static str> {
-    match provider {
-        AIProvider::CodexCli => Some("OpenAI.Codex"),
-        AIProvider::ClaudeCode => Some("Anthropic.ClaudeCode"),
-        _ => None,
-    }
-}
-
-/// Vendor PowerShell bootstrap (no winget, no Node, no admin required):
-/// downloads and runs each vendor's official silent installer.
-fn ps_bootstrap_script(provider: AIProvider) -> Option<&'static str> {
-    match provider {
-        AIProvider::CodexCli => Some("irm https://chatgpt.com/codex/install.ps1 | iex"),
-        AIProvider::ClaudeCode => Some("irm https://claude.ai/install.ps1 | iex"),
-        _ => None,
-    }
-}
-
-/// Where each vendor's installer puts its binary. A fresh install updates
-/// the REGISTRY PATH, but this app's environment block is stale until
-/// relaunch — where.exe would miss what was just written, so verification
-/// checks these paths directly.
-#[cfg(windows)]
-fn known_install_location(provider: AIProvider) -> Option<std::path::PathBuf> {
-    let (env_var, relative) = match provider {
-        AIProvider::CodexCli => ("LOCALAPPDATA", r"Programs\OpenAI\Codex\bin\codex.exe"),
-        AIProvider::ClaudeCode => ("USERPROFILE", r".local\bin\claude.exe"),
-        _ => return None,
-    };
-    std::env::var_os(env_var)
-        .map(|base| std::path::PathBuf::from(base).join(relative))
-        .filter(|path| path.exists())
-}
-
-#[cfg(not(windows))]
-fn known_install_location(_provider: AIProvider) -> Option<std::path::PathBuf> {
-    None
-}
-
-/// Probe a SPECIFIC binary path (used when the registry PATH is staler than
-/// the fresh install): run the spec's status args against it directly.
-async fn probe_explicit_path(
-    provider: AIProvider,
-    spec: &'static BridgeSpec,
-    path: &std::path::Path,
-) -> BridgeProbe {
-    let mut cmd = tokio::process::Command::new(path);
-    cmd.args(spec.status_args);
-    let authed = match run_headless(cmd, None, PROBE_TIMEOUT, spec.binary).await {
-        Ok(output) => {
-            let text = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            is_signed_in(spec, output.status.success(), &text)
-        }
-        Err(_) => false,
-    };
-    let _ = provider;
-    BridgeProbe {
-        path: Some(path.to_path_buf()),
-        authed,
-    }
-}
-
-/// Install a bridged CLI (user-initiated from Settings). Strategy, Node-free
-/// first because target machines often never had Node: 1) winget (official
-/// packages, preinstalled on Win11), 2) the vendor's own PowerShell
-/// bootstrap. Allowlisted constants only — no user input reaches a command
-/// line. Returns the post-install probe; when the registry PATH is staler
-/// than the install, the returned path comes from the known install
-/// location so callers can persist it as an explicit CLI path override.
+/// Run one explicitly confirmed installer method through the shared bounded
+/// service. Winget never falls back automatically: callers receive a typed
+/// response and must present a second confirmation before requesting the
+/// mutable vendor PowerShell bootstrap.
 #[tauri::command]
-pub async fn ai_bridge_install(provider: String) -> Result<BridgeStatus, String> {
+pub async fn ai_bridge_install(
+    app: tauri::AppHandle,
+    provider: String,
+    method: Option<String>,
+    confirmed: Option<bool>,
+    fallback_confirmed: Option<bool>,
+) -> Result<BridgeInstallResponse, String> {
     let provider_id = parse_bridge_provider(&provider)?;
-    let Some(spec) = spec_for(provider_id) else {
-        return Err(format!("No bridge spec for {provider}"));
-    };
-    let Some(_) = winget_package(provider_id) else {
-        return Err(format!(
-            "{provider} does not support automated installation"
-        ));
-    };
-
-    // Already resolvable? Nothing to install — report live status instead.
-    invalidate(provider_id);
-    if let Ok(existing) =
-        resolve_cli(spec.binary, configured_cli_path(provider_id).as_deref()).await
+    let shared_provider = shared_auth_provider(provider_id)?;
+    let method = parse_install_method(method.as_deref())?;
+    let spec =
+        spec_for(provider_id).ok_or_else(|| "Bridge specification unavailable".to_string())?;
+    let token = CancellationToken::new();
     {
-        let probe = probe_explicit_path(provider_id, spec, &existing).await;
-        return Ok(BridgeStatus::from(probe));
-    }
-
-    // 1) winget — preferred, official packages. winget.exe is NOT in
-    // System32 on typical systems (validated live): it installs as a
-    // per-user App Execution Alias under %LOCALAPPDATA%\Microsoft\WindowsApps,
-    // with a System32 copy only on some provisioned machines. Check both.
-    let system32 = std::env::var_os("SystemRoot")
-        .map(|root| std::path::PathBuf::from(root).join("System32"))
-        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows\System32"));
-
-    let alias = std::env::var_os("LOCALAPPDATA")
-        .map(|local| std::path::PathBuf::from(&local).join(r"Microsoft\WindowsApps\winget.exe"));
-    let winget_exe = match alias {
-        Some(ref a) if a.exists() => Some(a.clone()),
-        _ => {
-            let candidate = system32.join("winget.exe");
-            candidate.exists().then_some(candidate)
+        let mut tokens = install_tokens()
+            .lock()
+            .map_err(|_| "Install state unavailable".to_string())?;
+        if tokens.contains_key(spec.binary) {
+            return Err("A subscription CLI installation is already in progress".to_string());
         }
+        tokens.insert(spec.binary, token.clone());
+    }
+    let _token_guard = InstallTokenGuard(spec.binary);
+
+    let request = SubscriptionInstallRequest {
+        provider: shared_provider,
+        method,
+        confirmed: confirmed.unwrap_or(false),
+        fallback_confirmed: fallback_confirmed.unwrap_or(false),
     };
-
-    let mut installed_via_winget = false;
-    let mut last_error = String::from("no installer could run");
-    if let Some(winget) = winget_exe {
-        let mut cmd = tokio::process::Command::new(winget);
-        cmd.args([
-            "install",
-            "-e",
-            "--id",
-            winget_package(provider_id).unwrap_or_default(),
-            "--silent",
-            "--accept-package-agreements",
-            "--accept-source-agreements",
-        ]);
-        match run_headless(cmd, None, INSTALL_TIMEOUT, "winget install").await {
-            Ok(output) if output.status.success() => installed_via_winget = true,
-            Ok(output) => {
-                let text = crate::security::decode_windows_output(&output.stdout);
-                let err_text = crate::security::decode_windows_output(&output.stderr);
-                last_error = tail(&format!("winget: {text}\n{err_text}"), 400);
-            }
-            Err(error) => last_error = format!("winget: {error}"),
-        }
-    } else {
-        last_error = "winget.exe not found".to_string();
-    }
-
-    // 2) Vendor PowerShell bootstrap — always available on Windows 10 1809+.
-    if !installed_via_winget {
-        let Some(script) = ps_bootstrap_script(provider_id) else {
-            return Err(format!(
-                "No install method available for {provider}: {last_error}"
-            ));
-        };
-        // The Codex installer prompts when replacing an old-layout install;
-        // its documented CODEX_NON_INTERACTIVE switch keeps the run fully
-        // silent (-NonInteractive alone would fail the whole install).
-        let command = format!("$env:CODEX_NON_INTERACTIVE = '1'; {script}");
-        let mut cmd = tokio::process::Command::new(
-            system32
-                .join("windowspowershell")
-                .join("v1.0")
-                .join("powershell.exe"),
-        );
-        cmd.args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            command.as_str(),
-        ]);
-        match run_headless(cmd, None, INSTALL_TIMEOUT, "vendor installer").await {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => {
-                let text = crate::security::decode_windows_output(&output.stdout);
-                let err_text = crate::security::decode_windows_output(&output.stderr);
-                return Err(format!(
-                    "The vendor installer failed:\n{}",
-                    tail(&format!("{text}\n{err_text}"), 600)
-                ));
-            }
-            Err(error) => return Err(format!("The vendor installer failed: {error}")),
-        }
-    }
-
-    // Verify. Prefer the explicit known location: the app's inherited PATH
-    // predates the install, so where.exe may legitimately miss the fresh
-    // binary until relaunch.
+    let progress_app = app.clone();
+    let result = install_controller()
+        .install(request, token, move |progress| {
+            let _ = progress_app.emit("ai-bridge-install://progress", progress);
+        })
+        .await;
     invalidate(provider_id);
-    let status: BridgeStatus = if let Some(path) = known_install_location(provider_id) {
-        probe_explicit_path(provider_id, spec, &path).await.into()
-    } else {
-        probe(provider_id).await.into()
-    };
-    if status.path.is_none() {
-        return Err(format!(
-            "The installer finished but {} was not found where expected. \
-             Restart the app (fresh PATH) and refresh in Settings.",
-            spec.binary
-        ));
+    match result {
+        Ok(status) => Ok(BridgeInstallResponse::Installed {
+            status: BridgeStatus {
+                installed: true,
+                signed_in: status.state == SubscriptionAuthState::SignedIn,
+                path: Some(status.path.display().to_string()),
+            },
+        }),
+        Err(SubscriptionInstallError::VendorFallbackConfirmationRequired { reason, .. }) => {
+            Ok(BridgeInstallResponse::VendorFallbackConfirmationRequired { reason })
+        }
+        Err(error) => Err(error.to_string()),
     }
-    Ok(status)
+}
+
+#[tauri::command]
+pub async fn ai_bridge_install_cancel(provider: String) -> Result<(), String> {
+    let provider_id = parse_bridge_provider(&provider)?;
+    let spec =
+        spec_for(provider_id).ok_or_else(|| "Bridge specification unavailable".to_string())?;
+    let token = install_tokens()
+        .lock()
+        .map_err(|_| "Install state unavailable".to_string())?
+        .get(spec.binary)
+        .cloned();
+    if let Some(token) = token {
+        token.cancel();
+    }
+    Ok(())
 }
 
 /// Spawn the CLI's own login command. The CLI opens the browser and stores
@@ -1268,6 +1251,39 @@ mod tests {
                 "bridge forgot to scrub {key}"
             );
         }
+    }
+
+    #[test]
+    fn installer_adapter_accepts_only_the_two_static_methods() {
+        assert_eq!(
+            parse_install_method(None),
+            Ok(SubscriptionInstallMethod::Winget)
+        );
+        assert_eq!(
+            parse_install_method(Some("winget")),
+            Ok(SubscriptionInstallMethod::Winget)
+        );
+        assert_eq!(
+            parse_install_method(Some("vendor_power_shell")),
+            Ok(SubscriptionInstallMethod::VendorPowerShell)
+        );
+        for rejected in ["powershell -Command whoami", "npm", "curl", ""] {
+            assert!(
+                parse_install_method(Some(rejected)).is_err(),
+                "accepted {rejected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn installer_response_keeps_fallback_structured_and_output_free() {
+        let response = BridgeInstallResponse::VendorFallbackConfirmationRequired {
+            reason: SubscriptionInstallFallbackReason::WingetFailed,
+        };
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["kind"], "vendorFallbackConfirmationRequired");
+        assert_eq!(json["reason"], "winget_failed");
+        assert_eq!(json.as_object().unwrap().len(), 2);
     }
 
     #[test]

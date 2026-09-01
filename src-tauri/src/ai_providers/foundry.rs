@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 /// served by Foundry Local (it is only reachable through the Windows AI APIs,
 /// which require package identity); phi-4-mini is Microsoft's documented
 /// local fallback model.
-pub const FOUNDRY_LOCAL_MODEL: &str = "phi-4-mini";
+pub const FOUNDRY_LOCAL_MODEL: &str = wfdiag_native_ai_provider::FOUNDRY_DEFAULT_MODEL;
 
 /// Read the user-configured local AI endpoint from settings, normalized to a
 /// base URL without a trailing slash or `/v1` suffix.
@@ -58,17 +58,30 @@ async fn resolved_foundry_cli() -> Option<PathBuf> {
 
 /// Ask the Foundry Local CLI where its service is listening. The service port
 /// is dynamic by design — Microsoft documents that it must never be hardcoded,
-/// so discovery goes through `foundry service status`.
+/// so discovery uses the current `foundry status --output json` command with
+/// the pre-0.10 `foundry service status` spelling as a compatibility fallback.
 async fn discover_foundry_endpoint() -> Option<String> {
     let path = resolved_foundry_cli().await?;
-    let mut cmd = tokio::process::Command::new(&path);
-    cmd.args(["service", "status"]);
-    // run_headless adds CREATE_NO_WINDOW, a neutral cwd and kill-on-drop.
-    let output =
-        super::cli_bridge::run_headless(cmd, None, Duration::from_secs(5), "Foundry Local CLI")
-            .await
-            .ok()?;
-    extract_http_base(&String::from_utf8_lossy(&output.stdout))
+    for args in [
+        &["status", "--output", "json"][..],
+        &["service", "status"][..],
+    ] {
+        let mut cmd = tokio::process::Command::new(&path);
+        cmd.args(args);
+        // run_headless adds CREATE_NO_WINDOW, a neutral cwd and kill-on-drop.
+        let Ok(output) =
+            super::cli_bridge::run_headless(cmd, None, Duration::from_secs(5), "Foundry Local CLI")
+                .await
+        else {
+            continue;
+        };
+        if let Some(endpoint) = extract_http_base(&String::from_utf8_lossy(&output.stdout))
+            .or_else(|| extract_http_base(&String::from_utf8_lossy(&output.stderr)))
+        {
+            return Some(endpoint);
+        }
+    }
+    None
 }
 
 /// Resolve a reachable local OpenAI-compatible endpoint: an explicit setting

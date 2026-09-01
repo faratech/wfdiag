@@ -15,7 +15,7 @@ const ONE_SHOT_POLICY: &str = "You are a Windows diagnostic evidence explainer. 
 /// Never head-truncate here: that used to silently delete the current question.
 pub async fn one_shot(prompt: &str) -> Result<String, String> {
     let prompt = format!("{ONE_SHOT_POLICY}\n\nANALYSIS TASK\n{prompt}");
-    crate::phi_silica::generate_response(&prompt).await
+    crate::phi_silica::generate_response(&prompt, || false).await
 }
 
 /// Render a chat request as a single plain-text prompt (Phi Silica has no
@@ -46,9 +46,10 @@ pub(super) fn flatten_request(req: &ChatRequest) -> String {
 pub async fn chat_single_shot(
     req: &ChatRequest,
     tx: mpsc::Sender<String>,
+    is_cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
 ) -> Result<ChatTurn, String> {
     let prompt = flatten_request(req);
-    let text = crate::phi_silica::generate_response(&prompt).await?;
+    let text = crate::phi_silica::generate_response(&prompt, move || is_cancelled()).await?;
     let _ = tx.send(text.clone()).await;
     Ok(ChatTurn {
         text,

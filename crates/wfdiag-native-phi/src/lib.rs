@@ -22,7 +22,80 @@ pub use runtime::{
     generate_response, is_phi_silica_available, measure_prompt_fit,
 };
 
+use wfdiag_native_ai_chat::{
+    ChatProvider, ChatRequest, ChatTurn, FinishReason, flatten_chat_request,
+};
 use wfdiag_native_ai_provider::{BackendFuture, PhiStatusSnapshot, PhiStatusSource};
+
+/// Provider-neutral chat adapter over the package-aware Phi runtime.
+///
+/// Phi exposes a single prompt rather than a message/tool API. The shared
+/// chat engine already constrains its context budget and disables tools, so
+/// this adapter only flattens the retained conversation and emits the one
+/// completed response as a delta. Both desktop shells can therefore select
+/// Phi through the same [`ChatProvider`] boundary as network providers.
+///
+/// `is_cancelled` answers whether the caller's turn-level cancellation has
+/// fired. The shared engine's `select!` already returns a "Cancelled" turn to
+/// the UI the instant that happens, regardless of this adapter, but
+/// forwarding the check into `generate_response` is what lets the abandoned
+/// generation actually release the process-wide model mutex early instead of
+/// idling out its full budget. It's a plain closure rather than
+/// `tokio_util::sync::CancellationToken` so this crate doesn't need that
+/// dependency: construct with [`PhiChatProvider::new`] and
+/// `move || token.is_cancelled()` when a real turn token is available;
+/// `Default` never cancels, for callers (like report/analysis one-shots)
+/// with no per-turn cancellation to forward yet.
+#[derive(Clone)]
+pub struct PhiChatProvider {
+    is_cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+impl std::fmt::Debug for PhiChatProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhiChatProvider").finish_non_exhaustive()
+    }
+}
+
+impl Default for PhiChatProvider {
+    fn default() -> Self {
+        Self {
+            is_cancelled: std::sync::Arc::new(|| false),
+        }
+    }
+}
+
+impl PhiChatProvider {
+    #[must_use]
+    pub fn new(is_cancelled: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self {
+            is_cancelled: std::sync::Arc::new(is_cancelled),
+        }
+    }
+}
+
+impl ChatProvider for PhiChatProvider {
+    fn stream<'a>(
+        &'a self,
+        request: &'a ChatRequest,
+        tx: tokio::sync::mpsc::Sender<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ChatTurn, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let is_cancelled = self.is_cancelled.clone();
+            let text = generate_response(&flatten_chat_request(request), move || is_cancelled())
+                .await?;
+            let _ = tx.send(text.clone()).await;
+            Ok(ChatTurn {
+                text,
+                tool_calls: Vec::new(),
+                finished: FinishReason::Stop,
+                actual_models: Vec::new(),
+                provider_replay: None,
+            })
+        })
+    }
+}
 
 /// Real package-identity/LAF-aware status source shared by Tauri and Reactor.
 #[derive(Debug, Clone, Copy, Default)]
@@ -123,6 +196,26 @@ mod tests {
     fn non_windows_identity_is_false() {
         #[cfg(not(windows))]
         assert!(!has_package_identity());
+    }
+
+    #[test]
+    fn chat_adapter_keeps_history_and_current_question() {
+        let request = ChatRequest {
+            system: Some("Use only supplied evidence.".to_string()),
+            messages: vec![
+                wfdiag_native_ai_chat::ChatMessage::user("Is my disk healthy?"),
+                wfdiag_native_ai_chat::ChatMessage::assistant("I need more evidence."),
+                wfdiag_native_ai_chat::ChatMessage::user("Current free space is 8%."),
+            ],
+            tools: Vec::new(),
+            max_tokens: None,
+        };
+        let prompt = flatten_chat_request(&request);
+        assert!(prompt.starts_with("Use only supplied evidence."));
+        assert!(prompt.contains("User: Is my disk healthy?"));
+        assert!(prompt.contains("Assistant: I need more evidence."));
+        assert!(prompt.contains("User: Current free space is 8%."));
+        assert!(prompt.ends_with("Assistant:"));
     }
 
     #[cfg(not(windows))]

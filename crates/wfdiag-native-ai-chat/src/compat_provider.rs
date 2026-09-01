@@ -1,10 +1,9 @@
 //! Chat-provider adapter over the shared chat-completions client.
 //!
-//! Both desktop shells stream `OpenAI`-compatible providers identically
-//! (cloud `OpenAI` chat, `Foundry Local`, `Ollama`, custom endpoints). Providers
-//! with shell-specific transports — Phi Silica activation, the subscription
-//! CLI bridges, and the DeepSeek/Anthropic/Gemini native clients — remain
-//! behind their owners and report a clear error here.
+//! Both desktop shells stream API and subscription providers identically:
+//! OpenAI-compatible endpoints, native Anthropic/Gemini/DeepSeek transports,
+//! and the installed Codex/Claude Code CLIs. Phi Silica remains an explicit
+//! shell adapter because it owns package-bound Windows runtime state.
 
 use crate::ai_service::AIProvider;
 use crate::engine::ChatProvider;
@@ -34,6 +33,17 @@ impl ChatProvider for CompatChatProvider {
                 | AIProvider::Ollama
                 | AIProvider::CustomOpenAI => {
                     openai_compat::chat_stream(self.provider, &self.cfg, request, tx).await
+                }
+                AIProvider::Anthropic => {
+                    crate::anthropic::chat_stream(&self.cfg, request, tx).await
+                }
+                AIProvider::Gemini => crate::gemini::chat_stream(&self.cfg, request, tx).await,
+                AIProvider::DeepSeek => crate::deepseek::chat_stream(&self.cfg, request, tx).await,
+                AIProvider::CodexCli => {
+                    crate::codex::chat_single_shot(&self.cfg, request, tx).await
+                }
+                AIProvider::ClaudeCode => {
+                    crate::claude_cli::chat_single_shot(&self.cfg, request, tx).await
                 }
                 other => Err(format!(
                     "{other} chat requires a provider transport this shell does not provide yet"

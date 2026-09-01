@@ -1,6 +1,6 @@
-//! Native DeepSeek V4 client.
+//! Native `DeepSeek` V4 client.
 //!
-//! DeepSeek V4 enables thinking by default. Thinking-mode tool turns require
+//! `DeepSeek` V4 enables thinking by default. Thinking-mode tool turns require
 //! provider-specific `reasoning_content` to be replayed on every subsequent
 //! request. The app's provider-neutral history cannot represent that field,
 //! so this adapter explicitly selects documented non-thinking mode instead of
@@ -19,7 +19,7 @@ const DEEPSEEK_CHAT_URL: &str = "https://api.deepseek.com/chat/completions";
 
 /// Current fast model. The legacy `deepseek-chat` alias is retired on
 /// 2026-07-24 and must not be used as an application default.
-pub const DEEPSEEK_DEFAULT_MODEL: &str = "deepseek-v4-flash";
+pub const DEEPSEEK_DEFAULT_MODEL: &str = wfdiag_native_ai_provider::DEEPSEEK_DEFAULT_MODEL;
 
 fn wire_messages(system: Option<&str>, messages: &[ChatMessage]) -> Vec<Value> {
     let mut wire = Vec::with_capacity(messages.len() + usize::from(system.is_some()));
@@ -305,7 +305,7 @@ fn apply_stream_choice(
 fn finish_stream(
     text: String,
     pending: BTreeMap<u64, PendingCall>,
-    finish: Option<String>,
+    finish: Option<&str>,
     saw_done: bool,
     actual_models: Vec<String>,
 ) -> Result<ChatTurn, String> {
@@ -339,7 +339,7 @@ fn finish_stream(
             arguments,
         });
     }
-    let finished = finish_reason(finish.as_deref(), !calls.is_empty())?;
+    let finished = finish_reason(finish, !calls.is_empty())?;
     if finished == FinishReason::Refusal {
         return Err("DeepSeek blocked this response with content filtering".into());
     }
@@ -404,7 +404,7 @@ pub async fn chat_stream(
         Ok(true)
     })
     .await?;
-    finish_stream(text, pending, finish, saw_done, actual_models)
+    finish_stream(text, pending, finish.as_deref(), saw_done, actual_models)
 }
 
 #[cfg(test)]

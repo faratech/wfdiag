@@ -9,7 +9,7 @@ use crate::error::DiagError;
 
 /// OpenAI model used for all cloud-OpenAI calls.
 /// Change this constant to switch models globally.
-pub const OPENAI_MODEL: &str = "gpt-5-nano";
+pub const OPENAI_MODEL: &str = wfdiag_native_ai_provider::OPENAI_DEFAULT_MODEL;
 use async_openai::{
     Client,
     config::OpenAIConfig,

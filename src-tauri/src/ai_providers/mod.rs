@@ -21,9 +21,7 @@
 
 pub mod acp_bridge;
 pub mod anthropic;
-pub mod claude_cli;
 pub mod cli_bridge;
-pub mod codex;
 pub mod deepseek;
 pub mod discovery;
 pub mod foundry;
@@ -44,8 +42,8 @@ pub use wfdiag_native_ai_provider::{ProviderCaps, capabilities};
 // ============================================================================
 
 pub use wfdiag_native_ai_chat::{
-    ChatMessage, ChatRequest, ChatRole, ChatTurn, FinishReason, ProviderReplay, ResolvedProviderConfig,
-    ToolCall, ToolSpec,
+    ChatMessage, ChatRequest, ChatRole, ChatTurn, FinishReason, ProviderReplay,
+    ResolvedProviderConfig, ToolCall, ToolSpec, claude_cli, codex,
 };
 
 // The shared `/v1/chat/completions` client compiles once, in the native chat
@@ -313,15 +311,20 @@ pub async fn one_shot(
 /// `tx`. Non-streaming providers (Phi Silica) send one delta with the full
 /// text. Tool calls are never streamed partially — they arrive complete in
 /// the returned [`ChatTurn`].
+///
+/// `is_cancelled` is only consulted by Phi Silica (see
+/// [`crate::ai_chat::RealChatProvider::is_cancelled`]); every other provider
+/// already cancels correctly when its future is dropped.
 pub async fn chat_stream(
     provider: AIProvider,
     cfg: &ResolvedProviderConfig,
     req: &ChatRequest,
     tx: mpsc::Sender<String>,
+    is_cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
 ) -> Result<ChatTurn, String> {
     match provider {
         AIProvider::None => Err("No AI provider available".to_string()),
-        AIProvider::PhiSilica => phi::chat_single_shot(req, tx).await,
+        AIProvider::PhiSilica => phi::chat_single_shot(req, tx, is_cancelled).await,
         AIProvider::OpenAI
         | AIProvider::FoundryLocal
         | AIProvider::Ollama

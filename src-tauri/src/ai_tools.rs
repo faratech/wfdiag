@@ -16,10 +16,13 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+use wfdiag_native_ai_chat::MAX_GROUNDING_QUERY_CHARS;
+use wfdiag_native_ai_chat::{
+    BoundedToolBackend, BoundedToolCatalog, BoundedToolOperation, DiagnosticToolDescriptor,
+    RemediationToolDescriptor,
+};
 pub use wfdiag_native_ai_chat::{ToolExecutor, ToolFuture};
-
-const MAX_REASON_CHARS: usize = 300;
-const MAX_GROUNDING_QUERY_CHARS: usize = 420;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScanCoverage {
@@ -130,28 +133,31 @@ pub(crate) fn scan_coverage_text(session: Option<&DiagnosticSession>) -> String 
     )
 }
 
-fn require_object(call: &ToolCall) -> Result<&serde_json::Map<String, Value>, String> {
-    call.arguments
-        .as_object()
-        .ok_or_else(|| format!("{} arguments must be a JSON object", call.name))
-}
-
-fn reject_extra_keys(
-    call: &ToolCall,
-    args: &serde_json::Map<String, Value>,
-    allowed: &[&str],
-) -> Result<(), String> {
-    if let Some(key) = args.keys().find(|key| !allowed.contains(&key.as_str())) {
-        return Err(format!("{} does not accept argument '{}'", call.name, key));
-    }
-    Ok(())
+fn bounded_tool_catalog() -> BoundedToolCatalog {
+    BoundedToolCatalog::new(
+        diagnostics::get_all_tasks()
+            .into_iter()
+            .map(|task| DiagnosticToolDescriptor {
+                id: task.id,
+                description: task.description,
+            })
+            .collect(),
+        crate::remediation::remediations()
+            .iter()
+            .map(|remediation| RemediationToolDescriptor {
+                id: remediation.id.to_string(),
+            })
+            .collect(),
+    )
 }
 
 /// Provider schemas guide the model, but this is the actual trust boundary.
 /// Every call is checked again immediately before dispatch, including extra
 /// properties and bounded free text. A malformed call never reaches a tool.
+#[cfg(test)]
 pub(crate) fn validate_tool_call(call: &ToolCall) -> Result<(), String> {
-    let args = require_object(call)?;
+    bounded_tool_catalog().parse(call).map(|_| ())
+    /* legacy inlined validator retained in git history
     match call.name.as_str() {
         "run_diagnostic" => {
             reject_extra_keys(call, args, &["task_id", "reason"])?;
@@ -231,11 +237,13 @@ pub(crate) fn validate_tool_call(call: &ToolCall) -> Result<(), String> {
         | "list_scan_history" => reject_extra_keys(call, args, &[])?,
         other => return Err(format!("Unknown tool '{}'", other)),
     }
-    Ok(())
+    Ok(()) */
 }
 
 /// The curated bounded tool set offered to tool-capable providers.
 pub fn tool_registry() -> Vec<ToolSpec> {
+    bounded_tool_catalog().specs()
+    /* legacy inlined registry retained in git history
     let task_ids: Vec<String> = diagnostics::get_all_tasks()
         .into_iter()
         .map(|t| t.id)
@@ -380,7 +388,7 @@ pub fn tool_registry() -> Vec<ToolSpec> {
                 "additionalProperties": false,
             }),
         },
-    ]
+    ] */
 }
 
 /// Render the current session as a compact scan summary. Also used as inline
@@ -730,26 +738,53 @@ impl AppToolExecutor {
     }
 }
 
-impl ToolExecutor for AppToolExecutor {
-    fn execute<'a>(&'a self, call: &'a ToolCall, cancel: CancellationToken) -> ToolFuture<'a> {
+impl BoundedToolBackend for AppToolExecutor {
+    fn execute<'a>(
+        &'a self,
+        operation: BoundedToolOperation,
+        cancel: CancellationToken,
+    ) -> ToolFuture<'a> {
         Box::pin(async move {
-            validate_tool_call(call)?;
-            match call.name.as_str() {
-                "run_diagnostic" => self.run_diagnostic(&call.arguments).await,
-                "search_windows_knowledge" => {
-                    self.search_windows_knowledge(&call.arguments, &cancel)
+            match operation {
+                BoundedToolOperation::RunDiagnostic { task_id, reason: _ } => {
+                    self.run_diagnostic(&json!({ "task_id": task_id })).await
+                }
+                BoundedToolOperation::SearchWindowsKnowledge { query } => {
+                    self.search_windows_knowledge(&json!({ "query": query }), &cancel)
                         .await
                 }
-                "get_scan_summary" => self.get_scan_summary().await,
-                "request_full_scan" => self.request_full_scan(&call.arguments).await,
-                "get_detected_issues" => self.get_detected_issues().await,
-                "compare_with_previous_scan" => self.compare_with_previous_scan().await,
-                "get_live_stats" => self.get_live_stats().await,
-                "list_scan_history" => self.list_scan_history().await,
-                "list_remediations" => self.list_remediations().await,
-                "stage_remediation" => self.stage_remediation(&call.arguments).await,
-                other => Err(format!("Unknown tool '{}'", other)),
+                BoundedToolOperation::GetScanSummary => self.get_scan_summary().await,
+                BoundedToolOperation::RequestFullScan { reason } => {
+                    self.request_full_scan(&json!({ "reason": reason })).await
+                }
+                BoundedToolOperation::GetDetectedIssues => self.get_detected_issues().await,
+                BoundedToolOperation::CompareWithPreviousScan => {
+                    self.compare_with_previous_scan().await
+                }
+                BoundedToolOperation::GetLiveStats => self.get_live_stats().await,
+                BoundedToolOperation::ListScanHistory => self.list_scan_history().await,
+                BoundedToolOperation::ListRemediations => self.list_remediations().await,
+                BoundedToolOperation::StageRemediation {
+                    remediation_id,
+                    issue_id,
+                } => {
+                    self.stage_remediation(&json!({
+                        "remediation_id": remediation_id,
+                        "issue_id": issue_id,
+                    }))
+                    .await
+                }
             }
+        })
+    }
+}
+
+impl ToolExecutor for AppToolExecutor {
+    fn execute<'a>(&'a self, call: &'a ToolCall, cancel: CancellationToken) -> ToolFuture<'a> {
+        let operation = bounded_tool_catalog().parse(call);
+        Box::pin(async move {
+            let operation = operation?;
+            BoundedToolBackend::execute(self, operation, cancel).await
         })
     }
 }

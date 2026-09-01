@@ -778,7 +778,13 @@ pub async fn run_chat_turn(
                 let message = if answer.is_empty() {
                     "The provider refused this request without an explanation.".to_string()
                 } else {
-                    format!("The provider refused this request: {answer}")
+                    // `answer` was already streamed as normal chat deltas
+                    // before the refusal was detected (every provider's text
+                    // reaches the UI via `emitter.delta` before `stream_one_turn`
+                    // returns `Completed`, streaming providers incrementally
+                    // and one-shot providers like Phi as a single chunk).
+                    // Repeating it here would deliver the same text twice.
+                    "The provider refused this request.".to_string()
                 };
                 if allow_fallback && round == 0 && tool_call_count == 0 && answer.is_empty() {
                     return Err(message);

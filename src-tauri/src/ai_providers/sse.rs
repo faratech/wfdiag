@@ -27,7 +27,7 @@ where
 {
     let mut stream = response.bytes_stream().eventsource();
     while let Some(event) = stream.next().await {
-        let event = event.map_err(|e| format!("stream error: {}", e))?;
+        let event = event.map_err(|e| format!("stream error: {e}"))?;
         if !on_event(&event.event, &event.data)? {
             break;
         }

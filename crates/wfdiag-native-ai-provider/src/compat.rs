@@ -1,10 +1,10 @@
-//! Config resolution and key access for the chat-capable OpenAI-compatible
-//! providers. Both desktop shells resolve these four providers identically;
-//! providers with shell-specific transports (Phi Silica activation, the
-//! subscription CLI bridges, and the DeepSeek/Anthropic/Gemini native
-//! clients) stay behind their owners.
+//! Config resolution and key access for API and OpenAI-compatible providers.
+//! Package-bound Phi Silica and subscription CLI bridges remain behind
+//! explicit shell adapters, while all API-key providers share this resolver.
 
-use crate::composition::{FoundryEndpointSource, OllamaSource};
+use crate::composition::{
+    FoundryEndpointSource, OllamaSource, SubscriptionCli, SubscriptionCliStatusSource,
+};
 use crate::network::normalize_base_url;
 use crate::provider_config::ResolvedProviderConfig;
 use crate::{AIProvider, ProviderCaps, capabilities};
@@ -25,6 +25,14 @@ pub struct CompatConfigPorts {
     pub ollama: std::sync::Arc<dyn OllamaSource>,
 }
 
+/// Inputs for resolving a subscription-backed CLI transport. Authentication
+/// remains owned by the vendor CLI; this carries only its executable path and
+/// optional model selector.
+pub struct SubscriptionConfigPorts {
+    pub settings: AppSettings,
+    pub status: std::sync::Arc<dyn SubscriptionCliStatusSource>,
+}
+
 fn configured_model(value: Option<&String>, fallback: &str) -> String {
     value
         .map(String::as_str)
@@ -36,6 +44,7 @@ fn configured_model(value: Option<&String>, fallback: &str) -> String {
 
 /// Resolve key/endpoint/model for the chat-completions providers. Returns the
 /// same user-facing errors as the shipping Tauri `resolve_config`.
+#[allow(clippy::too_many_lines)] // Keep the provider matrix exhaustive in one audited match.
 pub async fn resolve_compat_config(
     provider: AIProvider,
     ports: &CompatConfigPorts,
@@ -51,7 +60,10 @@ pub async fn resolve_compat_config(
             Ok(ResolvedProviderConfig {
                 api_key: Some(api_key),
                 endpoint: None,
-                model: Some(configured_model(settings.open_ai_model.as_ref(), "gpt-5-nano")),
+                model: Some(configured_model(
+                    settings.open_ai_model.as_ref(),
+                    crate::OPENAI_DEFAULT_MODEL,
+                )),
             })
         }
         AIProvider::FoundryLocal => {
@@ -64,12 +76,15 @@ pub async fn resolve_compat_config(
                 .probe(configured)
                 .await
                 .ok_or_else(|| String::from(
-                    "No local AI endpoint available. Install Foundry Local and run 'foundry service start', or configure an endpoint in Settings.",
+                    "No local AI endpoint available. Install Foundry Local and run 'foundry server start', or configure an endpoint in Settings.",
                 ))?;
             Ok(ResolvedProviderConfig {
                 api_key: None,
                 endpoint: Some(endpoint),
-                model: Some(configured_model(settings.local_ai_model.as_ref(), "phi-4-mini")),
+                model: Some(configured_model(
+                    settings.local_ai_model.as_ref(),
+                    crate::FOUNDRY_DEFAULT_MODEL,
+                )),
             })
         }
         AIProvider::Ollama => {
@@ -94,9 +109,9 @@ pub async fn resolve_compat_config(
                 .custom_endpoint
                 .as_deref()
                 .and_then(normalize_base_url)
-                .ok_or_else(|| String::from(
-                    "No custom endpoint configured. Set the endpoint URL in Settings.",
-                ))?;
+                .ok_or_else(|| {
+                    String::from("No custom endpoint configured. Set the endpoint URL in Settings.")
+                })?;
             let model = settings
                 .custom_model
                 .as_deref()
@@ -111,9 +126,115 @@ pub async fn resolve_compat_config(
                 model: Some(model.to_string()),
             })
         }
+        AIProvider::Anthropic => {
+            let api_key = ports.keys.load(ProviderKeyId::Anthropic).ok_or_else(|| {
+                String::from(
+                    "Anthropic API key not configured. Please enter your API key in Settings.",
+                )
+            })?;
+            Ok(ResolvedProviderConfig {
+                api_key: Some(api_key),
+                endpoint: None,
+                model: Some(configured_model(
+                    settings.anthropic_model.as_ref(),
+                    crate::ANTHROPIC_DEFAULT_MODEL,
+                )),
+            })
+        }
+        AIProvider::Gemini => {
+            let api_key = ports.keys.load(ProviderKeyId::Gemini).ok_or_else(|| {
+                String::from(
+                    "Gemini API key not configured. Please enter your API key in Settings.",
+                )
+            })?;
+            let model =
+                crate::resolve_gemini_model(settings.gemini_model.as_deref(), &api_key).await;
+            Ok(ResolvedProviderConfig {
+                api_key: Some(api_key),
+                endpoint: None,
+                model: Some(model),
+            })
+        }
+        AIProvider::DeepSeek => {
+            let api_key = ports.keys.load(ProviderKeyId::DeepSeek).ok_or_else(|| {
+                String::from(
+                    "DeepSeek API key not configured. Please enter your API key in Settings.",
+                )
+            })?;
+            Ok(ResolvedProviderConfig {
+                api_key: Some(api_key),
+                endpoint: Some("https://api.deepseek.com".to_string()),
+                model: Some(configured_model(
+                    settings.deepseek_model.as_ref(),
+                    crate::DEEPSEEK_DEFAULT_MODEL,
+                )),
+            })
+        }
         other => Err(format!(
             "{other} chat requires a provider transport this shell does not provide yet"
         )),
+    }
+}
+
+/// Resolve a signed-in Codex or Claude Code CLI to the same non-secret
+/// provider configuration consumed by the shared chat engine.
+pub async fn resolve_subscription_config(
+    provider: AIProvider,
+    ports: &SubscriptionConfigPorts,
+) -> Result<ResolvedProviderConfig, String> {
+    let (cli, configured_path, configured_model, label) = match provider {
+        AIProvider::CodexCli => (
+            SubscriptionCli::Codex,
+            ports.settings.codex_cli_path.clone(),
+            ports.settings.codex_model.clone(),
+            "Codex CLI",
+        ),
+        AIProvider::ClaudeCode => (
+            SubscriptionCli::ClaudeCode,
+            ports.settings.claude_cli_path.clone(),
+            ports.settings.claude_model.clone(),
+            "Claude Code",
+        ),
+        other => {
+            return Err(format!("{other} is not a subscription CLI provider"));
+        }
+    };
+    let probe = ports.status.probe(cli, configured_path).await;
+    let path = probe.path.ok_or_else(|| {
+        format!("{label} was not found. Install it or configure its executable path in Settings.")
+    })?;
+    if !probe.usable {
+        return Err(format!(
+            "{label} is installed but not signed in. Open Settings and sign in with the vendor CLI."
+        ));
+    }
+    Ok(ResolvedProviderConfig {
+        api_key: None,
+        endpoint: Some(path),
+        model: configured_model
+            .filter(|model| !model.trim().is_empty())
+            .map(|model| sanitize_subscription_model(&model))
+            .transpose()?,
+    })
+}
+
+/// Validate a subscription model selector before it can reach an argument or
+/// environment-variable boundary. The accepted alphabet matches the shipping
+/// CLI bridge and includes versioned aliases such as `opus[1m]`.
+pub fn sanitize_subscription_model(model: &str) -> Result<String, String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("Model name is empty".to_string());
+    }
+    if model.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || matches!(character, '.' | '_' | ':' | '/' | '-' | '[' | ']')
+    }) {
+        Ok(model.to_string())
+    } else {
+        Err(format!(
+            "Invalid model name '{model}': only letters, digits and . _ : / - [ ] are allowed"
+        ))
     }
 }
 
@@ -132,10 +253,11 @@ pub fn provider_config_fingerprint(provider: AIProvider, cfg: &ResolvedProviderC
         format!("{:016x}", hasher.finish())
     }
 
-    let key = cfg.api_key.as_deref().filter(|key| !key.is_empty()).map_or_else(
-        || "none".to_string(),
-        key_fingerprint,
-    );
+    let key = cfg
+        .api_key
+        .as_deref()
+        .filter(|key| !key.is_empty())
+        .map_or_else(|| "none".to_string(), key_fingerprint);
 
     format!(
         "provider={};endpoint={};model={};key={}",
@@ -155,7 +277,7 @@ pub fn compat_caps(provider: AIProvider) -> ProviderCaps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BackendFuture;
+    use crate::{BackendFuture, CliProbeSnapshot};
 
     struct FixedKeys(Option<String>);
 
@@ -177,11 +299,21 @@ mod tests {
         fn discover(&self, _configured: Option<String>) -> BackendFuture<'_, Option<String>> {
             Box::pin(async { None })
         }
-        fn list_models(
-            &self,
-            _endpoint: String,
-        ) -> BackendFuture<'_, Result<Vec<String>, String>> {
+        fn list_models(&self, _endpoint: String) -> BackendFuture<'_, Result<Vec<String>, String>> {
             Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    struct FixedSubscriptionStatus(CliProbeSnapshot);
+
+    impl SubscriptionCliStatusSource for FixedSubscriptionStatus {
+        fn probe(
+            &self,
+            _provider: SubscriptionCli,
+            _configured_path: Option<String>,
+        ) -> crate::BackendFuture<'_, CliProbeSnapshot> {
+            let snapshot = self.0.clone();
+            Box::pin(async move { snapshot })
         }
     }
 
@@ -208,15 +340,18 @@ mod tests {
             open_ai_model: Some("gpt-5-mini".to_string()),
             ..AppSettings::default()
         };
-        let configured = resolve_compat_config(AIProvider::OpenAI, &ports(Some("sk-test"), settings))
-            .await
-            .unwrap();
-        assert_eq!(configured.model.as_deref(), Some("gpt-5-mini"));
-
-        let defaulted =
-            resolve_compat_config(AIProvider::OpenAI, &ports(Some("sk-test"), AppSettings::default()))
+        let configured =
+            resolve_compat_config(AIProvider::OpenAI, &ports(Some("sk-test"), settings))
                 .await
                 .unwrap();
+        assert_eq!(configured.model.as_deref(), Some("gpt-5-mini"));
+
+        let defaulted = resolve_compat_config(
+            AIProvider::OpenAI,
+            &ports(Some("sk-test"), AppSettings::default()),
+        )
+        .await
+        .unwrap();
         assert_eq!(defaulted.model.as_deref(), Some("gpt-5-nano"));
         assert_eq!(defaulted.endpoint, None);
     }
@@ -227,18 +362,18 @@ mod tests {
             custom_endpoint: Some("http://127.0.0.1:8080/v1".to_string()),
             ..AppSettings::default()
         };
-        let error =
-            resolve_compat_config(AIProvider::CustomOpenAI, &ports(None, no_model.clone()))
-                .await
-                .unwrap_err();
+        let error = resolve_compat_config(AIProvider::CustomOpenAI, &ports(None, no_model.clone()))
+            .await
+            .unwrap_err();
         assert!(error.contains("No model configured"));
 
         let settings = AppSettings {
             custom_model: Some("qwen3".to_string()),
             ..no_model
         };
-        let resolved =
-            resolve_compat_config(AIProvider::CustomOpenAI, &ports(None, settings)).await.unwrap();
+        let resolved = resolve_compat_config(AIProvider::CustomOpenAI, &ports(None, settings))
+            .await
+            .unwrap();
         // The /v1 suffix is stripped by the shipping normalizer.
         assert_eq!(resolved.endpoint.as_deref(), Some("http://127.0.0.1:8080"));
         assert_eq!(resolved.model.as_deref(), Some("qwen3"));
@@ -254,11 +389,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_specific_providers_report_their_transport_gap() {
+    async fn native_cloud_providers_require_credentials_and_resolve_shipping_defaults() {
+        for (provider, key_name, model, endpoint) in [
+            (
+                AIProvider::Anthropic,
+                "Anthropic API key",
+                "claude-sonnet-5",
+                None,
+            ),
+            (
+                AIProvider::Gemini,
+                "Gemini API key",
+                "gemini-3.6-flash",
+                None,
+            ),
+            (
+                AIProvider::DeepSeek,
+                "DeepSeek API key",
+                "deepseek-v4-flash",
+                Some("https://api.deepseek.com"),
+            ),
+        ] {
+            let error = resolve_compat_config(provider, &ports(None, AppSettings::default()))
+                .await
+                .unwrap_err();
+            assert!(error.contains(key_name), "{provider}: {error}");
+
+            // Gemini's blank setting intentionally performs live discovery;
+            // explicit selection keeps this provider-matrix test hermetic.
+            let settings = if provider == AIProvider::Gemini {
+                AppSettings {
+                    gemini_model: Some(model.to_string()),
+                    ..AppSettings::default()
+                }
+            } else {
+                AppSettings::default()
+            };
+            let resolved =
+                resolve_compat_config(provider, &ports(Some("secret-test-key"), settings))
+                    .await
+                    .unwrap();
+            assert_eq!(resolved.model.as_deref(), Some(model), "{provider}");
+            assert_eq!(resolved.endpoint.as_deref(), endpoint, "{provider}");
+        }
+    }
+
+    #[tokio::test]
+    async fn host_specific_providers_report_their_transport_gap() {
         for provider in [
-            AIProvider::Anthropic,
-            AIProvider::Gemini,
-            AIProvider::DeepSeek,
             AIProvider::PhiSilica,
             AIProvider::CodexCli,
             AIProvider::ClaudeCode,
@@ -266,7 +444,83 @@ mod tests {
             let error = resolve_compat_config(provider, &ports(None, AppSettings::default()))
                 .await
                 .unwrap_err();
-            assert!(error.contains("does not provide yet"), "{provider}: {error}");
+            assert!(
+                error.contains("does not provide yet"),
+                "{provider}: {error}"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn subscription_config_requires_install_and_sign_in() {
+        let missing = SubscriptionConfigPorts {
+            settings: AppSettings::default(),
+            status: std::sync::Arc::new(FixedSubscriptionStatus(CliProbeSnapshot::default())),
+        };
+        assert!(
+            resolve_subscription_config(AIProvider::CodexCli, &missing)
+                .await
+                .unwrap_err()
+                .contains("was not found")
+        );
+
+        let signed_out = SubscriptionConfigPorts {
+            settings: AppSettings::default(),
+            status: std::sync::Arc::new(FixedSubscriptionStatus(CliProbeSnapshot {
+                usable: false,
+                installed: true,
+                path: Some("codex".to_string()),
+            })),
+        };
+        assert!(
+            resolve_subscription_config(AIProvider::CodexCli, &signed_out)
+                .await
+                .unwrap_err()
+                .contains("not signed in")
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_config_returns_probed_path_and_model() {
+        let ports = SubscriptionConfigPorts {
+            settings: AppSettings {
+                claude_model: Some("claude-sonnet-5".to_string()),
+                ..AppSettings::default()
+            },
+            status: std::sync::Arc::new(FixedSubscriptionStatus(CliProbeSnapshot {
+                usable: true,
+                installed: true,
+                path: Some("C:/tools/claude.exe".to_string()),
+            })),
+        };
+        let resolved = resolve_subscription_config(AIProvider::ClaudeCode, &ports)
+            .await
+            .unwrap();
+        assert_eq!(resolved.endpoint.as_deref(), Some("C:/tools/claude.exe"));
+        assert_eq!(resolved.model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(resolved.api_key, None);
+    }
+
+    #[tokio::test]
+    async fn subscription_config_rejects_model_injection_before_transport() {
+        let ports = SubscriptionConfigPorts {
+            settings: AppSettings {
+                codex_model: Some("gpt-5.6-sol --danger".to_string()),
+                ..AppSettings::default()
+            },
+            status: std::sync::Arc::new(FixedSubscriptionStatus(CliProbeSnapshot {
+                usable: true,
+                installed: true,
+                path: Some("C:/tools/codex.exe".to_string()),
+            })),
+        };
+        let error = resolve_subscription_config(AIProvider::CodexCli, &ports)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Invalid model name"));
+        assert_eq!(
+            sanitize_subscription_model("opus[1m]").as_deref(),
+            Ok("opus[1m]")
+        );
     }
 }

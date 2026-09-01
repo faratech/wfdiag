@@ -87,7 +87,7 @@ pub trait ChatEmitter: Send + Sync {
     fn scan_request(&self, _payload: &ScanRequestPayload) {}
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolActivityView {
     pub call_id: String,
@@ -100,7 +100,7 @@ pub struct ToolActivityView {
     pub result_preview: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessageView {
     pub id: String,

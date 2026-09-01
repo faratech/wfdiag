@@ -700,6 +700,7 @@ fn ensure_feature_ready() -> Result<(), String> {
                 operation,
                 std::time::Duration::from_secs(15 * 60),
                 "Phi Silica preparation",
+                &|| false,
             )?;
             let status = result.Status().map_err(|error| {
                 format!(
@@ -1247,9 +1248,18 @@ where
 /// stream future, while this `spawn_blocking` call keeps running and holds the
 /// process-wide model mutex. Bounding inference below the outer deadline means
 /// the lock is always released before a superseding turn can starve behind it.
+/// `is_cancelled` additionally lets an abandoned turn release the mutex well
+/// before that 150s ceiling: the engine's `select!` already returns
+/// "Cancelled" to the UI the instant its token fires and drops its handle to
+/// this future, but the `spawn_blocking` closure keeps running underneath
+/// regardless — polling `is_cancelled()` here (a plain closure, not
+/// `tokio_util::CancellationToken`, so this crate doesn't need that
+/// dependency just to check a bool) is what actually stops it and calls
+/// `IAsyncInfo::Cancel()` on the WinRT operation instead of idling out.
 #[cfg(windows)]
 fn wait_for_async_with_progress_blocking<T, P>(
     op: windows_future::IAsyncOperationWithProgress<T, P>,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Result<T, String>
 where
     T: windows_core::RuntimeType,
@@ -1259,6 +1269,7 @@ where
         op,
         std::time::Duration::from_secs(150),
         "Phi Silica generation",
+        is_cancelled,
     )
 }
 
@@ -1267,6 +1278,7 @@ fn wait_for_async_with_progress_blocking_timeout<T, P>(
     op: windows_future::IAsyncOperationWithProgress<T, P>,
     timeout: std::time::Duration,
     operation_name: &str,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Result<T, String>
 where
     T: windows_core::RuntimeType,
@@ -1309,6 +1321,14 @@ where
                 );
             }
             AsyncStatus::Started => {
+                if is_cancelled() {
+                    let _ = info.Cancel();
+                    return Err(PhiError::ai_unavailable(
+                        "phi_silica",
+                        format!("{operation_name} was cancelled"),
+                    )
+                    .into());
+                }
                 if started.elapsed() >= timeout {
                     let _ = info.Cancel();
                     return Err(PhiError::ai_unavailable(
@@ -1445,6 +1465,7 @@ impl GenerationFailure {
 fn generate_with_model(
     model: &crate::windows_ai_bindings::LanguageModel,
     prompt: &str,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Result<String, GenerationFailure> {
     use crate::windows_ai_bindings::LanguageModelOptions;
     use windows_core::HSTRING;
@@ -1497,8 +1518,8 @@ fn generate_with_model(
             error.message()
         ))
     })?;
-    let response =
-        wait_for_async_with_progress_blocking(operation).map_err(GenerationFailure::runtime)?;
+    let response = wait_for_async_with_progress_blocking(operation, is_cancelled)
+        .map_err(GenerationFailure::runtime)?;
     complete_generation_response(&response)
 }
 
@@ -1565,9 +1586,20 @@ fn complete_generation_response(
     }
 }
 
-/// Generate a response using Phi Silica
+/// Generate a response using Phi Silica. `is_cancelled` lets an abandoned
+/// turn release the process-wide model mutex early instead of idling out the
+/// full 150s generation budget — pass `|| false` when no external
+/// cancellation applies (e.g. the report/analysis one-shot paths). Deliberately
+/// a plain closure rather than `tokio_util::sync::CancellationToken`: the
+/// check only needs to be a cheap, thread-safe bool read from the blocking
+/// pool, and callers that already hold a `CancellationToken` can pass
+/// `move || token.is_cancelled()` without this crate taking on that
+/// dependency itself.
 #[cfg(windows)]
-pub async fn generate_response(prompt: &str) -> Result<String, String> {
+pub async fn generate_response(
+    prompt: &str,
+    is_cancelled: impl Fn() -> bool + Send + 'static,
+) -> Result<String, String> {
     let prompt_owned = prompt.to_string();
     tokio::task::spawn_blocking(move || {
         let mut cached = cached_model_guard();
@@ -1578,7 +1610,7 @@ pub async fn generate_response(prompt: &str) -> Result<String, String> {
                 "Phi Silica model was unavailable after preparation".to_string()
             );
         };
-        let result = generate_with_model(model, &prompt_owned);
+        let result = generate_with_model(model, &prompt_owned, &is_cancelled);
         if result
             .as_ref()
             .err()
@@ -1593,7 +1625,10 @@ pub async fn generate_response(prompt: &str) -> Result<String, String> {
 }
 
 #[cfg(not(windows))]
-pub async fn generate_response(_prompt: &str) -> Result<String, String> {
+pub async fn generate_response(
+    _prompt: &str,
+    _is_cancelled: impl Fn() -> bool + Send + 'static,
+) -> Result<String, String> {
     Err(PhiError::PlatformNotSupported {
         operation: "Phi Silica".to_string(),
     }

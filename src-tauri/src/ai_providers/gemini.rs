@@ -18,14 +18,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::mpsc;
-
-/// Last-known GA model used only when live model discovery is unavailable.
-///
-/// An explicit `geminiModel` setting always wins. Empty settings are resolved
-/// from Google's live Models API and cached by `model_catalog`; keeping this
-/// constant current merely gives requests a safe outage fallback.
-pub const GEMINI_DEFAULT_MODEL: &str = "gemini-3.6-flash";
-pub(crate) const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
+pub use wfdiag_native_ai_provider::{GEMINI_API_BASE, GEMINI_DEFAULT_MODEL};
 
 const MAX_CALL_METADATA: usize = 2_048;
 const LEGACY_CALL_PREFIX: &str = "wfdiag-gemini-legacy-";
@@ -34,13 +27,7 @@ const LEGACY_CALL_PREFIX: &str = "wfdiag-gemini-legacy-";
 /// model. The early return is intentional: saved user choices never perform
 /// discovery and are never replaced by a provider-side catalog change.
 pub(crate) async fn resolve_model(configured: Option<String>, api_key: &str) -> String {
-    if let Some(model) = configured
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty())
-    {
-        return model;
-    }
-    super::model_catalog::resolve_gemini_default_model(api_key).await
+    wfdiag_native_ai_provider::resolve_gemini_model(configured.as_deref(), api_key).await
 }
 
 #[derive(Debug, Clone)]
@@ -62,15 +49,15 @@ fn metadata_cache() -> &'static Mutex<MetadataCache> {
 
 fn remember_call(wire_id: Option<&str>, thought_signature: Option<&str>, name: &str) -> String {
     static NEXT_LEGACY_ID: AtomicU64 = AtomicU64::new(1);
-    let public_id = wire_id
-        .filter(|id| !id.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
+    let public_id = wire_id.filter(|id| !id.trim().is_empty()).map_or_else(
+        || {
             format!(
                 "{LEGACY_CALL_PREFIX}{}-{name}",
                 NEXT_LEGACY_ID.fetch_add(1, Ordering::Relaxed)
             )
-        });
+        },
+        str::to_string,
+    );
     if let Ok(mut cache) = metadata_cache().lock() {
         if !cache.entries.contains_key(&public_id) {
             cache.order.push_back(public_id.clone());
@@ -213,23 +200,25 @@ fn map_finish_reason(reason: Option<&str>, has_tool_calls: bool) -> Result<Finis
         // All of these mean the model did NOT produce a normal completion —
         // treating them as Stop would make a blocked/malformed generation
         // look like a successful (if empty) answer.
-        Some("SAFETY")
-        | Some("PROHIBITED_CONTENT")
-        | Some("BLOCKLIST")
-        | Some("RECITATION")
-        | Some("SPII")
-        | Some("OTHER")
-        | Some("MALFORMED_FUNCTION_CALL")
-        | Some("LANGUAGE")
-        | Some("IMAGE_SAFETY")
-        | Some("IMAGE_PROHIBITED_CONTENT")
-        | Some("IMAGE_OTHER")
-        | Some("NO_IMAGE")
-        | Some("IMAGE_RECITATION")
-        | Some("UNEXPECTED_TOOL_CALL")
-        | Some("TOO_MANY_TOOL_CALLS")
-        | Some("MISSING_THOUGHT_SIGNATURE")
-        | Some("MALFORMED_RESPONSE") => Ok(FinishReason::Refusal),
+        Some(
+            "SAFETY"
+            | "PROHIBITED_CONTENT"
+            | "BLOCKLIST"
+            | "RECITATION"
+            | "SPII"
+            | "OTHER"
+            | "MALFORMED_FUNCTION_CALL"
+            | "LANGUAGE"
+            | "IMAGE_SAFETY"
+            | "IMAGE_PROHIBITED_CONTENT"
+            | "IMAGE_OTHER"
+            | "NO_IMAGE"
+            | "IMAGE_RECITATION"
+            | "UNEXPECTED_TOOL_CALL"
+            | "TOO_MANY_TOOL_CALLS"
+            | "MISSING_THOUGHT_SIGNATURE"
+            | "MALFORMED_RESPONSE",
+        ) => Ok(FinishReason::Refusal),
         Some(other) => Err(format!("Gemini returned unknown finish reason '{other}'")),
         None => Err("Gemini response ended without a finish reason".to_string()),
     }
@@ -281,13 +270,13 @@ pub(crate) fn parse_generate_response(v: &Value) -> Result<ChatTurn, String> {
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("unknown error");
-        return Err(format!("Gemini API error: {}", message));
+        return Err(format!("Gemini API error: {message}"));
     }
     if let Some(reason) = v
         .pointer("/promptFeedback/blockReason")
         .and_then(Value::as_str)
     {
-        return Err(format!("Gemini blocked the request ({})", reason));
+        return Err(format!("Gemini blocked the request ({reason})"));
     }
 
     let Some(candidate) = v.pointer("/candidates/0") else {
@@ -320,12 +309,9 @@ pub(crate) fn parse_generate_response(v: &Value) -> Result<ChatTurn, String> {
 
 fn endpoint_url(model: &str, stream: bool) -> String {
     if stream {
-        format!(
-            "{}/models/{}:streamGenerateContent?alt=sse",
-            GEMINI_API_BASE, model
-        )
+        format!("{GEMINI_API_BASE}/models/{model}:streamGenerateContent?alt=sse")
     } else {
-        format!("{}/models/{}:generateContent", GEMINI_API_BASE, model)
+        format!("{GEMINI_API_BASE}/models/{model}:generateContent")
     }
 }
 
@@ -342,7 +328,7 @@ async fn send_request(
         .json(body)
         .send()
         .await
-        .map_err(|e| format!("Gemini request failed: {}", e))?;
+        .map_err(|e| format!("Gemini request failed: {e}"))?;
 
     let status = response.status();
     if status.is_success() {
@@ -364,10 +350,7 @@ async fn send_request(
         429 => " Rate limit exceeded — wait a moment and retry.",
         _ => "",
     };
-    Err(format!(
-        "Gemini API error ({}): {}.{}",
-        status, detail, hint
-    ))
+    Err(format!("Gemini API error ({status}): {detail}.{hint}"))
 }
 
 /// One-shot analysis (system instruction + single user message).
@@ -382,7 +365,7 @@ pub async fn one_shot(
     let v: Value = response
         .json()
         .await
-        .map_err(|e| format!("Unexpected Gemini response: {}", e))?;
+        .map_err(|e| format!("Unexpected Gemini response: {e}"))?;
     let turn = parse_generate_response(&v)?;
     match turn.finished {
         FinishReason::Stop if !turn.text.trim().is_empty() => Ok(turn.text),
@@ -395,7 +378,7 @@ pub async fn one_shot(
 }
 
 /// Streaming chat with optional tools. Each SSE `data:` line is a complete
-/// GenerateContentResponse chunk with incremental parts.
+/// `GenerateContentResponse` chunk with incremental parts.
 pub async fn chat_stream(
     cfg: &ResolvedProviderConfig,
     req: &ChatRequest,
@@ -423,7 +406,7 @@ pub async fn chat_stream(
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown stream error");
-            return Err(format!("Gemini stream error: {}", message));
+            return Err(format!("Gemini stream error: {message}"));
         }
         if let Some(model) = v
             .get("modelVersion")
@@ -441,7 +424,7 @@ pub async fn chat_stream(
             .pointer("/promptFeedback/blockReason")
             .and_then(Value::as_str)
         {
-            return Err(format!("Gemini blocked the request ({})", reason));
+            return Err(format!("Gemini blocked the request ({reason})"));
         }
         let candidate = v
             .pointer("/candidates/0")
