@@ -261,11 +261,24 @@ pub(crate) fn non_empty_provider_draft(value: &str) -> Option<String> {
 }
 
 /// The unsaved provider-setup values a catalog refresh discovers with.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct ProviderCatalogDraft {
     pub(crate) api_key: Option<String>,
     pub(crate) endpoint: Option<String>,
     pub(crate) cli_path: Option<String>,
+}
+
+impl std::fmt::Debug for ProviderCatalogDraft {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The draft carries the credential the user is still typing; a Debug
+        // log of it must never print the secret itself.
+        formatter
+            .debug_struct("ProviderCatalogDraft")
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("endpoint", &self.endpoint)
+            .field("cli_path", &self.cli_path)
+            .finish()
+    }
 }
 
 /// What the selected provider needs before discovery can even be attempted.
