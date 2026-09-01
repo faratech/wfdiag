@@ -9,6 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const SUMMARY_INDEX_ID: &str = "_scan_summary_index";
+/// Files that failed to load during the last full rebuild. Recorded so the
+/// fast-path count can still match the file set even when one scan is
+/// permanently unreadable; without it every `list_scans` degraded to a full
+/// decrypt of the whole history directory.
+const UNREADABLE_INDEX_ID: &str = "_scan_unreadable_index";
 
 // Simplified scan record for storage
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,12 +262,6 @@ impl ScanStorage {
             .into());
         }
 
-        println!(
-            "Successfully loaded encrypted scan {} with {} results",
-            scan.id,
-            scan.results.len()
-        );
-
         Ok(scan)
     }
 
@@ -278,17 +277,21 @@ impl ScanStorage {
             .list_files()
             .map_err(|e| DiagError::storage("list_scans", e.to_string()))?
             .into_iter()
-            .filter(|id| id != SUMMARY_INDEX_ID)
+            .filter(|id| id != SUMMARY_INDEX_ID && id != UNREADABLE_INDEX_ID)
             .collect();
 
         if self.encrypted_storage.exists(SUMMARY_INDEX_ID)
             && let Ok(mut summaries) = self
                 .encrypted_storage
                 .load::<Vec<ScanSummary>>(SUMMARY_INDEX_ID)
-            && summaries.len() == stored_scan_ids.len()
+            && let Ok(unreadable) = self
+                .encrypted_storage
+                .load::<Vec<String>>(UNREADABLE_INDEX_ID)
+            && summaries.len() + unreadable.len() == stored_scan_ids.len()
             && summaries
                 .iter()
                 .all(|summary| stored_scan_ids.contains(&summary.id))
+            && unreadable.iter().all(|id| stored_scan_ids.contains(id))
         {
             summaries.sort_by_key(|summary| std::cmp::Reverse(summary.timestamp));
             return Ok(summaries);
@@ -305,16 +308,18 @@ impl ScanStorage {
             .list_files()
             .map_err(|e| DiagError::storage("list_scans", e.to_string()))?;
 
-        for scan_id in scan_ids.into_iter().filter(|id| id != SUMMARY_INDEX_ID) {
-            println!("Found encrypted scan: {}", scan_id);
-
+        let mut unreadable = Vec::new();
+        for scan_id in scan_ids.into_iter().filter(|id| id != SUMMARY_INDEX_ID && id != UNREADABLE_INDEX_ID) {
             match self.load_scan(&scan_id) {
                 Ok(scan) => {
                     summaries.push(Self::summary_for(&scan));
                 }
-                Err(e) => {
-                    println!("Warning: Failed to load scan '{}': {}", scan_id, e);
-                    // Continue loading other scans instead of failing completely
+                Err(_) => {
+                    // Keep going: one unreadable scan must not fail the whole
+                    // history listing. Recording the id keeps the summary and
+                    // unreadable counts aligned with the file set so the fast
+                    // path stays usable.
+                    unreadable.push(scan_id);
                 }
             }
         }
@@ -322,11 +327,12 @@ impl ScanStorage {
         // Sort by timestamp (newest first)
         summaries.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
 
-        println!("Successfully loaded {} scan summaries", summaries.len());
-
         self.encrypted_storage
             .store(SUMMARY_INDEX_ID, &summaries)
             .map_err(|error| DiagError::storage("write_summary_index", error.to_string()))?;
+        self.encrypted_storage
+            .store(UNREADABLE_INDEX_ID, &unreadable)
+            .map_err(|error| DiagError::storage("write_unreadable_index", error.to_string()))?;
 
         Ok(summaries)
     }
@@ -403,6 +409,42 @@ impl ScanStorage {
                 .map(TaskChangeSummary::from)
                 .collect(),
         })
+    }
+
+    /// Compare a live current scan with the newest stored scan other than the
+    /// current one (scan ids are unique per run, so this is the automatic
+    /// "previous run" baseline).
+    ///
+    /// Report generation can run when history retention is disabled or before
+    /// the current scan has been persisted, so the current record is supplied
+    /// directly. An unreadable automatic baseline is treated as no baseline,
+    /// matching the report service's established Tauri behavior.
+    pub fn compare_current_to_latest_stored(
+        &self,
+        current: std::sync::Arc<ScanRecord>,
+    ) -> Result<Option<ComparisonResult>, String> {
+        // This is an implicit baseline: history index/storage failures must
+        // not prevent a report from being generated. The Tauri report path
+        // has always treated an unreadable automatic baseline as no
+        // comparison (only an explicitly selected id is a hard error).
+        let previous_id = self.list_scans().ok().and_then(|summaries| {
+            summaries
+                .into_iter()
+                .map(|summary| summary.id)
+                .find(|id| *id != current.id)
+        });
+        let Some(previous_id) = previous_id else {
+            return Ok(None);
+        };
+        let Ok(previous) = self.load_scan(&previous_id) else {
+            return Ok(None);
+        };
+        let tasks = (self.task_catalog_provider)();
+        Ok(Some(Self::compute_comparison_with_catalog(
+            (*current).clone(),
+            previous,
+            &tasks,
+        )))
     }
 
     pub fn scan_task_diff(
@@ -928,12 +970,7 @@ mod tests {
     use super::*;
 
     fn result(success: bool, output: &str) -> TaskResult {
-        TaskResult {
-            success,
-            output: output.to_string(),
-            error: None,
-            duration_ms: 5,
-        }
+        crate::diagnostics::task_result(success, output.to_string(), 5)
     }
 
     fn scan(id: &str, results: Vec<(&str, TaskResult)>) -> ScanRecord {

@@ -1,6 +1,9 @@
+#[cfg(windows)]
 use std::error::Error;
+#[cfg(windows)]
 use wfdiag_native_monitor::{NativeMonitorRuntime, ProcessQuery};
 
+#[cfg(windows)]
 fn main() -> Result<(), Box<dyn Error>> {
     let async_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -8,10 +11,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (monitor, _events) = NativeMonitorRuntime::start(false)?;
 
     let page = async_runtime.block_on(async {
-        monitor
-            .request_processes(ProcessQuery::default())?
-            .await
-            .map_err(std::io::Error::other)
+        match monitor.request_processes(ProcessQuery::default())?.await {
+            Ok(ProcessQueryOutcome::Page(page)) => Ok(page),
+            Ok(ProcessQueryOutcome::Superseded) => {
+                Err(std::io::Error::other("query superseded before it ran"))
+            }
+            Err(error) => Err(std::io::Error::other(error)),
+        }
     })?;
 
     println!(
@@ -21,4 +27,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         page.captured_at
     );
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("process_query is available only on Windows");
 }

@@ -1,11 +1,13 @@
 use crate::{
-    DiskInfo as NativeDiskInfo, MonitorEmission, MonitorEmitter, ProcessInfo as NativeProcessInfo,
-    ProcessPage, ProcessQuery, SystemMonitor, SystemStats as NativeSystemStats,
+    DiskInfo as NativeDiskInfo, MonitorEmission, MonitorEmitter, MonitorProfile,
+    ProcessInfo as NativeProcessInfo, ProcessPage, ProcessQuery, SystemMonitor,
+    SystemStats as NativeSystemStats,
 };
 use std::io;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -115,14 +117,129 @@ impl From<&NativeSystemStats> for SystemStats {
 }
 
 enum RuntimeCommand {
-    Pause,
-    Resume,
-    Refresh,
-    ListProcesses {
-        query: ProcessQuery,
-        reply: oneshot::Sender<ProcessPage>,
-    },
+    ControlWake,
+    ProcessWake,
     Shutdown,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct ControlSnapshot {
+    running: bool,
+    refresh: bool,
+}
+
+/// Coalesces rapid lifecycle and refresh changes into one worker wake.
+///
+/// The desired lifecycle is latest-wins. Refresh is a single edge and is
+/// discarded while paused, so a hidden page cannot keep system sampling alive.
+struct CoalescedControl {
+    desired_running: AtomicBool,
+    refresh_requested: AtomicBool,
+    wake_pending: AtomicBool,
+}
+
+impl CoalescedControl {
+    fn new(running: bool) -> Self {
+        Self {
+            desired_running: AtomicBool::new(running),
+            refresh_requested: AtomicBool::new(false),
+            wake_pending: AtomicBool::new(false),
+        }
+    }
+
+    /// Returns true when the caller must enqueue a worker wake.
+    fn set_running(&self, running: bool) -> bool {
+        let changed = self.desired_running.swap(running, Ordering::AcqRel) != running;
+        if !running {
+            self.refresh_requested.store(false, Ordering::Release);
+        }
+        changed && !self.wake_pending.swap(true, Ordering::AcqRel)
+    }
+
+    /// Returns true when the caller must enqueue a worker wake.
+    fn request_refresh(&self) -> bool {
+        if !self.desired_running.load(Ordering::Acquire) {
+            return false;
+        }
+        let first_refresh = !self.refresh_requested.swap(true, Ordering::AcqRel);
+        first_refresh && !self.wake_pending.swap(true, Ordering::AcqRel)
+    }
+
+    fn take_for_wake(&self) -> ControlSnapshot {
+        // Clear first so a racing producer schedules another wake. The extra
+        // wake can be redundant, but no newer lifecycle state is ever lost.
+        self.wake_pending.store(false, Ordering::Release);
+        let running = self.desired_running.load(Ordering::Acquire);
+        let refresh = self.refresh_requested.swap(false, Ordering::AcqRel) && running;
+        ControlSnapshot { running, refresh }
+    }
+
+    fn clear_wake(&self) {
+        self.wake_pending.store(false, Ordering::Release);
+    }
+}
+
+struct ProcessRequest {
+    query: ProcessQuery,
+    reply: oneshot::Sender<ProcessQueryOutcome>,
+}
+
+/// Outcome of a queued process query.
+///
+/// The queue keeps only the newest request; a replaced query is answered with
+/// [`ProcessQueryOutcome::Superseded`] instead of silently closing its
+/// channel, so callers can tell "your query was superseded" (routine rapid
+/// requery) from "the monitor worker stopped" (a real failure).
+#[derive(Debug)]
+pub enum ProcessQueryOutcome {
+    /// The requested page.
+    Page(ProcessPage),
+    /// A newer query replaced this one before it could run.
+    Superseded,
+}
+
+/// One queued process enumeration at most. Replacing an obsolete request
+/// answers it with [`ProcessQueryOutcome::Superseded`], immediately releasing
+/// the cancelled Reactor task. An enumeration already executing may finish,
+/// but it can be followed by only the newest requested query rather than an
+/// unbounded stale backlog.
+#[derive(Default)]
+struct LatestProcessRequest {
+    latest: Mutex<Option<ProcessRequest>>,
+    wake_pending: AtomicBool,
+}
+
+impl LatestProcessRequest {
+    fn submit(&self, request: ProcessRequest) -> bool {
+        let previous = self
+            .latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .replace(request);
+        if let Some(previous) = previous {
+            let _ = previous.reply.send(ProcessQueryOutcome::Superseded);
+        }
+        !self.wake_pending.swap(true, Ordering::AcqRel)
+    }
+
+    fn take_for_wake(&self) -> Option<ProcessRequest> {
+        // Clear before taking: a concurrent submit then schedules a fresh wake
+        // and either replaces this not-yet-taken request or fills the empty
+        // slot for the next iteration. Both outcomes retain the newest query.
+        self.wake_pending.store(false, Ordering::Release);
+        self.latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+    }
+
+    fn clear(&self) {
+        self.wake_pending.store(false, Ordering::Release);
+        self.latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+    }
 }
 
 fn reap_worker(worker: JoinHandle<()>) {
@@ -140,6 +257,8 @@ fn reap_worker(worker: JoinHandle<()>) {
 /// worker so slow Windows providers cannot stall the UI thread during exit.
 pub struct NativeMonitorRuntime {
     commands: mpsc::UnboundedSender<RuntimeCommand>,
+    control: Arc<CoalescedControl>,
+    process_requests: Arc<LatestProcessRequest>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -151,10 +270,25 @@ impl NativeMonitorRuntime {
     /// Returns an I/O error if the telemetry worker or its Tokio runtime cannot
     /// be started, or if initialization does not finish within five seconds.
     pub fn start(include_process_adapter_stats: bool) -> io::Result<(Self, UiEventReceiver)> {
+        Self::start_with_profile(MonitorProfile::Legacy {
+            include_process_adapter_stats,
+        })
+    }
+
+    /// Start native collection with an explicit telemetry demand profile.
+    ///
+    /// Native shells should use `MonitorProfile::SystemOnly`; that profile
+    /// guarantees that one-second telemetry performs no process enumeration.
+    /// `start` remains the legacy Tauri-compatible behavior.
+    pub fn start_with_profile(profile: MonitorProfile) -> io::Result<(Self, UiEventReceiver)> {
         let capacity = NonZeroUsize::try_from(32usize)
             .map_err(|_| io::Error::other("native monitoring event capacity must be non-zero"))?;
         let (publisher, receiver) = ui_event_bus(capacity);
         let (commands, mut command_receiver) = mpsc::unbounded_channel();
+        let control = Arc::new(CoalescedControl::new(true));
+        let worker_control = Arc::clone(&control);
+        let process_requests = Arc::new(LatestProcessRequest::default());
+        let worker_process_requests = Arc::clone(&process_requests);
         let (startup_sender, startup_receiver) = std_mpsc::sync_channel(1);
 
         let worker = std::thread::Builder::new()
@@ -176,26 +310,49 @@ impl NativeMonitorRuntime {
 
                 runtime.block_on(async move {
                     let emitter = Arc::new(UiBusMonitorEmitter::new(publisher));
-                    let monitor = SystemMonitor::with_emitter(emitter.clone());
-                    monitor
-                        .start_monitoring(include_process_adapter_stats)
-                        .await;
+                    let monitor = Arc::new(SystemMonitor::with_emitter(emitter.clone()));
+                    monitor.start_monitoring_with_profile(profile).await;
+                    let mut running = true;
 
                     while let Some(command) = command_receiver.recv().await {
                         match command {
-                            RuntimeCommand::Pause => monitor.stop_monitoring().await,
-                            RuntimeCommand::Resume => {
-                                monitor
-                                    .start_monitoring(include_process_adapter_stats)
-                                    .await;
+                            RuntimeCommand::ControlWake => {
+                                let desired = worker_control.take_for_wake();
+                                let resumed = desired.running && !running;
+                                if desired.running != running {
+                                    if desired.running {
+                                        monitor.start_monitoring_with_profile(profile).await;
+                                    } else {
+                                        monitor.stop_monitoring().await;
+                                    }
+                                    running = desired.running;
+                                }
+
+                                // Starting seeds and immediately emits a sample;
+                                // fold any queued refresh into that transition.
+                                if desired.refresh && running && !resumed {
+                                    let stats = monitor.get_current_stats().await;
+                                    let _ = emitter.emit_system_stats(&stats);
+                                }
                             }
-                            RuntimeCommand::Refresh => {
-                                let stats = monitor.get_current_stats().await;
-                                let _ = emitter.emit_system_stats(&stats);
-                            }
-                            RuntimeCommand::ListProcesses { query, reply } => {
-                                let page = monitor.list_processes(query).await;
-                                let _ = reply.send(page);
+                            RuntimeCommand::ProcessWake => {
+                                if let Some(request) = worker_process_requests.take_for_wake() {
+                                    // Enumerate on its own task so a
+                                    // multi-second process snapshot cannot
+                                    // delay ControlWake handling: pause() and
+                                    // stop_monitoring() must take effect
+                                    // promptly even while a query is in
+                                    // flight. Concurrent enumerations still
+                                    // serialize inside SystemMonitor's snapshot
+                                    // refresh lock, and the UI rejects stale
+                                    // pages by request id.
+                                    let monitor = Arc::clone(&monitor);
+                                    tokio::spawn(async move {
+                                        let page = monitor.list_processes(request.query).await;
+                                        let _ =
+                                            request.reply.send(ProcessQueryOutcome::Page(page));
+                                    });
+                                }
                             }
                             RuntimeCommand::Shutdown => break,
                         }
@@ -230,6 +387,8 @@ impl NativeMonitorRuntime {
         Ok((
             Self {
                 commands,
+                control,
+                process_requests,
                 worker: Some(worker),
             },
             receiver,
@@ -239,19 +398,31 @@ impl NativeMonitorRuntime {
     /// Stop sampling without blocking the UI thread.
     #[must_use]
     pub fn pause(&self) -> bool {
-        self.commands.send(RuntimeCommand::Pause).is_ok()
+        self.send_control_wake(self.control.set_running(false))
     }
 
     /// Resume one-second native sampling.
     #[must_use]
     pub fn resume(&self) -> bool {
-        self.commands.send(RuntimeCommand::Resume).is_ok()
+        self.send_control_wake(self.control.set_running(true))
     }
 
     /// Request an immediate native sample.
     #[must_use]
     pub fn refresh(&self) -> bool {
-        self.commands.send(RuntimeCommand::Refresh).is_ok()
+        self.send_control_wake(self.control.request_refresh())
+    }
+
+    fn send_control_wake(&self, required: bool) -> bool {
+        if !required {
+            return !self.commands.is_closed();
+        }
+        if self.commands.send(RuntimeCommand::ControlWake).is_ok() {
+            true
+        } else {
+            self.control.clear_wake();
+            false
+        }
     }
 
     /// Queue an on-demand full process query on the monitor worker.
@@ -266,20 +437,128 @@ impl NativeMonitorRuntime {
     pub fn request_processes(
         &self,
         query: ProcessQuery,
-    ) -> io::Result<oneshot::Receiver<ProcessPage>> {
+    ) -> io::Result<oneshot::Receiver<ProcessQueryOutcome>> {
         let (reply, receiver) = oneshot::channel();
-        self.commands
-            .send(RuntimeCommand::ListProcesses { query, reply })
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "monitor worker stopped"))?;
+        if self
+            .process_requests
+            .submit(ProcessRequest { query, reply })
+            && self.commands.send(RuntimeCommand::ProcessWake).is_err()
+        {
+            self.process_requests.clear();
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "monitor worker stopped",
+            ));
+        }
         Ok(receiver)
     }
 }
 
 impl Drop for NativeMonitorRuntime {
     fn drop(&mut self) {
+        self.control.set_running(false);
+        self.process_requests.clear();
         let _ = self.commands.send(RuntimeCommand::Shutdown);
         if let Some(worker) = self.worker.take() {
             reap_worker(worker);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ProcessSortDirection, ProcessSortKey};
+
+    fn query(search: &str) -> ProcessQuery {
+        ProcessQuery {
+            search: search.to_string(),
+            sort_by: ProcessSortKey::CpuPercent,
+            sort_direction: ProcessSortDirection::Desc,
+            offset: 0,
+            limit: 100,
+        }
+    }
+
+    #[test]
+    fn pending_process_requests_are_latest_wins_with_one_wake() {
+        let slot = LatestProcessRequest::default();
+        let (first_reply, mut first_receiver) = oneshot::channel();
+        assert!(slot.submit(ProcessRequest {
+            query: query("first"),
+            reply: first_reply,
+        }));
+
+        let (latest_reply, _latest_receiver) = oneshot::channel();
+        assert!(!slot.submit(ProcessRequest {
+            query: query("latest"),
+            reply: latest_reply,
+        }));
+        assert!(matches!(
+            first_receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+
+        let pending = slot.take_for_wake().expect("latest request remains queued");
+        assert_eq!(pending.query.search, "latest");
+        drop(pending);
+
+        let (next_reply, _next_receiver) = oneshot::channel();
+        assert!(slot.submit(ProcessRequest {
+            query: query("next"),
+            reply: next_reply,
+        }));
+    }
+
+    #[test]
+    fn lifecycle_commands_are_latest_wins_and_idempotent() {
+        let control = CoalescedControl::new(true);
+
+        assert!(!control.set_running(true), "duplicate resume is a no-op");
+        assert!(control.set_running(false), "pause schedules one wake");
+        assert!(
+            !control.set_running(true),
+            "resume replaces the queued pause without a second wake"
+        );
+        assert_eq!(
+            control.take_for_wake(),
+            ControlSnapshot {
+                running: true,
+                refresh: false,
+            }
+        );
+        assert!(!control.set_running(true), "processed resume stays a no-op");
+    }
+
+    #[test]
+    fn refreshes_coalesce_and_pause_discards_them() {
+        let control = CoalescedControl::new(true);
+
+        assert!(control.request_refresh());
+        assert!(
+            !control.request_refresh(),
+            "only one refresh wake is queued"
+        );
+        assert_eq!(
+            control.take_for_wake(),
+            ControlSnapshot {
+                running: true,
+                refresh: true,
+            }
+        );
+
+        assert!(control.request_refresh());
+        assert!(!control.set_running(false), "the refresh wake is reused");
+        assert!(
+            !control.request_refresh(),
+            "paused sampling rejects refresh"
+        );
+        assert_eq!(
+            control.take_for_wake(),
+            ControlSnapshot {
+                running: false,
+                refresh: false,
+            }
+        );
     }
 }

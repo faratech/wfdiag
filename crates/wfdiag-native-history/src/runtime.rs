@@ -81,6 +81,12 @@ enum HistoryCommand {
         previous_id: String,
         reply: oneshot::Sender<Result<ComparisonResult, String>>,
     },
+    CompareCurrentToLatest {
+        // Arc: the record carries every result body and must not be copied
+        // into the command channel just to be handed to storage.
+        current: std::sync::Arc<ScanRecord>,
+        reply: oneshot::Sender<Result<Option<ComparisonResult>, String>>,
+    },
     CompareSummary {
         current_id: String,
         previous_id: String,
@@ -207,6 +213,10 @@ impl NativeHistoryRuntime {
                                 let _ =
                                     reply.send(storage.compare_scans(&current_id, &previous_id));
                             }
+                            HistoryCommand::CompareCurrentToLatest { current, reply } => {
+                                let _ =
+                                    reply.send(storage.compare_current_to_latest_stored(current));
+                            }
                             HistoryCommand::CompareSummary {
                                 current_id,
                                 previous_id,
@@ -319,6 +329,22 @@ impl NativeHistoryRuntime {
             previous_id: previous_id.into(),
             reply,
         })?;
+        Ok(receiver)
+    }
+
+    /// Compare a live scan snapshot against the newest persisted scan other
+    /// than the current one (scan ids are unique per run). This is the
+    /// report-generation baseline policy; it works even when the current scan
+    /// has not itself been saved.
+    ///
+    /// # Errors
+    /// Returns [`HistoryRuntimeError::WorkerStopped`] if the worker exited.
+    pub fn request_compare_current_to_latest(
+        &self,
+        current: std::sync::Arc<ScanRecord>,
+    ) -> Result<HistoryReply<Option<ComparisonResult>>, HistoryRuntimeError> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(HistoryCommand::CompareCurrentToLatest { current, reply })?;
         Ok(receiver)
     }
 
@@ -442,12 +468,12 @@ mod tests {
             is_admin: false,
             results: HashMap::from([(
                 "os_info".into(),
-                TaskResult {
+                Arc::new(TaskResult {
                     success,
                     output: if success { "ok" } else { "failed" }.into(),
                     error: None,
                     duration_ms: 5,
-                },
+                }),
             )]),
             task_count: 1,
             success_count: usize::from(success),
@@ -559,6 +585,64 @@ mod tests {
                 .expect("list")
                 .is_empty()
         );
+        drop(runtime);
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_comparison_uses_newest_other_session_and_handles_empty_history() {
+        let directory = temp_dir("live-comparison");
+        let runtime = NativeHistoryRuntime::start(HistoryRuntimeConfig::new(
+            directory.clone(),
+            || (true, 30),
+            task_catalog,
+        ))
+        .expect("start runtime");
+        for stored in [
+            scan("older", "2026-06-12T10:00:00Z", true),
+            scan("newer", "2026-06-12T11:00:00Z", false),
+        ] {
+            runtime
+                .request_save(stored)
+                .expect("queue save")
+                .await
+                .expect("worker reply")
+                .expect("save scan");
+        }
+
+        let live_comparison = runtime
+            .request_compare_current_to_latest(std::sync::Arc::new(scan("live", "2026-06-12T12:00:00Z", true)))
+            .expect("queue live comparison")
+            .await
+            .expect("worker reply")
+            .expect("compare live scan")
+            .expect("newest baseline");
+        assert_eq!(live_comparison.current_scan.id, "live");
+        assert_eq!(live_comparison.previous_scan.id, "newer");
+        assert_eq!(live_comparison.new_successes.len(), 1);
+
+        let autosaved_current = runtime
+            .request_compare_current_to_latest(std::sync::Arc::new(scan("newer", "2026-06-12T12:00:00Z", false)))
+            .expect("queue autosaved-current comparison")
+            .await
+            .expect("worker reply")
+            .expect("compare autosaved current")
+            .expect("older baseline");
+        assert_eq!(autosaved_current.previous_scan.id, "older");
+
+        runtime
+            .request_clear()
+            .expect("queue clear")
+            .await
+            .expect("worker reply")
+            .expect("clear");
+        let empty = runtime
+            .request_compare_current_to_latest(std::sync::Arc::new(scan("after-clear", "2026-06-12T13:00:00Z", true)))
+            .expect("queue empty comparison")
+            .await
+            .expect("worker reply")
+            .expect("compare empty history");
+        assert!(empty.is_none());
 
         drop(runtime);
         std::fs::remove_dir_all(directory).ok();

@@ -823,7 +823,7 @@ impl ReactorToolBackend {
             return Ok("Scan history storage is unavailable on this system.".to_string());
         };
         let comparison = history
-            .request_compare_current_to_latest(current)
+            .request_compare_current_to_latest(std::sync::Arc::new(current))
             .map_err(|error| error.to_string())?;
         let comparison = tokio::select! {
             biased;

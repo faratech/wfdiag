@@ -26,7 +26,9 @@ pub struct DiagnosticTask {
 
 /// Framework-neutral output from one diagnostic executor invocation.
 /// This is also the canonical input consumed by native issue detection.
-pub use wfdiag_native_issues::TaskResult as DiagnosticOutput;
+pub use wfdiag_native_issues::{
+    ScanEvidence, SharedScanEvidence, SharedTaskResult, TaskResult as DiagnosticOutput,
+};
 
 pub type DiagnosticFuture<'a> = Pin<Box<dyn Future<Output = DiagnosticOutput> + Send + 'a>>;
 
@@ -53,7 +55,7 @@ pub struct DiagnosticSession {
     #[serde(default)]
     pub scan_kind: ScanKind,
     pub selected_tasks: Vec<String>,
-    pub results: HashMap<String, DiagnosticOutput>,
+    pub results: SharedScanEvidence,
 }
 
 #[derive(Debug, Default)]
@@ -68,7 +70,8 @@ struct CoordinatorState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticRunResult {
     pub session_id: String,
-    pub completed: Vec<(String, DiagnosticOutput)>,
+    /// Exact immutable result map also retained by the completed session.
+    pub evidence: SharedScanEvidence,
     pub cancelled: bool,
 }
 
@@ -183,7 +186,7 @@ impl DiagnosticRuntime {
             start_time: SystemTime::now(),
             scan_kind,
             selected_tasks,
-            results: HashMap::new(),
+            results: Arc::new(HashMap::new()),
         };
 
         let mut state = self.state.lock().await;
@@ -237,6 +240,7 @@ impl DiagnosticRuntime {
                 .collect(),
         );
 
+        let expected_task_ids = selected_tasks.clone();
         let futures = selected_tasks.into_iter().map(|task_id| {
             let runtime = self.clone();
             let task_metadata = Arc::clone(&task_metadata);
@@ -273,25 +277,14 @@ impl DiagnosticRuntime {
                     return None;
                 }
 
-                let output = runtime.executor.execute(task_id.clone()).await;
+                let output: SharedTaskResult =
+                    Arc::new(runtime.executor.execute(task_id.clone()).await);
 
-                {
-                    let mut state = runtime.state.lock().await;
-                    if let Some(session) = state.current.as_mut()
-                        && session.session_id == session_id
-                    {
-                        session.results.insert(task_id.clone(), output.clone());
-                    }
-                }
-
-                let result_event = UiEvent::DiagnosticResult(DiagnosticTaskResult {
-                    session_id: session_id.clone(),
-                    task_id: task_id.clone(),
-                    success: output.success,
-                    output: output.output.clone(),
-                    error: output.error.clone(),
-                    duration_ms: output.duration_ms,
-                });
+                let result_event = UiEvent::DiagnosticResult(DiagnosticTaskResult::new(
+                    session_id.clone(),
+                    task_id.clone(),
+                    Arc::clone(&output),
+                ));
                 if runtime.sink.publish(result_event).await.is_err() {
                     return None;
                 }
@@ -314,11 +307,13 @@ impl DiagnosticRuntime {
             }
         });
 
-        let completed: Vec<(String, DiagnosticOutput)> = stream::iter(futures)
-            .buffer_unordered(max_concurrent)
-            .filter_map(async |result| result)
-            .collect()
-            .await;
+        let evidence: SharedScanEvidence = Arc::new(
+            stream::iter(futures)
+                .buffer_unordered(max_concurrent)
+                .filter_map(async |result| result)
+                .collect::<ScanEvidence>()
+                .await,
+        );
 
         let cancelled = {
             let mut state = self.state.lock().await;
@@ -329,15 +324,15 @@ impl DiagnosticRuntime {
                 .as_ref()
                 .is_some_and(|session| session.session_id == session_id)
             {
-                let incomplete = state.current.as_ref().is_some_and(|session| {
-                    session
-                        .selected_tasks
-                        .iter()
-                        .any(|task_id| !session.results.contains_key(task_id))
-                });
+                let incomplete = expected_task_ids
+                    .iter()
+                    .any(|task_id| !evidence.contains_key(task_id));
                 if incomplete {
                     state.current = state.previous.take();
                 } else {
+                    if let Some(session) = state.current.as_mut() {
+                        session.results = Arc::clone(&evidence);
+                    }
                     state.previous = None;
                 }
             }
@@ -346,7 +341,7 @@ impl DiagnosticRuntime {
 
         Ok(DiagnosticRunResult {
             session_id,
-            completed,
+            evidence,
             cancelled,
         })
     }
@@ -386,6 +381,13 @@ impl DiagnosticRuntime {
 
     /// Return a snapshot only when the caller still owns the visible session.
     ///
+    /// Contract (2026-08-31): the evidence map is published ONCE, when the
+    /// run finishes, shared with the terminal `DiagnosticRunResult` via one
+    /// `Arc`. Mid-run callers see the session's pre-run (empty) map, not a
+    /// growing one; incremental progress reaches the UI exclusively through
+    /// per-task `UiEvent::DiagnosticResult` events, which the native shell
+    /// accumulates itself. Do not add mid-run consumers of this method.
+    ///
     /// # Errors
     ///
     /// Returns a session ownership error when no matching current session
@@ -393,7 +395,7 @@ impl DiagnosticRuntime {
     pub async fn session_results(
         &self,
         session_id: &str,
-    ) -> Result<HashMap<String, DiagnosticOutput>, DiagnosticRuntimeError> {
+    ) -> Result<SharedScanEvidence, DiagnosticRuntimeError> {
         let state = self.state.lock().await;
         let current = state
             .current
@@ -405,7 +407,7 @@ impl DiagnosticRuntime {
                 actual: session_id.to_string(),
             });
         }
-        Ok(current.results.clone())
+        Ok(Arc::clone(&current.results))
     }
 
     #[must_use]
@@ -535,24 +537,25 @@ mod tests {
             .await
             .unwrap();
         let run = runtime.run_session(session_id.clone(), 1).await.unwrap();
-        assert_eq!(run.completed.len(), 1);
+        assert_eq!(run.evidence.len(), 1);
         assert!(!run.cancelled);
-        assert_eq!(
-            runtime.session_results(&session_id).await.unwrap()["base"].output,
-            "{\"task\":\"base\"}"
-        );
+        let session_evidence = runtime.session_results(&session_id).await.unwrap();
+        assert_eq!(session_evidence["base"].output, "{\"task\":\"base\"}");
+        assert!(Arc::ptr_eq(&run.evidence, &session_evidence));
 
+        let events = receiver.drain();
+        let UiEvent::DiagnosticResult(delivered) = &events[0] else {
+            panic!("the first lossless event should be the diagnostic result")
+        };
+        assert!(Arc::ptr_eq(&delivered.result, &run.evidence["base"]));
         assert_eq!(
-            receiver.drain(),
+            events,
             vec![
-                UiEvent::DiagnosticResult(DiagnosticTaskResult {
-                    session_id: session_id.clone(),
-                    task_id: "base".into(),
-                    success: true,
-                    output: "{\"task\":\"base\"}".into(),
-                    error: None,
-                    duration_ms: 7,
-                }),
+                UiEvent::DiagnosticResult(DiagnosticTaskResult::new(
+                    session_id.clone(),
+                    "base",
+                    Arc::clone(&run.evidence["base"]),
+                )),
                 UiEvent::TaskProgress(TaskProgress {
                     session_id,
                     task_id: "base".into(),
@@ -561,6 +564,29 @@ mod tests {
                     success: Some(true),
                 }),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_session_serializes_shared_evidence_with_the_legacy_shape() {
+        let executor = Arc::new(FakeExecutor::new());
+        let (runtime, _receiver) = DiagnosticRuntime::with_event_bus(executor, capacity());
+        let session_id = runtime
+            .start_session(vec!["base".into()], ScanKind::Quick)
+            .await
+            .unwrap();
+        let run = runtime.run_session(session_id.clone(), 1).await.unwrap();
+        let session = runtime.current_session().await.unwrap();
+
+        assert!(Arc::ptr_eq(&session.results, &run.evidence));
+        assert_eq!(
+            serde_json::to_value(&session).unwrap()["results"]["base"],
+            serde_json::json!({
+                "success": true,
+                "output": "{\"task\":\"base\"}",
+                "error": null,
+                "duration_ms": 7
+            })
         );
     }
 
@@ -642,5 +668,59 @@ mod tests {
         );
         release.add_permits(1);
         first.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_evidence_publishes_once_at_the_end_while_events_stream_incrementally() {
+        let executor = Arc::new(FakeExecutor::new());
+        let (runtime, receiver) = DiagnosticRuntime::with_event_bus(executor.clone(), capacity());
+        let session_id = runtime
+            .start_session(vec!["slow".into(), "base".into()], ScanKind::Quick)
+            .await
+            .unwrap();
+
+        let run_runtime = runtime.clone();
+        let run_session_id = session_id.clone();
+        let run = tokio::spawn(async move {
+            run_runtime
+                .run_session(run_session_id, 1)
+                .await
+                .expect("run completes once the slow task is released")
+        });
+
+        // max_concurrent=1 keeps "base" behind "slow", so holding the slow
+        // task parks the whole run after its first task has started.
+        executor
+            .slow_started
+            .acquire()
+            .await
+            .expect("test start semaphore remains open")
+            .forget();
+
+        let mid_run = runtime.session_results(&session_id).await.unwrap();
+        assert!(
+            mid_run.is_empty(),
+            "the evidence map must stay empty while the run is in flight; \
+             incremental progress is delivered via per-task UI events"
+        );
+
+        // Release the slow task; the run then completes "base" and finishes.
+        executor.slow_release.add_permits(1);
+        let run = run.await.expect("run task joins");
+        let final_results = runtime.session_results(&session_id).await.unwrap();
+        assert_eq!(final_results.len(), 2);
+        assert!(Arc::ptr_eq(&run.evidence, &final_results));
+
+        // Per-task results reached the event stream incrementally, in
+        // completion order, while the map itself was withheld until the end.
+        let delivered: Vec<String> = receiver
+            .drain()
+            .into_iter()
+            .filter_map(|event| match event {
+                UiEvent::DiagnosticResult(result) => Some(result.task_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(delivered, ["slow".to_string(), "base".to_string()]);
     }
 }

@@ -19,4 +19,4 @@ mod wmi_native;
 mod runtime;
 
 pub use monitor::*;
-pub use runtime::{NativeMonitorRuntime, UiBusMonitorEmitter};
+pub use runtime::{NativeMonitorRuntime, ProcessQueryOutcome, UiBusMonitorEmitter};

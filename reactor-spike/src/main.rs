@@ -69,7 +69,7 @@ use save_picker::{
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex, RwLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 use subscription_auth_support::{
     SubscriptionAuthRuntime, SubscriptionAuthState, SubscriptionAuthWorkerEvent,
@@ -1125,12 +1125,25 @@ fn take_startup_scan_when_ready(
     true
 }
 
-fn build_diagnostic_executor() -> Result<tokio::runtime::Runtime, String> {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(5)
-        .thread_name("wfdiag-diagnostic")
-        .build()
-        .map_err(|error| format!("could not create the diagnostic worker pool: {error}"))
+/// The scan executor's process-wide runtime. Building a 5-worker multi-thread
+/// runtime per scan start/run/cancel created and destroyed ~10 threads per
+/// scan and blocked on the shutdown barrier while the user watched "Stop
+/// scan". `enable_all()` also arms the IO/time drivers any diagnostic task
+/// that uses tokio networking or timers needs (without them such use panics
+/// inside the executor and surfaces as a misleading queue rejection).
+fn shared_diagnostic_executor() -> Result<&'static tokio::runtime::Runtime, String> {
+    static EXECUTOR: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+    EXECUTOR
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(5)
+                .thread_name("wfdiag-diagnostic")
+                .enable_all()
+                .build()
+                .map_err(|error| format!("could not create the diagnostic worker pool: {error}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -8319,10 +8332,12 @@ impl WfdiagSpike {
                 let result = runtime
                     .request_processes(query)
                     .map_err(|error| error.to_string())
-                    .and_then(|receiver| {
-                        receiver
-                            .blocking_recv()
-                            .map_err(|_| "native process worker closed the query".to_string())
+                    .and_then(|receiver| match receiver.blocking_recv() {
+                        Ok(wfdiag_native_monitor::ProcessQueryOutcome::Page(page)) => Ok(page),
+                        Ok(wfdiag_native_monitor::ProcessQueryOutcome::Superseded) => {
+                            Err("process query was superseded by a newer one".to_string())
+                        }
+                        Err(_) => Err("native process worker closed the query".to_string()),
                     });
                 Message::ProcessQueryFinished { request_id, result }
             },
@@ -8547,7 +8562,7 @@ impl WfdiagSpike {
             history_tag,
         );
         if let Some(history) = self.history_runtime.as_ref()
-            && let Ok(reply) = history.request_compare_current_to_latest(current_record)
+            && let Ok(reply) = history.request_compare_current_to_latest(std::sync::Arc::new(current_record))
         {
             self.report_prepare_task = Some(spawn_report_generation_preparation(
                 context, request_id, generation, reply,
@@ -9607,7 +9622,7 @@ impl WfdiagSpike {
         self.status = format!("Starting {}…", scan_kind_label(scan_kind));
 
         self.diagnostic_start_task = Some(context.spawn_background_with_rejection(
-            move |_| match build_diagnostic_executor() {
+            move |_| match shared_diagnostic_executor() {
                 Ok(executor) => match executor.block_on(runtime.start_session(task_ids, scan_kind))
                 {
                     Ok(session_id) => Message::DiagnosticSessionStarted {
@@ -9647,7 +9662,7 @@ impl WfdiagSpike {
         let run_session_id = session_id.clone();
         self.diagnostic_run_task = Some(context.spawn_background_with_rejection(
             move |_| {
-                match build_diagnostic_executor() {
+                match shared_diagnostic_executor() {
                     Ok(executor) => match executor
                         .block_on(runtime.run_session(run_session_id.clone(), max_concurrent_tasks))
                     {
@@ -9711,7 +9726,7 @@ impl WfdiagSpike {
         let cancel_session_id = session_id.clone();
         let rejection_session_id = session_id.clone();
         self.diagnostic_cancel_task = Some(context.spawn_background_with_rejection(
-            move |_| match build_diagnostic_executor() {
+            move |_| match shared_diagnostic_executor() {
                 Ok(executor) => {
                     let error = executor
                         .block_on(runtime.cancel_session(&cancel_session_id))
@@ -9796,10 +9811,18 @@ impl WfdiagSpike {
                 } else {
                     self.diagnostic_results.push(result);
                 }
+                // Catalog order, computed once per event instead of one
+                // linear catalog scan per result inside the key closure.
+                let catalog_order: std::collections::HashMap<&str, usize> = self
+                    .diagnostic_catalog
+                    .iter()
+                    .enumerate()
+                    .map(|(index, task)| (task.id.as_str(), index))
+                    .collect();
                 self.diagnostic_results.sort_by_key(|result| {
-                    self.diagnostic_catalog
-                        .iter()
-                        .position(|task| task.id == result.task_id)
+                    catalog_order
+                        .get(result.task_id.as_str())
+                        .copied()
                         .unwrap_or(usize::MAX)
                 });
                 self.update_diagnostic_counts();
@@ -10928,16 +10951,12 @@ impl Component for WfdiagSpike {
                 self.network_loading = true;
                 context.spawn_background_with_rejection(
                     move |_cancellation| {
-                        let runtime = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build();
-                        let result = match runtime {
-                            Ok(runtime) => {
-                                let connections = runtime
-                                    .block_on(wfdiag_native_monitor::get_network_connections());
-                                Ok(connections)
-                            }
-                            Err(error) => Err(error.to_string()),
+                        // Reuse the shared scan executor instead of building a
+                        // fresh current-thread runtime per click.
+                        let result = match shared_diagnostic_executor() {
+                            Ok(runtime) => Ok(runtime
+                                .block_on(wfdiag_native_monitor::get_network_connections())),
+                            Err(error) => Err(error),
                         };
                         Message::NetworkConnectionsFinished(Box::new(result))
                     },
