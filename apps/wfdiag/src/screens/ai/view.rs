@@ -2,13 +2,18 @@
 
 #![deny(unsafe_code)]
 
+use crate::app::WfdiagShell;
 use crate::app::consts::{BOT_AVATAR, ISSUE_WARN_DARK};
+use crate::app::message::Message;
 use crate::app::policy::{ai_workspace_height, provider_display_name};
+use crate::app::screen::ShellEnv;
 use crate::app::state::{
     AiMode, AiPreparationUi, ChatDisplayMessage, ChatDisplayRole, CloudFallbackConsent,
     FullScanConsent, Page,
 };
+use crate::dialogs::settings::msg::SettingsMsg;
 use crate::fixtures::visual::VisualState;
+use crate::screens::ai::state::{AiMsg, AiScreen};
 use crate::widgets::chrome::{fa_icon_label, page_header, placed};
 use crate::widgets::icons;
 use crate::widgets::icons::FaIcon;
@@ -91,6 +96,65 @@ pub(crate) fn ai_provider_pill_content(
         active != AIProvider::None,
         cloud,
     )
+}
+
+impl AiScreen {
+    /// Paint the page from the screen's own state plus the chrome's env.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn view(&self, env: &ShellEnv<'_>, vc: &mut ViewContext<WfdiagShell>) -> View {
+        ai_page(
+            env.palette,
+            env.narrow,
+            env.window_size.height,
+            env.visual_state,
+            env.deterministic_visual,
+            env.settings.ai_enabled,
+            self.mode,
+            &self.chat_input,
+            &self.composer_reference,
+            self.answer.as_deref(),
+            &self.messages,
+            self.full_scan_consent.as_ref(),
+            self.cloud_fallback_consent.as_ref(),
+            self.provider_status.as_ref(),
+            self.status_loading,
+            self.status_error.as_deref(),
+            AiPreparationUi {
+                intent: self.pending_intent.as_ref(),
+                error: self.preparation_error.as_deref(),
+                scan_busy: env.scan.busy,
+                scan_cancelling: env.scan.cancelling,
+                completed: env.scan.completed,
+                total: env.scan.total,
+                current_task: env.scan.current_task,
+            },
+            vc.message(Message::Ai(AiMsg::SetMode(AiMode::Assistant))),
+            vc.message(Message::Ai(AiMsg::SetMode(AiMode::ScanReport))),
+            vc.callback(|value| Message::Ai(AiMsg::ChatInputChanged(value))),
+            vc.callback(|value| Message::Ai(AiMsg::UsePrompt(value))),
+            vc.message(Message::Ai(AiMsg::SendChat)),
+            vc.message(Message::Ai(AiMsg::NewConversation)),
+            vc.message(Message::Ai(AiMsg::AllowCloudFallback)),
+            vc.message(Message::Ai(AiMsg::NeverCloudFallback)),
+            vc.message(Message::Ai(AiMsg::ApproveFullScan)),
+            vc.message(Message::Ai(AiMsg::DismissFullScan)),
+            vc.message(Message::Settings(SettingsMsg::Open)),
+            vc.message(Message::Ai(AiMsg::CancelPendingIntent)),
+            vc.message(Message::Ai(AiMsg::RetryPendingIntent)),
+            self.report_text.as_deref(),
+            self.report_provider.as_deref(),
+            self.report_provider_use.as_ref(),
+            self.report_generating,
+            self.report_error.as_deref(),
+            env.scan.has_results,
+            vc.message(Message::Ai(AiMsg::GenerateReport)),
+            vc.message(Message::Ai(AiMsg::RegenerateReport)),
+            vc.message(Message::Ai(AiMsg::CancelReport)),
+            vc.message(Message::Ai(AiMsg::CopyReport)),
+            self.streaming,
+            vc.message(Message::Ai(AiMsg::CancelChat)),
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

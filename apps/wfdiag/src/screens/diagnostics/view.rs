@@ -2,11 +2,16 @@
 
 #![deny(unsafe_code)]
 
+use crate::app::WfdiagShell;
 use crate::app::consts::{
     BOT_AVATAR, DESKTOP_DARK, DESKTOP_LIGHT, STATUS_OK_DARK, STATUS_OK_LIGHT, STATUS_WARN_DARK,
     STATUS_WARN_LIGHT, STETHOSCOPE_DARK, STETHOSCOPE_LIGHT, WAND_DARK, WAND_LIGHT,
 };
+use crate::app::message::Message;
+use crate::app::screen::ShellEnv;
 use crate::app::state::{DiagnosticAnalysisDisplay, Page};
+use crate::screens::ai::state::AiMsg;
+use crate::screens::diagnostics::state::{DiagnosticsMsg, DiagnosticsScreen};
 use crate::widgets::badges::icon_status_pill;
 use crate::widgets::cards::statistic;
 use crate::widgets::chrome::{fa_icon_label, page_header, placed};
@@ -1483,6 +1488,56 @@ pub(crate) fn diagnostics_live_results_page(
                 .margin(Thickness::new(0.0, 16.0, 0.0, 0.0))
                 .content(body),
         ))
+}
+
+impl DiagnosticsScreen {
+    /// Paint the page from the screen's own state plus the chrome's env.
+    ///
+    /// `analysis_available` stays an argument because it is an AI-provider
+    /// fact, which the AI screen owns; the root passes it in.
+    pub(crate) fn view(
+        &self,
+        env: &ShellEnv<'_>,
+        analysis_available: bool,
+        vc: &mut ViewContext<WfdiagShell>,
+    ) -> View {
+        let selected_analysis = self
+            .selected_task_id
+            .as_deref()
+            .or_else(|| self.results.first().map(|result| result.task_id.as_str()))
+            .and_then(|task_id| self.analyses.get(task_id));
+        diagnostics_page(
+            env.palette,
+            env.theme,
+            env.compact,
+            &self.results,
+            &self.catalog,
+            &self.expected_task_ids,
+            &self.task_statuses,
+            self.busy(),
+            self.cancelling(),
+            self.completed,
+            self.total,
+            self.current_task.as_deref(),
+            self.duration_ms,
+            vc.message(Message::Diagnostics(DiagnosticsMsg::RequestQuickScan)),
+            vc.message(Message::Diagnostics(DiagnosticsMsg::RequestFullScan)),
+            vc.message(Message::Diagnostics(DiagnosticsMsg::CancelScan)),
+            vc.message(Message::Ai(AiMsg::ExplainLatestScan)),
+            self.selected_task_id.clone(),
+            vc.callback(|value| Message::Diagnostics(DiagnosticsMsg::SelectResult(value))),
+            &self.filter,
+            vc.callback(|value| Message::Diagnostics(DiagnosticsMsg::FilterChanged(value))),
+            self.raw_output,
+            vc.message(Message::Diagnostics(DiagnosticsMsg::SetRawOutput(false))),
+            vc.message(Message::Diagnostics(DiagnosticsMsg::SetRawOutput(true))),
+            selected_analysis,
+            analysis_available,
+            vc.message(Message::Diagnostics(DiagnosticsMsg::AnalyzeSelected)),
+            vc.message(Message::Diagnostics(DiagnosticsMsg::RetrySelectedAnalysis)),
+            vc.message(Message::Diagnostics(DiagnosticsMsg::CancelAnalysis)),
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

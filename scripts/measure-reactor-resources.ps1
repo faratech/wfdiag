@@ -1677,8 +1677,7 @@ $environmentNames = @(
     "WFDIAG_REACTOR_WIDTH",
     "WFDIAG_REACTOR_HEIGHT",
     "WFDIAG_REACTOR_THEME",
-    "WFDIAG_NO_TRAY",
-    "WFDIAG_NO_WORKERS"
+    "WFDIAG_NO_TRAY"
 )
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) {

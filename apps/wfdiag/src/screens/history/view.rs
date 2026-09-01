@@ -2,12 +2,16 @@
 
 #![deny(unsafe_code)]
 
-use crate::app::message::HistoryChangeKind;
+use crate::app::WfdiagShell;
+use crate::app::message::{HistoryChangeKind, Message};
 use crate::app::policy::{
     history_change_rows, history_display_label, history_scan_matches_filter, history_trend_badge,
 };
+use crate::app::screen::ShellEnv;
 use crate::app::state::{HistoryTaskDiffProjection, HistoryTrendBadge, Page};
+use crate::fixtures::visual::VisualState;
 use crate::screens::diagnostics::view::format_diagnostic_duration;
+use crate::screens::history::state::{HistoryMsg, HistoryScreen};
 use crate::widgets::chrome::{fa_icon_label, page_header, placed};
 use crate::widgets::icons;
 use crate::widgets::icons::FaIcon;
@@ -18,6 +22,52 @@ use wfdiag_native_projection::json_diff::{
     JsonDifference, JsonDifferenceKind, visible_differences,
 };
 use windows_reactor::*;
+
+impl HistoryScreen {
+    /// Paint the page from the screen's own state plus the chrome's env.
+    pub(crate) fn view(&self, env: &ShellEnv<'_>, vc: &mut ViewContext<WfdiagShell>) -> View {
+        history_page(
+            env.palette,
+            env.narrow,
+            env.deterministic_visual,
+            env.visual_state == VisualState::HistoryEmpty,
+            &self.summaries,
+            &self.filter,
+            self.selected_id.as_deref(),
+            self.label_draft.as_str(),
+            self.label_editing,
+            self.tag_draft.as_str(),
+            self.comparison.as_ref(),
+            self.comparing,
+            self.comparison_error.as_deref(),
+            self.expanded_task_id.as_deref(),
+            self.task_diff.as_ref(),
+            self.task_diff_loading,
+            self.task_diff_error.as_deref(),
+            self.loading,
+            self.error.as_deref(),
+            self.ack_busy,
+            vc.message(Message::History(HistoryMsg::Refresh)),
+            vc.callback(|value| Message::History(HistoryMsg::FilterChanged(value))),
+            vc.callback(|value| Message::History(HistoryMsg::Select(value))),
+            vc.message(Message::History(HistoryMsg::BeginLabelEdit)),
+            vc.message(Message::History(HistoryMsg::CancelLabelEdit)),
+            vc.callback(|value| Message::History(HistoryMsg::LabelDraftChanged(value))),
+            vc.message(Message::History(HistoryMsg::SaveLabel)),
+            vc.callback(|value| Message::History(HistoryMsg::TagDraftChanged(value))),
+            vc.message(Message::History(HistoryMsg::SaveTags)),
+            vc.callback(|value| Message::History(HistoryMsg::ToggleTaskDetail(value))),
+            vc.message(Message::History(HistoryMsg::ToggleClearConfirm(true))),
+            vc.message(Message::History(HistoryMsg::ClearConfirmed)),
+            vc.message(Message::History(HistoryMsg::ToggleClearConfirm(false))),
+            self.clear_confirm,
+            self.trends.as_deref(),
+            self.trends_loading,
+            self.trends_error.as_deref(),
+            vc.message(Message::History(HistoryMsg::RequestTrends)),
+        )
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn history_page(

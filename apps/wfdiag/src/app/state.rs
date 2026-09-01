@@ -46,8 +46,9 @@ impl PageTransition {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum AiMode {
+    #[default]
     Assistant,
     ScanReport,
 }

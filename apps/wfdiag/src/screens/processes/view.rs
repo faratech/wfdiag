@@ -2,17 +2,23 @@
 
 #![deny(unsafe_code)]
 
+use crate::app::WfdiagShell;
 use crate::app::consts::PROCESS_PAGE_SIZE;
+use crate::app::message::Message;
 use crate::app::policy::process_layout_metrics;
+use crate::app::screen::ShellEnv;
+use crate::app::shell_msg::ShellMsg;
 use crate::app::state::Page;
 use crate::fixtures::visual::PROCESS_ROWS_258;
+use crate::screens::monitor::state::MonitorMsg;
+use crate::screens::processes::state::{ProcessesMsg, ProcessesScreen};
 use crate::widgets::chrome::{fa_icon_label, page_header, placed};
 use crate::widgets::icons;
 use crate::widgets::icons::FaIcon;
 use crate::widgets::palette_colors::{Palette, palette_track};
+use std::sync::Arc;
 use wfdiag_app::ports::monitor::{ProcessPage, ProcessRow, ProcessSortDirection, ProcessSortKey};
 use wfdiag_native_projection::process_identity::ProcessIdentity;
-use wfdiag_native_projection::render::fixed_process_slots;
 use windows_reactor::*;
 
 #[derive(Clone, PartialEq)]
@@ -35,6 +41,18 @@ pub(crate) struct ProcessViewRow {
 impl ProcessViewRow {
     pub(crate) fn identity(&self) -> ProcessIdentity {
         ProcessIdentity::new(self.pid, self.start_time)
+    }
+
+    /// The reconciliation key for one row.
+    ///
+    /// #194: rows used to be keyed by their **slot index**, so a CPU-sorted
+    /// page that reorders every two seconds moved every row's contents to a
+    /// different key and forced a full re-render. Keying by the process
+    /// identity (PID plus start time) lets Reactor move the realized row
+    /// instead, and lets an unchanged row be skipped entirely.
+    pub(crate) fn row_key(&self) -> String {
+        let identity = self.identity();
+        format!("process:{}:{}", identity.pid, identity.start_time)
     }
 
     pub(crate) fn icon(&self) -> FaIcon {
@@ -102,14 +120,30 @@ pub(crate) fn format_bytes(value: u64) -> String {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub(crate) struct ProcessRowInput {
     pub(crate) palette: Palette,
     pub(crate) narrow: bool,
     pub(crate) row_width: f64,
-    pub(crate) process: ProcessViewRow,
+    pub(crate) process: Arc<ProcessViewRow>,
     pub(crate) selected: bool,
     pub(crate) select_process: Callback<Option<ProcessIdentity>>,
+}
+
+/// #194: the live tick re-queries the same page twice a second, so most rows
+/// arrive byte-identical. The screen keeps the previous `Arc` for those, which
+/// makes the row comparison a pointer test instead of thirteen field tests —
+/// and, more importantly, makes Reactor skip the realized row altogether.
+impl PartialEq for ProcessRowInput {
+    fn eq(&self, other: &Self) -> bool {
+        let same_row = Arc::ptr_eq(&self.process, &other.process) || self.process == other.process;
+        same_row
+            && self.palette == other.palette
+            && self.narrow == other.narrow
+            && self.row_width == other.row_width
+            && self.selected == other.selected
+            && self.select_process == other.select_process
+    }
 }
 
 pub(crate) struct ProcessRowComponent;
@@ -127,9 +161,37 @@ impl Component for ProcessRowComponent {
             input.palette,
             input.narrow,
             input.row_width,
-            &input.process,
+            input.process.as_ref(),
             input.selected,
             input.select_process.clone(),
+        )
+    }
+}
+
+impl ProcessesScreen {
+    /// Paint the page from the screen's own state plus the chrome's env.
+    pub(crate) fn view(&self, env: &ShellEnv<'_>, vc: &mut ViewContext<WfdiagShell>) -> View {
+        processes_page(
+            env.palette,
+            env.window_size.width,
+            env.pane_expanded,
+            &self.filter,
+            self.page.as_ref(),
+            &self.rows,
+            self.loading,
+            self.error.as_deref(),
+            self.sort_key,
+            self.sort_direction,
+            env.deterministic_visual,
+            self.selected,
+            env.monitoring_paused,
+            vc.callback(|value| Message::Processes(ProcessesMsg::FilterChanged(value))),
+            vc.callback(|value| Message::Processes(ProcessesMsg::Sort(value))),
+            vc.message(Message::Processes(ProcessesMsg::Previous)),
+            vc.message(Message::Processes(ProcessesMsg::Next)),
+            vc.callback(|value| Message::Processes(ProcessesMsg::Select(value))),
+            vc.message(Message::Monitor(MonitorMsg::ToggleMonitoring)),
+            vc.message(Message::Shell(ShellMsg::Refresh)),
         )
     }
 }
@@ -141,6 +203,7 @@ pub(crate) fn processes_page(
     pane_expanded: bool,
     filter: &str,
     process_page: Option<&ProcessPage>,
+    live_rows: &[Arc<ProcessViewRow>],
     loading: bool,
     error: Option<&str>,
     sort_key: ProcessSortKey,
@@ -171,17 +234,12 @@ pub(crate) fn processes_page(
                     || process.pid.to_string().contains(&needle)
                     || process.status.to_ascii_lowercase().contains(&needle)
             })
-            .map(ProcessViewRow::from)
+            .map(|process| Arc::new(ProcessViewRow::from(process)))
             .collect::<Vec<_>>();
         let total = if needle.is_empty() { 450 } else { rows.len() };
         (rows, total, 0, PROCESS_PAGE_SIZE)
     } else if let Some(page) = process_page {
-        (
-            page.items.iter().map(ProcessViewRow::from).collect(),
-            page.total,
-            page.offset,
-            page.limit,
-        )
+        (live_rows.to_vec(), page.total, page.offset, page.limit)
     } else {
         (Vec::new(), 0, 0, PROCESS_PAGE_SIZE)
     };
@@ -191,25 +249,29 @@ pub(crate) fn processes_page(
             .iter()
             .take(visible)
             .find(|process| identity.matches_observation(process.identity()))
-            .cloned()
+            .map(Arc::clone)
     });
-    // Positional keys never change, even when CPU sorting reorders every row
-    // or the live page count shrinks. Reactor can update realized slot inputs
-    // without resetting the ItemsRepeater's virtual collection.
-    let rows = fixed_process_slots(&display_rows)
-        .map(|(index, process)| {
-            let row = process.map_or_else(View::empty, |process| {
+    // #194: rows are keyed by process identity, not by slot index. A
+    // CPU-sorted page reorders on every live tick; with positional keys that
+    // moved every row's contents into a different slot and re-rendered the
+    // whole table twice a second. With identity keys Reactor moves the
+    // realized row, and an unchanged row compares equal and is skipped.
+    let rows = display_rows
+        .iter()
+        .take(visible)
+        .map(|process| {
+            KeyedView::new(
+                process.row_key(),
                 View::component::<ProcessRowComponent>(ProcessRowInput {
                     palette,
                     narrow,
                     row_width,
-                    process: process.clone(),
+                    process: Arc::clone(process),
                     selected: selected_identity
                         .is_some_and(|identity| identity.matches_observation(process.identity())),
                     select_process: select_process.clone(),
-                })
-            });
-            KeyedView::new(index, row)
+                }),
+            )
         })
         .collect::<Vec<_>>();
 
@@ -328,7 +390,7 @@ pub(crate) fn processes_page(
         )));
     let detail = selected
         .as_ref()
-        .map(|process| process_details_258(palette, process, select_process))
+        .map(|process| process_details_258(palette, process.as_ref(), select_process))
         .unwrap_or_else(View::empty);
     let layout: View = if narrow {
         StackPanel::new().spacing(12.0).children((table, detail))

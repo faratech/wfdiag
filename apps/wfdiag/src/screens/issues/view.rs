@@ -2,14 +2,20 @@
 
 #![deny(unsafe_code)]
 
+use crate::app::WfdiagShell;
 use crate::app::consts::{
     ISSUE_INFO_DARK, ISSUE_INFO_LIGHT, ISSUE_SHIELD_DARK, ISSUE_SHIELD_LIGHT,
     ISSUE_STETHOSCOPE_DARK, ISSUE_STETHOSCOPE_LIGHT, ISSUE_USER_SHIELD_DARK,
     ISSUE_USER_SHIELD_LIGHT, ISSUE_WARN_DARK, ISSUE_WARN_LIGHT, STATUS_OK_DARK, STATUS_OK_LIGHT,
 };
+use crate::app::message::Message;
 use crate::app::policy::action_run_status_text;
+use crate::app::screen::ShellEnv;
+use crate::app::shell_msg::ShellMsg;
 use crate::app::state::{FixPlanActionSelection, IssuePrioritizationDisplay, Page};
 use crate::screens::ai::view::report_provider_attribution;
+use crate::screens::diagnostics::state::DiagnosticsMsg;
+use crate::screens::issues::state::{IssuesMsg, IssuesScreen};
 use crate::widgets::chrome::{fa_icon_label, page_header};
 use crate::widgets::icons::FaIcon;
 use crate::widgets::markdown_render::{MarkdownStyle, render_markdown_lite};
@@ -24,6 +30,53 @@ use wfdiag_native_remediation::runtime::{
     ActionItemRun, ActionItemStatus, ActionRunStatus, ActionRunSummary,
 };
 use windows_reactor::*;
+
+impl IssuesScreen {
+    /// Paint the page from the screen's own state plus the chrome's env.
+    ///
+    /// `competing_action_busy` folds in the review dialogs, which are the
+    /// shell's, so the page cannot start a second remediation behind one.
+    pub(crate) fn view(
+        &self,
+        env: &ShellEnv<'_>,
+        competing_action_busy: bool,
+        vc: &mut ViewContext<WfdiagShell>,
+    ) -> View {
+        issues_page(
+            env.palette,
+            env.theme,
+            &self.issues,
+            &self.maintenance,
+            self.fix_plan.as_ref(),
+            self.fix_plan_busy,
+            self.fix_plan_error.as_deref(),
+            &self.prioritization,
+            self.active_run.as_ref(),
+            &self.run_history,
+            &self.expanded_runs,
+            competing_action_busy,
+            env.settings.ai_enabled,
+            env.is_admin,
+            self.refreshing,
+            self.error.as_deref(),
+            env.scan.has_results,
+            self.projection_current(env.scan.session_id),
+            vc.message(Message::Diagnostics(DiagnosticsMsg::RequestQuickScan)),
+            vc.callback(|value| Message::Issues(IssuesMsg::RunRemediation(value))),
+            vc.callback(|value| Message::Issues(IssuesMsg::AskAiAboutIssue(value))),
+            vc.message(Message::Issues(IssuesMsg::Prioritize)),
+            vc.message(Message::Issues(IssuesMsg::CancelPrioritization)),
+            vc.message(Message::Issues(IssuesMsg::ProposeFixPlan)),
+            vc.message(Message::Issues(IssuesMsg::CancelFixPlan)),
+            vc.callback(|value| Message::Issues(IssuesMsg::ReviewFixPlanActions(value))),
+            vc.message(Message::Issues(IssuesMsg::CancelActionRun)),
+            vc.callback(|(run_id, expanded)| {
+                Message::Issues(IssuesMsg::RunExpandedChanged { run_id, expanded })
+            }),
+            vc.message(Message::Shell(ShellMsg::RestartAsAdmin)),
+        )
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn issues_page(
@@ -275,11 +328,15 @@ pub(crate) fn issues_page(
         maintenance_card(palette, maintenance, run_remediation),
     ));
 
-    // The page content overflows the viewport (issue cards + 8 maintenance
-    // rows); without the viewer the tail is clipped and unreachable.
-    ScrollViewer::new()
-        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
-        .content(StackPanel::new().spacing(12.0).keyed_children(children))
+    // #193: pages never nest ScrollViewers. This content overflows the
+    // viewport (issue cards plus eight maintenance rows), and it used to wrap
+    // itself in a viewer nested inside the shell's page host. The inner viewer
+    // was measured with unbounded height by the outer one, so it never
+    // scrolled, while the outer one had its scrollbar hidden — which is why
+    // only the first three maintenance rows were reachable for a standard
+    // user. The host now owns the single, visible viewer; the page returns
+    // plain content.
+    StackPanel::new().spacing(12.0).keyed_children(children)
 }
 
 pub(crate) const fn action_item_status_label(status: ActionItemStatus) -> &'static str {
@@ -678,19 +735,15 @@ pub(crate) fn issues_empty_page(
         View::empty()
     };
 
-    // A clean scan still shows all eight always-available maintenance rows.
-    // The hero plus that catalog is taller than the normal workspace, so the
-    // empty branch needs the same reachable overflow behavior as the detected
-    // issue branch above. Without this viewer only the first few rows are
-    // realized and neither keyboard nor UI Automation can reach the rest.
-    ScrollViewer::new()
-        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
-        .content(StackPanel::new().spacing(0.0).children((
-            page_header(palette, Page::Issues, View::empty()),
-            hero,
-            action_panel,
-            maintenance_card(palette, maintenance, run_remediation),
-        )))
+    // A clean scan still shows all eight always-available maintenance rows,
+    // and the hero plus that catalog is taller than the workspace. #193: the
+    // shell's page host scrolls it — pages never nest ScrollViewers.
+    StackPanel::new().spacing(0.0).children((
+        page_header(palette, Page::Issues, View::empty()),
+        hero,
+        action_panel,
+        maintenance_card(palette, maintenance, run_remediation),
+    ))
 }
 
 pub(crate) const fn issue_ai_action_enabled(ai_enabled: bool, competing_action_busy: bool) -> bool {
@@ -1528,5 +1581,24 @@ mod tests {
         assert!(!issue_ai_action_enabled(false, false));
         assert!(!issue_ai_action_enabled(true, true));
         assert!(!issue_ai_action_enabled(false, true));
+    }
+
+    #[test]
+    fn the_issues_page_never_nests_a_scroll_viewer() {
+        // #193. Both branches of this page used to wrap themselves in a
+        // scroll viewer nested inside the shell's page host. The inner one was
+        // measured with unbounded height by the outer one, so it never
+        // scrolled, and the outer one's scrollbar was hidden — which is why a
+        // standard user could only reach three of the eight maintenance rows.
+        // The host owns the one viewer now. Asserting on the source is what
+        // makes a re-introduction impossible to miss: `View` exposes no public
+        // way to inspect its root control. The needle is split so this test's
+        // own text is not a match.
+        let needle = concat!("Scroll", "Viewer::new()");
+        let occurrences = include_str!("view.rs").matches(needle).count();
+        assert_eq!(
+            occurrences, 0,
+            "pages never nest scroll viewers: the shell page host owns the only one (#193)"
+        );
     }
 }

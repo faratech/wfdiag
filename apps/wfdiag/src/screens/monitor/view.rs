@@ -2,7 +2,12 @@
 
 #![deny(unsafe_code)]
 
+use crate::app::WfdiagShell;
+use crate::app::message::Message;
+use crate::app::screen::ShellEnv;
+use crate::app::shell_msg::ShellMsg;
 use crate::app::state::{MonitorHistory, MonitorMetric, Page};
+use crate::screens::monitor::state::{MonitorMsg, MonitorScreen};
 use crate::widgets::cards::metric_card;
 use crate::widgets::chrome::{fa_icon_label, page_header};
 use crate::widgets::icons;
@@ -172,6 +177,25 @@ pub(crate) fn monitor_status_pill(palette: Palette, paused: bool) -> View {
                         .vertical_alignment(VerticalAlignment::Center),
                 )),
         )
+}
+
+impl MonitorScreen {
+    /// Paint the page from the screen's own state plus the chrome's env.
+    pub(crate) fn view(&self, env: &ShellEnv<'_>, vc: &mut ViewContext<WfdiagShell>) -> View {
+        monitor_page(
+            env.palette,
+            env.narrow,
+            self.paused,
+            self.error.as_deref(),
+            self.stats.as_ref(),
+            &self.history,
+            vc.message(Message::Monitor(MonitorMsg::ToggleMonitoring)),
+            vc.message(Message::Shell(ShellMsg::Refresh)),
+            self.network_connections.as_deref(),
+            self.network_loading,
+            vc.message(Message::Monitor(MonitorMsg::RequestNetworkConnections)),
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

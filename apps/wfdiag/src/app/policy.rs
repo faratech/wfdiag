@@ -12,7 +12,7 @@ use crate::app::consts::{
     WINDOW_HOOK_RETRY_MIN,
 };
 use crate::app::message::HistoryChangeKind;
-use crate::app::state::HistoryTrendBadge;
+use crate::app::state::{HistoryTrendBadge, Page};
 use crate::platform::window;
 use std::sync::Arc;
 use std::time::Duration;
@@ -549,6 +549,20 @@ pub(crate) fn diagnostics_uses_compact_layout(client_width: f64) -> bool {
     client_width < DIAGNOSTICS_COMPACT_BREAKPOINT
 }
 
+/// Whether the shell's page host scrolls the open page (#193).
+///
+/// The host owns the **one** `ScrollViewer` in the window and always shows its
+/// scrollbar when it has one. Pages return plain content: a viewer nested
+/// inside this one is measured with unbounded height, so it never scrolls and
+/// everything past the fold becomes unreachable by pointer, keyboard and UI
+/// Automation alike.
+///
+/// The single exception is the full-width Diagnostics layout, which sizes
+/// itself to the viewport and must not scroll at all; its compact layout does.
+pub(crate) const fn page_host_scrolls(page: Page, diagnostics_compact: bool) -> bool {
+    !matches!(page, Page::Diagnostics) || diagnostics_compact
+}
+
 pub(crate) fn process_layout_metrics(client_width: f64, pane_expanded: bool) -> (bool, f64) {
     let pane_width = if pane_expanded { 230.0 } else { 64.0 };
     let content_width = (client_width - pane_width - SHELL_CONTENT_HORIZONTAL_CHROME).max(1.0);
@@ -1031,6 +1045,20 @@ pub(crate) fn resolved_export_format(value: &str) -> ReportFormat {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn the_page_host_owns_scrolling_for_every_page_but_wide_diagnostics() {
+        // #193: the shell's page host is the ONE ScrollViewer, and it always
+        // shows its bar. Wide Diagnostics lays itself out inside the viewport
+        // and must not scroll; its compact layout must.
+        assert!(page_host_scrolls(Page::Issues, false));
+        assert!(page_host_scrolls(Page::Monitor, false));
+        assert!(page_host_scrolls(Page::Processes, false));
+        assert!(page_host_scrolls(Page::Ai, false));
+        assert!(page_host_scrolls(Page::History, false));
+        assert!(!page_host_scrolls(Page::Diagnostics, false));
+        assert!(page_host_scrolls(Page::Diagnostics, true));
+    }
     use crate::app::message::SettingsDialogAction;
     use crate::fixtures::visual::fixture_258_system_info;
     use crate::screens::history::view::history_comparison_placeholder;

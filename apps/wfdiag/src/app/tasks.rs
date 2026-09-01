@@ -10,7 +10,13 @@
 
 use crate::app::WfdiagShell;
 use crate::app::consts::{PALETTE_FOCUS_DELAY, PALETTE_RESTORE_DELAY, WINDOW_COMMAND_POLL};
-use crate::app::message::{Message, PaletteFocusAction};
+use crate::app::message::Message;
+use crate::app::native_msg::NativeMsg;
+use crate::dialogs::about::state::AboutMsg;
+use crate::dialogs::export::msg::ExportMsg;
+use crate::dialogs::palette::msg::PaletteFocusAction;
+use crate::dialogs::palette::msg::PaletteMsg;
+use crate::dialogs::update_notice::state::UpdateNoticeMsg;
 use crate::platform::external::launch_external_action;
 use crate::platform::save_picker::{ValidatedExportPath, ValidatedSupportPackagePaths};
 use crate::platform::{instance, save_picker, window};
@@ -37,16 +43,16 @@ pub(crate) fn spawn_palette_focus_delay(
             let deadline = Instant::now() + delay;
             loop {
                 if cancellation.is_cancelled() {
-                    return Message::PaletteFocusCancelled { epoch };
+                    return Message::Palette(PaletteMsg::FocusCancelled { epoch });
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Message::PaletteFocusReady { epoch, action };
+                    return Message::Palette(PaletteMsg::FocusReady { epoch, action });
                 }
                 std::thread::sleep(remaining.min(Duration::from_millis(25)));
             }
         },
-        Message::PaletteFocusRejected { epoch },
+        Message::Palette(PaletteMsg::FocusRejected { epoch }),
     )
 }
 
@@ -59,16 +65,16 @@ pub(crate) fn spawn_window_hook_retry(
             let deadline = Instant::now() + delay;
             loop {
                 if cancellation.is_cancelled() {
-                    return Message::WindowHookRetryRejected;
+                    return Message::Native(NativeMsg::WindowHookRetryRejected);
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Message::WindowHookRetryReady;
+                    return Message::Native(NativeMsg::WindowHookRetryReady);
                 }
                 std::thread::sleep(remaining.min(Duration::from_millis(100)));
             }
         },
-        Message::WindowHookRetryRejected,
+        Message::Native(NativeMsg::WindowHookRetryRejected),
     )
 }
 
@@ -83,24 +89,24 @@ pub(crate) fn spawn_instance_watch(
     context.spawn_background_with_rejection(
         move |cancellation| loop {
             if cancellation.is_cancelled() {
-                return Message::InstanceWaitCancelled;
+                return Message::Native(NativeMsg::InstanceWaitCancelled);
             }
             if let Some(snapshot) = window::lifecycle_snapshot_if_changed(lifecycle_revision) {
-                return Message::WindowLifecycleChanged(snapshot);
+                return Message::Native(NativeMsg::WindowLifecycleChanged(snapshot));
             }
             if instance::activation_requested() {
-                return Message::InstanceActivated;
+                return Message::Native(NativeMsg::InstanceActivated);
             }
             if let Some(shortcut) = window::take_global_shortcut() {
-                return Message::GlobalShortcut(shortcut);
+                return Message::Native(NativeMsg::GlobalShortcut(shortcut));
             }
             let command = window::take_tray_command();
             if command != window::TRAY_COMMAND_NONE {
-                return Message::TrayCommand(command);
+                return Message::Native(NativeMsg::TrayCommand(command));
             }
             std::thread::sleep(WINDOW_COMMAND_POLL);
         },
-        Message::InstanceWaitCancelled,
+        Message::Native(NativeMsg::InstanceWaitCancelled),
     )
 }
 
@@ -115,25 +121,25 @@ pub(crate) fn spawn_update_notice_timer(
             let deadline = Instant::now() + duration;
             loop {
                 if cancellation.is_cancelled() {
-                    return Message::UpdateNoticeTimerCancelled {
+                    return Message::UpdateNotice(UpdateNoticeMsg::TimerCancelled {
                         epoch,
                         timer_generation,
-                    };
+                    });
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Message::UpdateNoticeExpired {
+                    return Message::UpdateNotice(UpdateNoticeMsg::Expired {
                         epoch,
                         timer_generation,
-                    };
+                    });
                 }
                 std::thread::sleep(remaining.min(Duration::from_millis(100)));
             }
         },
-        Message::UpdateNoticeTimerRejected {
+        Message::UpdateNotice(UpdateNoticeMsg::TimerRejected {
             epoch,
             timer_generation,
-        },
+        }),
     )
 }
 
@@ -144,11 +150,13 @@ pub(crate) fn spawn_about_external_action(
     update: Option<UpdateInfo>,
 ) -> ComponentTask {
     context.spawn_background_with_rejection(
-        move |_| Message::AboutExternalFinished {
-            epoch,
-            result: launch_external_action(action, update.as_ref()),
+        move |_| {
+            Message::About(AboutMsg::ExternalFinished {
+                epoch,
+                result: launch_external_action(action, update.as_ref()),
+            })
         },
-        Message::AboutExternalRejected { epoch },
+        Message::About(AboutMsg::ExternalRejected { epoch }),
     )
 }
 
@@ -174,17 +182,17 @@ pub(crate) fn spawn_export_file_write(
                             .map_err(|error| error.to_string())
                     })
             };
-            Message::ExportFileSaved {
+            Message::Export(ExportMsg::FileSaved {
                 epoch,
                 result: Box::new(result),
-            }
+            })
         },
-        Message::ExportFileSaved {
+        Message::Export(ExportMsg::FileSaved {
             epoch,
             result: Box::new(Err(
                 "The Reactor background queue rejected the export write".to_string(),
             )),
-        },
+        }),
     )
 }
 
@@ -223,16 +231,16 @@ pub(crate) fn spawn_support_package_write(
                 })?;
                 Ok(validated)
             };
-            Message::SupportPackageSaved {
+            Message::Export(ExportMsg::SupportPackageSaved {
                 epoch,
                 result: Box::new(write()),
-            }
+            })
         },
-        Message::SupportPackageSaved {
+        Message::Export(ExportMsg::SupportPackageSaved {
             epoch,
             result: Box::new(Err(
                 "The Reactor background queue rejected the support-package write".to_string(),
             )),
-        },
+        }),
     )
 }

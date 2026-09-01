@@ -1,23 +1,36 @@
-//! The shell's message alphabet and the small payload enums it carries.
+//! The shell's message alphabet.
 //!
-//! Every variant here is either a **user intent** or a **UI-side timer/dialog
-//! callback**. There is no longer one variant per engine worker: worker output
-//! arrives as a single [`Message::App`] batch of [`AppEvent`]s drained from
-//! [`wfdiag_app::AppService`], which has already applied every staleness guard.
-//! That is what removed the `*WorkerEventReceived` / `*Finished` / `*Rejected`
-//! / `*WaitCancelled` / `*WorkerStopped` families.
+//! Every variant is either a **user intent**, a **UI-side timer/dialog
+//! callback**, or one drained batch of engine facts. There is no longer one
+//! variant per engine worker: worker output arrives as a single
+//! [`Message::App`] batch of [`AppEvent`]s drained from
+//! [`wfdiag_app::AppService`], which has already applied every staleness
+//! guard.
+//!
+//! The alphabet is one level deep on purpose. Every message except the four
+//! Reactor-level ones belongs to exactly one screen or dialog, and names that
+//! owner: `Message::Processes(..)` is routed to `ProcessesScreen::update` and
+//! can touch nothing else. That is what keeps [`crate::app::WfdiagShell`] a
+//! dispatcher rather than a god object.
 
 #![deny(unsafe_code)]
 
-use crate::app::state::{AiMode, FixPlanActionSelection};
-use crate::platform::save_picker::{SavePickerReply, ValidatedSupportPackagePaths};
-use crate::platform::window;
+use crate::app::native_msg::NativeMsg;
+use crate::app::shell_msg::ShellMsg;
+use crate::dialogs::about::state::AboutMsg;
+use crate::dialogs::action_review::state::ActionReviewMsg;
+use crate::dialogs::export::msg::ExportMsg;
+use crate::dialogs::palette::msg::PaletteMsg;
+use crate::dialogs::settings::msg::SettingsMsg;
+use crate::dialogs::shortcuts_help::state::ShortcutHelpMsg;
+use crate::dialogs::update_notice::state::UpdateNoticeMsg;
+use crate::screens::ai::state::AiMsg;
+use crate::screens::diagnostics::state::DiagnosticsMsg;
+use crate::screens::history::state::HistoryMsg;
+use crate::screens::issues::state::IssuesMsg;
+use crate::screens::monitor::state::MonitorMsg;
+use crate::screens::processes::state::ProcessesMsg;
 use wfdiag_app::AppEvent;
-use wfdiag_app::domain::subscriptions::InstallPrompt;
-use wfdiag_app::ports::monitor::ProcessSortKey;
-use wfdiag_native_ai_chat::SubscriptionAuthProvider;
-use wfdiag_native_projection::process_identity::ProcessIdentity;
-use wfdiag_native_update::policy::AboutExternalAction;
 use windows_reactor::*;
 
 #[derive(Clone)]
@@ -67,12 +80,6 @@ pub(crate) enum HistoryChangeKind {
     Changed,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PaletteFocusAction {
-    FocusQuery,
-    RestorePrevious,
-}
-
 impl HistoryChangeKind {
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -83,203 +90,36 @@ impl HistoryChangeKind {
     }
 }
 
-/// Which export payload a finished picker or write belongs to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ExportPickerKind {
-    /// The single-file report export.
-    File,
-    /// The three-file support package.
-    SupportPackage,
-}
-
 #[derive(Clone)]
 pub(crate) enum Message {
     /// One coalesced native-window wake. The UI thread drains the application
     /// service and every remaining UI-owned signal source in response.
     NativeSignalReady,
-    /// One drained batch of engine facts. Every staleness comparison already
-    /// happened inside `AppService::drain`, so these are applied in order with
-    /// no further guards.
-    App(Vec<AppEvent>),
     /// First-publication handoff. Reactor commits native window commands
     /// before running view effects, so this is the earliest deterministic
     /// point where Win32 lifecycle/shortcut integration can discover the HWND.
     WindowHookBootstrap,
-    Navigate(Option<String>),
     WindowSize(WindowSize),
     ColorSchemeChanged(ColorScheme),
-    TogglePane,
-    ToggleTheme,
-    OpenAbout,
-    AboutClosed {
-        epoch: u64,
-    },
-    AboutExternalRequested {
-        epoch: u64,
-        action: AboutExternalAction,
-    },
-    AboutExternalFinished {
-        epoch: u64,
-        result: Result<(), String>,
-    },
-    AboutExternalRejected {
-        epoch: u64,
-    },
-    UpdateNoticeClosed {
-        epoch: u64,
-    },
-    UpdateNoticeExpired {
-        epoch: u64,
-        timer_generation: u64,
-    },
-    UpdateNoticePointerEntered {
-        epoch: u64,
-    },
-    UpdateNoticePointerExited {
-        epoch: u64,
-    },
-    UpdateNoticeTimerCancelled {
-        epoch: u64,
-        timer_generation: u64,
-    },
-    UpdateNoticeTimerRejected {
-        epoch: u64,
-        timer_generation: u64,
-    },
-    OpenSettings,
-    SettingsDialog {
-        epoch: u64,
-        action: SettingsDialogAction,
-    },
-    RefreshProviderModels,
-    CancelProviderModels,
-    RefreshSubscriptionAuth(SubscriptionAuthProvider),
-    StartSubscriptionSignIn(SubscriptionAuthProvider),
-    StartSubscriptionSignOut(SubscriptionAuthProvider),
-    CancelSubscriptionAuth,
-    RequestSubscriptionInstall(SubscriptionAuthProvider),
-    SubscriptionInstallPromptClosed {
-        prompt: InstallPrompt,
-        result: ContentDialogResult,
-    },
-    CancelSubscriptionInstall,
-    RequestQuickScan,
-    RequestFullScan,
-    CancelScan,
-    /// The off-UI-thread save picker answered (#140, #196). The epoch rejects
-    /// an answer from a request the user has already superseded.
-    ExportPickerFinished {
-        epoch: u64,
-        kind: ExportPickerKind,
-        outcome: Box<SavePickerReply>,
-    },
-    ExportFileSaved {
-        epoch: u64,
-        result: Box<Result<std::path::PathBuf, String>>,
-    },
-    SupportPackageSaved {
-        epoch: u64,
-        result: Box<Result<ValidatedSupportPackagePaths, String>>,
-    },
-    SetAiMode(AiMode),
-    ToggleMonitoring,
-    Refresh,
-    ProcessFilterChanged(String),
-    ProcessSort(ProcessSortKey),
-    ProcessPrevious,
-    ProcessNext,
-    /// The process-filter debounce elapsed. The engine is only asked for a
-    /// page once the user stops typing.
-    ProcessQueryDue {
-        revision: u64,
-    },
-    ProcessQueryDebounceEnded {
-        revision: u64,
-    },
-    SelectProcess(Option<ProcessIdentity>),
-    RefreshHistory,
-    HistoryFilterChanged(String),
-    SelectHistory(String),
-    ToggleHistoryTaskDetail(String),
-    ChatInputChanged(String),
-    UsePrompt(String),
-    SendChat,
-    GenerateReport,
-    RegenerateReport,
-    CancelReport,
-    CancelPendingAiIntent,
-    RetryPendingAiIntent,
-    CopyReport,
-    ExplainLatestScan,
-    RunRemediation(String),
-    AskAiAboutIssue(String),
-    PrioritizeIssues,
-    CancelIssuePrioritization,
-    ProposeFixPlan,
-    CancelFixPlan,
-    ReviewFixPlanActions(FixPlanActionSelection),
-    CancelChat,
-    NewConversation,
-    AllowCloudFallback,
-    NeverCloudFallback,
-    ApproveFullScan,
-    DismissFullScan,
-    TogglePalette,
-    ClosePalette,
-    PaletteFocusReady {
-        epoch: u64,
-        action: PaletteFocusAction,
-    },
-    PaletteFocusCancelled {
-        epoch: u64,
-    },
-    PaletteFocusRejected {
-        epoch: u64,
-    },
-    PaletteQueryChanged(String),
-    PaletteActiveChanged(usize),
-    PaletteCommand(String),
-    ShowShortcutHelp,
-    CloseShortcutHelp,
-    ProviderKeyDraftChanged(usize, String),
-    StoreProviderKey(usize),
-    ClearProviderKey(usize),
-    ToggleQuickScanTask(String),
-    RequestNetworkConnections,
-    DiagnosticFilterChanged(String),
-    SetDiagnosticRaw(bool),
-    SelectDiagnosticResult(String),
-    AnalyzeSelectedDiagnostic,
-    RetrySelectedDiagnosticAnalysis,
-    CancelDiagnosticAnalysis,
-    ToggleClearHistoryConfirm(bool),
-    ClearHistoryConfirmed,
-    BeginHistoryLabelEdit,
-    CancelHistoryLabelEdit,
-    HistoryLabelDraftChanged(String),
-    SaveHistoryLabel,
-    HistoryTagDraftChanged(String),
-    SaveHistoryTags,
-    RequestHistoryTrends,
-    ActionReviewDialogClosed {
-        proposal_id: String,
-        result: ContentDialogResult,
-    },
-    RepairDialogClosed {
-        proposal_id: String,
-        result: ContentDialogResult,
-    },
-    CancelActionRun,
-    ActionRunExpandedChanged {
-        run_id: String,
-        expanded: bool,
-    },
-    RestartAsAdmin,
-    InstanceWaitCancelled,
-    WindowHookRetryReady,
-    WindowHookRetryRejected,
-    InstanceActivated,
-    WindowLifecycleChanged(window::WindowLifecycleSnapshot),
-    GlobalShortcut(window::GlobalShortcutEvent),
-    TrayCommand(u8),
+    /// One Win32 lifecycle, instance, global-shortcut or tray signal.
+    Native(NativeMsg),
+    /// One drained batch of engine facts. Every staleness comparison already
+    /// happened inside `AppService::drain`, so these are applied in order with
+    /// no further guards.
+    App(Vec<AppEvent>),
+    /// One chrome message: navigation, the pane, the theme, refresh.
+    Shell(ShellMsg),
+    Diagnostics(DiagnosticsMsg),
+    Monitor(MonitorMsg),
+    Processes(ProcessesMsg),
+    Ai(AiMsg),
+    Issues(IssuesMsg),
+    History(HistoryMsg),
+    Settings(SettingsMsg),
+    About(AboutMsg),
+    UpdateNotice(UpdateNoticeMsg),
+    Export(ExportMsg),
+    Palette(PaletteMsg),
+    Shortcuts(ShortcutHelpMsg),
+    ActionReview(ActionReviewMsg),
 }
