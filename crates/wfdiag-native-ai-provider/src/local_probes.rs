@@ -282,23 +282,40 @@ impl FoundryHealthProbe for ReqwestFoundryHealthProbe {
     }
 }
 
-/// Validate a Foundry Local base URL through its documented status endpoint.
+/// Validate a Foundry Local base URL through the current status endpoint.
+///
+/// Foundry Local 0.10 moved the OpenAI-compatible API from `/openai/*` to
+/// `/v1/*` and its health document from `/openai/status` to `/status`.
+/// Probe the current route first, then retain the pre-0.10 route as a
+/// compatibility fallback. Both responses use the same `endpoints` schema.
 pub async fn foundry_service_is_healthy(base: &str) -> bool {
-    let Ok(response) = reqwest::Client::new()
-        .get(format!("{base}/openai/status"))
-        .timeout(FOUNDRY_HEALTH_TIMEOUT)
-        .send()
-        .await
-    else {
-        return false;
-    };
-    if !response.status().is_success() {
-        return false;
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + FOUNDRY_HEALTH_TIMEOUT;
+    for path in ["/status", "/openai/status"] {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        if timeout.is_zero() {
+            break;
+        }
+        let Ok(response) = client
+            .get(format!("{base}{path}"))
+            .timeout(timeout)
+            .send()
+            .await
+        else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        if response
+            .json::<Value>()
+            .await
+            .is_ok_and(|body| valid_foundry_status_body(&body))
+        {
+            return true;
+        }
     }
-    response
-        .json::<Value>()
-        .await
-        .is_ok_and(|body| valid_foundry_status_body(&body))
+    false
 }
 
 type FoundryCliCache = Arc<Mutex<Option<(Instant, Option<PathBuf>)>>>;
@@ -311,8 +328,11 @@ fn shared_foundry_cli_cache() -> FoundryCliCache {
 /// Shipping Foundry Local endpoint probe with no UI-framework dependency.
 ///
 /// A healthy configured endpoint wins. Otherwise the adapter resolves the
-/// `foundry` CLI, runs `foundry service status`, extracts its dynamic base URL,
-/// and validates `/openai/status`. CLI resolution (including a miss) is cached
+/// `foundry` CLI, asks the current CLI for `status --output json`, extracts its
+/// dynamic base URL, and validates `/status`. The pre-0.10
+/// `service status` spelling remains a fallback so existing installations do
+/// not regress during the CLI transition, as does the legacy
+/// `/openai/status` health route. CLI resolution (including a miss) is cached
 /// for 30 seconds, as in 2.5.8; endpoint health is checked on every probe.
 #[derive(Clone)]
 pub struct FoundryCliEndpointSource {
@@ -383,17 +403,33 @@ impl FoundryCliEndpointSource {
 
     async fn discover_endpoint(&self) -> Option<String> {
         let path = self.resolved_cli().await?;
-        let output = self
-            .runner
-            .run(ProcessRequest {
-                program: path,
-                args: vec!["service".to_string(), "status".to_string()],
-                timeout: FOUNDRY_STATUS_TIMEOUT,
-                what: "Foundry Local CLI".to_string(),
-            })
-            .await
-            .ok()?;
-        extract_http_base(&String::from_utf8_lossy(&output.stdout))
+        for args in [
+            vec![
+                "status".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            vec!["service".to_string(), "status".to_string()],
+        ] {
+            let Ok(output) = self
+                .runner
+                .run(ProcessRequest {
+                    program: path.clone(),
+                    args,
+                    timeout: FOUNDRY_STATUS_TIMEOUT,
+                    what: "Foundry Local CLI".to_string(),
+                })
+                .await
+            else {
+                continue;
+            };
+            if let Some(endpoint) = extract_http_base(&String::from_utf8_lossy(&output.stdout))
+                .or_else(|| extract_http_base(&String::from_utf8_lossy(&output.stderr)))
+            {
+                return Some(endpoint);
+            }
+        }
+        None
     }
 
     async fn probe_inner(&self, configured: Option<String>) -> Option<String> {
@@ -461,9 +497,15 @@ fn is_signed_in(spec: &SubscriptionCliSpec, exit_ok: bool, output: &str) -> bool
 pub struct ProcessSubscriptionCliStatusSource {
     runner: Arc<dyn ProcessRunner>,
     cache: SubscriptionProbeCache,
+    /// Per-key async mutexes: concurrent cache misses share one probe instead
+    /// of spawning one child process per caller. Entries live for the
+    /// process lifetime but are bounded by the key space (2 providers × the
+    /// few configured paths a user can set).
+    in_flight: Arc<Mutex<HashMap<(SubscriptionCli, String), Arc<tokio::sync::Mutex<()>>>>>,
 }
 
-type SubscriptionProbeCache = Arc<Mutex<HashMap<SubscriptionCli, (Instant, CliProbeSnapshot)>>>;
+type SubscriptionProbeCache =
+    Arc<Mutex<HashMap<(SubscriptionCli, String), (Instant, CliProbeSnapshot)>>>;
 
 fn shared_subscription_probe_cache() -> SubscriptionProbeCache {
     static CACHE: OnceLock<SubscriptionProbeCache> = OnceLock::new();
@@ -492,6 +534,7 @@ impl ProcessSubscriptionCliStatusSource {
         Self {
             runner: Arc::new(TokioProcessRunner),
             cache: shared_subscription_probe_cache(),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -500,6 +543,7 @@ impl ProcessSubscriptionCliStatusSource {
         Self {
             runner,
             cache: Arc::new(Mutex::new(HashMap::new())),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -507,7 +551,7 @@ impl ProcessSubscriptionCliStatusSource {
     /// installation, or explicit refresh action.
     pub fn invalidate(&self, provider: SubscriptionCli) {
         if let Ok(mut cache) = self.cache.lock() {
-            cache.remove(&provider);
+            cache.retain(|(cached_provider, _), _| *cached_provider != provider);
         }
     }
 
@@ -571,21 +615,50 @@ impl ProcessSubscriptionCliStatusSource {
         provider: SubscriptionCli,
         configured_path: Option<String>,
     ) -> CliProbeSnapshot {
-        let cached = self.cache.lock().ok().and_then(|cache| {
-            cache
-                .get(&provider)
-                .filter(|(at, _)| at.elapsed() < PROBE_TTL)
-                .map(|(_, probe)| probe.clone())
-        });
-        if let Some(probe) = cached {
+        let cache_key = (
+            provider,
+            configured_path
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string(),
+        );
+        if let Some(probe) = self.cached_snapshot(&cache_key) {
+            return probe;
+        }
+
+        // Single-flight: serialize concurrent misses per key, then re-check
+        // the cache so followers adopt the leader's fresh result instead of
+        // spawning their own child process.
+        let guard = {
+            let mut in_flight = self
+                .in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            in_flight
+                .entry(cache_key.clone())
+                .or_default()
+                .clone()
+        };
+        let _permit = guard.lock().await;
+        if let Some(probe) = self.cached_snapshot(&cache_key) {
             return probe;
         }
 
         let (fresh, conclusive) = self.probe_uncached(provider, configured_path).await;
         if conclusive && let Ok(mut cache) = self.cache.lock() {
-            cache.insert(provider, (Instant::now(), fresh.clone()));
+            cache.insert(cache_key, (Instant::now(), fresh.clone()));
         }
         fresh
+    }
+
+    fn cached_snapshot(&self, cache_key: &(SubscriptionCli, String)) -> Option<CliProbeSnapshot> {
+        self.cache.lock().ok().and_then(|cache| {
+            cache
+                .get(cache_key)
+                .filter(|(at, _)| at.elapsed() < PROBE_TTL)
+                .map(|(_, probe)| probe.clone())
+        })
     }
 }
 
@@ -603,7 +676,10 @@ impl SubscriptionCliStatusSource for ProcessSubscriptionCliStatusSource {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
 
     #[derive(Default)]
     struct FakeRunner {
@@ -643,6 +719,59 @@ mod tests {
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
         }
+    }
+
+    fn foundry_http_server(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&requests);
+        let server = thread::spawn(move || {
+            for (status, body) in responses {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let Some(mut stream) = (loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break Some(stream),
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => break None,
+                    }
+                }) else {
+                    return;
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+                if let Some(path) = request_line.split_whitespace().nth(1) {
+                    observed.lock().unwrap().push(path.to_string());
+                }
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).unwrap_or_default() == 0 || header == "\r\n" {
+                        break;
+                    }
+                }
+                let reason = if status == 200 { "OK" } else { "Not Found" };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        (base, requests, server)
     }
 
     struct FakeHealth {
@@ -716,6 +845,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn current_foundry_health_route_wins_without_a_legacy_request() {
+        let (base, requests, server) =
+            foundry_http_server(vec![(200, r#"{"endpoints":["http://127.0.0.1:5272"]}"#)]);
+
+        assert!(foundry_service_is_healthy(&base).await);
+        server.join().unwrap();
+        assert_eq!(requests.lock().unwrap().as_slice(), &["/status"]);
+    }
+
+    #[tokio::test]
+    async fn legacy_foundry_health_route_is_used_after_current_404() {
+        let (base, requests, server) = foundry_http_server(vec![
+            (404, r#"{"error":"missing"}"#),
+            (200, r#"{"Endpoints":["http://127.0.0.1:5272/openai"]}"#),
+        ]);
+
+        assert!(foundry_service_is_healthy(&base).await);
+        server.join().unwrap();
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            &["/status", "/openai/status"]
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_current_health_schema_falls_back_to_legacy() {
+        let (base, requests, server) = foundry_http_server(vec![
+            (200, r#"{"state":"ready"}"#),
+            (200, r#"{"endpoints":["http://127.0.0.1:5272/openai"]}"#),
+        ]);
+
+        assert!(foundry_service_is_healthy(&base).await);
+        server.join().unwrap();
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            &["/status", "/openai/status"]
+        );
+    }
+
+    #[tokio::test]
+    async fn foundry_health_fails_when_current_and_legacy_routes_are_invalid() {
+        let (base, requests, server) = foundry_http_server(vec![
+            (200, r#"{"endpoints":[]}"#),
+            (200, r#"{"Endpoints":[42]}"#),
+        ]);
+
+        assert!(!foundry_service_is_healthy(&base).await);
+        server.join().unwrap();
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            &["/status", "/openai/status"]
+        );
+    }
+
+    #[tokio::test]
     async fn healthy_configured_foundry_endpoint_wins_without_cli_work() {
         let runner = Arc::new(FakeRunner::default());
         let health = Arc::new(FakeHealth::new([true]));
@@ -760,10 +944,38 @@ mod tests {
         assert_eq!(requests[0].args, ["foundry"]);
         assert_eq!(requests[0].timeout, CLI_PROBE_TIMEOUT);
         assert_eq!(requests[1].program, PathBuf::from("/opt/foundry"));
-        assert_eq!(requests[1].args, ["service", "status"]);
+        assert_eq!(requests[1].args, ["status", "--output", "json"]);
         assert_eq!(requests[1].timeout, FOUNDRY_STATUS_TIMEOUT);
-        // Shipping extracts stdout even if `foundry service status` exits non-zero.
+        // Discovery extracts a URL even when the CLI exits non-zero; some
+        // historical Foundry builds did that while the service was starting.
         assert!(!runner.requests()[1].what.is_empty());
+    }
+
+    #[tokio::test]
+    async fn current_foundry_status_falls_back_to_legacy_service_status() {
+        let runner = Arc::new(FakeRunner::with_outputs(vec![
+            Ok(output(true, "/opt/foundry\n", "")),
+            Ok(output(false, "", "unknown command: status")),
+            Ok(output(
+                true,
+                "running at http://127.0.0.1:5273/openai/status",
+                "",
+            )),
+        ]));
+        let health = Arc::new(FakeHealth::new([true]));
+        let source = FoundryCliEndpointSource::with_dependencies(runner.clone(), health.clone());
+
+        let endpoint = source.probe(None).await;
+
+        assert_eq!(endpoint.as_deref(), Some("http://127.0.0.1:5273"));
+        assert_eq!(
+            health.endpoints.lock().unwrap().as_slice(),
+            &["http://127.0.0.1:5273"]
+        );
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[1].args, ["status", "--output", "json"]);
+        assert_eq!(requests[2].args, ["service", "status"]);
     }
 
     #[test]

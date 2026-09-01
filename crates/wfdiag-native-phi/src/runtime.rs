@@ -1241,6 +1241,12 @@ where
 
 /// Blocking wait for a normal inference operation. Model preparation uses a
 /// longer explicit timeout because it may download assets.
+///
+/// The 150s budget MUST stay strictly below the chat engine's
+/// `TURN_TIMEOUT_SECS` (180s): the engine's outer timeout only drops the
+/// stream future, while this `spawn_blocking` call keeps running and holds the
+/// process-wide model mutex. Bounding inference below the outer deadline means
+/// the lock is always released before a superseding turn can starve behind it.
 #[cfg(windows)]
 fn wait_for_async_with_progress_blocking<T, P>(
     op: windows_future::IAsyncOperationWithProgress<T, P>,
@@ -1251,7 +1257,7 @@ where
 {
     wait_for_async_with_progress_blocking_timeout(
         op,
-        std::time::Duration::from_secs(3 * 60),
+        std::time::Duration::from_secs(150),
         "Phi Silica generation",
     )
 }
@@ -1567,10 +1573,12 @@ pub async fn generate_response(prompt: &str) -> Result<String, String> {
         let mut cached = cached_model_guard();
         prepare_phi_runtime()?;
         ensure_cached_model_locked(&mut cached)?;
-        let result = generate_with_model(
-            cached.as_ref().expect("cached model initialized"),
-            &prompt_owned,
-        );
+        let Some(model) = cached.as_ref() else {
+            return Err(
+                "Phi Silica model was unavailable after preparation".to_string()
+            );
+        };
+        let result = generate_with_model(model, &prompt_owned);
         if result
             .as_ref()
             .err()

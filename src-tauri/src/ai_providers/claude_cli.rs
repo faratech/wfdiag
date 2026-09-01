@@ -27,7 +27,9 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Claude Code may spend a turn thinking before answering; match Codex.
-const EXEC_TIMEOUT: Duration = Duration::from_secs(180);
+/// MUST stay strictly below the engine's `TURN_TIMEOUT_SECS` (180s) so the
+/// CLI-specific timeout error and child cleanup stay reachable.
+pub(crate) const EXEC_TIMEOUT: Duration = Duration::from_secs(150);
 
 /// Fixed instruction argument: `-p` requires a prompt argument and treats
 /// piped stdin as attached content, so the real payload always goes via
@@ -183,7 +185,7 @@ fn parse_result_json(stdout: &str) -> Result<String, String> {
             continue;
         }
         let result_text = value.get("result").and_then(|r| r.as_str());
-        if value.get("is_error").and_then(|e| e.as_bool()) == Some(true) {
+        if value.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) {
             return Err(format!(
                 "Claude Code reported an error: {}",
                 result_text.unwrap_or("unknown error")

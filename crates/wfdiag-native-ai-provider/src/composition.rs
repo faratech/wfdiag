@@ -293,7 +293,17 @@ impl ProviderManagementService {
 impl ProviderManagementBackend for ProviderManagementService {
     fn status_input(&self) -> BackendFuture<'_, ProviderStatusInput> {
         Box::pin(async move {
-            let configuration = self.probes.configuration.snapshot();
+            // The settings read plus the per-provider DPAPI key checks are
+            // blocking file/Win32 work; run them on the blocking pool so they
+            // cannot stall the shared current-thread runtime while network
+            // probes are in flight. Deliberately uncached: key-set flags must
+            // reflect a just-completed credential save on the next probe.
+            let configuration_source = std::sync::Arc::clone(&self.probes.configuration);
+            let configuration = tokio::task::spawn_blocking(move || {
+                configuration_source.snapshot()
+            })
+            .await
+            .unwrap_or_default();
             let phi_probe = self.probes.phi.probe();
             let foundry_probe = self
                 .probes
@@ -362,7 +372,17 @@ impl ProviderManagementBackend for ProviderManagementService {
 
     fn list_ollama_models(&self) -> BackendFuture<'_, Result<Vec<String>, String>> {
         Box::pin(async move {
-            let configuration = self.probes.configuration.snapshot();
+            // The settings read plus the per-provider DPAPI key checks are
+            // blocking file/Win32 work; run them on the blocking pool so they
+            // cannot stall the shared current-thread runtime while network
+            // probes are in flight. Deliberately uncached: key-set flags must
+            // reflect a just-completed credential save on the next probe.
+            let configuration_source = std::sync::Arc::clone(&self.probes.configuration);
+            let configuration = tokio::task::spawn_blocking(move || {
+                configuration_source.snapshot()
+            })
+            .await
+            .unwrap_or_default();
             let endpoint = self
                 .probes
                 .ollama

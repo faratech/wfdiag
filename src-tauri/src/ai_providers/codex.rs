@@ -1,8 +1,8 @@
-//! OpenAI Codex CLI bridge: "Sign in with ChatGPT" without API keys.
+//! `OpenAI` Codex CLI bridge: "Sign in with `ChatGPT`" without API keys.
 //!
 //! Requests run through the user's installed Codex CLI (`codex exec`), so
-//! usage bills to their ChatGPT plan and authentication stays entirely inside
-//! OpenAI's own tooling — see `cli_bridge.rs` for the trust model. Headless
+//! usage bills to their `ChatGPT` plan and authentication stays entirely inside
+//! `OpenAI`'s own tooling — see `cli_bridge.rs` for the trust model. Headless
 //! runs use `--json` (JSONL thread events on stdout) with the prompt piped
 //! via stdin, a neutral empty working directory and the default read-only
 //! sandbox, so the CLI can neither see the user's files nor change anything.
@@ -17,7 +17,11 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Codex plans multi-step agent turns; give it more room than an API call.
-const EXEC_TIMEOUT: Duration = Duration::from_secs(180);
+/// MUST stay strictly below the engine's `TURN_TIMEOUT_SECS` (180s): the
+/// outer turn deadline has to fire after this so the CLI-specific timeout
+/// error and its child cleanup remain reachable (same rule as the ACP
+/// bridge's `PROMPT_TIMEOUT`).
+pub(crate) const EXEC_TIMEOUT: Duration = Duration::from_secs(150);
 
 /// The invariant part of every Codex invocation. User configuration and
 /// repository rules are deliberately disabled because a bridge run must be

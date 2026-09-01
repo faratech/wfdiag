@@ -1,7 +1,9 @@
 use crate::{BackendFuture, CustomEndpointSource, OllamaSource};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 pub const OLLAMA_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:11434";
 
@@ -117,7 +119,40 @@ pub async fn discover_ollama_endpoint(configured: Option<&str>) -> Option<String
     }
 }
 
+/// Model capabilities change only when the user pulls or replaces a model, so
+/// a five-minute TTL keeps a multi-round tool conversation from issuing one
+/// `POST /api/show` per round inside the shared turn deadline. Only successful
+/// probes are cached; errors keep propagating.
+const OLLAMA_CAPABILITY_TTL: Duration = Duration::from_secs(5 * 60);
+
+type OllamaCapabilityCache = Arc<Mutex<HashMap<(String, String), (Instant, bool)>>>;
+
+fn shared_ollama_capability_cache() -> OllamaCapabilityCache {
+    static CACHE: std::sync::OnceLock<OllamaCapabilityCache> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
+}
+
 pub async fn ollama_model_supports_tools(base: &str, model: &str) -> Result<bool, String> {
+    let cache_key = (
+        base.trim().trim_end_matches('/').to_string(),
+        model.to_string(),
+    );
+    if let Ok(cache) = shared_ollama_capability_cache().lock()
+        && let Some((at, supported)) = cache.get(&cache_key)
+        && at.elapsed() < OLLAMA_CAPABILITY_TTL
+    {
+        return Ok(*supported);
+    }
+    let supported = fetch_ollama_model_supports_tools(base, model).await?;
+    if let Ok(mut cache) = shared_ollama_capability_cache().lock() {
+        cache.insert(cache_key, (Instant::now(), supported));
+    }
+    Ok(supported)
+}
+
+async fn fetch_ollama_model_supports_tools(base: &str, model: &str) -> Result<bool, String> {
     let response = reqwest::Client::new()
         .post(format!("{base}/api/show"))
         .timeout(Duration::from_secs(5))

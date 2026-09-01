@@ -835,7 +835,10 @@ pub async fn run_chat_turn(
             emitter.done(&done(provider_use, "cancelled", tool_call_count));
             return Ok(TurnStatus::Cancelled);
         }
-        deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(TURN_TIMEOUT_SECS);
+        // The deadline is deliberately NOT re-armed here: TURN_TIMEOUT_SECS
+        // bounds the whole user-visible turn. Re-arming per tool round allowed
+        // 4 rounds × (stream + tools) to run ~20 minutes against transports
+        // that assume 180s is the ceiling.
 
         let history_calls = if preserve_all_calls {
             requested_calls
@@ -1208,7 +1211,19 @@ mod tests {
     use serde_json::json;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
     use wfdiag_native_ai_provider::AIProvider;
+
+    /// The outer turn timeout must fire strictly after every inner transport
+    /// budget so provider-specific timeout errors and child-process cleanup
+    /// stay reachable — the same rule the ACP bridge documents for its
+    /// `PROMPT_TIMEOUT` (170s).
+    #[test]
+    fn transport_budgets_stay_strictly_below_the_turn_deadline() {
+        let turn = Duration::from_secs(TURN_TIMEOUT_SECS);
+        assert!(crate::codex::EXEC_TIMEOUT < turn);
+        assert!(crate::claude_cli::EXEC_TIMEOUT < turn);
+    }
 
     #[derive(Default)]
     struct RecordingEmitter(Mutex<Vec<String>>);
