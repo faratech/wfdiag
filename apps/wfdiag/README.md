@@ -127,6 +127,19 @@ Keep the `self-contained` path separate from the Store/MSIX workflow. It validat
 direct distribution and does not supply the registered package identity or `systemAIModels`
 capability required by the Store-only on-device AI path.
 
+### Startup failure `0x8007007E` ("The specified module could not be found")
+
+The runtime bootstrap loads `Microsoft.WindowsAppRuntime.Bootstrap.dll` from the
+executable's own directory, by that exact name. When the startup modal blames the *bootstrap
+shim*, the file is missing beside `wfdiag.exe` — usually because a deployment folder renamed
+it (`Microsoft.WindowsAppRuntime.Bootstrap-arm64.dll`) or mixed architectures. Keep one
+architecture per folder, with the DLL unsuffixed and matching the exe; each release zip ships
+the correct pair. When the modal blames the framework package instead, the shim was found but
+unusable (architecture mismatch) or the machine is genuinely missing the Windows App Runtime
+2.4+ framework (the Store package supplies it). Either way the modal also records a
+`kind: runtime-start` entry under `%LOCALAPPDATA%\WFDiag\logs` so a failing machine leaves
+evidence behind.
+
 ## Validation
 
 The orchestrator runs every Windows suite and writes reports under `validation-reports/`:

@@ -701,9 +701,12 @@ jobs:
           WindowsForum Diagnostics (native shell, framework-dependent build)
 
           Keep wfdiag.exe and Microsoft.WindowsAppRuntime.Bootstrap.dll in the same
-          folder. The Windows App Runtime 2.x framework must be installed
-          (https://aka.ms/windowsappsdk/2.4/latest/windowsappruntimeinstall-x64.exe
-          or the ARM64 installer). The Microsoft Store package installs it for you.
+          folder — the DLL must keep that exact name and match the exe's
+          architecture (use one folder per architecture). The Windows App
+          Runtime 2.x framework must also be installed:
+          https://aka.ms/windowsappsdk/2.4/latest/windowsappruntimeinstall-x64.exe
+          https://aka.ms/windowsappsdk/2.4/latest/windowsappruntimeinstall-arm64.exe
+          The Microsoft Store package installs it for you.
           NOTE
               (cd "exe-$ARCH" && zip -q "../WindowsForum_Diagnostics_${VERSION}_${ARCH}.zip" wfdiag.exe Microsoft.WindowsAppRuntime.Bootstrap.dll README.txt)
             elif [ -f "exe-$ARCH/wfdiag-tauri.exe" ]; then
