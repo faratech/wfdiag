@@ -1,6 +1,9 @@
 //! Serializable messages crossing the application-core/UI boundary.
 
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
+use std::ops::Deref;
+use wfdiag_native_issues::{SharedTaskResult, TaskResult};
 
 /// A framework-neutral event consumed by a UI shell.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -20,15 +23,94 @@ pub enum UiEvent {
 /// Unlike replaceable running progress, results are delivered through the
 /// lossless event lane. The native shell therefore receives the same evidence
 /// that the legacy Tauri command returns when a scan finishes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticTaskResult {
     pub session_id: String,
     pub task_id: String,
-    pub success: bool,
-    pub output: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    pub duration_ms: u64,
+    pub result: SharedTaskResult,
+}
+
+impl DiagnosticTaskResult {
+    #[must_use]
+    pub fn new(
+        session_id: impl Into<String>,
+        task_id: impl Into<String>,
+        result: SharedTaskResult,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            task_id: task_id.into(),
+            result,
+        }
+    }
+
+    #[must_use]
+    pub fn into_result(self) -> SharedTaskResult {
+        self.result
+    }
+}
+
+impl Deref for DiagnosticTaskResult {
+    type Target = TaskResult;
+
+    fn deref(&self) -> &Self::Target {
+        &self.result
+    }
+}
+
+// Keep the temporary Tauri compatibility payload byte-for-byte compatible:
+// task-result fields remain flat and a missing error is omitted. Deriving
+// through `Arc<TaskResult>` would serialize TaskResult's optional error as
+// `null`, which is its separate shipping command contract.
+impl Serialize for DiagnosticTaskResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct(
+            "DiagnosticTaskResult",
+            if self.result.error.is_some() { 6 } else { 5 },
+        )?;
+        state.serialize_field("session_id", &self.session_id)?;
+        state.serialize_field("task_id", &self.task_id)?;
+        state.serialize_field("success", &self.result.success)?;
+        state.serialize_field("output", &self.result.output)?;
+        if let Some(error) = &self.result.error {
+            state.serialize_field("error", error)?;
+        }
+        state.serialize_field("duration_ms", &self.result.duration_ms)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for DiagnosticTaskResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireResult {
+            session_id: String,
+            task_id: String,
+            success: bool,
+            output: String,
+            #[serde(default)]
+            error: Option<String>,
+            duration_ms: u64,
+        }
+
+        let wire = WireResult::deserialize(deserializer)?;
+        Ok(Self::new(
+            wire.session_id,
+            wire.task_id,
+            std::sync::Arc::new(TaskResult {
+                success: wire.success,
+                output: wire.output,
+                error: wire.error,
+                duration_ms: wire.duration_ms,
+            }),
+        ))
+    }
 }
 
 impl UiEvent {
@@ -468,4 +550,53 @@ pub struct QuickScanRequest {
     pub request_id: String,
     pub requested_at_ms: u64,
     pub source: QuickScanSource,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The hand-written serde impl re-declares the shipping `task-result`
+    /// payload; a new TaskResult field must fail HERE (field count / shape)
+    /// rather than silently changing the wire contract consumers pin on.
+    #[test]
+    fn task_result_wire_payload_stays_flat_and_field_counted() {
+        let without_error = DiagnosticTaskResult::new(
+            "session-1",
+            "cpu",
+            std::sync::Arc::new(TaskResult {
+                success: true,
+                output: "{}".to_string(),
+                error: None,
+                duration_ms: 7,
+            }),
+        );
+        let json = serde_json::to_string(&without_error).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"session_id":"session-1","task_id":"cpu","success":true,"output":"{}","duration_ms":7}"#
+        );
+
+        let with_error = DiagnosticTaskResult::new(
+            "session-1",
+            "cpu",
+            std::sync::Arc::new(TaskResult {
+                success: false,
+                output: "{}".to_string(),
+                error: Some("failed".to_string()),
+                duration_ms: 7,
+            }),
+        );
+        let json = serde_json::to_string(&with_error).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"session_id":"session-1","task_id":"cpu","success":false,"output":"{}","error":"failed","duration_ms":7}"#
+        );
+
+        // Round-trip: the wire shape is the parse shape, error included.
+        let parsed: DiagnosticTaskResult =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.task_id, "cpu");
+        assert_eq!(parsed.result.error.as_deref(), Some("failed"));
+    }
 }

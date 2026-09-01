@@ -169,8 +169,9 @@ async fn bridge_workdir() -> Result<PathBuf, String> {
 
     static VALIDATED_WORKDIR: OnceLock<PathBuf> = OnceLock::new();
     if let Some(directory) = VALIDATED_WORKDIR.get() {
-        std::fs::create_dir_all(directory)
-            .map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
+        // Best-effort recreate (the user may have deleted the directory after
+        // validation); a real failure surfaces from the child spawn itself.
+        let _ = std::fs::create_dir_all(directory);
         return Ok(directory.clone());
     }
 
@@ -296,6 +297,12 @@ pub async fn foundry_service_is_healthy(base: &str) -> bool {
         if timeout.is_zero() {
             break;
         }
+        // Note (2026-08-31 audit): both routes are deliberately probed on any
+        // non-success or schema mismatch — pinned by
+        // `invalid_current_health_schema_falls_back_to_legacy` and
+        // `foundry_health_fails_when_current_and_legacy_routes_are_invalid`.
+        // The bounded deadline below is the accepted worst-case cost of the
+        // pre-0.10 compatibility fallback.
         let Ok(response) = client
             .get(format!("{base}{path}"))
             .timeout(timeout)

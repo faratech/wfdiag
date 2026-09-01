@@ -25,6 +25,10 @@ pub const SESSION_MAX_AGE_SECS: u64 = 6 * 60 * 60;
 
 const FLUSH_CHARS: usize = 120;
 const FLUSH_INTERVAL_MS: u64 = 60;
+/// Streaming cap for one turn. Well above any sane answer and above the
+/// stored-session budget's typical share, but small enough that a runaway
+/// provider response cannot grow memory without bound while streaming.
+const MAX_STREAM_CHARS: usize = 256 * 1024;
 const PREVIEW_CHARS: usize = 300;
 const FULL_SCAN_REQUEST_INTRO: &str = "A Full Scan could provide the missing evidence: ";
 const FULL_SCAN_REQUEST_QUESTION: &str = "Would you like me to run the Full Scan?";
@@ -389,6 +393,16 @@ async fn stream_one_turn(
             maybe_delta = rx.recv(), if receiver_open => {
                 match maybe_delta {
                     Some(delta) => {
+                        // Hard cap per turn: MAX_SESSION_CHARS is only applied
+                        // to stored sessions afterwards, so without this a
+                        // runaway provider response grows memory unchecked
+                        // while the turn is still streaming. Deltas past the
+                        // cap are dropped (the stream is truncated, not the
+                        // session) and the receiver is closed.
+                        if streamed.chars().count() >= MAX_STREAM_CHARS {
+                            receiver_open = false;
+                            continue;
+                        }
                         streamed.push_str(&delta);
                         pending.push_str(&delta);
                         if pending.chars().count() >= FLUSH_CHARS {
@@ -564,6 +578,24 @@ fn prepare_chat_request(
         .map(|message| message_chars(message).saturating_add(64))
         .sum::<usize>();
     if message_cost > history_budget {
+        // trim_history always keeps the current turn intact, so when the turn
+        // ALONE exceeds the budget no amount of history dropping could fit;
+        // tell the user that instead of suggesting a different provider.
+        let tail_start = request_messages
+            .iter()
+            .rposition(|message| matches!(message.role, ChatRole::User));
+        let current_turn_cost = tail_start.map_or(0, |start| {
+            request_messages[start..]
+                .iter()
+                .map(|message| message_chars(message).saturating_add(64))
+                .sum::<usize>()
+        });
+        if current_turn_cost > history_budget {
+            return Err(
+                "The current message is too long for this provider's context window. Shorten the message, start a new conversation, or choose a provider with a larger context window."
+                    .to_string(),
+            );
+        }
         return Err(format!(
             "This request needs about {} input characters, but {} only has room for {}. Try a provider with a larger context window.",
             message_cost

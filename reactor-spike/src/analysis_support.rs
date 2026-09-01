@@ -1000,12 +1000,16 @@ fn analysis_cache_identity(
     grounding: Option<&str>,
 ) -> AnalysisCacheIdentity {
     let diagnostic_output = generation.diagnostic_result.output.as_str();
+    // Hash the output ONCE; the content hash folds the already-computed
+    // output fingerprint together with grounding instead of re-walking the
+    // full diagnostic payload a second time.
+    let output_hash = diagnostic_output_hash(diagnostic_output);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    diagnostic_output.hash(&mut hasher);
+    output_hash.hash(&mut hasher);
     grounding.unwrap_or_default().hash(&mut hasher);
     let content_hash = hasher.finish();
     AnalysisCacheIdentity {
-        output_hash: diagnostic_output_hash(diagnostic_output),
+        output_hash,
         cache_key: format!(
             "{}:{}:DiagnosticInterpretation:{}:{}:{}:{:x}",
             generation.session_id,

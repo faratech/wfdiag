@@ -185,6 +185,7 @@ impl BusState {
 struct Shared {
     capacity: usize,
     state: Mutex<BusState>,
+    wake: Mutex<Option<UiWakeHandler>>,
     items_available: Event,
     lossless_capacity_available: Event,
     progress_capacity_available: Event,
@@ -201,6 +202,51 @@ impl Shared {
         self.items_available.notify(usize::MAX);
         self.lossless_capacity_available.notify(usize::MAX);
         self.progress_capacity_available.notify(usize::MAX);
+        self.wake_ui();
+    }
+
+    fn notify_item(&self) {
+        self.items_available.notify(1);
+        // One wake per accepted event is deliberate (2026-08-31 audit): a
+        // coalescing flag would need the UI-side drain to clear it AFTER it
+        // reads the queue, which is a cross-thread handshake this bus does
+        // not own. Posting unconditionally can never lose an event; the drain
+        // itself coalesces the actual UI work.
+        self.wake_ui();
+    }
+
+    fn wake_ui(&self) {
+        let handler = self
+            .wake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(handler) = handler {
+            handler.call();
+        }
+    }
+}
+
+/// Thread-safe notification invoked after an event is accepted or the bus
+/// terminates. Native shells use this to schedule one UI-thread drain instead
+/// of dedicating a polling thread to each receiver.
+#[derive(Clone)]
+pub struct UiWakeHandler(Arc<dyn Fn() + Send + Sync>);
+
+impl UiWakeHandler {
+    #[must_use]
+    pub fn new(handler: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(Arc::new(handler))
+    }
+
+    fn call(&self) {
+        (self.0)();
+    }
+}
+
+impl fmt::Debug for UiWakeHandler {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("UiWakeHandler(..)")
     }
 }
 
@@ -347,7 +393,7 @@ impl UiEventPublisher {
                         };
                         let replaced = state.coalesced.system_stats.replace(replacement).is_some();
                         drop(state);
-                        self.shared.items_available.notify(1);
+                        self.shared.notify_item();
                         return Ok(PublishOutcome::Coalesced { replaced });
                     }
                     Lane::TaskProgress => {
@@ -371,7 +417,7 @@ impl UiEventPublisher {
                                 .insert(key, replacement)
                                 .is_some();
                             drop(state);
-                            self.shared.items_available.notify(1);
+                            self.shared.notify_item();
                             return Ok(PublishOutcome::Coalesced { replaced });
                         }
                     }
@@ -384,7 +430,7 @@ impl UiEventPublisher {
                         if released_progress {
                             self.shared.progress_capacity_available.notify_additional(1);
                         }
-                        self.shared.items_available.notify(1);
+                        self.shared.notify_item();
                         return Ok(PublishOutcome::Enqueued);
                     }
                     Lane::Lossless => self.shared.lossless_capacity_available.listen(),
@@ -441,7 +487,7 @@ impl UiEventPublisher {
         if released_progress {
             self.shared.progress_capacity_available.notify_additional(1);
         }
-        self.shared.items_available.notify(1);
+        self.shared.notify_item();
         Ok(outcome)
     }
 }
@@ -476,6 +522,35 @@ impl fmt::Debug for UiEventReceiver {
 }
 
 impl UiEventReceiver {
+    /// Register an event-driven UI wake callback.
+    ///
+    /// Registration immediately wakes the UI if events were accepted before
+    /// the callback was installed. Replacing the callback is supported during
+    /// native window remounts.
+    pub fn set_wake_handler(&self, handler: UiWakeHandler) {
+        *self
+            .shared
+            .wake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handler);
+        let should_wake = {
+            let state = self.shared.state();
+            state.pending_len() != 0 || !state.accepting
+        };
+        if should_wake {
+            self.shared.wake_ui();
+        }
+    }
+
+    /// Remove the current native wake callback without closing the bus.
+    pub fn clear_wake_handler(&self) {
+        self.shared
+            .wake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+
     /// Drain every event currently accepted by the bus.
     ///
     /// The returned batch is ordered by acceptance sequence. Its maximum size
@@ -607,6 +682,7 @@ pub fn ui_event_bus(lossless_capacity: NonZeroUsize) -> (UiEventPublisher, UiEve
             lossless: VecDeque::with_capacity(lossless_capacity.get()),
             coalesced: CoalescedSlots::default(),
         }),
+        wake: Mutex::new(None),
         items_available: Event::new(),
         lossless_capacity_available: Event::new(),
         progress_capacity_available: Event::new(),
@@ -628,6 +704,7 @@ mod tests {
         DiagnosticTaskResult, ProviderExecutionClass, ProviderUse, QuickScanRequest,
         QuickScanSource, ReportDelta, ReportEvent, SystemStats, TaskProgress, TaskProgressStatus,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     fn capacity(value: usize) -> NonZeroUsize {
@@ -676,14 +753,16 @@ mod tests {
     }
 
     fn diagnostic_result(task_id: &str) -> UiEvent {
-        UiEvent::DiagnosticResult(DiagnosticTaskResult {
-            session_id: "scan-1".into(),
-            task_id: task_id.into(),
-            success: true,
-            output: "{}".into(),
-            error: None,
-            duration_ms: 1,
-        })
+        UiEvent::DiagnosticResult(DiagnosticTaskResult::new(
+            "scan-1",
+            task_id,
+            std::sync::Arc::new(wfdiag_native_issues::TaskResult {
+                success: true,
+                output: "{}".into(),
+                error: None,
+                duration_ms: 1,
+            }),
+        ))
     }
 
     fn stats(timestamp: i64) -> UiEvent {
@@ -1110,5 +1189,37 @@ mod tests {
         sink.try_publish(delta("one")).unwrap();
         clone.try_publish(delta("two")).unwrap();
         assert_eq!(receiver.drain(), vec![delta("one"), delta("two")]);
+    }
+
+    #[test]
+    fn native_wake_handler_observes_publication_and_close() {
+        let (publisher, receiver) = ui_event_bus(capacity(2));
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&wakes);
+        receiver.set_wake_handler(UiWakeHandler::new(move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+        }));
+
+        publisher.try_publish(delta("one")).unwrap();
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        receiver.close();
+        assert_eq!(wakes.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn late_native_wake_registration_observes_pending_data() {
+        let (publisher, receiver) = ui_event_bus(capacity(1));
+        publisher.try_publish(stats(1)).unwrap();
+
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&wakes);
+        receiver.set_wake_handler(UiWakeHandler::new(move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+        }));
+
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        receiver.clear_wake_handler();
+        publisher.try_publish(stats(2)).unwrap();
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
     }
 }
