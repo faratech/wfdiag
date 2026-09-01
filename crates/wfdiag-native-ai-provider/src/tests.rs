@@ -144,6 +144,126 @@ fn routing_preserves_complete_auto_priority_and_explicit_no_fallback() {
 }
 
 #[test]
+fn availability_rows_are_authoritative_and_legacy_flags_bridge_rowless_payloads() {
+    fn payload(rows: Vec<ProviderInfo>) -> AIProviderStatus {
+        AIProviderStatus {
+            preferred_provider: AIProvider::None,
+            openai_available: true,
+            openai_api_key_set: true,
+            phi_silica_available: false,
+            phi_silica_ready: true,
+            phi_silica_message: None,
+            foundry_local_available: true,
+            foundry_local_endpoint: None,
+            active_provider: AIProvider::None,
+            providers: rows,
+        }
+    }
+
+    let row = |id, available| ProviderInfo {
+        id,
+        available,
+        configured: available,
+        model: None,
+        endpoint: None,
+        supports_tools: false,
+        supports_streaming: false,
+    };
+
+    // Current payloads carry every row; rows override the legacy flags.
+    let current = payload(vec![
+        row(AIProvider::PhiSilica, false),
+        row(AIProvider::FoundryLocal, false),
+        row(AIProvider::OpenAI, true),
+        row(AIProvider::Anthropic, true),
+    ]);
+    let availability = current.availability();
+    assert!(!availability.phi);
+    assert!(!availability.foundry);
+    assert!(availability.openai);
+    assert!(availability.anthropic);
+    assert!(!availability.gemini);
+
+    // A pre-`providers` payload deserializes with no rows: only the three
+    // providers that have legacy flags stay routable; the rest are
+    // deliberately unavailable rather than invented.
+    let legacy = payload(Vec::new());
+    let availability = legacy.availability();
+    assert!(availability.phi);
+    assert!(availability.foundry);
+    assert!(availability.openai);
+    assert!(!availability.ollama);
+    assert!(!availability.custom);
+    assert!(!availability.codex);
+    assert!(!availability.claude);
+    assert!(!availability.anthropic);
+    assert!(!availability.gemini);
+    assert!(!availability.deepseek);
+}
+
+#[test]
+fn local_retry_routing_uses_private_order_and_skips_tried_providers() {
+    let availability = ProviderAvailability {
+        phi: true,
+        foundry: true,
+        ollama: true,
+        openai: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        next_auto_local_route(
+            AIProviderPreference::Auto,
+            &[AIProvider::PhiSilica],
+            availability,
+        ),
+        Some(AIProvider::FoundryLocal)
+    );
+    assert_eq!(
+        next_auto_local_route(
+            AIProviderPreference::Auto,
+            &[AIProvider::PhiSilica, AIProvider::FoundryLocal],
+            availability,
+        ),
+        Some(AIProvider::Ollama)
+    );
+    assert_eq!(
+        next_auto_local_route(AIProviderPreference::OpenAI, &[], availability),
+        None
+    );
+    assert_eq!(
+        next_auto_local_route(
+            AIProviderPreference::Auto,
+            &[
+                AIProvider::PhiSilica,
+                AIProvider::FoundryLocal,
+                AIProvider::Ollama,
+            ],
+            availability,
+        ),
+        None
+    );
+}
+
+#[test]
+fn status_projects_complete_routing_availability() {
+    let mut input = status_input();
+    input.probes.phi_silica_available = true;
+    input.probes.phi_silica_ready = true;
+    input.probes.foundry_endpoint = Some("http://127.0.0.1:5272/v1".to_string());
+    input.probes.ollama_endpoint = Some("http://127.0.0.1:11434/v1".to_string());
+    input.probes.anthropic_available = true;
+    let availability = project_provider_status(input).availability();
+
+    assert!(availability.phi);
+    assert!(availability.foundry);
+    assert!(availability.ollama);
+    assert!(availability.openai);
+    assert!(availability.anthropic);
+    assert!(!availability.custom);
+    assert!(!availability.gemini);
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // Full JSON golden pins every legacy wire field and omission.
 fn status_projection_matches_legacy_shape_order_and_defaults() {
     let status = project_provider_status(status_input());

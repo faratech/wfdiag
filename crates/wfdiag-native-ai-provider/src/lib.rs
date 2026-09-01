@@ -17,18 +17,26 @@ use std::thread::JoinHandle;
 use tokio::sync::{mpsc, oneshot};
 
 mod cache;
+mod catalog_service;
 mod compat;
 mod composition;
+mod fallback;
 mod local_probes;
+mod model_catalog;
 mod network;
 mod provider_config;
 
-pub use compat::{
-    CompatConfigPorts, ProviderKeySource, compat_caps, provider_config_fingerprint,
-    resolve_compat_config,
-};
-pub use provider_config::ResolvedProviderConfig;
 pub use cache::{ProviderCacheControl, SharedAiCache};
+pub use catalog_service::{
+    ANTHROPIC_DEFAULT_MODEL, DEEPSEEK_DEFAULT_MODEL, FOUNDRY_DEFAULT_MODEL, ModelCatalog,
+    ModelCatalogRequest, ModelCatalogService, OPENAI_DEFAULT_MODEL, SubscriptionModelCatalogSource,
+    parse_model_catalog_provider,
+};
+pub use compat::{
+    CompatConfigPorts, ProviderKeySource, SubscriptionConfigPorts, compat_caps,
+    provider_config_fingerprint, resolve_compat_config, resolve_subscription_config,
+    sanitize_subscription_model,
+};
 pub use composition::{
     CustomEndpointSource, FoundryEndpointSource, OllamaSource, PackageIdentitySource,
     PhiStatusSnapshot, PhiStatusSource, ProviderConfigurationSnapshot, ProviderConfigurationSource,
@@ -36,9 +44,19 @@ pub use composition::{
     ProviderSelectionState, SettingsServiceProviderConfigurationSource, SubscriptionCli,
     SubscriptionCliStatusSource,
 };
+pub use fallback::{
+    AUTO_FALLBACK_ORDER, FallbackCandidate, ProviderTrustZone, crosses_local_to_cloud,
+    next_auto_local_route, next_fallback_candidate, provider_fallback_plan, provider_trust_zone,
+    route_provider,
+};
 pub use local_probes::{
     FoundryCliEndpointSource, ProcessSubscriptionCliStatusSource, SUBSCRIPTION_OVERRIDE_ENV_VARS,
     extract_http_base, foundry_service_is_healthy, valid_foundry_status_body,
+};
+pub use model_catalog::{
+    GEMINI_API_BASE, GEMINI_DEFAULT_MODEL, ModelCatalogEntry, ModelCatalogMetadata,
+    best_gemini_catalog_default, list_gemini_models, resolve_gemini_default_model,
+    resolve_gemini_model,
 };
 pub use network::{
     OLLAMA_DEFAULT_ENDPOINT, ReqwestOllamaSource, TcpCustomEndpointSource,
@@ -46,6 +64,7 @@ pub use network::{
     parse_ollama_capabilities, parse_ollama_tags, probe_http_endpoint, probe_http_endpoint_async,
     resolve_ollama_model,
 };
+pub use provider_config::ResolvedProviderConfig;
 
 /// Exact provider identifiers exposed to every UI shell.
 ///
@@ -248,52 +267,6 @@ pub struct ProviderAvailability {
     pub deepseek: bool,
 }
 
-/// Pure local-first routing decision used by every shell and request path.
-#[must_use]
-pub const fn route_provider(
-    preference: AIProviderPreference,
-    availability: ProviderAvailability,
-) -> AIProvider {
-    match preference {
-        AIProviderPreference::Auto => {
-            if availability.phi {
-                AIProvider::PhiSilica
-            } else if availability.foundry {
-                AIProvider::FoundryLocal
-            } else if availability.ollama {
-                AIProvider::Ollama
-            } else if availability.custom {
-                AIProvider::CustomOpenAI
-            } else if availability.codex {
-                AIProvider::CodexCli
-            } else if availability.claude {
-                AIProvider::ClaudeCode
-            } else if availability.openai {
-                AIProvider::OpenAI
-            } else if availability.anthropic {
-                AIProvider::Anthropic
-            } else if availability.gemini {
-                AIProvider::Gemini
-            } else if availability.deepseek {
-                AIProvider::DeepSeek
-            } else {
-                AIProvider::None
-            }
-        }
-        AIProviderPreference::OpenAI if availability.openai => AIProvider::OpenAI,
-        AIProviderPreference::PhiSilica if availability.phi => AIProvider::PhiSilica,
-        AIProviderPreference::FoundryLocal if availability.foundry => AIProvider::FoundryLocal,
-        AIProviderPreference::Ollama if availability.ollama => AIProvider::Ollama,
-        AIProviderPreference::CustomOpenAI if availability.custom => AIProvider::CustomOpenAI,
-        AIProviderPreference::CodexCli if availability.codex => AIProvider::CodexCli,
-        AIProviderPreference::ClaudeCode if availability.claude => AIProvider::ClaudeCode,
-        AIProviderPreference::Anthropic if availability.anthropic => AIProvider::Anthropic,
-        AIProviderPreference::Gemini if availability.gemini => AIProvider::Gemini,
-        AIProviderPreference::DeepSeek if availability.deepseek => AIProvider::DeepSeek,
-        _ => AIProvider::None,
-    }
-}
-
 /// Per-provider row used by Settings badges and provider pickers.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +299,49 @@ pub struct AIProviderStatus {
     pub active_provider: AIProvider,
     #[serde(default)]
     pub providers: Vec<ProviderInfo>,
+}
+
+impl AIProviderStatus {
+    /// Project the public status rows back into the pure routing snapshot.
+    ///
+    /// Current status payloads always contain every provider row, and those
+    /// rows are authoritative. The three legacy top-level flags
+    /// (`phi_silica_ready`, `foundry_local_available`, `openai_available`)
+    /// exist only for payloads serialized before `providers` was introduced:
+    /// such a payload deserializes with an empty row list, so those three
+    /// providers still route from their flags. No legacy flag exists for the
+    /// other providers, so a row-less payload deliberately routes them as
+    /// unavailable rather than inventing availability.
+    #[must_use]
+    pub fn availability(&self) -> ProviderAvailability {
+        if self.providers.is_empty() {
+            // Pre-`providers` wire payload: bridge from the legacy flags.
+            return ProviderAvailability {
+                phi: self.phi_silica_ready,
+                foundry: self.foundry_local_available,
+                openai: self.openai_available,
+                ..ProviderAvailability::default()
+            };
+        }
+        let row_available = |provider| {
+            self.providers
+                .iter()
+                .find(|info| info.id == provider)
+                .is_some_and(|info| info.available)
+        };
+        ProviderAvailability {
+            phi: row_available(AIProvider::PhiSilica),
+            foundry: row_available(AIProvider::FoundryLocal),
+            ollama: row_available(AIProvider::Ollama),
+            custom: row_available(AIProvider::CustomOpenAI),
+            codex: row_available(AIProvider::CodexCli),
+            claude: row_available(AIProvider::ClaudeCode),
+            openai: row_available(AIProvider::OpenAI),
+            anthropic: row_available(AIProvider::Anthropic),
+            gemini: row_available(AIProvider::Gemini),
+            deepseek: row_available(AIProvider::DeepSeek),
+        }
+    }
 }
 
 /// Minimal CLI-probe projection needed by provider status.

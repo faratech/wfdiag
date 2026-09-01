@@ -77,7 +77,7 @@ fn message_chars(message: &ChatMessage) -> usize {
         + message
             .tool_calls
             .iter()
-            .map(|call| call.name.len() + call.arguments.to_string().len())
+            .map(|call| call.name.chars().count() + call.arguments.to_string().chars().count())
             .sum::<usize>()
         + message
             .provider_replay

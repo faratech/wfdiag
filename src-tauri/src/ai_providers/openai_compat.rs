@@ -362,8 +362,10 @@ pub async fn chat_stream(
         if let Some(delta) = choice.delta.refusal
             && !delta.is_empty()
         {
+            // Accumulate only: the engine re-emits refusals as a single
+            // "The provider refused this request: …" message, so streaming
+            // these deltas too would show the text twice.
             refusal.push_str(&delta);
-            let _ = tx.send(delta).await;
         }
         if let Some(fragments) = choice.delta.tool_calls {
             for fragment in fragments {

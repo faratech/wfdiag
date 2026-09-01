@@ -1,26 +1,51 @@
 #![windows_subsystem = "windows"]
 
 mod action_support;
+mod analysis_support;
 mod chat_support;
 mod export_support;
+mod fix_plan_support;
+mod focus_support;
 mod icons;
 mod instance_support;
 mod issue_support;
+mod markdown_support;
 mod notification_support;
-mod window_support;
+mod process_identity;
+mod provider_setup_support;
+mod render_support;
 mod report_support;
 mod save_picker;
+mod subscription_auth_support;
+mod subscription_install_support;
+mod ui_wake_support;
 mod update_support;
+mod window_support;
+#[allow(dead_code, non_snake_case, non_upper_case_globals)]
+mod winui_focus_bindings;
 
-use export_support::{
-    ExportExternalAction, current_export_date_strings, launch_export_external_action,
-    write_text_to_clipboard,
+use action_support::{
+    ActionApproval, ActionItemRun, ActionItemStatus, ActionPrepareInput, ActionProposal,
+    ActionRequest, ActionRunEvent, ActionRunStatus, ActionRunSummary, ActionSnapshot,
+    ActionWorkerEvent, ApprovalScope, DetectedIssueRemediation, NativeActionRuntime,
+    current_action_catalog_fingerprint,
 };
-use action_support::{ActionWorkerEvent, NativeActionRuntime};
-use chat_support::{CHAT_WAIT_POLL, ChatWorkerEvent, NativeChatRuntime};
-use report_support::{NativeReportRuntime, ReportWorkerEvent, ReportScan};
-use wfdiag_native_remediation::remediation;
-use save_picker::{SavePickerOutcome, ValidatedExportPath};
+use analysis_support::{
+    AnalysisRoute, AnalysisWorkerEvent, DiagnosticAnalysisGeneration, GroundingTrace,
+    GroundingTraceSource, IssuePrioritizationGeneration, NativeAnalysisRuntime,
+};
+use chat_support::{
+    ChatScanSnapshot, ChatToolActivity, ChatToolActivityState, ChatToolHistory, ChatToolPorts,
+    ChatToolSnapshot, ChatWorkerEvent, NativeChatRuntime,
+};
+use export_support::{
+    ExportExternalAction, current_export_date_strings, launch_email_compose_draft,
+    launch_export_external_action, write_text_to_clipboard,
+};
+use fix_plan_support::{
+    FixPlanGeneration, FixPlanRoute, FixPlanWorkerEvent, NativeFixPlanRuntime, ValidatedFixPlan,
+    initial_fix_plan_route,
+};
 use icons::FaIcon;
 use issue_support::{
     PendingIssueDetection, PreparedIssueDetection, advance_nonzero_generation,
@@ -28,47 +53,74 @@ use issue_support::{
     pending_issue_preparation_is_current, prepare_issue_detection, project_issues,
     take_current_issue_completion,
 };
+use markdown_support::{MarkdownStyle, render_markdown_lite, safe_markdown_link_target};
+use process_identity::{ProcessIdentity, reconcile_process_selection};
+use provider_setup_support::{ModelCatalog, ProviderSetupRuntime, ProviderSetupWorkerEvent};
+use render_support::{
+    MONITOR_GRAPH_HEIGHT, MONITOR_GRAPH_PATH_COUNT, MONITOR_GRAPH_WIDTH, fixed_process_slots,
+    monitor_graph_geometry,
+};
+use report_support::{NativeReportRuntime, ReportGeneration, ReportScan, ReportWorkerEvent};
+use save_picker::{
+    SavePickerError, SavePickerOutcome, SupportPackagePickerOutcome, ValidatedExportPath,
+    ValidatedSupportPackagePaths,
+};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, RwLock, mpsc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+use subscription_auth_support::{
+    SubscriptionAuthRuntime, SubscriptionAuthState, SubscriptionAuthWorkerEvent,
+};
+use subscription_install_support::{
+    SubscriptionInstallFallbackReason, SubscriptionInstallMethod, SubscriptionInstallProgress,
+    SubscriptionInstallRuntime, SubscriptionInstallStage, SubscriptionInstallWorkerEvent,
+};
+use wfdiag_native_ai_chat::{
+    ProviderUse, SubscriptionAuthOperation, SubscriptionAuthProvider, SubscriptionAuthStatus,
+};
 use wfdiag_native_ai_provider::{
-    ReqwestOllamaSource,
     AIProvider, AIProviderPreference, AIProviderStatus, FoundryCliEndpointSource,
-    NativeAiProviderRuntime, PackageIdentitySource, ProcessSubscriptionCliStatusSource,
-    ProviderManagementService, ProviderModelDefaults, ProviderPreferenceSettingsValidator,
-    ProviderPreferenceStatusReply, ProviderProbeBundle, ProviderSelectionState,
-    ProviderStatusReply, SettingsServiceProviderConfigurationSource, SharedAiCache,
-    provider_preference_for_runtime,
+    ModelCatalogRequest, NativeAiProviderRuntime, PackageIdentitySource,
+    ProcessSubscriptionCliStatusSource, ProviderAvailability, ProviderManagementService,
+    ProviderModelDefaults, ProviderPreferenceSettingsValidator, ProviderPreferenceStatusReply,
+    ProviderProbeBundle, ProviderSelectionState, ProviderStatusReply, ReqwestOllamaSource,
+    SettingsServiceProviderConfigurationSource, SharedAiCache, next_auto_local_route,
+    next_fallback_candidate, parse_provider_preference, provider_preference_for_runtime,
 };
 use wfdiag_native_diagnostics::{
-    DiagnosticOutput, DiagnosticRuntime, DiagnosticTask, NativeDiagnosticRuntime, ScanKind,
+    DiagnosticOutput, DiagnosticRuntime, DiagnosticTask, NativeDiagnosticRuntime, ScanEvidence,
+    ScanKind, SharedScanEvidence,
 };
 use wfdiag_native_export::{
     ExportCompleted, ExportMetadata, ExportPayload, ExportRequest, ExportRequestKind,
-    ExportRuntime, ExportTask, ReportFormat, TaskResult as ExportTaskResult,
+    ExportRuntime, ExportTask, ReportFormat, SupportPackagePayload,
 };
 use wfdiag_native_history::{
-    ComparisonSummary, DiagnosticTask as HistoryDiagnosticTask, HistoryReply, HistoryRuntimeConfig,
-    NativeHistoryRuntime, ScanRecord, ScanStorage, ScanSummary, TaskResult as HistoryTaskResult,
-    TaskTrend,
-    Timestamp,
+    ComparisonResult, ComparisonSummary, DiagnosticTask as HistoryDiagnosticTask, HistoryReply,
+    HistoryRuntimeConfig, NativeHistoryRuntime, ScanRecord, ScanStorage, ScanSummary,
+    TaskChangeSummary, TaskDiffDetail, TaskTrend, Timestamp,
 };
 use wfdiag_native_issues::{
     Issue, IssueDetectionCompleted, IssueRuntime, IssueSeverity, RemediationSummary,
     RemediationTier, Timestamp as IssueTimestamp,
 };
-use wfdiag_native_monitor::{NetworkConnection, 
-    NativeMonitorRuntime, ProcessPage, ProcessQuery, ProcessRow, ProcessSortDirection,
-    ProcessSortKey,
+use wfdiag_native_monitor::{
+    MonitorProfile, NativeMonitorRuntime, NetworkConnection, ProcessPage, ProcessQuery, ProcessRow,
+    ProcessSortDirection, ProcessSortKey,
 };
 use wfdiag_native_phi::WindowsPhiStatusSource;
-use wfdiag_native_settings::{
-    AppSettings, CloudFallbackPolicy, ProviderKeyId, SettingsCommand, SettingsEvent,
-    SettingsRuntime, SettingsService, SettingsValidator, windows_shipping_settings_service,
-};
+use wfdiag_native_remediation::remediation;
 #[cfg(feature = "settings-test-path")]
-use wfdiag_native_settings::{ShippingSettingsStorage, WindowsDpapiCredentialStorage};
+use wfdiag_native_settings::{
+    AllowAllSettings, ShippingSettingsStorage, WindowsDpapiCredentialStorage,
+};
+use wfdiag_native_settings::{
+    AppSettings, CloudFallbackPolicy, ProviderCredentialAction, ProviderCredentialTransaction,
+    ProviderKeyId, SettingsCommand, SettingsEvent, SettingsRuntime, SettingsService,
+    SettingsUpdate, SettingsValidator, windows_shipping_settings_service,
+};
 use wfdiag_native_system::{
     ArchitectureSnapshot, SystemCompleted, SystemInfo, SystemPayload, SystemRequest,
     SystemRequestKind, SystemRuntime,
@@ -77,8 +129,12 @@ use wfdiag_native_update::{
     NativeUpdateRuntime, SignatureProvider, UpdateInfo, UpdateReply, UpdateService,
     WindowsPackageSignatureProvider,
 };
+use wfdiag_reactor_spike::json_diff::{
+    JsonDifference, JsonDifferenceKind, find_json_differences, visible_differences,
+};
 use wfdiag_ui_core::{
     ChatEvent, DiagnosticTaskResult, SystemStats, TaskProgressStatus, UiEvent, UiEventReceiver,
+    UiWakeHandler,
 };
 use windows_reactor::*;
 
@@ -88,9 +144,13 @@ use update_support::{
 };
 
 const APP_VERSION: &str = env!("WFDIAG_APP_VERSION");
+const HISTORY_TREND_SCAN_LIMIT: usize = 10;
 const ABOUT_DESCRIPTION: &str = "A native Windows diagnostics tool by WindowsForum.com. Runs hardware, driver, storage, network, security and log diagnostics locally — with optional on-device or cloud AI analysis.";
 const VERSION_PROBE_FLAG: &str = "--wfdiag-version-probe";
+const ELEVATED_RELAUNCH_FLAG: &str = "--wfdiag-elevated-relaunch";
 const VERSION_PROBE_FILE_ENV: &str = "WFDIAG_REACTOR_VERSION_PROBE_FILE";
+#[cfg(feature = "settings-test-path")]
+const LIVE_TEST_FIXTURE_ENV: &str = "WFDIAG_REACTOR_LIVE_TEST_FIXTURE";
 const APP_BADGE: &[u8] = include_bytes!("../../public/wf-ds/app-badge.png");
 const BOT_AVATAR: &[u8] = include_bytes!("../../public/wf-ds/chatgpt-bot-avatar.webp");
 const STETHOSCOPE_LIGHT: &[u8] = include_bytes!("../assets/stethoscope-light.png");
@@ -159,10 +219,30 @@ const QUICK_DETECTION_SOURCE_TASK_IDS: [&str; 11] = [
     "firewall_status",
 ];
 
-const PROCESS_PAGE_SIZE: usize = 100;
+const PROCESS_PAGE_SIZE: usize = render_support::PROCESS_REPEATER_SLOTS;
 const PROCESS_FILTER_DEBOUNCE: Duration = Duration::from_millis(180);
+const PROCESS_LIVE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const DIAGNOSTICS_COMPACT_BREAKPOINT: f64 = 840.0;
+const PROCESS_WIDE_CONTENT_MIN_WIDTH: f64 = 1_012.0;
+const SHELL_CONTENT_HORIZONTAL_CHROME: f64 = 72.0;
+const PROCESS_DETAILS_COLUMN_WIDTH: f64 = 312.0;
+const AI_WORKSPACE_VERTICAL_CHROME: f64 = 243.0;
+const AI_WORKSPACE_MIN_HEIGHT: f64 = 240.0;
 const SCAN_FINALIZATION_DELAY: Duration = Duration::from_millis(500);
+const PALETTE_FOCUS_DELAY: Duration = Duration::from_millis(125);
+const PALETTE_RESTORE_DELAY: Duration = Duration::from_millis(200);
 const SETTINGS_MAX_CONCURRENT_TASKS: u32 = 16;
+const WINDOW_COMMAND_POLL: Duration = Duration::from_millis(50);
+const WINDOW_HOOK_RETRY_MIN: Duration = Duration::from_millis(100);
+const WINDOW_HOOK_RETRY_MAX: Duration = Duration::from_millis(3_200);
+
+const PROVIDER_KEY_LABELS: [&str; 5] = [
+    "OpenAI",
+    "Anthropic Claude",
+    "Google Gemini",
+    "DeepSeek",
+    "Custom endpoint",
+];
 
 const AI_PROVIDER_LABELS: [&str; 11] = [
     "Auto",
@@ -191,6 +271,324 @@ const AI_PROVIDER_IDS: [&str; 11] = [
     "deepseek",
 ];
 const CODEX_MODEL_IDS: [&str; 3] = ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.5"];
+const PROVIDER_SETUP_LABELS: [&str; 10] = [
+    "Phi Silica (on-device NPU)",
+    "Foundry Local (local server)",
+    "Ollama (local server)",
+    "ChatGPT via Codex CLI",
+    "Claude via Claude Code CLI",
+    "OpenAI",
+    "Anthropic Claude",
+    "Google Gemini",
+    "DeepSeek",
+    "Custom OpenAI-compatible endpoint",
+];
+const PROVIDER_MODEL_REFRESH_DELAY: Duration = Duration::from_millis(400);
+const PROVIDER_SETUP_PROVIDERS: [AIProvider; 10] = [
+    AIProvider::PhiSilica,
+    AIProvider::FoundryLocal,
+    AIProvider::Ollama,
+    AIProvider::CodexCli,
+    AIProvider::ClaudeCode,
+    AIProvider::OpenAI,
+    AIProvider::Anthropic,
+    AIProvider::Gemini,
+    AIProvider::DeepSeek,
+    AIProvider::CustomOpenAI,
+];
+
+fn provider_setup_provider(index: usize) -> Option<AIProvider> {
+    PROVIDER_SETUP_PROVIDERS.get(index).copied()
+}
+
+fn provider_setup_index_for_provider(provider: AIProvider) -> Option<usize> {
+    PROVIDER_SETUP_PROVIDERS
+        .iter()
+        .position(|candidate| *candidate == provider)
+}
+
+fn configured_provider_setup_index(settings: &AppSettings) -> usize {
+    let explicit = parse_provider_preference(&settings.preferred_ai_provider);
+    if explicit != AIProviderPreference::Auto {
+        let provider = match explicit {
+            AIProviderPreference::Auto => AIProvider::None,
+            AIProviderPreference::OpenAI => AIProvider::OpenAI,
+            AIProviderPreference::PhiSilica => AIProvider::PhiSilica,
+            AIProviderPreference::FoundryLocal => AIProvider::FoundryLocal,
+            AIProviderPreference::Ollama => AIProvider::Ollama,
+            AIProviderPreference::CustomOpenAI => AIProvider::CustomOpenAI,
+            AIProviderPreference::CodexCli => AIProvider::CodexCli,
+            AIProviderPreference::ClaudeCode => AIProvider::ClaudeCode,
+            AIProviderPreference::Anthropic => AIProvider::Anthropic,
+            AIProviderPreference::Gemini => AIProvider::Gemini,
+            AIProviderPreference::DeepSeek => AIProvider::DeepSeek,
+        };
+        if let Some(index) = provider_setup_index_for_provider(provider) {
+            return index;
+        }
+    }
+
+    if settings.phi_silica_laf_token.is_some() {
+        0
+    } else if settings.local_ai_endpoint.is_some() {
+        1
+    } else if settings.ollama_endpoint.is_some() || settings.ollama_model.is_some() {
+        2
+    } else if settings.custom_endpoint.is_some()
+        || settings.custom_model.is_some()
+        || settings.custom_api_key_set
+    {
+        9
+    } else if settings.codex_cli_path.is_some() || settings.codex_model.is_some() {
+        3
+    } else if settings.claude_cli_path.is_some() || settings.claude_model.is_some() {
+        4
+    } else if settings.open_ai_api_key_set {
+        5
+    } else if settings.anthropic_api_key_set || settings.anthropic_model.is_some() {
+        6
+    } else if settings.gemini_api_key_set || settings.gemini_model.is_some() {
+        7
+    } else if settings.deepseek_api_key_set || settings.deepseek_model.is_some() {
+        8
+    } else {
+        5
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PhiPreferenceGate {
+    Checking,
+    Ready,
+    Blocked(String),
+}
+
+impl PhiPreferenceGate {
+    fn blocking_reason(&self) -> Option<&str> {
+        match self {
+            Self::Checking => Some(
+                "Checking whether Phi Silica is available on this PC. Wait for the check to finish before selecting it.",
+            ),
+            Self::Ready => None,
+            Self::Blocked(reason) => Some(reason),
+        }
+    }
+}
+
+fn phi_preference_gate(
+    provider_status: Option<&AIProviderStatus>,
+    provider_loading: bool,
+) -> PhiPreferenceGate {
+    if provider_loading || provider_status.is_none() {
+        return PhiPreferenceGate::Checking;
+    }
+    let status = provider_status.expect("provider status checked above");
+    if status.phi_silica_available && status.phi_silica_ready {
+        PhiPreferenceGate::Ready
+    } else {
+        PhiPreferenceGate::Blocked(
+            status.phi_silica_message.clone().unwrap_or_else(|| {
+                "Phi Silica is unavailable or not ready on this PC.".to_string()
+            }),
+        )
+    }
+}
+
+fn validate_phi_preference(preference: &str, gate: &PhiPreferenceGate) -> Result<(), String> {
+    if preference.eq_ignore_ascii_case("phi_silica")
+        && let Some(reason) = gate.blocking_reason()
+    {
+        return Err(reason.to_string());
+    }
+    Ok(())
+}
+
+const fn settings_ai_status_probe_needed(
+    settings_open: bool,
+    status_known: bool,
+    status_loading: bool,
+) -> bool {
+    settings_open && !status_known && !status_loading
+}
+
+fn provider_models_auto_discovery_allowed(index: usize) -> bool {
+    provider_setup_provider(index)
+        .is_some_and(|provider| !matches!(provider, AIProvider::PhiSilica | AIProvider::ClaudeCode))
+}
+
+fn subscription_auth_provider_for_setup(index: usize) -> Option<SubscriptionAuthProvider> {
+    match index {
+        3 => Some(SubscriptionAuthProvider::Codex),
+        4 => Some(SubscriptionAuthProvider::ClaudeCode),
+        _ => None,
+    }
+}
+
+fn subscription_auth_state_index(provider: SubscriptionAuthProvider) -> usize {
+    match provider {
+        SubscriptionAuthProvider::Codex => 0,
+        SubscriptionAuthProvider::ClaudeCode => 1,
+    }
+}
+
+const fn subscription_install_progress_label(
+    progress: SubscriptionInstallProgress,
+) -> &'static str {
+    match progress.stage {
+        SubscriptionInstallStage::CheckingExisting => "Checking for an existing CLI installation…",
+        SubscriptionInstallStage::ResolvingInstaller => "Resolving the approved installer…",
+        SubscriptionInstallStage::InstallingWinget => "Installing with Windows Package Manager…",
+        SubscriptionInstallStage::InstallingVendorFallback => {
+            "Running the separately approved vendor installer…"
+        }
+        SubscriptionInstallStage::Verifying => "Verifying the installed CLI path…",
+        SubscriptionInstallStage::Completed => "CLI installation verified",
+    }
+}
+
+fn subscription_auth_completion_refreshes_models(operation: SubscriptionAuthOperation) -> bool {
+    operation != SubscriptionAuthOperation::Status
+}
+
+fn provider_setup_model(index: usize, settings: &AppSettings) -> Option<&str> {
+    match index {
+        1 => settings.local_ai_model.as_deref(),
+        2 => settings.ollama_model.as_deref(),
+        3 => settings.codex_model.as_deref(),
+        4 => settings.claude_model.as_deref(),
+        5 => settings.open_ai_model.as_deref(),
+        6 => settings.anthropic_model.as_deref(),
+        7 => settings.gemini_model.as_deref(),
+        8 => settings.deepseek_model.as_deref(),
+        9 => settings.custom_model.as_deref(),
+        _ => None,
+    }
+}
+
+fn set_provider_setup_model(index: usize, settings: &mut AppSettings, model: Option<String>) {
+    match index {
+        1 => settings.local_ai_model = model,
+        2 => settings.ollama_model = model,
+        3 => settings.codex_model = model,
+        4 => settings.claude_model = model,
+        5 => settings.open_ai_model = model,
+        6 => settings.anthropic_model = model,
+        7 => settings.gemini_model = model,
+        8 => settings.deepseek_model = model,
+        9 => settings.custom_model = model,
+        _ => {}
+    }
+}
+
+fn set_provider_key_configured(
+    settings: &mut AppSettings,
+    provider: ProviderKeyId,
+    configured: bool,
+) {
+    match provider {
+        ProviderKeyId::OpenAI => settings.open_ai_api_key_set = configured,
+        ProviderKeyId::Anthropic => settings.anthropic_api_key_set = configured,
+        ProviderKeyId::Gemini => settings.gemini_api_key_set = configured,
+        ProviderKeyId::DeepSeek => settings.deepseek_api_key_set = configured,
+        ProviderKeyId::Custom => settings.custom_api_key_set = configured,
+    }
+}
+
+fn set_provider_key_value(
+    settings: &mut AppSettings,
+    provider: ProviderKeyId,
+    value: Option<String>,
+) {
+    match provider {
+        ProviderKeyId::OpenAI => settings.open_ai_api_key = value,
+        ProviderKeyId::Anthropic => settings.anthropic_api_key = value,
+        ProviderKeyId::Gemini => settings.gemini_api_key = value,
+        ProviderKeyId::DeepSeek => settings.deepseek_api_key = value,
+        ProviderKeyId::Custom => settings.custom_api_key = value,
+    }
+}
+
+fn strip_provider_key_values(settings: &mut AppSettings) {
+    for provider in ProviderKeyId::ALL {
+        set_provider_key_value(settings, provider, None);
+    }
+}
+
+fn non_empty_provider_draft(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn provider_catalog_request_for_draft(
+    setup_index: usize,
+    settings: &AppSettings,
+    provider_key_drafts: &[String; ProviderKeyId::ALL.len()],
+) -> Result<Option<ModelCatalogRequest>, String> {
+    let Some(provider) = provider_setup_provider(setup_index) else {
+        return Err("The selected provider is not recognized".to_string());
+    };
+    if provider == AIProvider::PhiSilica {
+        return Ok(None);
+    }
+    let (draft_api_key, key_configured) = match provider {
+        AIProvider::OpenAI => (
+            non_empty_provider_draft(&provider_key_drafts[0]),
+            settings.open_ai_api_key_set,
+        ),
+        AIProvider::Anthropic => (
+            non_empty_provider_draft(&provider_key_drafts[1]),
+            settings.anthropic_api_key_set,
+        ),
+        AIProvider::Gemini => (
+            non_empty_provider_draft(&provider_key_drafts[2]),
+            settings.gemini_api_key_set,
+        ),
+        AIProvider::DeepSeek => (
+            non_empty_provider_draft(&provider_key_drafts[3]),
+            settings.deepseek_api_key_set,
+        ),
+        AIProvider::CustomOpenAI => (
+            non_empty_provider_draft(&provider_key_drafts[4]),
+            settings.custom_api_key_set,
+        ),
+        _ => (None, false),
+    };
+    if matches!(
+        provider,
+        AIProvider::OpenAI | AIProvider::Anthropic | AIProvider::Gemini | AIProvider::DeepSeek
+    ) && draft_api_key.is_none()
+        && !key_configured
+    {
+        return Err("Enter an API key to load the available models.".to_string());
+    }
+
+    let draft_endpoint = match provider {
+        AIProvider::FoundryLocal => settings.local_ai_endpoint.clone(),
+        AIProvider::Ollama => settings.ollama_endpoint.clone(),
+        AIProvider::CustomOpenAI => settings.custom_endpoint.clone(),
+        _ => None,
+    };
+    if provider == AIProvider::CustomOpenAI
+        && draft_endpoint
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return Err("Enter an endpoint URL to load the available models.".to_string());
+    }
+    let draft_cli_path = match provider {
+        AIProvider::CodexCli => settings.codex_cli_path.clone(),
+        AIProvider::ClaudeCode => settings.claude_cli_path.clone(),
+        _ => None,
+    };
+    Ok(Some(ModelCatalogRequest {
+        provider,
+        draft_api_key,
+        draft_endpoint,
+        draft_cli_path,
+    }))
+}
 
 fn window_theme_from_setting(value: &str) -> WindowTheme {
     match value.trim().to_ascii_lowercase().as_str() {
@@ -206,6 +604,40 @@ fn window_theme_setting(theme: WindowTheme) -> &'static str {
         WindowTheme::Light => "light",
         WindowTheme::Dark => "dark",
     }
+}
+
+fn effective_window_theme(theme: WindowTheme, color_scheme: ColorScheme) -> WindowTheme {
+    match theme {
+        WindowTheme::System => match color_scheme {
+            ColorScheme::Light => WindowTheme::Light,
+            ColorScheme::Dark => WindowTheme::Dark,
+        },
+        explicit => explicit,
+    }
+}
+
+fn navigation_rail_forced_collapsed(client_width: f64) -> bool {
+    client_width <= 1100.0
+}
+
+fn diagnostics_uses_compact_layout(client_width: f64) -> bool {
+    client_width < DIAGNOSTICS_COMPACT_BREAKPOINT
+}
+
+fn process_layout_metrics(client_width: f64, pane_expanded: bool) -> (bool, f64) {
+    let pane_width = if pane_expanded { 230.0 } else { 64.0 };
+    let content_width = (client_width - pane_width - SHELL_CONTENT_HORIZONTAL_CHROME).max(1.0);
+    let compact = content_width < PROCESS_WIDE_CONTENT_MIN_WIDTH;
+    let details_width = if compact {
+        0.0
+    } else {
+        PROCESS_DETAILS_COLUMN_WIDTH
+    };
+    (compact, (content_width - details_width).max(1.0))
+}
+
+fn ai_workspace_height(client_height: f64) -> f64 {
+    (client_height - AI_WORKSPACE_VERTICAL_CHROME).max(AI_WORKSPACE_MIN_HEIGHT)
 }
 
 fn selected_setting_index(value: &str, values: &[&str]) -> Option<usize> {
@@ -263,6 +695,22 @@ fn provider_preference_id(preference: AIProviderPreference) -> &'static str {
     }
 }
 
+fn provider_display_name(provider: AIProvider) -> &'static str {
+    match provider {
+        AIProvider::None => "No provider",
+        AIProvider::PhiSilica => "Phi Silica",
+        AIProvider::FoundryLocal => "Foundry Local",
+        AIProvider::Ollama => "Ollama",
+        AIProvider::CustomOpenAI => "Custom endpoint",
+        AIProvider::CodexCli => "Codex CLI",
+        AIProvider::ClaudeCode => "Claude Code",
+        AIProvider::OpenAI => "OpenAI",
+        AIProvider::Anthropic => "Anthropic Claude",
+        AIProvider::Gemini => "Google Gemini",
+        AIProvider::DeepSeek => "DeepSeek",
+    }
+}
+
 fn normalize_provider_preference_for_runtime(settings: &mut AppSettings) {
     let identity = ReactorPackageIdentitySource::default();
     let preference = provider_preference_for_runtime(
@@ -284,9 +732,31 @@ fn reactor_settings_service(validator: Arc<dyn SettingsValidator>) -> SettingsSe
     windows_shipping_settings_service(validator)
 }
 
+#[cfg(feature = "settings-test-path")]
+fn load_live_test_settings() -> Result<AppSettings, String> {
+    let path = std::env::var_os("WFDIAG_REACTOR_SETTINGS_TEST_PATH")
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| {
+            "WFDIAG_REACTOR_SETTINGS_TEST_PATH is required for this validation fixture".to_string()
+        })?;
+    SettingsService::new(
+        Arc::new(ShippingSettingsStorage::at_path(path.into())),
+        Arc::new(WindowsDpapiCredentialStorage::new()),
+        Arc::new(AllowAllSettings),
+    )
+    .load_nonsecret_settings()
+    .map_err(|error| format!("could not load isolated validation settings: {error}"))
+}
+
+#[cfg(not(feature = "settings-test-path"))]
+fn load_live_test_settings() -> Result<AppSettings, String> {
+    Err("the settings-test-path validation feature is not enabled".to_string())
+}
+
 fn reactor_ai_provider_runtime(
     settings: SettingsService,
     identity: Arc<dyn PackageIdentitySource>,
+    cache: SharedAiCache,
 ) -> Result<NativeAiProviderRuntime, String> {
     let probes = ProviderProbeBundle::shipping_networks(
         Arc::new(SettingsServiceProviderConfigurationSource::new(settings)),
@@ -298,11 +768,11 @@ fn reactor_ai_provider_runtime(
     let service = ProviderManagementService::new(
         probes,
         ProviderSelectionState::default(),
-        Arc::new(SharedAiCache::new(100)),
+        Arc::new(cache),
         ProviderModelDefaults {
             foundry: "phi-4-mini".to_string(),
             openai: "gpt-5-nano".to_string(),
-            anthropic: "claude-sonnet-4-6".to_string(),
+            anthropic: "claude-sonnet-5".to_string(),
             gemini: "gemini-3.6-flash".to_string(),
             deepseek: "deepseek-v4-flash".to_string(),
         },
@@ -333,6 +803,41 @@ fn scan_kind_history_tag(scan_kind: ScanKind) -> &'static str {
         ScanKind::Full => "Full Scan",
         ScanKind::Targeted => "Manual Diagnostic",
     }
+}
+
+fn requires_scan_data(prompt: &str) -> bool {
+    let normalized = prompt.trim().to_ascii_lowercase();
+    if normalized.is_empty()
+        || normalized.contains("in general")
+        || normalized.contains("generally")
+        || normalized.starts_with("define ")
+        || normalized == "what is windows?"
+        || normalized == "what is windows"
+        || (normalized.starts_with("what does ") && normalized.contains(" mean"))
+    {
+        return false;
+    }
+    let casual = normalized.trim_matches(|character: char| {
+        character.is_whitespace() || matches!(character, '.' | '!' | '?' | ',')
+    });
+    if matches!(
+        casual,
+        "hi" | "hello"
+            | "hey"
+            | "thanks"
+            | "thank you"
+            | "good morning"
+            | "good afternoon"
+            | "good evening"
+            | "who are you"
+            | "what can you do"
+            | "tell me a joke"
+    ) || casual.starts_with("write me a ")
+        || casual.starts_with("write a ")
+    {
+        return false;
+    }
+    true
 }
 
 fn scan_concurrency_from_settings(max_concurrent_tasks: u32) -> usize {
@@ -366,6 +871,190 @@ fn select_scan_tasks(
         .collect()
 }
 
+fn issue_prioritization_payload(issues: &[Issue]) -> Result<String, String> {
+    let rows = issues
+        .iter()
+        .filter(|issue| {
+            issue.detected && issue.status == wfdiag_native_issues::IssueStatus::Detected
+        })
+        .map(|issue| {
+            serde_json::json!({
+                "id": issue.id,
+                "severity": issue.severity,
+                "title": issue.title,
+                "description": issue.description,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&rows)
+        .map_err(|error| format!("could not serialize detected issues: {error}"))
+}
+
+fn action_run_status_text(summary: &ActionRunSummary) -> String {
+    let total = summary.actions.len();
+    let current = summary
+        .current_index
+        .and_then(|index| summary.actions.get(index))
+        .map(|action| action.label.as_str());
+    match summary.status {
+        ActionRunStatus::Running => current.map_or_else(
+            || "Running vetted remediation…".to_string(),
+            |label| format!("Running remediation · {label}"),
+        ),
+        ActionRunStatus::CancelRequested => {
+            "Stopping remediation after the current safe boundary…".to_string()
+        }
+        ActionRunStatus::Succeeded if action_run_schedules_restart(summary) => {
+            "Restart scheduled · Windows will restart in 60 seconds; save your work now · run “shutdown /a” to cancel"
+                .to_string()
+        }
+        ActionRunStatus::Succeeded if action_run_is_open_tool_handoff(summary) => {
+            "Tool opened · complete the action in Windows, then re-run the relevant diagnostic"
+                .to_string()
+        }
+        ActionRunStatus::Succeeded => format!(
+            "Remediation complete · {total} action{} succeeded{}",
+            if total == 1 { "" } else { "s" },
+            if summary.requires_restart() {
+                " · restart required"
+            } else {
+                ""
+            }
+        ),
+        ActionRunStatus::Partial => format!(
+            "Remediation finished with partial results · {total} action{} reviewed{}",
+            if total == 1 { "" } else { "s" },
+            if summary.requires_restart() {
+                " · restart required"
+            } else {
+                ""
+            }
+        ),
+        ActionRunStatus::Failed => "Remediation failed · review the step details".to_string(),
+        ActionRunStatus::Cancelled => "Remediation cancelled".to_string(),
+    }
+}
+
+fn action_proposal_matches_snapshot(proposal: &ActionProposal, snapshot: &ActionSnapshot) -> bool {
+    proposal.scan_fingerprint == snapshot.scan_fingerprint
+        && proposal.catalog_fingerprint == snapshot.catalog_fingerprint
+        && proposal.actions.iter().all(|action| {
+            action
+                .issue_id
+                .as_deref()
+                .map_or(action.remediation.maintenance, |issue_id| {
+                    snapshot.detected_issues.iter().any(|issue| {
+                        issue.issue_id == issue_id
+                            && issue.remediation_id.as_deref()
+                                == Some(action.remediation.id.as_str())
+                    })
+                })
+        })
+}
+
+fn action_proposal_schedules_restart(proposal: &ActionProposal) -> bool {
+    proposal
+        .actions
+        .iter()
+        .any(|action| action.remediation.id == "restart_system")
+}
+
+fn action_proposal_contains_repair(proposal: &ActionProposal) -> bool {
+    proposal
+        .actions
+        .iter()
+        .any(|action| action.remediation.tier == RemediationTier::Repair)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActionReviewPresentation {
+    title: String,
+    primary_label: String,
+    admin_blocked: bool,
+    schedules_restart: bool,
+    requires_restart: bool,
+    long_running: bool,
+    can_stop: bool,
+    batch: bool,
+}
+
+fn action_review_presentation(
+    proposal: &ActionProposal,
+    is_admin: bool,
+) -> ActionReviewPresentation {
+    let batch = proposal.approval_scope == ApprovalScope::Batch;
+    let admin_blocked = !is_admin
+        && proposal
+            .actions
+            .iter()
+            .any(|action| action.remediation.admin_required);
+    let schedules_restart = action_proposal_schedules_restart(proposal);
+    let repair = action_proposal_contains_repair(proposal);
+    let title = if batch {
+        format!("Review {} actions", proposal.actions.len())
+    } else {
+        proposal.actions.first().map_or_else(
+            || "Review remediation".to_string(),
+            |action| action.remediation.label.clone(),
+        )
+    };
+    let primary_label = if admin_blocked {
+        "Restart as Administrator".to_string()
+    } else if batch {
+        format!("Run these {} actions", proposal.actions.len())
+    } else if schedules_restart {
+        "Schedule restart".to_string()
+    } else if repair {
+        "Run repair once".to_string()
+    } else {
+        "Run once".to_string()
+    };
+    ActionReviewPresentation {
+        title,
+        primary_label,
+        admin_blocked,
+        schedules_restart,
+        requires_restart: proposal
+            .actions
+            .iter()
+            .any(|action| action.remediation.requires_restart),
+        long_running: proposal
+            .actions
+            .iter()
+            .any(|action| action.remediation.long_running),
+        can_stop: proposal
+            .actions
+            .iter()
+            .all(|action| action.remediation.cancellable),
+        batch,
+    }
+}
+
+fn action_run_schedules_restart(summary: &ActionRunSummary) -> bool {
+    summary
+        .actions
+        .iter()
+        .any(|action| action.remediation_id == "restart_system")
+}
+
+fn action_run_is_open_tool_handoff(summary: &ActionRunSummary) -> bool {
+    !summary.actions.is_empty()
+        && summary.actions.iter().all(|action| {
+            remediation::find(&action.remediation_id)
+                .is_some_and(|spec| spec.tier == RemediationTier::OpenTool)
+        })
+}
+
+const fn chat_completion_notice(finish_reason: &str) -> Option<&'static str> {
+    match finish_reason.as_bytes() {
+        b"length" => Some("Response stopped at the provider’s output limit."),
+        b"tool_budget" => {
+            Some("Tool budget reached; this answer uses the evidence already gathered.")
+        }
+        _ => None,
+    }
+}
+
 fn history_task_catalog(catalog: &[DiagnosticTask]) -> Vec<HistoryDiagnosticTask> {
     catalog
         .iter()
@@ -393,6 +1082,48 @@ fn system_identity_blocks_scan(
     !deterministic_visual && system_info_request_id.is_some()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupScanGate {
+    AwaitingSettings,
+    Armed,
+    Consumed,
+}
+
+fn apply_startup_scan_preference(gate: &mut StartupScanGate, scan_on_startup: bool) {
+    if *gate == StartupScanGate::AwaitingSettings {
+        *gate = if scan_on_startup {
+            StartupScanGate::Armed
+        } else {
+            StartupScanGate::Consumed
+        };
+    }
+}
+
+fn take_startup_scan_when_ready(
+    gate: &mut StartupScanGate,
+    deterministic_visual: bool,
+    settings_loading: bool,
+    system_info_request_id: Option<u64>,
+    architecture_request_id: Option<u64>,
+) -> bool {
+    if deterministic_visual {
+        *gate = StartupScanGate::Consumed;
+        return false;
+    }
+    if *gate != StartupScanGate::Armed
+        || settings_loading
+        || system_info_request_id.is_some()
+        || architecture_request_id.is_some()
+    {
+        return false;
+    }
+
+    // Consume before dispatch so every later completion/retry is a no-op even
+    // when the diagnostic runtime rejects the startup scan.
+    *gate = StartupScanGate::Consumed;
+    true
+}
+
 fn build_diagnostic_executor() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(5)
@@ -412,9 +1143,513 @@ enum Page {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PageTransition {
+    previous: Page,
+    next: Page,
+}
+
+impl PageTransition {
+    fn between(previous: Page, next: Page) -> Option<Self> {
+        (previous != next).then_some(Self { previous, next })
+    }
+
+    fn leaves_processes(self) -> bool {
+        self.previous == Page::Processes && self.next != Page::Processes
+    }
+}
+
+fn next_process_request_id(current: u64) -> u64 {
+    let next = current.wrapping_add(1);
+    if next == 0 { 1 } else { next }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PaletteCommandSpec {
+    section: &'static str,
+    label: Cow<'static, str>,
+    tag: Cow<'static, str>,
+    keywords: Cow<'static, str>,
+    enabled: bool,
+    icon: FaIcon,
+    shortcut: Option<Cow<'static, str>>,
+}
+
+const PALETTE_MAX_RESULTS: usize = 14;
+
+#[derive(Clone, Copy)]
+struct PaletteCommandTemplate {
+    section: &'static str,
+    label: &'static str,
+    tag: &'static str,
+    keywords: &'static str,
+    icon: FaIcon,
+    shortcut: Option<&'static str>,
+}
+
+impl PaletteCommandTemplate {
+    fn command(self, enabled: bool) -> PaletteCommandSpec {
+        PaletteCommandSpec {
+            section: self.section,
+            label: Cow::Borrowed(self.label),
+            tag: Cow::Borrowed(self.tag),
+            keywords: Cow::Borrowed(self.keywords),
+            enabled,
+            icon: self.icon,
+            shortcut: self.shortcut.map(Cow::Borrowed),
+        }
+    }
+}
+
+const PALETTE_NAVIGATION_TEMPLATES: [PaletteCommandTemplate; 6] = [
+    PaletteCommandTemplate {
+        section: "Navigate",
+        label: "Go to Diagnostics",
+        tag: "diagnostics",
+        keywords: "page screen navigate",
+        icon: FaIcon::Diagnostics,
+        shortcut: Some("Ctrl+1"),
+    },
+    PaletteCommandTemplate {
+        section: "Navigate",
+        label: "Go to Live Monitor",
+        tag: "monitor",
+        keywords: "page screen navigate",
+        icon: FaIcon::Monitor,
+        shortcut: Some("Ctrl+2"),
+    },
+    PaletteCommandTemplate {
+        section: "Navigate",
+        label: "Go to Processes",
+        tag: "processes",
+        keywords: "page screen navigate",
+        icon: FaIcon::Processes,
+        shortcut: Some("Ctrl+3"),
+    },
+    PaletteCommandTemplate {
+        section: "Navigate",
+        label: "Go to AI Analysis",
+        tag: "ai",
+        keywords: "page screen navigate",
+        icon: FaIcon::Ai,
+        shortcut: Some("Ctrl+4"),
+    },
+    PaletteCommandTemplate {
+        section: "Navigate",
+        label: "Go to Issues",
+        tag: "issues",
+        keywords: "page screen navigate",
+        icon: FaIcon::Issues,
+        shortcut: Some("Ctrl+5"),
+    },
+    PaletteCommandTemplate {
+        section: "Navigate",
+        label: "Go to History",
+        tag: "history",
+        keywords: "page screen navigate",
+        icon: FaIcon::History,
+        shortcut: Some("Ctrl+6"),
+    },
+];
+
+const PALETTE_SCAN_TEMPLATES: [PaletteCommandTemplate; 2] = [
+    PaletteCommandTemplate {
+        section: "Scan",
+        label: "Run Quick Scan",
+        tag: "quick-scan",
+        keywords: "diagnostic fast ctrl shift q",
+        icon: FaIcon::Bolt,
+        shortcut: Some("Ctrl+Shift+Q"),
+    },
+    PaletteCommandTemplate {
+        section: "Scan",
+        label: "Run Full Scan",
+        tag: "full-scan",
+        keywords: "diagnostic complete ctrl shift f",
+        icon: FaIcon::ListCheck,
+        shortcut: Some("Ctrl+Shift+F"),
+    },
+];
+
+const PALETTE_STOP_SCAN_TEMPLATE: PaletteCommandTemplate = PaletteCommandTemplate {
+    section: "Scan",
+    label: "Stop Scan",
+    tag: "stop-scan",
+    keywords: "cancel stop diagnostic",
+    icon: FaIcon::Xmark,
+    shortcut: None,
+};
+
+const PALETTE_REPORT_TEMPLATES: [PaletteCommandTemplate; 5] = [
+    PaletteCommandTemplate {
+        section: "Report",
+        label: "Copy Report to Clipboard",
+        tag: "copy-diagnostic-report",
+        keywords: "clipboard forum copy",
+        icon: FaIcon::Copy,
+        shortcut: None,
+    },
+    PaletteCommandTemplate {
+        section: "Report",
+        label: "Export Report…",
+        tag: "export",
+        keywords: "save file json txt html",
+        icon: FaIcon::FileExport,
+        shortcut: None,
+    },
+    PaletteCommandTemplate {
+        section: "Report",
+        label: "Share to WindowsForum",
+        tag: "share",
+        keywords: "forum browser clipboard",
+        icon: FaIcon::ShareNodes,
+        shortcut: None,
+    },
+    PaletteCommandTemplate {
+        section: "Report",
+        label: "Email Report",
+        tag: "email",
+        keywords: "mail compose clipboard",
+        icon: FaIcon::PaperPlane,
+        shortcut: None,
+    },
+    PaletteCommandTemplate {
+        section: "Report",
+        label: "Generate Support Package",
+        tag: "support-package",
+        keywords: "support package json txt html bundle",
+        icon: FaIcon::Download,
+        shortcut: None,
+    },
+];
+
+const PALETTE_APP_TEMPLATES: [PaletteCommandTemplate; 2] = [
+    PaletteCommandTemplate {
+        section: "App",
+        label: "Open Settings",
+        tag: "settings",
+        keywords: "preferences configuration",
+        icon: FaIcon::Gear,
+        shortcut: None,
+    },
+    PaletteCommandTemplate {
+        section: "App",
+        label: "About WindowsForum Diagnostics",
+        tag: "about",
+        keywords: "version information",
+        icon: FaIcon::CircleInfo,
+        shortcut: None,
+    },
+];
+
+#[derive(Clone, Debug, PartialEq)]
+struct PaletteFuzzyResult {
+    score: f64,
+    indices: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PaletteMatch {
+    command: PaletteCommandSpec,
+    score: f64,
+    indices: Vec<usize>,
+}
+
+/// Exact port of the shipping React palette matcher: case-insensitive
+/// subsequence scoring with word-start, consecutive-run, early-hit, and tight
+/// spread bonuses. Character indices are retained for title highlighting.
+fn palette_fuzzy_score(query: &str, target: &str) -> Option<PaletteFuzzyResult> {
+    let query = query.to_lowercase().chars().collect::<Vec<_>>();
+    let target = target.to_lowercase().chars().collect::<Vec<_>>();
+    if query.is_empty() {
+        return Some(PaletteFuzzyResult {
+            score: 0.0,
+            indices: Vec::new(),
+        });
+    }
+    if query.len() > target.len() {
+        return None;
+    }
+
+    let mut indices = Vec::with_capacity(query.len());
+    let mut score = 0.0_f64;
+    let mut target_index = 0_usize;
+    let mut previous_match = None;
+    for needle in query {
+        let relative = target[target_index..]
+            .iter()
+            .position(|character| *character == needle)?;
+        let found = target_index + relative;
+        let mut bonus = 1.0;
+        if found == 0 {
+            bonus += 8.0;
+        } else if matches!(target[found - 1], ' ' | '-' | '_' | '/' | '.' | ':') {
+            bonus += 6.0;
+        }
+        if previous_match.is_some_and(|previous| found == previous + 1) {
+            bonus += 4.0;
+        }
+        bonus += (3.0 - found as f64 * 0.05).max(0.0);
+        score += bonus;
+        indices.push(found);
+        previous_match = Some(found);
+        target_index = found + 1;
+    }
+
+    let spread = indices.last()? - indices.first()? + 1;
+    score += (indices.len() as f64 * 2.0 - (spread - indices.len()) as f64).max(0.0);
+    Some(PaletteFuzzyResult { score, indices })
+}
+
+fn palette_section_order(section: &str) -> usize {
+    match section {
+        "Navigate" => 0,
+        "Scan" => 1,
+        "Report" => 2,
+        "App" => 3,
+        "Diagnostics" => 4,
+        _ => 5,
+    }
+}
+
+fn palette_visible_matches(commands: Vec<PaletteCommandSpec>, query: &str) -> Vec<PaletteMatch> {
+    let query = query.trim();
+    let mut matches = if query.is_empty() {
+        commands
+            .into_iter()
+            .filter(|command| matches!(command.section, "Navigate" | "Scan"))
+            .map(|command| PaletteMatch {
+                command,
+                score: 0.0,
+                indices: Vec::new(),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        commands
+            .into_iter()
+            .filter_map(|command| {
+                if let Some(title_match) = palette_fuzzy_score(query, &command.label) {
+                    return Some(PaletteMatch {
+                        command,
+                        score: title_match.score,
+                        indices: title_match.indices,
+                    });
+                }
+                palette_fuzzy_score(query, &command.keywords).map(|keyword_match| PaletteMatch {
+                    command,
+                    score: keyword_match.score * 0.6,
+                    indices: Vec::new(),
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if !query.is_empty() {
+        // Stable descending sort retains source command order for exact ties,
+        // matching modern JavaScript Array.sort semantics.
+        matches.sort_by(|left, right| right.score.total_cmp(&left.score));
+        matches.truncate(PALETTE_MAX_RESULTS);
+    }
+    matches.sort_by_key(|matched| palette_section_order(matched.command.section));
+    matches
+}
+
+fn diagnostic_palette_icon(category: &str) -> FaIcon {
+    match category.trim().to_ascii_lowercase().as_str() {
+        "system" => FaIcon::Desktop,
+        "hardware" => FaIcon::Microchip,
+        "storage" => FaIcon::HardDrive,
+        "network" => FaIcon::Globe,
+        "drivers" | "software" => FaIcon::Gear,
+        "logs" => FaIcon::ClockRotateLeft,
+        "performance" => FaIcon::ChartLine,
+        "debug" => FaIcon::Stethoscope,
+        _ => FaIcon::Diagnostics,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AiMode {
     Assistant,
     ScanReport,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PendingAiIntent {
+    Report { force_refresh: bool },
+    Chat { prompt: String },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingAiProviderGate {
+    Ready,
+    Waiting,
+    Refresh,
+    Disabled,
+    Unavailable,
+}
+
+fn pending_ai_provider_gate(
+    ai_enabled: bool,
+    provider_loading: bool,
+    provider_status: Option<&AIProviderStatus>,
+) -> PendingAiProviderGate {
+    if !ai_enabled {
+        PendingAiProviderGate::Disabled
+    } else if provider_loading {
+        PendingAiProviderGate::Waiting
+    } else {
+        match provider_status {
+            Some(status) if status.active_provider != AIProvider::None => {
+                PendingAiProviderGate::Ready
+            }
+            Some(_) => PendingAiProviderGate::Unavailable,
+            None => PendingAiProviderGate::Refresh,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AiPreparationUi<'a> {
+    intent: Option<&'a PendingAiIntent>,
+    error: Option<&'a str>,
+    scan_busy: bool,
+    scan_cancelling: bool,
+    completed: usize,
+    total: usize,
+    current_task: Option<&'a str>,
+}
+
+impl AiPreparationUi<'_> {
+    fn is_chat(self) -> bool {
+        matches!(self.intent, Some(PendingAiIntent::Chat { .. }))
+    }
+
+    fn is_report(self) -> bool {
+        matches!(self.intent, Some(PendingAiIntent::Report { .. }))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FullScanConsent {
+    source_scan_id: String,
+    reason: String,
+    original_prompt: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChatDisplayRole {
+    User,
+    Assistant,
+}
+
+#[derive(Clone, Debug)]
+struct ChatDisplayMessage {
+    request_id: u64,
+    role: ChatDisplayRole,
+    text: String,
+    provider_use: Option<ProviderUse>,
+    finish_reason: Option<String>,
+    terminal_message: Option<String>,
+    tools: ChatToolHistory,
+    proposals: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ChatAttempt {
+    logical_request_id: u64,
+    prompt: String,
+    tools: ChatToolSnapshot,
+    preference: AIProviderPreference,
+    availability: ProviderAvailability,
+    tried: Vec<AIProvider>,
+    initial_provider: AIProvider,
+    current_provider: AIProvider,
+    first_failure: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct CloudFallbackConsent {
+    previous_request_id: u64,
+    attempt: ChatAttempt,
+    candidate: AIProvider,
+    reason: String,
+}
+
+#[derive(Clone, Debug)]
+struct PendingCloudFallbackPolicyUpdate {
+    request_id: u64,
+    policy: CloudFallbackPolicy,
+    consent: CloudFallbackConsent,
+}
+
+#[derive(Clone, Debug, Default)]
+struct DiagnosticAnalysisDisplay {
+    interpretation: Option<String>,
+    provider_use: Option<ProviderUse>,
+    grounding: Option<GroundingTrace>,
+    cached: bool,
+    error: Option<String>,
+    busy: bool,
+}
+
+#[derive(Clone, Debug)]
+struct DiagnosticAnalysisAttempt {
+    generation: DiagnosticAnalysisGeneration,
+    tried: Vec<AIProvider>,
+    initial_provider: AIProvider,
+}
+
+#[derive(Clone, Debug)]
+struct PendingDiagnosticAnalysis {
+    request_id: u64,
+    attempt: DiagnosticAnalysisAttempt,
+}
+
+#[derive(Clone, Debug, Default)]
+struct IssuePrioritizationDisplay {
+    text: Option<String>,
+    provider_use: Option<ProviderUse>,
+    grounding: Option<GroundingTrace>,
+    cached: bool,
+    error: Option<String>,
+    busy: bool,
+    /// Epoch of the committed issue evidence this text describes. A result
+    /// from an older detection pass is never rendered over newer evidence.
+    committed_epoch: u64,
+}
+
+#[derive(Clone, Debug)]
+struct IssuePrioritizationAttempt {
+    generation: IssuePrioritizationGeneration,
+    tried: Vec<AIProvider>,
+    initial_provider: AIProvider,
+    committed_epoch: u64,
+}
+
+#[derive(Clone, Debug)]
+struct PendingIssuePrioritization {
+    request_id: u64,
+    attempt: IssuePrioritizationAttempt,
+}
+
+#[derive(Clone, Debug)]
+struct FixPlanAttempt {
+    generation: FixPlanGeneration,
+    tried: Vec<AIProvider>,
+    initial_provider: AIProvider,
+}
+
+#[derive(Clone, Debug)]
+struct PendingFixPlan {
+    request_id: u64,
+    attempt: FixPlanAttempt,
+}
+
+#[derive(Clone, Debug)]
+struct FixPlanActionSelection {
+    actions: Vec<ActionRequest>,
+    expected_scan_fingerprint: String,
+    expected_catalog_fingerprint: String,
 }
 
 /// Deterministic Store 2.5.8 visual states used only by screenshot/QA automation.
@@ -432,6 +1667,7 @@ enum VisualState {
     AiConversationTopCompact,
     AiConversationBottomCompact,
     SettingsBottom,
+    RemediationPartial,
 }
 
 impl VisualState {
@@ -457,6 +1693,7 @@ impl VisualState {
                 Self::AiConversationBottomCompact
             }
             "settings-bottom-desktop-dark" | "settings-bottom" => Self::SettingsBottom,
+            "remediation-partial-desktop-dark" | "remediation-partial" => Self::RemediationPartial,
             _ => Self::Live,
         }
     }
@@ -466,6 +1703,7 @@ impl VisualState {
             Self::MonitorEmpty | Self::SettingsBottom => Page::Monitor,
             Self::ProcessesEmpty => Page::Processes,
             Self::HistoryEmpty => Page::History,
+            Self::RemediationPartial => Page::Issues,
             Self::AiEmptyCompact
             | Self::IssueToChat
             | Self::AiConversationDesktop
@@ -481,9 +1719,10 @@ impl VisualState {
             Self::AiEmptyCompact
             | Self::AiConversationTopCompact
             | Self::AiConversationBottomCompact => (900.0, 800.0),
-            Self::IssueToChat | Self::AiConversationDesktop | Self::SettingsBottom => {
-                (1440.0, 900.0)
-            }
+            Self::IssueToChat
+            | Self::AiConversationDesktop
+            | Self::SettingsBottom
+            | Self::RemediationPartial => (1440.0, 900.0),
             Self::Live => (1200.0, 800.0),
         }
     }
@@ -505,7 +1744,101 @@ impl VisualState {
                 | Self::AiConversationDesktop
                 | Self::AiConversationTopCompact
                 | Self::AiConversationBottomCompact
+                | Self::RemediationPartial
         )
+    }
+}
+
+/// Closed, validation-build-only live fixtures. Unlike screenshot fixtures,
+/// these exercise a deliberately tiny real native path. Production builds do
+/// not read [`LIVE_TEST_FIXTURE_ENV`], and the action fixture permits only the
+/// one non-mutating catalog item named below.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveTestFixture {
+    DeviceManager,
+    ExportFallback,
+    AdminRelaunch,
+}
+
+impl LiveTestFixture {
+    #[cfg(feature = "settings-test-path")]
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "device-manager" => Some(Self::DeviceManager),
+            "export-fallback" => Some(Self::ExportFallback),
+            "admin-relaunch" => Some(Self::AdminRelaunch),
+            _ => None,
+        }
+    }
+
+    const fn injects_scan(self) -> bool {
+        true
+    }
+
+    fn permits_actions(self, actions: &[ActionRequest]) -> bool {
+        self == Self::DeviceManager
+            && !actions.is_empty()
+            && actions
+                .iter()
+                .all(|action| action.remediation_id == "open_device_manager")
+    }
+}
+
+#[cfg(feature = "settings-test-path")]
+fn live_test_fixture_from_env() -> Option<LiveTestFixture> {
+    std::env::var(LIVE_TEST_FIXTURE_ENV)
+        .ok()
+        .as_deref()
+        .and_then(LiveTestFixture::parse)
+}
+
+#[cfg(not(feature = "settings-test-path"))]
+fn live_test_fixture_from_env() -> Option<LiveTestFixture> {
+    None
+}
+
+fn remediation_partial_visual_run() -> ActionRunSummary {
+    use remediation::{
+        FixCompletionStatus, FixResult, RemediationStepResult, RemediationStepStatus,
+    };
+
+    let steps = vec![
+        RemediationStepResult {
+            action: "Reset Winsock catalog".to_string(),
+            status: RemediationStepStatus::Succeeded,
+            detail: Some("The Winsock catalog was reset.".to_string()),
+        },
+        RemediationStepResult {
+            action: "Reset TCP/IP stack".to_string(),
+            status: RemediationStepStatus::Failed,
+            detail: Some("Access was denied while applying one step.".to_string()),
+        },
+    ];
+    ActionRunSummary {
+        run_id: "visual-partial-run".to_string(),
+        proposal_id: "visual-partial-proposal".to_string(),
+        authorization_id: "visual-partial-authorization".to_string(),
+        status: ActionRunStatus::Partial,
+        actions: vec![ActionItemRun {
+            remediation_id: "network_reset".to_string(),
+            label: "Reset network stack".to_string(),
+            cancellable: true,
+            status: ActionItemStatus::Partial,
+            result: Some(FixResult {
+                success: false,
+                message: "The remediation completed with partial results.".to_string(),
+                actions_taken: steps.iter().map(|step| step.action.clone()).collect(),
+                requires_restart: false,
+                completion_status: FixCompletionStatus::Partial,
+                steps,
+            }),
+            error: None,
+        }],
+        current_index: None,
+        approved_at_ms: 1_780_000_000_000,
+        completed_at_ms: Some(1_780_000_001_000),
+        scan_fingerprint: "visual-partial-scan".to_string(),
+        catalog_fingerprint: current_action_catalog_fingerprint(),
     }
 }
 
@@ -579,7 +1912,7 @@ impl Page {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct Palette {
     panel: Color,
     card: Color,
@@ -650,6 +1983,9 @@ enum SettingsDialogAction {
     NetworkGroundingChanged(bool),
     CodexCliPathChanged(String),
     CodexModelSelectionChanged(Option<usize>),
+    ProviderSetupSelectionChanged(Option<usize>),
+    ProviderModelSelectionChanged(Option<usize>),
+    ProviderTextChanged(usize, String),
     ScanOnStartupChanged(bool),
     CloseToTrayChanged(bool),
     MaxConcurrentTasksChanged(Option<f64>),
@@ -668,6 +2004,8 @@ impl SettingsDialogAction {
                 | Self::PreferredAiProviderSelectionChanged(None)
                 | Self::CloudFallbackSelectionChanged(None)
                 | Self::CodexModelSelectionChanged(None)
+                | Self::ProviderModelSelectionChanged(None)
+                | Self::ProviderSetupSelectionChanged(_)
                 | Self::MaxConcurrentTasksChanged(None)
                 | Self::Cancel
                 | Self::Save
@@ -678,15 +2016,87 @@ impl SettingsDialogAction {
 /// Which history maintenance operation an acknowledgement completes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HistoryAckKind {
+    Label,
     Tags,
     Clear,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryChangeKind {
+    Regressed,
+    Recovered,
+    Changed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PaletteFocusAction {
+    FocusQuery,
+    RestorePrevious,
+}
+
+impl HistoryChangeKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Regressed => "regressed",
+            Self::Recovered => "recovered",
+            Self::Changed => "changed",
+        }
+    }
+}
+
+/// Reactor presentation state for one expanded History task.
+///
+/// The native history contract remains the source of the raw payloads. The
+/// structured JSON projection is computed once on the background completion
+/// path so rebuilding the WinUI tree never reparses large diagnostic output.
+#[derive(Clone, Debug)]
+struct HistoryTaskDiffProjection {
+    detail: TaskDiffDetail,
+    differences: Option<Vec<JsonDifference>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HistoryTrendBadge {
+    label: String,
+    description: String,
+}
+
+#[derive(Clone, Debug)]
+struct PendingActionApproval {
+    proposal: ActionProposal,
+    return_surface: ActionReviewSurface,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActionReviewSurface {
+    Review,
+    RepairConfirmation,
+}
+
+impl From<TaskDiffDetail> for HistoryTaskDiffProjection {
+    fn from(detail: TaskDiffDetail) -> Self {
+        let differences = find_json_differences(&detail.previous_output, &detail.current_output);
+        Self {
+            detail,
+            differences,
+        }
+    }
+}
+
 #[derive(Clone)]
 enum Message {
+    /// One coalesced native-window wake. The UI thread drains every app-owned
+    /// event channel in response, replacing the former permanent poll tasks.
+    NativeSignalReady,
+    /// First-publication handoff. Reactor commits native window commands
+    /// before running view effects, so this is the earliest deterministic
+    /// point where Win32 lifecycle/shortcut integration can discover the HWND.
+    WindowHookBootstrap,
     Navigate(Option<String>),
     WindowSize(WindowSize),
+    ColorSchemeChanged(ColorScheme),
     TogglePane,
+    ToggleTheme,
     OpenAbout,
     AboutClosed {
         epoch: u64,
@@ -739,8 +2149,35 @@ enum Message {
     },
     SettingsRuntimeEvent(Box<SettingsEvent>),
     SettingsWorkerStopped,
-    SettingsWaitCancelled,
-    SettingsWaitRejected,
+    ProviderModelsRefreshDue {
+        dialog_epoch: u64,
+        refresh_revision: u64,
+        setup_index: usize,
+    },
+    ProviderModelsRefreshCancelled {
+        refresh_revision: u64,
+    },
+    ProviderModelsRefreshRejected {
+        refresh_revision: u64,
+    },
+    RefreshProviderModels,
+    CancelProviderModels,
+    ProviderSetupWorkerEventReceived(Box<ProviderSetupWorkerEvent>),
+    ProviderSetupWorkerStopped,
+    RefreshSubscriptionAuth(SubscriptionAuthProvider),
+    StartSubscriptionSignIn(SubscriptionAuthProvider),
+    StartSubscriptionSignOut(SubscriptionAuthProvider),
+    CancelSubscriptionAuth,
+    SubscriptionAuthWorkerEventReceived(Box<SubscriptionAuthWorkerEvent>),
+    SubscriptionAuthWorkerStopped,
+    RequestSubscriptionInstall(SubscriptionAuthProvider),
+    SubscriptionInstallPromptClosed {
+        prompt: SubscriptionInstallPrompt,
+        result: ContentDialogResult,
+    },
+    CancelSubscriptionInstall,
+    SubscriptionInstallWorkerEventReceived(Box<SubscriptionInstallWorkerEvent>),
+    SubscriptionInstallWorkerStopped,
     SystemRuntimeCompleted(Box<SystemCompleted>),
     SystemWorkerStopped,
     SystemWaitCancelled,
@@ -766,7 +2203,7 @@ enum Message {
     DiagnosticRunFinished {
         session_id: String,
         cancelled: bool,
-        authoritative_results: Result<HashMap<String, DiagnosticOutput>, String>,
+        authoritative_results: Result<SharedScanEvidence, String>,
     },
     DiagnosticRunRejected,
     DiagnosticFinalizationElapsed {
@@ -799,7 +2236,6 @@ enum Message {
         events: Vec<UiEvent>,
         terminated: bool,
     },
-    DiagnosticWaitRejected,
     AiStatusFinished {
         request_id: u64,
         result: Result<Box<AIProviderStatus>, String>,
@@ -813,7 +2249,14 @@ enum Message {
     ExportRuntimeCompleted(Box<ExportCompleted>),
     /// The rendered report file was written to the validated user path. The
     /// write happens on a background worker; the error is already a string.
-    ExportFileSaved(Box<Result<std::path::PathBuf, String>>),
+    ExportFileSaved {
+        request_id: u64,
+        result: Box<Result<std::path::PathBuf, String>>,
+    },
+    SupportPackageSaved {
+        request_id: u64,
+        result: Box<Result<ValidatedSupportPackagePaths, String>>,
+    },
     ExportWorkerStopped,
     ExportWaitCancelled,
     ExportWaitRejected,
@@ -834,7 +2277,7 @@ enum Message {
     ProcessQueryRejected {
         request_id: u64,
     },
-    SelectProcess(Option<u32>),
+    SelectProcess(Option<ProcessIdentity>),
     RefreshHistory,
     HistoryFilterChanged(String),
     SelectHistory(String),
@@ -846,6 +2289,16 @@ enum Message {
         request_id: u64,
         result: Result<Box<ComparisonSummary>, String>,
     },
+    ToggleHistoryTaskDetail(String),
+    HistoryTaskDiffFinished {
+        request_id: u64,
+        task_id: String,
+        result: Result<Box<HistoryTaskDiffProjection>, String>,
+    },
+    HistoryTaskDiffRejected {
+        request_id: u64,
+        task_id: String,
+    },
     HistoryQueryRejected {
         request_id: u64,
         comparison: bool,
@@ -855,21 +2308,54 @@ enum Message {
     SendChat,
     ChatWorkerEventReceived(Box<ChatWorkerEvent>),
     ChatWorkerStopped,
-    ChatWaitCancelled,
-    ChatWaitRejected,
     ReportWorkerEventReceived(Box<ReportWorkerEvent>),
     ReportWorkerStopped,
-    ReportWaitCancelled,
-    ReportWaitRejected,
+    ReportGenerationPrepared {
+        request_id: u64,
+        generation: Box<ReportGeneration>,
+    },
+    ReportGenerationPreparationCancelled {
+        request_id: u64,
+    },
+    ReportGenerationPreparationRejected {
+        request_id: u64,
+    },
     GenerateReport,
+    RegenerateReport,
     CancelReport,
+    CancelPendingAiIntent,
+    RetryPendingAiIntent,
+    CopyReport,
+    ExplainLatestScan,
     RunRemediation(String),
     AskAiAboutIssue(String),
+    PrioritizeIssues,
+    CancelIssuePrioritization,
     ProposeFixPlan,
+    CancelFixPlan,
+    ReviewFixPlanActions(FixPlanActionSelection),
+    FixPlanWorkerEventReceived(Box<FixPlanWorkerEvent>),
+    FixPlanWorkerStopped,
     CancelChat,
+    NewConversation,
+    AllowCloudFallback,
+    NeverCloudFallback,
+    ApproveFullScan,
+    DismissFullScan,
     TogglePalette,
     ClosePalette,
+    PaletteFocusReady {
+        epoch: u64,
+        action: PaletteFocusAction,
+    },
+    PaletteFocusCancelled {
+        epoch: u64,
+    },
+    PaletteFocusRejected {
+        epoch: u64,
+    },
     PaletteQueryChanged(String),
+    PaletteActiveChanged(usize),
     PaletteCommand(String),
     ShowShortcutHelp,
     CloseShortcutHelp,
@@ -878,10 +2364,21 @@ enum Message {
     ClearProviderKey(usize),
     ToggleQuickScanTask(String),
     RequestNetworkConnections,
+    DiagnosticFilterChanged(String),
+    SetDiagnosticRaw(bool),
     SelectDiagnosticResult(String),
+    AnalyzeSelectedDiagnostic,
+    RetrySelectedDiagnosticAnalysis,
+    CancelDiagnosticAnalysis,
+    AnalysisWorkerEventReceived(Box<AnalysisWorkerEvent>),
+    AnalysisWorkerStopped,
     NetworkConnectionsFinished(Box<Result<Vec<NetworkConnection>, String>>),
     ToggleClearHistoryConfirm(bool),
     ClearHistoryConfirmed,
+    BeginHistoryLabelEdit,
+    CancelHistoryLabelEdit,
+    HistoryLabelDraftChanged(String),
+    SaveHistoryLabel,
     HistoryTagDraftChanged(String),
     SaveHistoryTags,
     HistoryAckFinished {
@@ -889,30 +2386,48 @@ enum Message {
         result: Result<(), String>,
     },
     RequestHistoryTrends,
-    HistoryTrendsFinished(Box<Result<Vec<TaskTrend>, String>>),
+    HistoryTrendsFinished {
+        request_id: u64,
+        result: Box<Result<Vec<TaskTrend>, String>>,
+    },
+    ActionReviewDialogClosed {
+        proposal_id: String,
+        result: ContentDialogResult,
+    },
     RepairDialogClosed {
-        remediation_id: String,
+        proposal_id: String,
         result: ContentDialogResult,
     },
     ActionWorkerEventReceived(Box<ActionWorkerEvent>),
     ActionWorkerStopped,
-    ActionWaitCancelled,
-    ActionWaitRejected,
+    InstanceWaitCancelled,
+    WindowHookRetryReady,
+    WindowHookRetryRejected,
+    ActionRunEventReceived(Box<ActionRunEvent>),
+    ActionRunStreamStopped,
+    CancelActionRun,
+    ActionRunExpandedChanged {
+        run_id: String,
+        expanded: bool,
+    },
     RestartAsAdmin,
     RestartAsAdminFinished(Result<bool, String>),
     InstanceActivated,
+    WindowLifecycleChanged(window_support::WindowLifecycleSnapshot),
+    GlobalShortcut(window_support::GlobalShortcutEvent),
     TrayCommand(u8),
     BackendBatch {
         events: Vec<UiEvent>,
         terminated: bool,
     },
-    BackendWaitRejected,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct DiagnosticSnapshot {
     results: Vec<DiagnosticTaskResult>,
     scan_kind: Option<ScanKind>,
+    task_ids: Vec<String>,
+    session_id: Option<String>,
     duration_ms: u64,
     total: usize,
     completed: usize,
@@ -920,16 +2435,183 @@ struct DiagnosticSnapshot {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct TargetedDiagnosticOverlay {
+    target_task_id: String,
+    base: DiagnosticSnapshot,
+    staged_result: Option<DiagnosticTaskResult>,
+}
+
+impl TargetedDiagnosticOverlay {
+    fn for_committed_session(
+        scan_kind: ScanKind,
+        task_ids: &[String],
+        base: DiagnosticSnapshot,
+    ) -> Option<Self> {
+        let [target_task_id] = task_ids else {
+            return None;
+        };
+        (scan_kind == ScanKind::Targeted && base.session_id.is_some()).then(|| Self {
+            target_task_id: target_task_id.clone(),
+            base,
+            staged_result: None,
+        })
+    }
+
+    fn stage(&mut self, result: DiagnosticTaskResult) {
+        if result.task_id == self.target_task_id {
+            self.staged_result = Some(result);
+        }
+    }
+
+    fn staged_counts(&self) -> (usize, usize) {
+        self.staged_result
+            .as_ref()
+            .map_or((0, 0), |result| (1, usize::from(!result.success)))
+    }
+
+    fn rollback(self) -> DiagnosticSnapshot {
+        self.base
+    }
+
+    fn commit(
+        &self,
+        replacement: DiagnosticTaskResult,
+        catalog: &[DiagnosticTask],
+    ) -> Result<DiagnosticSnapshot, String> {
+        let results = merge_targeted_diagnostic_result(
+            self.base.results.clone(),
+            &self.target_task_id,
+            replacement,
+            self.base.session_id.as_deref(),
+            catalog,
+        )?;
+        let mut task_ids = self.base.task_ids.clone();
+        if !task_ids
+            .iter()
+            .any(|task_id| task_id == &self.target_task_id)
+        {
+            task_ids.push(self.target_task_id.clone());
+        }
+        let completed = results.len();
+        let errors = results.iter().filter(|result| !result.success).count();
+        Ok(DiagnosticSnapshot {
+            results,
+            scan_kind: self.base.scan_kind,
+            total: task_ids.len(),
+            task_ids,
+            session_id: self.base.session_id.clone(),
+            duration_ms: self.base.duration_ms,
+            completed,
+            errors,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum PendingExportAction {
     ShareToWindowsForum,
+    EmailReport,
+    CopyDiagnosticReport,
+    SupportPackage {
+        paths: ValidatedSupportPackagePaths,
+    },
     /// Write the rendered report to the user-chosen, policy-validated path.
-    SaveToFile { path: ValidatedExportPath },
+    SaveToFile {
+        path: ValidatedExportPath,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingExport {
     request_id: u64,
     action: PendingExportAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExportWriteKind {
+    File,
+    SupportPackage,
+}
+
+fn pending_export_write_is_current(
+    pending: Option<&PendingExport>,
+    request_id: u64,
+    kind: ExportWriteKind,
+) -> bool {
+    pending.is_some_and(|pending| {
+        pending.request_id == request_id
+            && matches!(
+                (&pending.action, kind),
+                (
+                    PendingExportAction::SaveToFile { .. },
+                    ExportWriteKind::File
+                ) | (
+                    PendingExportAction::SupportPackage { .. },
+                    ExportWriteKind::SupportPackage
+                )
+            )
+    })
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ProviderCatalogUiState {
+    catalog: Option<ModelCatalog>,
+    loading: bool,
+    error: Option<String>,
+    blocked: Option<String>,
+    stale: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingProviderCatalogRequest {
+    request_id: u64,
+    provider: AIProvider,
+    setup_index: usize,
+    dialog_epoch: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingProviderKeyChange {
+    request_id: u64,
+    provider: ProviderKeyId,
+    index: usize,
+    store: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct SubscriptionAuthUiState {
+    status: Option<SubscriptionAuthStatus>,
+    operation: Option<SubscriptionAuthOperation>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingSubscriptionAuth {
+    operation_id: u64,
+    provider: SubscriptionAuthProvider,
+    operation: SubscriptionAuthOperation,
+    dialog_epoch: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SubscriptionInstallPrompt {
+    Winget {
+        provider: SubscriptionAuthProvider,
+        dialog_epoch: u64,
+    },
+    VendorFallback {
+        provider: SubscriptionAuthProvider,
+        reason: SubscriptionInstallFallbackReason,
+        dialog_epoch: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingSubscriptionInstall {
+    request_id: u64,
+    provider: SubscriptionAuthProvider,
+    method: SubscriptionInstallMethod,
+    dialog_epoch: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -940,9 +2622,12 @@ struct DiagnosticScanPolicy {
 }
 
 impl DiagnosticScanPolicy {
-    fn snapshot(settings: &AppSettings, scan_kind: ScanKind) -> Self {
+    fn snapshot(settings: &AppSettings, scan_kind: ScanKind, targeted_rerun: bool) -> Self {
         Self {
-            auto_save: settings.auto_save,
+            // A one-row rerun updates the currently committed scan in place.
+            // Persisting it as a separate one-row history entry would both lose
+            // the scan context and diverge from the shipping Tauri behavior.
+            auto_save: settings.auto_save && !targeted_rerun,
             max_concurrent_tasks: scan_concurrency_from_settings(settings.max_concurrent_tasks),
             history_tag: scan_kind_history_tag(scan_kind).to_string(),
         }
@@ -985,19 +2670,12 @@ fn update_history_retention_policy(
 
 fn authoritative_ui_results(
     session_id: &str,
-    results: &HashMap<String, DiagnosticOutput>,
+    results: &ScanEvidence,
     catalog: &[DiagnosticTask],
 ) -> Vec<DiagnosticTaskResult> {
     let mut results = results
         .iter()
-        .map(|(task_id, result)| DiagnosticTaskResult {
-            session_id: session_id.to_string(),
-            task_id: task_id.clone(),
-            success: result.success,
-            output: result.output.clone(),
-            error: result.error.clone(),
-            duration_ms: result.duration_ms,
-        })
+        .map(|(task_id, result)| DiagnosticTaskResult::new(session_id, task_id, Arc::clone(result)))
         .collect::<Vec<_>>();
     results.sort_by_key(|result| {
         catalog
@@ -1008,8 +2686,67 @@ fn authoritative_ui_results(
     results
 }
 
+fn merge_targeted_diagnostic_result(
+    mut prior: Vec<DiagnosticTaskResult>,
+    target_task_id: &str,
+    mut replacement: DiagnosticTaskResult,
+    base_session_id: Option<&str>,
+    catalog: &[DiagnosticTask],
+) -> Result<Vec<DiagnosticTaskResult>, String> {
+    if replacement.task_id != target_task_id {
+        return Err(format!(
+            "targeted rerun returned `{}` instead of `{target_task_id}`",
+            replacement.task_id
+        ));
+    }
+    let replacement_index = prior
+        .iter()
+        .position(|result| result.task_id == target_task_id);
+
+    if let Some(session_id) = base_session_id {
+        replacement.session_id = session_id.to_string();
+    }
+    let prior_order = prior
+        .iter()
+        .enumerate()
+        .map(|(index, result)| (result.task_id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    if let Some(replacement_index) = replacement_index {
+        prior[replacement_index] = replacement;
+    } else {
+        prior.push(replacement);
+    }
+    prior.sort_by_key(|result| {
+        catalog
+            .iter()
+            .position(|task| task.id == result.task_id)
+            .map_or_else(
+                || {
+                    (
+                        1,
+                        prior_order
+                            .get(&result.task_id)
+                            .copied()
+                            .unwrap_or(usize::MAX),
+                    )
+                },
+                |index| (0, index),
+            )
+    });
+    Ok(prior)
+}
+
+fn diagnostic_output_snapshot(results: &[DiagnosticTaskResult]) -> SharedScanEvidence {
+    Arc::new(
+        results
+            .iter()
+            .map(|result| (result.task_id.clone(), Arc::clone(&result.result)))
+            .collect(),
+    )
+}
+
 fn authoritative_result_set_is_complete(
-    results: &HashMap<String, DiagnosticOutput>,
+    results: &ScanEvidence,
     expected_task_ids: &[String],
 ) -> bool {
     let expected = expected_task_ids
@@ -1032,17 +2769,7 @@ fn build_history_scan_record(
 ) -> ScanRecord {
     let results = results
         .iter()
-        .map(|result| {
-            (
-                result.task_id.clone(),
-                HistoryTaskResult {
-                    success: result.success,
-                    output: result.output.clone(),
-                    error: result.error.clone(),
-                    duration_ms: result.duration_ms,
-                },
-            )
-        })
+        .map(|result| (result.task_id.clone(), Arc::clone(&result.result)))
         .collect::<HashMap<_, _>>();
     let success_count = results.values().filter(|result| result.success).count();
     let failure_count = results.len().saturating_sub(success_count);
@@ -1176,7 +2903,9 @@ fn machine_card_accessibility_name(
 
 struct WfdiagSpike {
     page: Page,
+    live_test_fixture: Option<LiveTestFixture>,
     theme: WindowTheme,
+    effective_color_scheme: ColorScheme,
     window_size: WindowSize,
     requested_client_width: f64,
     requested_client_height: f64,
@@ -1210,6 +2939,7 @@ struct WfdiagSpike {
     settings_saving: bool,
     settings_error: Option<String>,
     settings_save_error: Option<String>,
+    startup_scan_gate: StartupScanGate,
     system_runtime: Option<SystemRuntime>,
     system_receiver: Option<Arc<Mutex<mpsc::Receiver<SystemCompleted>>>>,
     system_wait: Option<ComponentTask>,
@@ -1227,13 +2957,14 @@ struct WfdiagSpike {
     issue_request_id: u64,
     issue_committed_epoch: u64,
     issue_source_session_id: Option<String>,
-    issue_source_results: Option<Arc<HashMap<String, DiagnosticOutput>>>,
+    issue_source_results: Option<SharedScanEvidence>,
     issue_projected_epoch: Option<u64>,
     issue_projected_session_id: Option<String>,
     issue_pending: Option<PendingIssueDetection>,
     issue_enqueued_request_id: Option<u64>,
     issue_error: Option<String>,
     monitoring_paused: bool,
+    monitoring_paused_by_lifecycle: bool,
     process_filter: String,
     process_page: Option<ProcessPage>,
     process_sort_key: ProcessSortKey,
@@ -1241,9 +2972,10 @@ struct WfdiagSpike {
     process_offset: usize,
     process_request_id: u64,
     process_request_task: Option<ComponentTask>,
+    process_last_refresh_started_at: Option<Instant>,
     process_loading: bool,
     process_error: Option<String>,
-    selected_process_pid: Option<u32>,
+    selected_process: Option<ProcessIdentity>,
     history_runtime: Option<Arc<NativeHistoryRuntime>>,
     history_retention_policy: Arc<RwLock<HistoryRetentionPolicy>>,
     history_summaries: Vec<ScanSummary>,
@@ -1254,47 +2986,136 @@ struct WfdiagSpike {
     history_request_task: Option<ComponentTask>,
     history_compare_request_id: u64,
     history_compare_task: Option<ComponentTask>,
+    history_expanded_task_id: Option<String>,
+    history_task_diff: Option<HistoryTaskDiffProjection>,
+    history_task_diff_error: Option<String>,
+    history_task_diff_request_id: u64,
+    history_task_diff_task: Option<ComponentTask>,
     history_loading: bool,
     history_error: Option<String>,
+    history_comparison_error: Option<String>,
     chat_input: String,
+    chat_composer_reference: ElementRef<TextBox>,
+    chat_focus_revision: u64,
     chat_answer: Option<String>,
+    ai_worker_settings: Option<SettingsService>,
+    ai_worker_cache: SharedAiCache,
+    ai_worker_policy: std::ffi::OsString,
     chat_runtime: Option<NativeChatRuntime>,
-    chat_receiver:
-        Option<Arc<Mutex<std::sync::mpsc::Receiver<ChatWorkerEvent>>>>,
+    chat_receiver: Option<Arc<Mutex<std::sync::mpsc::Receiver<ChatWorkerEvent>>>>,
     chat_wait: Option<ComponentTask>,
     chat_request_id: u64,
     chat_pending: Option<u64>,
+    chat_attempt: Option<ChatAttempt>,
+    chat_last_prompt: Option<String>,
+    full_scan_consent: Option<FullScanConsent>,
+    cloud_fallback_consent: Option<CloudFallbackConsent>,
+    cloud_fallback_policy_update: Option<PendingCloudFallbackPolicyUpdate>,
+    chat_messages: Vec<ChatDisplayMessage>,
     report_runtime: Option<NativeReportRuntime>,
-    report_receiver:
-        Option<Arc<Mutex<std::sync::mpsc::Receiver<ReportWorkerEvent>>>>,
+    report_receiver: Option<Arc<Mutex<std::sync::mpsc::Receiver<ReportWorkerEvent>>>>,
     report_wait: Option<ComponentTask>,
+    report_prepare_task: Option<ComponentTask>,
     report_request_id: u64,
     report_pending: Option<u64>,
     report_text: Option<String>,
     report_provider: Option<String>,
+    report_provider_use: Option<ProviderUse>,
+    report_source_session_id: Option<String>,
     report_error: Option<String>,
+    pending_ai_intent: Option<PendingAiIntent>,
+    pending_ai_preparation_error: Option<String>,
+    fix_plan_runtime: Option<NativeFixPlanRuntime>,
+    fix_plan_receiver: Option<Arc<Mutex<std::sync::mpsc::Receiver<FixPlanWorkerEvent>>>>,
+    fix_plan_wait: Option<ComponentTask>,
+    fix_plan_request_id: u64,
+    fix_plan_pending: Option<PendingFixPlan>,
+    fix_plan: Option<ValidatedFixPlan>,
+    fix_plan_error: Option<String>,
     action_runtime: Option<NativeActionRuntime>,
-    action_receiver:
-        Option<Arc<Mutex<std::sync::mpsc::Receiver<ActionWorkerEvent>>>>,
+    action_receiver: Option<Arc<Mutex<std::sync::mpsc::Receiver<ActionWorkerEvent>>>>,
     action_wait: Option<ComponentTask>,
+    action_run_receiver: Option<Arc<Mutex<std::sync::mpsc::Receiver<ActionRunEvent>>>>,
+    action_run_wait: Option<ComponentTask>,
+    action_active_run: Option<ActionRunSummary>,
+    action_run_history: Vec<ActionRunSummary>,
+    action_expanded_runs: HashSet<String>,
     action_request_id: u64,
     action_pending: Option<u64>,
-    repair_confirm: Option<RemediationSummary>,
+    action_pending_approval: Option<PendingActionApproval>,
+    action_review: Option<ActionProposal>,
+    repair_confirm: Option<ActionProposal>,
     admin_relaunch_task: Option<ComponentTask>,
     instance_wait: Option<ComponentTask>,
     palette_open: bool,
     palette_query: String,
+    palette_active_index: usize,
+    palette_query_reference: ElementRef<TextBox>,
+    palette_button_reference: ElementRef<Button>,
+    palette_result_references: [ElementRef<Button>; PALETTE_MAX_RESULTS],
+    palette_dialog_epoch: u64,
+    palette_focus_task: Option<ComponentTask>,
     shortcut_help_open: bool,
     window_hook_installed: bool,
-    provider_key_drafts: [String; 4],
+    window_hook_retry_failures: u8,
+    window_hook_retry_task: Option<ComponentTask>,
+    window_lifecycle_revision: u64,
+    window_usable: bool,
+    provider_key_drafts: [String; ProviderKeyId::ALL.len()],
+    provider_credential_transaction: ProviderCredentialTransaction,
     provider_key_busy: bool,
+    provider_key_pending: Option<PendingProviderKeyChange>,
+    provider_setup_index: usize,
+    provider_setup_runtime: Option<ProviderSetupRuntime>,
+    provider_setup_receiver:
+        Option<Arc<Mutex<std::sync::mpsc::Receiver<ProviderSetupWorkerEvent>>>>,
+    provider_setup_wait: Option<ComponentTask>,
+    provider_setup_error: Option<String>,
+    provider_catalogs: Vec<ProviderCatalogUiState>,
+    provider_catalog_request_id: u64,
+    provider_catalog_pending: Option<PendingProviderCatalogRequest>,
+    provider_catalog_refresh_revision: u64,
+    provider_catalog_refresh_task: Option<ComponentTask>,
+    provider_catalog_refresh_after_cancel: bool,
+    subscription_auth_runtime: Option<SubscriptionAuthRuntime>,
+    subscription_auth_receiver:
+        Option<Arc<Mutex<std::sync::mpsc::Receiver<SubscriptionAuthWorkerEvent>>>>,
+    subscription_auth_wait: Option<ComponentTask>,
+    subscription_auth_error: Option<String>,
+    subscription_auth_states: Vec<SubscriptionAuthUiState>,
+    subscription_auth_operation_id: u64,
+    subscription_auth_pending: Option<PendingSubscriptionAuth>,
+    subscription_install_runtime: Option<SubscriptionInstallRuntime>,
+    subscription_install_receiver:
+        Option<Arc<Mutex<std::sync::mpsc::Receiver<SubscriptionInstallWorkerEvent>>>>,
+    subscription_install_wait: Option<ComponentTask>,
+    subscription_install_request_id: u64,
+    subscription_install_pending: Option<PendingSubscriptionInstall>,
+    subscription_install_prompt: Option<SubscriptionInstallPrompt>,
+    subscription_install_progress: Option<SubscriptionInstallProgress>,
+    subscription_install_error: Option<String>,
     history_clear_confirm: bool,
+    history_label_draft: String,
+    history_label_editing: bool,
     history_tag_draft: String,
     history_ack_busy: bool,
     history_wait: Option<ComponentTask>,
     history_trends: Option<Vec<TaskTrend>>,
     history_trends_loading: bool,
+    history_trends_error: Option<String>,
+    history_trends_request_id: u64,
+    history_trends_baseline_id: Option<String>,
     selected_result_task_id: Option<String>,
+    diagnostic_filter: String,
+    diagnostic_raw_output: bool,
+    analysis_runtime: Option<NativeAnalysisRuntime>,
+    analysis_receiver: Option<Arc<Mutex<std::sync::mpsc::Receiver<AnalysisWorkerEvent>>>>,
+    analysis_wait: Option<ComponentTask>,
+    analysis_request_id: u64,
+    analysis_pending: Option<PendingDiagnosticAnalysis>,
+    diagnostic_analyses: HashMap<String, DiagnosticAnalysisDisplay>,
+    issue_prioritization_pending: Option<PendingIssuePrioritization>,
+    issue_prioritization: IssuePrioritizationDisplay,
     network_connections: Option<Vec<NetworkConnection>>,
     network_loading: bool,
     ai_mode: AiMode,
@@ -1314,6 +3135,7 @@ struct WfdiagSpike {
     status: String,
     diagnostic_results: Vec<DiagnosticTaskResult>,
     previous_diagnostic_snapshot: Option<DiagnosticSnapshot>,
+    targeted_diagnostic_overlay: Option<TargetedDiagnosticOverlay>,
     diagnostic_catalog: Vec<DiagnosticTask>,
     diagnostic_runtime: Option<DiagnosticRuntime>,
     diagnostic_receiver: Option<Arc<UiEventReceiver>>,
@@ -1326,6 +3148,7 @@ struct WfdiagSpike {
     diagnostic_scan_kind: Option<ScanKind>,
     diagnostic_scan_policy: Option<DiagnosticScanPolicy>,
     diagnostic_expected_task_ids: Vec<String>,
+    diagnostic_task_statuses: HashMap<String, TaskProgressStatus>,
     diagnostic_session_id: Option<String>,
     diagnostic_scan_start: Option<Instant>,
     diagnostic_duration_ms: u64,
@@ -1342,6 +3165,7 @@ struct WfdiagSpike {
     is_admin: bool,
     latest_system_stats: Option<SystemStats>,
     monitor_history: MonitorHistory,
+    monitor_error: Option<String>,
     native_monitor: Option<Arc<NativeMonitorRuntime>>,
     backend_receiver: Option<Arc<UiEventReceiver>>,
     backend_wait: Option<ComponentTask>,
@@ -1511,38 +3335,35 @@ impl MonitorHistory {
     }
 }
 
-fn spawn_backend_wait(
-    context: &ComponentContext<WfdiagSpike>,
-    receiver: Arc<UiEventReceiver>,
-) -> ComponentTask {
-    context.spawn_background_with_rejection(
-        move |cancellation| {
-            while !cancellation.is_cancelled()
-                && !receiver.wait_for_events_timeout(Duration::from_millis(100))
-            {}
-            let events = receiver.drain();
-            let terminated = receiver.is_terminated();
-            Message::BackendBatch { events, terminated }
-        },
-        Message::BackendWaitRejected,
-    )
-}
+/// Bound one UI publication so a bursty stream cannot monopolize the WinUI
+/// dispatcher. Hitting the limit schedules another coalesced native wake.
+const NATIVE_EVENT_DRAIN_LIMIT: usize = 512;
 
-fn spawn_diagnostic_wait(
-    context: &ComponentContext<WfdiagSpike>,
-    receiver: Arc<UiEventReceiver>,
-) -> ComponentTask {
-    context.spawn_background_with_rejection(
-        move |cancellation| {
-            while !cancellation.is_cancelled()
-                && !receiver.wait_for_events_timeout(Duration::from_millis(100))
-            {}
-            let events = receiver.drain();
-            let terminated = receiver.is_terminated();
-            Message::DiagnosticBatch { events, terminated }
-        },
-        Message::DiagnosticWaitRejected,
-    )
+fn drain_native_receiver<T>(
+    receiver: &Arc<Mutex<std::sync::mpsc::Receiver<T>>>,
+    messages: &mut Vec<Message>,
+    mut map: impl FnMut(T) -> Message,
+    stopped: Message,
+) -> bool {
+    let receiver = match receiver.lock() {
+        Ok(receiver) => receiver,
+        Err(_) => {
+            messages.push(stopped);
+            return false;
+        }
+    };
+
+    for _ in 0..NATIVE_EVENT_DRAIN_LIMIT {
+        match receiver.try_recv() {
+            Ok(event) => messages.push(map(event)),
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                messages.push(stopped);
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn spawn_ai_status_wait(
@@ -1710,29 +3531,61 @@ fn spawn_history_save_wait(
     )
 }
 
-fn spawn_settings_wait(
+fn spawn_provider_model_refresh_delay(
     context: &ComponentContext<WfdiagSpike>,
-    receiver: Arc<Mutex<mpsc::Receiver<SettingsEvent>>>,
+    dialog_epoch: u64,
+    refresh_revision: u64,
+    setup_index: usize,
 ) -> ComponentTask {
     context.spawn_background_with_rejection(
-        move |cancellation| loop {
-            if cancellation.is_cancelled() {
-                return Message::SettingsWaitCancelled;
-            }
-
-            let received = match receiver.lock() {
-                Ok(receiver) => receiver.recv_timeout(Duration::from_millis(100)),
-                Err(_) => return Message::SettingsWorkerStopped,
-            };
-            match received {
-                Ok(event) => return Message::SettingsRuntimeEvent(Box::new(event)),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Message::SettingsWorkerStopped;
+        move |cancellation| {
+            let deadline = Instant::now() + PROVIDER_MODEL_REFRESH_DELAY;
+            loop {
+                if cancellation.is_cancelled() {
+                    return Message::ProviderModelsRefreshCancelled { refresh_revision };
                 }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Message::ProviderModelsRefreshDue {
+                        dialog_epoch,
+                        refresh_revision,
+                        setup_index,
+                    };
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(50)));
             }
         },
-        Message::SettingsWaitRejected,
+        Message::ProviderModelsRefreshRejected { refresh_revision },
+    )
+}
+
+fn spawn_palette_focus_delay(
+    context: &ComponentContext<WfdiagSpike>,
+    epoch: u64,
+    action: PaletteFocusAction,
+) -> ComponentTask {
+    context.spawn_background_with_rejection(
+        move |cancellation| {
+            let delay = match action {
+                PaletteFocusAction::FocusQuery => PALETTE_FOCUS_DELAY,
+                // ContentDialog::Hide completes asynchronously. Restoring a
+                // XAML element while the popup is still unwinding succeeds
+                // transiently, then WinUI moves focus to its InputSite.
+                PaletteFocusAction::RestorePrevious => PALETTE_RESTORE_DELAY,
+            };
+            let deadline = Instant::now() + delay;
+            loop {
+                if cancellation.is_cancelled() {
+                    return Message::PaletteFocusCancelled { epoch };
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Message::PaletteFocusReady { epoch, action };
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(25)));
+            }
+        },
+        Message::PaletteFocusRejected { epoch },
     )
 }
 
@@ -1792,72 +3645,276 @@ fn spawn_issue_wait(
     )
 }
 
-fn spawn_chat_wait(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AiWorkerKind {
+    Analysis,
+    Chat,
+    FixPlan,
+    Report,
+}
+
+impl AiWorkerKind {
+    const fn display_name(self) -> &'static str {
+        match self {
+            Self::Analysis => "one-shot diagnostic AI",
+            Self::Chat => "AI chat",
+            Self::FixPlan => "AI fix planning",
+            Self::Report => "AI report generation",
+        }
+    }
+}
+
+/// Interpret the explicit worker-isolation switch used by the native UI
+/// harness. An absent/empty/unknown policy is the production path and keeps
+/// every AI worker enabled.
+fn ai_worker_enabled(policy: &std::ffi::OsStr, worker: AiWorkerKind) -> bool {
+    match policy.to_str().unwrap_or_default() {
+        "analysis" => worker != AiWorkerKind::Analysis,
+        "chat" => worker != AiWorkerKind::Chat,
+        "fix-plan" => worker != AiWorkerKind::FixPlan,
+        "report" => worker != AiWorkerKind::Report,
+        "only-analysis" => worker == AiWorkerKind::Analysis,
+        "only-chat" => worker == AiWorkerKind::Chat,
+        "only-fix-plan" => worker == AiWorkerKind::FixPlan,
+        "only-report" => worker == AiWorkerKind::Report,
+        "only-action" | "only-instance" | "none" => false,
+        _ => true,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MonitoringLifecycleAction {
+    None,
+    Pause,
+    ResumeAndRefresh,
+}
+
+fn window_is_usable(snapshot: window_support::WindowLifecycleSnapshot) -> bool {
+    snapshot.registered && snapshot.visible && !snapshot.minimized && snapshot.focused
+}
+
+fn global_shortcut_is_allowed(
+    event: window_support::GlobalShortcutEvent,
+    blocking_overlay_open: bool,
+    palette_open: bool,
+    diagnostics_busy: bool,
+) -> bool {
+    if matches!(
+        event.command,
+        window_support::GlobalShortcutCommand::PalettePrevious
+            | window_support::GlobalShortcutCommand::PaletteNext
+            | window_support::GlobalShortcutCommand::PaletteExecute
+            | window_support::GlobalShortcutCommand::PaletteClose
+    ) {
+        return palette_open;
+    }
+    if event.command == window_support::GlobalShortcutCommand::TogglePalette && palette_open {
+        return true;
+    }
+    if blocking_overlay_open {
+        return false;
+    }
+    if event.editable_focused
+        && event.command != window_support::GlobalShortcutCommand::TogglePalette
+    {
+        return false;
+    }
+    !diagnostics_busy
+        || !matches!(
+            event.command,
+            window_support::GlobalShortcutCommand::QuickScan
+                | window_support::GlobalShortcutCommand::FullScan
+        )
+}
+
+fn monitoring_lifecycle_action(
+    snapshot: window_support::WindowLifecycleSnapshot,
+    monitoring_paused: bool,
+    paused_by_lifecycle: bool,
+) -> MonitoringLifecycleAction {
+    if window_is_usable(snapshot) {
+        if monitoring_paused && paused_by_lifecycle {
+            MonitoringLifecycleAction::ResumeAndRefresh
+        } else {
+            MonitoringLifecycleAction::None
+        }
+    } else if monitoring_paused {
+        MonitoringLifecycleAction::None
+    } else {
+        MonitoringLifecycleAction::Pause
+    }
+}
+
+fn history_tag_draft_for_selection(summaries: &[ScanSummary], selected_id: &str) -> String {
+    summaries
+        .iter()
+        .find(|summary| summary.id == selected_id)
+        .map(|summary| summary.tags.join(", "))
+        .unwrap_or_default()
+}
+
+fn history_display_label(scan: &ScanSummary) -> &str {
+    scan.label
+        .as_deref()
+        .or_else(|| scan.tags.first().map(String::as_str))
+        .unwrap_or("Scan")
+}
+
+fn history_label_draft_for_selection(summaries: &[ScanSummary], selected_id: &str) -> String {
+    summaries
+        .iter()
+        .find(|summary| summary.id == selected_id)
+        .and_then(|summary| {
+            summary
+                .label
+                .as_deref()
+                .or_else(|| summary.tags.first().map(String::as_str))
+        })
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn history_scan_matches_filter(scan: &ScanSummary, needle: &str) -> bool {
+    needle.is_empty()
+        || scan.id.to_ascii_lowercase().contains(needle)
+        || scan.computer_name.to_ascii_lowercase().contains(needle)
+        || scan
+            .label
+            .as_deref()
+            .is_some_and(|label| label.to_ascii_lowercase().contains(needle))
+        || scan
+            .tags
+            .iter()
+            .any(|tag| tag.to_ascii_lowercase().contains(needle))
+        || scan
+            .timestamp
+            .to_iso_string()
+            .to_ascii_lowercase()
+            .contains(needle)
+}
+
+fn history_change_rows(
+    comparison: &ComparisonSummary,
+) -> Vec<(HistoryChangeKind, &TaskChangeSummary)> {
+    comparison
+        .new_failures
+        .iter()
+        .map(|change| (HistoryChangeKind::Regressed, change))
+        .chain(
+            comparison
+                .new_successes
+                .iter()
+                .map(|change| (HistoryChangeKind::Recovered, change)),
+        )
+        .chain(
+            comparison
+                .status_unchanged
+                .iter()
+                .filter(|change| change.output_changed)
+                .map(|change| (HistoryChangeKind::Changed, change)),
+        )
+        .collect()
+}
+
+fn history_comparison_refresh_target(
+    previous_latest_id: Option<&str>,
+    summaries: &[ScanSummary],
+    selected_id: Option<&str>,
+) -> Option<String> {
+    let latest_id = summaries.first().map(|summary| summary.id.as_str());
+    if previous_latest_id == latest_id {
+        return None;
+    }
+    selected_id
+        .filter(|selected| summaries.iter().any(|scan| scan.id == *selected))
+        .map(str::to_string)
+}
+
+fn history_trends_baseline_changed(
+    trends_baseline_id: Option<&str>,
+    current_baseline_id: Option<&str>,
+) -> bool {
+    trends_baseline_id != current_baseline_id
+}
+
+fn history_trend_badge(trends: Option<&[TaskTrend]>, task_id: &str) -> Option<HistoryTrendBadge> {
+    let trend = trends?
+        .iter()
+        .find(|trend| trend.task_id == task_id && trend.failed >= 2)?;
+    Some(HistoryTrendBadge {
+        label: format!("{}/{} errors", trend.failed, trend.scans_considered),
+        description: format!(
+            "This diagnostic had a collection error in {} of the last {} scans",
+            trend.failed, trend.scans_considered
+        ),
+    })
+}
+
+fn history_task_diff_result_is_current(
+    request_id: u64,
+    current_request_id: u64,
+    task_id: &str,
+    expanded_task_id: Option<&str>,
+) -> bool {
+    request_id == current_request_id && expanded_task_id == Some(task_id)
+}
+
+fn window_hook_retry_delay(failures: u8) -> Duration {
+    let exponent = u32::from(failures.saturating_sub(1).min(5));
+    WINDOW_HOOK_RETRY_MIN
+        .saturating_mul(1_u32 << exponent)
+        .min(WINDOW_HOOK_RETRY_MAX)
+}
+
+fn spawn_window_hook_retry(
     context: &ComponentContext<WfdiagSpike>,
-    receiver: Arc<Mutex<std::sync::mpsc::Receiver<ChatWorkerEvent>>>,
+    delay: Duration,
+) -> ComponentTask {
+    context.spawn_background_with_rejection(
+        move |cancellation| {
+            let deadline = Instant::now() + delay;
+            loop {
+                if cancellation.is_cancelled() {
+                    return Message::WindowHookRetryRejected;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Message::WindowHookRetryReady;
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(100)));
+            }
+        },
+        Message::WindowHookRetryRejected,
+    )
+}
+
+fn spawn_instance_watch(
+    context: &ComponentContext<WfdiagSpike>,
+    lifecycle_revision: u64,
 ) -> ComponentTask {
     context.spawn_background_with_rejection(
         move |cancellation| loop {
             if cancellation.is_cancelled() {
-                return Message::ChatWaitCancelled;
+                return Message::InstanceWaitCancelled;
             }
-            let received = match receiver.lock() {
-                Ok(receiver) => receiver.recv_timeout(CHAT_WAIT_POLL),
-                Err(_) => return Message::ChatWorkerStopped,
-            };
-            match received {
-                Ok(event) => return Message::ChatWorkerEventReceived(Box::new(event)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Message::ChatWorkerStopped;
-                }
-            }
-        },
-        Message::ChatWaitRejected,
-    )
-}
-
-fn spawn_instance_watch(context: &ComponentContext<WfdiagSpike>) -> ComponentTask {
-    context.spawn_background_with_rejection(
-        move |cancellation| loop {
-            if cancellation.is_cancelled() {
-                return Message::ActionWaitCancelled;
+            if let Some(snapshot) =
+                window_support::lifecycle_snapshot_if_changed(lifecycle_revision)
+            {
+                return Message::WindowLifecycleChanged(snapshot);
             }
             if instance_support::activation_requested() {
                 return Message::InstanceActivated;
+            }
+            if let Some(shortcut) = window_support::take_global_shortcut() {
+                return Message::GlobalShortcut(shortcut);
             }
             let command = window_support::take_tray_command();
             if command != window_support::TRAY_COMMAND_NONE {
                 return Message::TrayCommand(command);
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(WINDOW_COMMAND_POLL);
         },
-        Message::ActionWaitCancelled,
-    )
-}
-
-fn spawn_action_wait(
-    context: &ComponentContext<WfdiagSpike>,
-    receiver: Arc<Mutex<std::sync::mpsc::Receiver<ActionWorkerEvent>>>,
-) -> ComponentTask {
-    context.spawn_background_with_rejection(
-        move |cancellation| loop {
-            if cancellation.is_cancelled() {
-                return Message::ActionWaitCancelled;
-            }
-            let received = match receiver.lock() {
-                Ok(receiver) => receiver.recv_timeout(CHAT_WAIT_POLL),
-                Err(_) => return Message::ActionWorkerStopped,
-            };
-            match received {
-                Ok(event) => return Message::ActionWorkerEventReceived(Box::new(event)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Message::ActionWorkerStopped;
-                }
-            }
-        },
-        Message::ActionWaitRejected,
+        Message::InstanceWaitCancelled,
     )
 }
 
@@ -1867,7 +3924,9 @@ fn spawn_relaunch_as_admin(context: &ComponentContext<WfdiagSpike>) -> Component
     context.spawn_background_with_rejection(
         move |_cancellation| {
             Message::RestartAsAdminFinished(
-                wfdiag_native_remediation::elevation::relaunch_self_elevated(),
+                wfdiag_native_remediation::elevation::relaunch_self_elevated_with_flag(
+                    ELEVATED_RELAUNCH_FLAG,
+                ),
             )
         },
         Message::RestartAsAdminFinished(Err(
@@ -1876,28 +3935,43 @@ fn spawn_relaunch_as_admin(context: &ComponentContext<WfdiagSpike>) -> Component
     )
 }
 
-fn spawn_report_wait(
+/// Resolve the implicit "latest different scan" report baseline without
+/// touching DPAPI or the filesystem on the WinUI thread. History failures are
+/// intentionally soft here: the shipping report path generates without a
+/// comparison whenever its automatic baseline cannot be read.
+fn spawn_report_generation_preparation(
     context: &ComponentContext<WfdiagSpike>,
-    receiver: Arc<Mutex<std::sync::mpsc::Receiver<ReportWorkerEvent>>>,
+    request_id: u64,
+    mut generation: ReportGeneration,
+    mut reply: HistoryReply<Option<ComparisonResult>>,
 ) -> ComponentTask {
     context.spawn_background_with_rejection(
         move |cancellation| loop {
             if cancellation.is_cancelled() {
-                return Message::ReportWaitCancelled;
+                return Message::ReportGenerationPreparationCancelled { request_id };
             }
-            let received = match receiver.lock() {
-                Ok(receiver) => receiver.recv_timeout(CHAT_WAIT_POLL),
-                Err(_) => return Message::ReportWorkerStopped,
-            };
-            match received {
-                Ok(event) => return Message::ReportWorkerEventReceived(Box::new(event)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Message::ReportWorkerStopped;
+            match reply.try_recv() {
+                Ok(Ok(comparison)) => {
+                    generation.comparison = comparison;
+                    return Message::ReportGenerationPrepared {
+                        request_id,
+                        generation: Box::new(generation),
+                    };
+                }
+                // An implicit history baseline is optional. A storage error or
+                // a stopped history worker must not disable AI reporting.
+                Ok(Err(_)) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    return Message::ReportGenerationPrepared {
+                        request_id,
+                        generation: Box::new(generation),
+                    };
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(50));
                 }
             }
         },
-        Message::ReportWaitRejected,
+        Message::ReportGenerationPreparationRejected { request_id },
     )
 }
 
@@ -1940,23 +4014,93 @@ const fn export_format_label(format: ReportFormat) -> &'static str {
     }
 }
 
+/// Resolve persisted export settings defensively at the action boundary.
+///
+/// The settings service normalizes legacy, empty, and unsupported values to
+/// `text` while loading and saving. Keeping the same fallback here prevents a
+/// stale in-memory snapshot from turning an otherwise valid export click into
+/// the old "selected export format is not available" dead end.
+fn resolved_export_format(value: &str) -> ReportFormat {
+    ReportFormat::try_from(value).unwrap_or(ReportFormat::Text)
+}
+
+fn resolve_export_picker_selection(
+    result: Result<SavePickerOutcome, SavePickerError>,
+) -> Result<Option<ValidatedExportPath>, String> {
+    match result {
+        Ok(SavePickerOutcome::Cancelled) => Ok(None),
+        Ok(SavePickerOutcome::Selected(path)) => Ok(Some(path)),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 fn spawn_export_file_write(
     context: &ComponentContext<WfdiagSpike>,
+    request_id: u64,
     path: ValidatedExportPath,
     content: String,
 ) -> ComponentTask {
     context.spawn_background_with_rejection(
         move |cancellation| {
-            // The path was policy-validated on the UI thread by the save
-            // picker; only the (potentially large) file write happens here.
             let result = if cancellation.is_cancelled() {
                 Err("The export was cancelled".to_string())
             } else {
-                std::fs::write(path.as_path(), content)
-                    .map(|()| path.into_path())
+                // Match Tauri's `save_results_to_file`: the picker preflights
+                // the destination, then the write path is policy-validated
+                // again immediately before filesystem mutation.
+                path.revalidate()
                     .map_err(|error| error.to_string())
+                    .and_then(|path| {
+                        std::fs::write(path.as_path(), content)
+                            .map(|()| path.into_path())
+                            .map_err(|error| error.to_string())
+                    })
             };
-            Message::ExportFileSaved(Box::new(result))
+            Message::ExportFileSaved {
+                request_id,
+                result: Box::new(result),
+            }
+        },
+        Message::ExportWaitRejected,
+    )
+}
+
+fn spawn_support_package_write(
+    context: &ComponentContext<WfdiagSpike>,
+    request_id: u64,
+    paths: ValidatedSupportPackagePaths,
+    payload: SupportPackagePayload,
+) -> ComponentTask {
+    context.spawn_background_with_rejection(
+        move |cancellation| {
+            let write = || -> Result<ValidatedSupportPackagePaths, String> {
+                if cancellation.is_cancelled() {
+                    return Err("Support-package generation was cancelled".to_string());
+                }
+                let validated = paths.revalidate().map_err(|error| error.to_string())?;
+                std::fs::write(&validated.json, payload.json.as_bytes()).map_err(|error| {
+                    format!("could not write {}: {error}", validated.json.display())
+                })?;
+                if cancellation.is_cancelled() {
+                    return Err("Support-package generation was cancelled".to_string());
+                }
+                let validated = paths.revalidate().map_err(|error| error.to_string())?;
+                std::fs::write(&validated.text, payload.text.as_bytes()).map_err(|error| {
+                    format!("could not write {}: {error}", validated.text.display())
+                })?;
+                if cancellation.is_cancelled() {
+                    return Err("Support-package generation was cancelled".to_string());
+                }
+                let validated = paths.revalidate().map_err(|error| error.to_string())?;
+                std::fs::write(&validated.html, payload.html.as_bytes()).map_err(|error| {
+                    format!("could not write {}: {error}", validated.html.display())
+                })?;
+                Ok(validated)
+            };
+            Message::SupportPackageSaved {
+                request_id,
+                result: Box::new(write()),
+            }
         },
         Message::ExportWaitRejected,
     )
@@ -1965,7 +4109,7 @@ fn spawn_export_file_write(
 fn spawn_issue_request_preparation(
     context: &ComponentContext<WfdiagSpike>,
     pending: PendingIssueDetection,
-    results: Arc<HashMap<String, DiagnosticOutput>>,
+    results: SharedScanEvidence,
 ) -> ComponentTask {
     let rejected = pending.clone();
     context.spawn_background_with_rejection(
@@ -1974,8 +4118,8 @@ fn spawn_issue_request_preparation(
                 return Message::IssueRequestPreparationCancelled(pending);
             }
 
-            // These two OS-dependent inputs and the potentially large result
-            // map clone stay off the Reactor UI thread.
+            // These two OS-dependent inputs stay off the Reactor UI thread;
+            // diagnostic evidence itself is shared without another deep copy.
             let now = IssueTimestamp::now();
             let temp_file_count = std::fs::read_dir(std::env::temp_dir())
                 .ok()
@@ -1984,7 +4128,7 @@ fn spawn_issue_request_preparation(
                 pending.request_id,
                 pending.committed_epoch,
                 pending.session_id.clone(),
-                (*results).clone(),
+                Arc::clone(&results),
                 now,
                 temp_file_count,
             );
@@ -2111,6 +4255,227 @@ fn spawn_about_external_action(
 }
 
 impl WfdiagSpike {
+    /// Drain every continuously-lived native producer from the UI thread.
+    /// Worker threads only enqueue typed data and post one coalesced WM_APP
+    /// signal, so idle pages no longer retain a Reactor poll task per channel.
+    fn drain_native_messages(&self) -> Vec<Message> {
+        let mut messages = Vec::new();
+        let mut saturated = false;
+
+        if let Some(snapshot) =
+            window_support::lifecycle_snapshot_if_changed(self.window_lifecycle_revision)
+        {
+            messages.push(Message::WindowLifecycleChanged(snapshot));
+        }
+        if instance_support::activation_requested() {
+            messages.push(Message::InstanceActivated);
+        }
+        while let Some(shortcut) = window_support::take_global_shortcut() {
+            messages.push(Message::GlobalShortcut(shortcut));
+        }
+        let tray_command = window_support::take_tray_command();
+        if tray_command != window_support::TRAY_COMMAND_NONE {
+            messages.push(Message::TrayCommand(tray_command));
+        }
+
+        if let Some(receiver) = self.backend_receiver.as_ref() {
+            let events = receiver.drain();
+            let terminated = receiver.is_terminated();
+            if !events.is_empty() || terminated {
+                messages.push(Message::BackendBatch { events, terminated });
+            }
+        }
+        if let Some(receiver) = self.diagnostic_receiver.as_ref() {
+            let events = receiver.drain();
+            let terminated = receiver.is_terminated();
+            if !events.is_empty() || terminated {
+                messages.push(Message::DiagnosticBatch { events, terminated });
+            }
+        }
+
+        if let Some(receiver) = self.settings_receiver.as_ref() {
+            saturated |= drain_native_receiver(
+                receiver,
+                &mut messages,
+                |event| Message::SettingsRuntimeEvent(Box::new(event)),
+                Message::SettingsWorkerStopped,
+            );
+        }
+
+        if let Some(receiver) = self.provider_setup_receiver.as_ref() {
+            saturated |= drain_native_receiver(
+                receiver,
+                &mut messages,
+                |event| Message::ProviderSetupWorkerEventReceived(Box::new(event)),
+                Message::ProviderSetupWorkerStopped,
+            );
+        }
+        if let Some(receiver) = self.subscription_auth_receiver.as_ref() {
+            saturated |= drain_native_receiver(
+                receiver,
+                &mut messages,
+                |event| Message::SubscriptionAuthWorkerEventReceived(Box::new(event)),
+                Message::SubscriptionAuthWorkerStopped,
+            );
+        }
+        if let Some(receiver) = self.subscription_install_receiver.as_ref() {
+            saturated |= drain_native_receiver(
+                receiver,
+                &mut messages,
+                |event| Message::SubscriptionInstallWorkerEventReceived(Box::new(event)),
+                Message::SubscriptionInstallWorkerStopped,
+            );
+        }
+        if let Some(receiver) = self.chat_receiver.as_ref() {
+            saturated |= drain_native_receiver(
+                receiver,
+                &mut messages,
+                |event| Message::ChatWorkerEventReceived(Box::new(event)),
+                Message::ChatWorkerStopped,
+            );
+        }
+        if let Some(receiver) = self.report_receiver.as_ref() {
+            saturated |= drain_native_receiver(
+                receiver,
+                &mut messages,
+                |event| Message::ReportWorkerEventReceived(Box::new(event)),
+                Message::ReportWorkerStopped,
+            );
+        }
+        if let Some(receiver) = self.analysis_receiver.as_ref() {
+            saturated |= drain_native_receiver(
+                receiver,
+                &mut messages,
+                |event| Message::AnalysisWorkerEventReceived(Box::new(event)),
+                Message::AnalysisWorkerStopped,
+            );
+        }
+        if let Some(receiver) = self.fix_plan_receiver.as_ref() {
+            saturated |= drain_native_receiver(
+                receiver,
+                &mut messages,
+                |event| Message::FixPlanWorkerEventReceived(Box::new(event)),
+                Message::FixPlanWorkerStopped,
+            );
+        }
+        if let Some(receiver) = self.action_receiver.as_ref() {
+            saturated |= drain_native_receiver(
+                receiver,
+                &mut messages,
+                |event| Message::ActionWorkerEventReceived(Box::new(event)),
+                Message::ActionWorkerStopped,
+            );
+        }
+        if let Some(receiver) = self.action_run_receiver.as_ref() {
+            saturated |= drain_native_receiver(
+                receiver,
+                &mut messages,
+                |event| Message::ActionRunEventReceived(Box::new(event)),
+                Message::ActionRunStreamStopped,
+            );
+        }
+
+        if saturated {
+            ui_wake_support::notify();
+        }
+        messages
+    }
+
+    fn ai_worker_startup_settings(&self, worker: AiWorkerKind) -> Result<SettingsService, String> {
+        if self.deterministic_visual {
+            return Err(format!(
+                "Visual fixture mode does not start the native {} worker",
+                worker.display_name()
+            ));
+        }
+        if !ai_worker_enabled(self.ai_worker_policy.as_os_str(), worker) {
+            return Err(format!(
+                "Native {} is disabled by the worker-isolation policy",
+                worker.display_name()
+            ));
+        }
+        self.ai_worker_settings.clone().ok_or_else(|| {
+            format!(
+                "Native {} cannot start because native settings are unavailable",
+                worker.display_name()
+            )
+        })
+    }
+
+    fn ai_worker_available(&self, worker: AiWorkerKind) -> bool {
+        !self.deterministic_visual
+            && self.ai_worker_settings.is_some()
+            && ai_worker_enabled(self.ai_worker_policy.as_os_str(), worker)
+    }
+
+    fn ensure_chat_runtime(&mut self) -> Result<(), String> {
+        if self.chat_runtime.is_some() {
+            return Ok(());
+        }
+        let settings = self.ai_worker_startup_settings(AiWorkerKind::Chat)?;
+        let tools = ChatToolPorts::shipping(self.history_runtime.as_ref().map(Arc::clone));
+        let (runtime, receiver) = NativeChatRuntime::start_with_ports(
+            settings,
+            Arc::new(FoundryCliEndpointSource::new()),
+            Arc::new(ReqwestOllamaSource),
+            tools,
+        )
+        .map_err(|error| format!("Native AI chat could not start: {error}"))?;
+        self.chat_receiver = Some(Arc::new(Mutex::new(receiver)));
+        self.chat_runtime = Some(runtime);
+        Ok(())
+    }
+
+    fn ensure_report_runtime(&mut self) -> Result<(), String> {
+        if self.report_runtime.is_some() {
+            return Ok(());
+        }
+        let settings = self.ai_worker_startup_settings(AiWorkerKind::Report)?;
+        let (runtime, receiver) = NativeReportRuntime::start(
+            settings,
+            Arc::new(FoundryCliEndpointSource::new()),
+            Arc::new(ReqwestOllamaSource),
+            self.ai_worker_cache.clone(),
+        )
+        .map_err(|error| format!("Native AI report generation could not start: {error}"))?;
+        self.report_receiver = Some(Arc::new(Mutex::new(receiver)));
+        self.report_runtime = Some(runtime);
+        Ok(())
+    }
+
+    fn ensure_analysis_runtime(&mut self) -> Result<(), String> {
+        if self.analysis_runtime.is_some() {
+            return Ok(());
+        }
+        let settings = self.ai_worker_startup_settings(AiWorkerKind::Analysis)?;
+        let (runtime, receiver) = NativeAnalysisRuntime::start(
+            settings,
+            Arc::new(FoundryCliEndpointSource::new()),
+            Arc::new(ReqwestOllamaSource),
+            self.ai_worker_cache.clone(),
+        )
+        .map_err(|error| format!("Native diagnostic AI could not start: {error}"))?;
+        self.analysis_receiver = Some(Arc::new(Mutex::new(receiver)));
+        self.analysis_runtime = Some(runtime);
+        Ok(())
+    }
+
+    fn ensure_fix_plan_runtime(&mut self) -> Result<(), String> {
+        if self.fix_plan_runtime.is_some() {
+            return Ok(());
+        }
+        let settings = self.ai_worker_startup_settings(AiWorkerKind::FixPlan)?;
+        let (runtime, receiver) = NativeFixPlanRuntime::start(
+            settings,
+            Arc::new(FoundryCliEndpointSource::new()),
+            Arc::new(ReqwestOllamaSource),
+        )
+        .map_err(|error| format!("Native AI fix planning could not start: {error}"))?;
+        self.fix_plan_receiver = Some(Arc::new(Mutex::new(receiver)));
+        self.fix_plan_runtime = Some(runtime);
+        Ok(())
+    }
+
     fn next_ai_status_request_id(&mut self) -> u64 {
         self.ai_status_request_id = self.ai_status_request_id.wrapping_add(1);
         if self.ai_status_request_id == 0 {
@@ -2120,6 +4485,18 @@ impl WfdiagSpike {
     }
 
     fn request_ai_provider_status(&mut self, context: &ComponentContext<Self>) {
+        self.request_ai_provider_status_with_disabled_policy(context, false);
+    }
+
+    fn request_ai_provider_status_for_settings(&mut self, context: &ComponentContext<Self>) {
+        self.request_ai_provider_status_with_disabled_policy(context, true);
+    }
+
+    fn request_ai_provider_status_with_disabled_policy(
+        &mut self,
+        context: &ComponentContext<Self>,
+        probe_while_disabled: bool,
+    ) {
         if self.deterministic_visual {
             return;
         }
@@ -2135,7 +4512,7 @@ impl WfdiagSpike {
                 (!self.settings_loading).then(|| "AI settings could not be loaded".to_string());
             return;
         }
-        if !self.settings_snapshot.ai_enabled {
+        if !probe_while_disabled && !self.settings_snapshot.ai_enabled {
             self.ai_provider_status = None;
             self.ai_status_loading = false;
             self.ai_status_error = None;
@@ -2400,12 +4777,8 @@ impl WfdiagSpike {
         settings_dialog_callback_is_current(self.settings_open, self.settings_dialog_epoch, epoch)
     }
 
-    fn resume_settings_wait(&mut self, context: &ComponentContext<Self>) {
-        let Some(receiver) = self.settings_receiver.as_ref().map(Arc::clone) else {
-            self.settings_wait = None;
-            return;
-        };
-        self.settings_wait = Some(spawn_settings_wait(context, receiver));
+    fn resume_settings_wait(&mut self, _context: &ComponentContext<Self>) {
+        self.settings_wait = None;
     }
 
     fn resume_system_wait(&mut self, context: &ComponentContext<Self>) {
@@ -2435,64 +4808,554 @@ impl WfdiagSpike {
         self.issue_wait = Some(spawn_issue_wait(context, receiver));
     }
 
-    fn resume_chat_wait(&mut self, context: &ComponentContext<Self>) {
-        if self.chat_wait.is_some() {
+    fn resume_chat_wait(&mut self, _context: &ComponentContext<Self>) {
+        self.chat_wait = None;
+    }
+
+    fn resume_analysis_wait(&mut self, _context: &ComponentContext<Self>) {
+        self.analysis_wait = None;
+    }
+
+    fn resume_fix_plan_wait(&mut self, _context: &ComponentContext<Self>) {
+        self.fix_plan_wait = None;
+    }
+
+    fn invalidate_fix_plan(&mut self) {
+        if let Some(pending) = self.fix_plan_pending.take()
+            && let Some(runtime) = self.fix_plan_runtime.as_ref()
+        {
+            let _ = runtime.cancel(pending.request_id);
+        }
+        self.fix_plan = None;
+        self.fix_plan_error = None;
+    }
+
+    fn invalidate_issue_prioritization(&mut self) {
+        if let Some(pending) = self.issue_prioritization_pending.take()
+            && let Some(runtime) = self.analysis_runtime.as_ref()
+        {
+            let _ = runtime.cancel(pending.request_id);
+        }
+        self.issue_prioritization = IssuePrioritizationDisplay::default();
+    }
+
+    fn begin_issue_prioritization(
+        &mut self,
+        force_refresh: bool,
+        context: &ComponentContext<Self>,
+    ) {
+        if self.deterministic_visual {
+            self.status = "Visual fixture mode · issue prioritization is disabled".to_string();
             return;
         }
-        if let Some(receiver) = self.chat_receiver.as_ref() {
-            self.chat_wait = Some(spawn_chat_wait(context, Arc::clone(receiver)));
+        if !self.settings_snapshot.ai_enabled {
+            self.status = "Enable AI insights in Settings before prioritizing issues".to_string();
+            return;
+        }
+        if self.analysis_pending.is_some() || self.issue_prioritization_pending.is_some() {
+            self.status = "Another one-shot AI analysis is already running…".to_string();
+            return;
+        }
+        let Some(session_id) = self.issue_source_session_id.clone() else {
+            self.status = "Run a diagnostic scan before prioritizing issues".to_string();
+            return;
+        };
+        let issues_data = match issue_prioritization_payload(&self.issues) {
+            Ok(payload) if payload != "[]" => payload,
+            Ok(_) => {
+                self.invalidate_issue_prioritization();
+                self.status = "No detected issues need prioritization".to_string();
+                return;
+            }
+            Err(error) => {
+                self.issue_prioritization.error = Some(error.clone());
+                self.status = format!("Could not prepare issue prioritization · {error}");
+                return;
+            }
+        };
+        if !force_refresh
+            && self.issue_prioritization.committed_epoch == self.issue_committed_epoch
+            && self.issue_prioritization.text.is_some()
+        {
+            self.status = "Issue prioritization is already available".to_string();
+            return;
+        }
+        let Some(status) = self.ai_provider_status.as_ref() else {
+            self.status = "Set up an available AI provider before prioritizing issues".to_string();
+            return;
+        };
+        let preference = parse_provider_preference(&self.settings_snapshot.preferred_ai_provider);
+        let availability = status.availability();
+        let Some(candidate) = next_fallback_candidate(preference, None, &[], availability) else {
+            self.status = "Set up an available AI provider before prioritizing issues".to_string();
+            return;
+        };
+        let attempt = IssuePrioritizationAttempt {
+            generation: IssuePrioritizationGeneration {
+                session_id,
+                issues_data,
+                route: AnalysisRoute {
+                    preference,
+                    provider: candidate.provider,
+                    availability,
+                    fallback_from: None,
+                },
+                network_grounding_enabled: self.settings_snapshot.network_grounding_enabled,
+                force_refresh,
+            },
+            tried: vec![candidate.provider],
+            initial_provider: candidate.provider,
+            committed_epoch: self.issue_committed_epoch,
+        };
+        let _ = self.queue_issue_prioritization(attempt, context);
+    }
+
+    fn queue_issue_prioritization(
+        &mut self,
+        attempt: IssuePrioritizationAttempt,
+        context: &ComponentContext<Self>,
+    ) -> bool {
+        if let Err(error) = self.ensure_analysis_runtime() {
+            self.issue_prioritization.error = Some(error.clone());
+            self.issue_prioritization.busy = false;
+            self.status = error;
+            return false;
+        }
+        let Some(request_id) = advance_nonzero_generation(&mut self.analysis_request_id) else {
+            self.issue_prioritization.error =
+                Some("AI issue-prioritization request identity was exhausted".to_string());
+            self.status = "Native AI issue prioritization is unavailable".to_string();
+            return false;
+        };
+        let Some(runtime) = self.analysis_runtime.as_ref() else {
+            self.issue_prioritization.error =
+                Some("Native one-shot AI worker is unavailable".to_string());
+            self.status = "Native AI issue prioritization is unavailable".to_string();
+            return false;
+        };
+        let provider = attempt.generation.route.provider;
+        let queued = if attempt.generation.force_refresh {
+            runtime.reprioritize_issues(request_id, attempt.generation.clone())
+        } else {
+            runtime.prioritize_issues(request_id, attempt.generation.clone())
+        };
+        if !queued {
+            self.issue_prioritization.error =
+                Some("The native one-shot AI queue is unavailable".to_string());
+            self.status = "The native AI issue-prioritization queue is unavailable".to_string();
+            return false;
+        }
+        self.issue_prioritization = IssuePrioritizationDisplay {
+            text: None,
+            provider_use: Some(ProviderUse::for_provider(
+                provider,
+                attempt.generation.route.fallback_from,
+            )),
+            grounding: None,
+            cached: false,
+            error: None,
+            busy: true,
+            committed_epoch: attempt.committed_epoch,
+        };
+        self.issue_prioritization_pending = Some(PendingIssuePrioritization {
+            request_id,
+            attempt,
+        });
+        self.status = format!(
+            "Prioritizing detected issues · {}…",
+            provider_display_name(provider)
+        );
+        self.resume_analysis_wait(context);
+        true
+    }
+
+    fn apply_issue_prioritization_event(
+        &mut self,
+        event: AnalysisWorkerEvent,
+        context: &ComponentContext<Self>,
+    ) {
+        match event {
+            AnalysisWorkerEvent::Ack {
+                provider_use,
+                grounding,
+                cached,
+                ..
+            } => {
+                self.issue_prioritization.provider_use = Some(provider_use);
+                self.issue_prioritization.grounding = grounding;
+                self.issue_prioritization.cached = cached;
+                self.issue_prioritization.busy = true;
+                self.status = if cached {
+                    "Loading cached issue prioritization…".to_string()
+                } else {
+                    "The AI provider is prioritizing detected issues…".to_string()
+                };
+                self.resume_analysis_wait(context);
+            }
+            AnalysisWorkerEvent::Done {
+                interpretation,
+                provider_use,
+                grounding,
+                cached,
+                ..
+            } => {
+                let Some(pending) = self.issue_prioritization_pending.take() else {
+                    return;
+                };
+                if pending.attempt.committed_epoch != self.issue_committed_epoch
+                    || pending.attempt.generation.session_id
+                        != self.issue_source_session_id.as_deref().unwrap_or_default()
+                {
+                    self.issue_prioritization = IssuePrioritizationDisplay::default();
+                    self.status =
+                        "Ignored stale issue prioritization after evidence changed".to_string();
+                    return;
+                }
+                let provider = provider_use.provider_id.clone();
+                self.issue_prioritization = IssuePrioritizationDisplay {
+                    text: Some(interpretation),
+                    provider_use: Some(provider_use),
+                    grounding,
+                    cached,
+                    error: None,
+                    busy: false,
+                    committed_epoch: pending.attempt.committed_epoch,
+                };
+                self.status = if cached {
+                    format!("Issue prioritization ready · {provider} · cached")
+                } else {
+                    format!("Issue prioritization ready · {provider}")
+                };
+            }
+            AnalysisWorkerEvent::Failed {
+                route,
+                provider_use,
+                grounding,
+                message,
+                retryable,
+                ..
+            } => {
+                let Some(mut pending) = self.issue_prioritization_pending.take() else {
+                    self.resume_analysis_wait(context);
+                    return;
+                };
+                let next_local = retryable.then(|| {
+                    next_auto_local_route(
+                        route.preference,
+                        &pending.attempt.tried,
+                        route.availability,
+                    )
+                });
+                if let Some(Some(provider)) = next_local {
+                    pending.attempt.tried.push(provider);
+                    pending.attempt.generation.route.provider = provider;
+                    pending.attempt.generation.route.fallback_from =
+                        Some(pending.attempt.initial_provider);
+                    if self.queue_issue_prioritization(pending.attempt, context) {
+                        return;
+                    }
+                }
+                self.issue_prioritization.provider_use = Some(provider_use);
+                self.issue_prioritization.grounding = grounding;
+                self.issue_prioritization.error = Some(message.clone());
+                self.issue_prioritization.busy = false;
+                self.status = format!("Issue prioritization failed · {message}");
+            }
+            AnalysisWorkerEvent::Cancelled {
+                provider_use,
+                grounding,
+                ..
+            } => {
+                self.issue_prioritization_pending = None;
+                self.issue_prioritization.provider_use = Some(provider_use);
+                self.issue_prioritization.grounding = grounding;
+                self.issue_prioritization.busy = false;
+                self.issue_prioritization.error = None;
+                self.status = "Issue prioritization cancelled".to_string();
+            }
         }
     }
 
-    /// Store or clear a provider credential through the settings worker.
-    /// The draft text never persists to settings.json — only the DPAPI
-    /// credential file for the provider's closed key id.
-    fn submit_provider_key(&mut self, index: usize, store: bool) {
-        const KEY_IDS: [ProviderKeyId; 4] = [
-            ProviderKeyId::OpenAI,
-            ProviderKeyId::Anthropic,
-            ProviderKeyId::Gemini,
-            ProviderKeyId::Custom,
-        ];
-        let Some(provider) = KEY_IDS.get(index).copied() else {
-            return;
-        };
+    fn begin_fix_plan(&mut self, context: &ComponentContext<Self>) {
         if self.deterministic_visual {
-            self.status =
-                "Visual fixture mode · credential changes are disabled".to_string();
+            self.status = "Visual fixture mode · AI fix planning is disabled".to_string();
             return;
         }
+        if !self.settings_snapshot.ai_enabled {
+            self.status = "Enable AI insights in Settings before proposing a fix plan".to_string();
+            return;
+        }
+        if self.fix_plan_pending.is_some() {
+            self.status = "A fix plan is already being generated…".to_string();
+            return;
+        }
+        let detected_issues = self
+            .issues
+            .iter()
+            .filter(|issue| {
+                issue.detected && issue.status == wfdiag_native_issues::IssueStatus::Detected
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if detected_issues.is_empty() {
+            self.fix_plan = None;
+            self.fix_plan_error = None;
+            self.status = "No detected issues need a fix plan".to_string();
+            return;
+        }
+        let Some(provider_status) = self.ai_provider_status.as_ref() else {
+            self.status = "Set up an available AI provider before proposing a fix plan".to_string();
+            return;
+        };
+        let preference = parse_provider_preference(&self.settings_snapshot.preferred_ai_provider);
+        let availability = provider_status.availability();
+        let route =
+            initial_fix_plan_route(preference, provider_status.active_provider, availability);
+        if route.provider == AIProvider::None || !availability.contains(route.provider) {
+            self.status = "Set up an available AI provider before proposing a fix plan".to_string();
+            return;
+        }
+        let snapshot = self.action_snapshot();
+        let mut tried = route.fallback_from.into_iter().collect::<Vec<_>>();
+        if !tried.contains(&route.provider) {
+            tried.push(route.provider);
+        }
+        let initial_provider = tried.first().copied().unwrap_or(route.provider);
+        let attempt = FixPlanAttempt {
+            generation: FixPlanGeneration {
+                detected_issues,
+                route,
+                scan_fingerprint: snapshot.scan_fingerprint,
+                catalog_fingerprint: snapshot.catalog_fingerprint,
+            },
+            tried,
+            initial_provider,
+        };
+        self.fix_plan = None;
+        self.fix_plan_error = None;
+        let _ = self.queue_fix_plan(attempt, context);
+    }
+
+    fn queue_fix_plan(
+        &mut self,
+        attempt: FixPlanAttempt,
+        context: &ComponentContext<Self>,
+    ) -> bool {
+        if let Err(error) = self.ensure_fix_plan_runtime() {
+            self.fix_plan_error = Some(error.clone());
+            self.status = error;
+            return false;
+        }
+        let Some(request_id) = advance_nonzero_generation(&mut self.fix_plan_request_id) else {
+            self.fix_plan_error = Some("AI fix-plan request identity was exhausted".to_string());
+            self.status = "Native AI fix planning is unavailable".to_string();
+            return false;
+        };
+        let Some(runtime) = self.fix_plan_runtime.as_ref() else {
+            self.fix_plan_error = Some("Native AI fix-plan worker is unavailable".to_string());
+            self.status = "Native AI fix planning is unavailable".to_string();
+            return false;
+        };
+        let provider = attempt.generation.route.provider;
+        if !runtime.generate(request_id, attempt.generation.clone()) {
+            self.fix_plan_error = Some("The native AI fix-plan queue is unavailable".to_string());
+            self.status = "The native AI fix-plan queue is unavailable".to_string();
+            return false;
+        }
+        self.fix_plan_pending = Some(PendingFixPlan {
+            request_id,
+            attempt,
+        });
+        self.fix_plan_error = None;
+        self.status = format!("Preparing a vetted fix plan with {provider}…");
+        self.resume_fix_plan_wait(context);
+        true
+    }
+
+    fn begin_selected_diagnostic_analysis(
+        &mut self,
+        force_refresh: bool,
+        context: &ComponentContext<Self>,
+    ) {
+        if self.deterministic_visual {
+            self.status = "Visual fixture mode · diagnostic AI is disabled".to_string();
+            return;
+        }
+        if !self.settings_snapshot.ai_enabled {
+            self.status = "Enable AI insights in Settings before interpreting".to_string();
+            return;
+        }
+        if self.analysis_pending.is_some() || self.issue_prioritization_pending.is_some() {
+            self.status = "Another one-shot AI analysis is already running…".to_string();
+            return;
+        }
+        let Some(result) = self
+            .selected_result_task_id
+            .as_deref()
+            .and_then(|task_id| {
+                self.diagnostic_results
+                    .iter()
+                    .find(|result| result.task_id == task_id)
+            })
+            .or_else(|| self.diagnostic_results.first())
+            .cloned()
+        else {
+            self.status = "Run a diagnostic scan before asking for an interpretation".to_string();
+            return;
+        };
+        if !force_refresh
+            && self
+                .diagnostic_analyses
+                .get(&result.task_id)
+                .and_then(|display| display.interpretation.as_ref())
+                .is_some()
+        {
+            self.status = "Diagnostic interpretation is already available".to_string();
+            return;
+        }
+        let Some(status) = self.ai_provider_status.as_ref() else {
+            self.status = "Set up an available AI provider before interpreting".to_string();
+            return;
+        };
+        let preference = parse_provider_preference(&self.settings_snapshot.preferred_ai_provider);
+        let availability = status.availability();
+        let Some(candidate) = next_fallback_candidate(preference, None, &[], availability) else {
+            self.status = "Set up an available AI provider before interpreting".to_string();
+            return;
+        };
+        let task_name = self
+            .diagnostic_catalog
+            .iter()
+            .find(|task| task.id == result.task_id)
+            .map_or_else(|| result.task_id.clone(), |task| task.name.clone());
+        let generation = DiagnosticAnalysisGeneration {
+            session_id: result.session_id.clone(),
+            task_id: result.task_id.clone(),
+            task_name,
+            diagnostic_result: Arc::clone(&result.result),
+            route: AnalysisRoute {
+                preference,
+                provider: candidate.provider,
+                availability,
+                fallback_from: None,
+            },
+            network_grounding_enabled: self.settings_snapshot.network_grounding_enabled,
+            force_refresh,
+        };
+        let _ = self.queue_diagnostic_analysis(
+            DiagnosticAnalysisAttempt {
+                generation,
+                tried: vec![candidate.provider],
+                initial_provider: candidate.provider,
+            },
+            context,
+        );
+    }
+
+    fn queue_diagnostic_analysis(
+        &mut self,
+        attempt: DiagnosticAnalysisAttempt,
+        context: &ComponentContext<Self>,
+    ) -> bool {
+        let task_id = attempt.generation.task_id.clone();
+        if let Err(error) = self.ensure_analysis_runtime() {
+            let display = self.diagnostic_analyses.entry(task_id).or_default();
+            display.busy = false;
+            display.error = Some(error.clone());
+            self.status = error;
+            return false;
+        }
+        let Some(request_id) = advance_nonzero_generation(&mut self.analysis_request_id) else {
+            self.status = "Diagnostic AI request identity was exhausted".to_string();
+            return false;
+        };
+        let provider = attempt.generation.route.provider;
+        let Some(runtime) = self.analysis_runtime.as_ref() else {
+            self.status = "Native diagnostic AI is unavailable".to_string();
+            return false;
+        };
+        let queued = if attempt.generation.force_refresh {
+            runtime.retry(request_id, attempt.generation.clone())
+        } else {
+            runtime.generate(request_id, attempt.generation.clone())
+        };
+        if !queued {
+            self.status = "The native diagnostic AI queue is unavailable".to_string();
+            return false;
+        }
+        let display = self.diagnostic_analyses.entry(task_id).or_default();
+        display.busy = true;
+        display.error = None;
+        display.cached = false;
+        display.provider_use = Some(ProviderUse::for_provider(
+            provider,
+            attempt.generation.route.fallback_from,
+        ));
+        self.analysis_pending = Some(PendingDiagnosticAnalysis {
+            request_id,
+            attempt,
+        });
+        self.status = format!(
+            "Interpreting the selected diagnostic · {}…",
+            provider_display_name(provider)
+        );
+        self.resume_analysis_wait(context);
+        true
+    }
+
+    /// Stage a provider credential for the current Settings dialog. Storage
+    /// is untouched until the dialog's primary Save action succeeds; Cancel
+    /// discards the transaction and every plaintext draft.
+    fn submit_provider_key(&mut self, index: usize, store: bool) {
+        let Some(provider) = ProviderKeyId::ALL.get(index).copied() else {
+            return;
+        };
         let key = self.provider_key_drafts[index].clone();
         if store && key.trim().is_empty() {
             self.status = "Enter an API key first".to_string();
             return;
         }
-        let request_id = self.next_settings_request_id();
-        // The settings worker borrow is taken last: nothing above may hold a
-        // borrow across the &mut request-id bump.
-        let Some(settings_runtime) = self.settings_runtime.as_ref() else {
-            self.status = "Native settings persistence is unavailable".to_string();
-            return;
-        };
-        let command = if store {
-            SettingsCommand::StoreProviderKey {
-                request_id,
-                provider,
-                key,
-            }
+        if store {
+            self.provider_credential_transaction
+                .stage_store(provider, key.trim().to_string());
+            set_provider_key_configured(&mut self.settings_draft, provider, true);
+            self.status = "API key staged · press Save to commit".to_string();
         } else {
-            SettingsCommand::ClearProviderKey { request_id, provider }
-        };
-        if let Err(error) = settings_runtime.send(command) {
-            self.status = format!("Credential change failed: {error}");
+            self.provider_credential_transaction.stage_clear(provider);
+            set_provider_key_configured(&mut self.settings_draft, provider, false);
+            self.status = "API key removal staged · press Save to commit".to_string();
+        }
+        self.provider_key_pending = None;
+        self.provider_key_busy = false;
+        self.settings_save_error = None;
+    }
+
+    /// Save or clear the user-facing label without touching metadata tags.
+    fn request_history_label_save(&mut self, context: &ComponentContext<Self>) {
+        if self.deterministic_visual || self.history_ack_busy {
             return;
         }
-        self.provider_key_busy = true;
-        self.status = if store {
-            "Saving API key…".to_string()
-        } else {
-            "Clearing API key…".to_string()
+        let Some(runtime) = self.history_runtime.as_ref().map(Arc::clone) else {
+            self.status = "Native history is unavailable".to_string();
+            return;
         };
+        let Some(scan_id) = self.selected_history_id.clone() else {
+            return;
+        };
+        let label = self.history_label_draft.trim();
+        let label = (!label.is_empty()).then(|| label.to_string());
+        match runtime.request_update_label(scan_id, label) {
+            Ok(reply) => {
+                self.history_ack_busy = true;
+                self.status = "Saving label…".to_string();
+                self.history_wait = Some(spawn_history_ack_wait(
+                    context,
+                    HistoryAckKind::Label,
+                    reply,
+                ));
+            }
+            Err(error) => self.status = error.to_string(),
+        }
     }
 
     /// Save the tag draft for the selected scan through the history worker.
@@ -2518,13 +5381,174 @@ impl WfdiagSpike {
             Ok(reply) => {
                 self.history_ack_busy = true;
                 self.status = "Saving tags…".to_string();
-                self.history_wait = Some(spawn_history_ack_wait(
-                    context,
-                    HistoryAckKind::Tags,
-                    reply,
-                ));
+                self.history_wait =
+                    Some(spawn_history_ack_wait(context, HistoryAckKind::Tags, reply));
             }
             Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    fn invalidate_history_trends(&mut self) {
+        self.history_trends_request_id = self.history_trends_request_id.wrapping_add(1);
+        if self.history_trends_request_id == 0 {
+            self.history_trends_request_id = 1;
+        }
+        self.history_trends = None;
+        self.history_trends_loading = false;
+        self.history_trends_error = None;
+        self.history_trends_baseline_id = None;
+    }
+
+    fn request_history_trends(&mut self, context: &ComponentContext<Self>) {
+        if self.deterministic_visual || self.history_trends_loading {
+            return;
+        }
+        let baseline_id = self.history_summaries.first().map(|scan| scan.id.clone());
+        self.history_trends_request_id = self.history_trends_request_id.wrapping_add(1);
+        if self.history_trends_request_id == 0 {
+            self.history_trends_request_id = 1;
+        }
+        let request_id = self.history_trends_request_id;
+        self.history_trends_baseline_id = baseline_id;
+        self.history_trends_loading = true;
+        self.history_trends_error = None;
+
+        let Some(runtime) = self.history_runtime.as_ref().map(Arc::clone) else {
+            self.history_trends_loading = false;
+            self.history_trends_error = Some("Native history is unavailable".to_string());
+            return;
+        };
+        match runtime.request_trends(HISTORY_TREND_SCAN_LIMIT) {
+            Ok(mut reply) => {
+                context.spawn_background_with_rejection(
+                    move |cancellation| loop {
+                        if cancellation.is_cancelled() {
+                            return Message::HistoryTrendsFinished {
+                                request_id,
+                                result: Box::new(Err(
+                                    "The Reactor background queue rejected trends".to_string(),
+                                )),
+                            };
+                        }
+                        match reply.try_recv() {
+                            Ok(result) => {
+                                return Message::HistoryTrendsFinished {
+                                    request_id,
+                                    result: Box::new(result.map_err(|error| error.to_string())),
+                                };
+                            }
+                            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                                std::thread::sleep(Duration::from_millis(50));
+                            }
+                            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                                return Message::HistoryTrendsFinished {
+                                    request_id,
+                                    result: Box::new(Err(
+                                        "Native history worker stopped".to_string()
+                                    )),
+                                };
+                            }
+                        }
+                    },
+                    Message::HistoryTrendsFinished {
+                        request_id,
+                        result: Box::new(Err(
+                            "The Reactor background queue rejected trends".to_string()
+                        )),
+                    },
+                );
+            }
+            Err(error) => {
+                self.history_trends_loading = false;
+                self.history_trends_error = Some(error.to_string());
+            }
+        }
+    }
+
+    fn clear_history_task_diff(&mut self) {
+        self.history_task_diff_request_id = self.history_task_diff_request_id.wrapping_add(1);
+        if self.history_task_diff_request_id == 0 {
+            self.history_task_diff_request_id = 1;
+        }
+        if let Some(task) = self.history_task_diff_task.take() {
+            task.cancel();
+        }
+        self.history_expanded_task_id = None;
+        self.history_task_diff = None;
+        self.history_task_diff_error = None;
+    }
+
+    fn toggle_history_task_detail(&mut self, task_id: String, context: &ComponentContext<Self>) {
+        if self.history_expanded_task_id.as_deref() == Some(task_id.as_str()) {
+            self.clear_history_task_diff();
+            return;
+        }
+
+        let Some(comparison) = self.history_comparison.as_ref() else {
+            return;
+        };
+        if !history_change_rows(comparison)
+            .iter()
+            .any(|(_, change)| change.task_id == task_id)
+        {
+            return;
+        }
+        let current_id = comparison.current_scan.id.clone();
+        let previous_id = comparison.previous_scan.id.clone();
+        let Some(runtime) = self.history_runtime.as_ref().map(Arc::clone) else {
+            self.status = "Native history is unavailable".to_string();
+            return;
+        };
+
+        self.clear_history_task_diff();
+        self.history_expanded_task_id = Some(task_id.clone());
+        let request_id = self.history_task_diff_request_id;
+        match runtime.request_task_diff(current_id, previous_id, task_id.clone()) {
+            Ok(mut reply) => {
+                self.status = "Loading stored task details…".to_string();
+                let rejected_task_id = task_id.clone();
+                self.history_task_diff_task = Some(context.spawn_background_with_rejection(
+                    move |cancellation| loop {
+                        if cancellation.is_cancelled() {
+                            return Message::HistoryTaskDiffRejected {
+                                request_id,
+                                task_id,
+                            };
+                        }
+                        match reply.try_recv() {
+                            Ok(result) => {
+                                return Message::HistoryTaskDiffFinished {
+                                    request_id,
+                                    task_id,
+                                    result: result
+                                        .map(HistoryTaskDiffProjection::from)
+                                        .map(Box::new)
+                                        .map_err(|error| error.to_string()),
+                                };
+                            }
+                            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                                std::thread::sleep(Duration::from_millis(50));
+                            }
+                            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                                return Message::HistoryTaskDiffFinished {
+                                    request_id,
+                                    task_id,
+                                    result: Err("Native history worker stopped".to_string()),
+                                };
+                            }
+                        }
+                    },
+                    Message::HistoryTaskDiffRejected {
+                        request_id,
+                        task_id: rejected_task_id,
+                    },
+                ));
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.history_task_diff_error = Some(message.clone());
+                self.status = format!("Could not load stored task details · {message}");
+            }
         }
     }
 
@@ -2555,112 +5579,819 @@ impl WfdiagSpike {
     /// Install the tray + close-to-tray hook once the WinUI window exists.
     /// Runs on the UI thread (subclassing requires the owning thread); the
     /// bool guard makes it a cheap no-op afterwards.
-    fn ensure_window_hook(&mut self) {
-        if self.window_hook_installed || self.deterministic_visual {
-            return;
-        }
-        // Investigation switch: WFDIAG_NO_TRAY skips the tray subclass.
-        if std::env::var_os("WFDIAG_NO_TRAY").is_some() {
-            self.window_hook_installed = true;
+    fn ensure_window_hook(&mut self, context: &ComponentContext<Self>) {
+        if self.window_hook_installed
+            || self.window_hook_retry_task.is_some()
+            || self.deterministic_visual
+        {
             return;
         }
         let Some(window) = instance_support::main_window_hwnd() else {
+            // `create` runs before windows-reactor materializes its HWND. A
+            // one-shot bootstrap reaches this path after the first delay; if
+            // window creation is slower, continue with bounded backoff until
+            // the exact process-owned window can be discovered.
+            self.window_hook_retry_failures = self.window_hook_retry_failures.saturating_add(1);
+            let delay = window_hook_retry_delay(self.window_hook_retry_failures);
+            self.window_hook_retry_task = Some(spawn_window_hook_retry(context, delay));
             return;
         };
-        if let Err(error) =
+        // The validation switch omits only the notification-area icon. The
+        // native wake/lifecycle subclass remains required for event delivery.
+        let tray_disabled = std::env::var_os("WFDIAG_NO_TRAY").is_some();
+        let installed = if tray_disabled {
+            window_support::install_without_tray(window)
+        } else {
             window_support::install(window, "WindowsForum Diagnostics")
-        {
-            self.status = error;
-            self.window_hook_installed = true;
+        };
+        if let Err(error) = installed {
+            if error.core_installed() {
+                // Explorer can reject a notification-area icon while the
+                // lifecycle/shortcut/wake subclass itself is healthy. Keep
+                // event-driven delivery and explicitly disable close-to-tray
+                // so the user can never hide a window that has no restore
+                // affordance.
+                window_support::set_close_to_tray(false);
+                self.status = format!("System tray unavailable · {}", error.message());
+                self.window_hook_installed = true;
+                self.window_hook_retry_failures = 0;
+                ui_wake_support::notify();
+                return;
+            }
+
+            self.window_hook_retry_failures = self.window_hook_retry_failures.saturating_add(1);
+            let delay = window_hook_retry_delay(self.window_hook_retry_failures);
+            self.status = format!(
+                "Native window integration is retrying in {} ms · {}",
+                delay.as_millis(),
+                error.message()
+            );
+            self.window_hook_retry_task = Some(spawn_window_hook_retry(context, delay));
             return;
         }
-        window_support::set_close_to_tray(self.settings_snapshot.close_to_tray);
+        window_support::set_close_to_tray(!tray_disabled && self.settings_snapshot.close_to_tray);
         self.window_hook_installed = true;
+        self.window_hook_retry_failures = 0;
+        // Producers may have queued data before the HWND became available.
+        ui_wake_support::notify();
+    }
+
+    fn apply_window_lifecycle(
+        &mut self,
+        snapshot: window_support::WindowLifecycleSnapshot,
+        context: &ComponentContext<Self>,
+    ) {
+        self.window_lifecycle_revision = snapshot.revision;
+        self.window_usable = window_is_usable(snapshot);
+        if !matches!(self.page, Page::Monitor | Page::Processes) {
+            return;
+        }
+        match monitoring_lifecycle_action(
+            snapshot,
+            self.monitoring_paused,
+            self.monitoring_paused_by_lifecycle,
+        ) {
+            MonitoringLifecycleAction::Pause => {
+                let accepted = self
+                    .native_monitor
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.pause());
+                if accepted {
+                    self.monitoring_paused = true;
+                    self.monitoring_paused_by_lifecycle = true;
+                    self.invalidate_process_page_request();
+                    if matches!(self.page, Page::Monitor | Page::Processes) {
+                        self.status =
+                            "Live monitoring paused while the window is inactive".to_string();
+                    }
+                }
+            }
+            MonitoringLifecycleAction::ResumeAndRefresh => {
+                let accepted = self
+                    .native_monitor
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.resume());
+                if accepted {
+                    self.monitoring_paused = false;
+                    self.monitoring_paused_by_lifecycle = false;
+                    if let Some(runtime) = self.native_monitor.as_ref() {
+                        let _ = runtime.refresh();
+                    }
+                    if self.page == Page::Processes {
+                        self.request_process_page(context, false);
+                    }
+                    if matches!(self.page, Page::Monitor | Page::Processes) {
+                        self.status = "Live monitoring resumed and refreshed".to_string();
+                    }
+                }
+            }
+            MonitoringLifecycleAction::None => {}
+        }
+    }
+
+    fn blocking_overlay_open(&self) -> bool {
+        self.settings_open
+            || self.about_open
+            || self.palette_open
+            || self.shortcut_help_open
+            || self.full_scan_consent.is_some()
+            || self.cloud_fallback_consent.is_some()
+            || self.cloud_fallback_policy_update.is_some()
+            || self.action_review.is_some()
+            || self.repair_confirm.is_some()
+            || self.subscription_install_prompt.is_some()
+            || self.history_clear_confirm
+    }
+
+    fn set_palette_visibility(&mut self, open: bool, context: &ComponentContext<Self>) {
+        if self.palette_open == open {
+            return;
+        }
+        if let Some(task) = self.palette_focus_task.take() {
+            task.cancel();
+        }
+        if open {
+            focus_support::capture_pre_palette_focus();
+        }
+        self.palette_open = open;
+        window_support::set_palette_open(open);
+        self.palette_query.clear();
+        self.palette_active_index = 0;
+        self.palette_dialog_epoch = self.palette_dialog_epoch.wrapping_add(1);
+        let action = if open {
+            PaletteFocusAction::FocusQuery
+        } else {
+            PaletteFocusAction::RestorePrevious
+        };
+        self.palette_focus_task = Some(spawn_palette_focus_delay(
+            context,
+            self.palette_dialog_epoch,
+            action,
+        ));
+    }
+
+    /// Apply a Win32-captured chord only after revalidating the current UI
+    /// state on Reactor's component thread. This mirrors the shipping hook's
+    /// overlay, editable-target, and active-scan gates without allowing the
+    /// raw window procedure to mutate component state.
+    fn handle_global_shortcut(
+        &mut self,
+        mut event: window_support::GlobalShortcutEvent,
+        context: &ComponentContext<Self>,
+    ) {
+        // WinUI 3 controls are windowless. Replace the Win32 HWND hint with
+        // the authoritative focused XAML object while we are on the UI thread.
+        event.editable_focused |= focus_support::editable_control_focused();
+        if !global_shortcut_is_allowed(
+            event,
+            self.blocking_overlay_open(),
+            self.palette_open,
+            self.diagnostics_busy(),
+        ) {
+            return;
+        }
+        match event.command {
+            window_support::GlobalShortcutCommand::TogglePalette => {
+                self.set_palette_visibility(!self.palette_open, context);
+            }
+            window_support::GlobalShortcutCommand::PalettePrevious => {
+                self.palette_active_index = self.palette_active_index.saturating_sub(1);
+            }
+            window_support::GlobalShortcutCommand::PaletteNext => {
+                let match_count =
+                    palette_visible_matches(self.palette_command_specs(), &self.palette_query)
+                        .len();
+                self.palette_active_index = self
+                    .palette_active_index
+                    .saturating_add(1)
+                    .min(match_count.saturating_sub(1));
+            }
+            window_support::GlobalShortcutCommand::PaletteExecute => {
+                let matches =
+                    palette_visible_matches(self.palette_command_specs(), &self.palette_query);
+                if let Some(matched) = matches.get(self.palette_active_index) {
+                    let tag = matched.command.tag.to_string();
+                    if matched.command.enabled {
+                        self.set_palette_visibility(false, context);
+                        self.handle_palette_command(tag, context);
+                    }
+                }
+            }
+            window_support::GlobalShortcutCommand::PaletteClose => {
+                self.set_palette_visibility(false, context);
+            }
+            window_support::GlobalShortcutCommand::Navigate(index) => {
+                let Some(page) = index
+                    .checked_sub(1)
+                    .and_then(|index| Page::ALL.get(usize::from(index)))
+                    .copied()
+                else {
+                    return;
+                };
+                self.handle_palette_command(page.tag().to_string(), context);
+            }
+            window_support::GlobalShortcutCommand::ShowHelp => {
+                self.shortcut_help_open = true;
+            }
+            window_support::GlobalShortcutCommand::QuickScan => {
+                self.begin_diagnostic_scan(ScanKind::Quick, context);
+            }
+            window_support::GlobalShortcutCommand::FullScan => {
+                self.begin_diagnostic_scan(ScanKind::Full, context);
+            }
+        }
+    }
+
+    fn palette_command_specs(&self) -> Vec<PaletteCommandSpec> {
+        let mut commands = Vec::with_capacity(
+            PALETTE_NAVIGATION_TEMPLATES.len()
+                + PALETTE_SCAN_TEMPLATES.len()
+                + PALETTE_REPORT_TEMPLATES.len()
+                + PALETTE_APP_TEMPLATES.len()
+                + self.diagnostic_results.len()
+                + self.diagnostic_catalog.len()
+                + 3,
+        );
+        commands.extend(
+            PALETTE_NAVIGATION_TEMPLATES
+                .into_iter()
+                .map(|template| template.command(true)),
+        );
+        let scan_idle = !self.diagnostics_busy();
+        commands.extend(
+            PALETTE_SCAN_TEMPLATES
+                .into_iter()
+                .map(|template| template.command(scan_idle)),
+        );
+        if !scan_idle {
+            commands.push(PALETTE_STOP_SCAN_TEMPLATE.command(!self.diagnostic_cancel_requested));
+        }
+
+        let report_ready = !self.diagnostic_results.is_empty() && self.export_pending.is_none();
+        commands.extend(
+            PALETTE_REPORT_TEMPLATES
+                .into_iter()
+                .map(|template| template.command(report_ready)),
+        );
+
+        let dark =
+            effective_window_theme(self.theme, self.effective_color_scheme) == WindowTheme::Dark;
+        commands.push(PaletteCommandSpec {
+            section: "App",
+            label: Cow::Borrowed(if dark {
+                "Switch to Light Theme"
+            } else {
+                "Switch to Dark Theme"
+            }),
+            tag: Cow::Borrowed("toggle-theme"),
+            keywords: Cow::Borrowed("theme dark light appearance"),
+            enabled: !self.settings_saving,
+            icon: if dark { FaIcon::Sun } else { FaIcon::Moon },
+            shortcut: None,
+        });
+        commands.extend(
+            PALETTE_APP_TEMPLATES
+                .into_iter()
+                .map(|template| template.command(true)),
+        );
+        commands.push(PaletteCommandSpec {
+            section: "App",
+            label: Cow::Borrowed(if self.pane_open {
+                "Collapse Navigation Rail"
+            } else {
+                "Expand Navigation Rail"
+            }),
+            tag: Cow::Borrowed("toggle-pane"),
+            keywords: Cow::Borrowed("sidebar navigation rail collapse expand"),
+            enabled: true,
+            icon: if self.pane_open {
+                FaIcon::AnglesLeft
+            } else {
+                FaIcon::AnglesRight
+            },
+            shortcut: None,
+        });
+
+        for result in &self.diagnostic_results {
+            let name = self
+                .diagnostic_catalog
+                .iter()
+                .find(|task| task.id == result.task_id)
+                .map_or(result.task_id.as_str(), |task| task.name.as_str());
+            commands.push(PaletteCommandSpec {
+                section: "Diagnostics",
+                label: Cow::Owned(format!("View Result: {name}")),
+                tag: Cow::Owned(format!("view:{}", result.task_id)),
+                keywords: Cow::Owned(format!("result diagnostic {}", result.task_id)),
+                enabled: true,
+                icon: self
+                    .diagnostic_catalog
+                    .iter()
+                    .find(|task| task.id == result.task_id)
+                    .map_or(FaIcon::Diagnostics, |task| {
+                        diagnostic_palette_icon(&task.category)
+                    }),
+                shortcut: None,
+            });
+        }
+        for task in &self.diagnostic_catalog {
+            commands.push(PaletteCommandSpec {
+                section: "Diagnostics",
+                label: Cow::Owned(format!("Run: {}", task.name)),
+                tag: Cow::Owned(format!("run:{}", task.id)),
+                keywords: Cow::Owned(format!("task diagnostic {} {}", task.id, task.category)),
+                enabled: scan_idle && (self.is_admin || !task.admin_required),
+                icon: diagnostic_palette_icon(&task.category),
+                shortcut: None,
+            });
+        }
+        commands
+    }
+
+    fn persist_shell_settings(
+        &mut self,
+        submitted: AppSettings,
+        context: &ComponentContext<Self>,
+    ) -> bool {
+        if self.deterministic_visual {
+            self.settings_snapshot = submitted.clone();
+            self.settings_draft = submitted;
+            return true;
+        }
+        if self.settings_loading || self.settings_saving || self.settings_pending_save.is_some() {
+            self.status = "Settings are already being saved…".to_string();
+            return false;
+        }
+        if self.settings_runtime.is_none() {
+            self.status = "Native settings persistence is unavailable".to_string();
+            return false;
+        }
+        let Some(request_id) = advance_nonzero_generation(&mut self.settings_request_id) else {
+            self.status = "Native settings request identity was exhausted".to_string();
+            return false;
+        };
+        let command = SettingsCommand::Save {
+            request_id,
+            settings: Box::new(submitted.clone()),
+        };
+        if let Err(error) = self
+            .settings_runtime
+            .as_ref()
+            .expect("settings runtime availability checked above")
+            .send(command)
+        {
+            self.status = format!("Settings were not saved · {error}");
+            return false;
+        }
+        self.settings_pending_save = Some(PendingSettingsSave {
+            request_id,
+            dialog_epoch: self.settings_dialog_epoch,
+            submitted,
+        });
+        self.settings_saving = true;
+        self.settings_save_error = None;
+        self.resume_settings_wait(context);
+        true
+    }
+
+    fn toggle_navigation_rail(&mut self, context: &ComponentContext<Self>) {
+        self.pane_open = !self.pane_open;
+        let mut submitted = self.settings_snapshot.clone();
+        submitted.nav_rail_collapsed = !self.pane_open;
+        if self.persist_shell_settings(submitted, context) {
+            self.status = if self.pane_open {
+                "Navigation expanded"
+            } else {
+                "Navigation collapsed"
+            }
+            .to_string();
+        }
+    }
+
+    /// Invalidate process-page work before changing surfaces. Cancelling the
+    /// component task is not sufficient once the native request has reached
+    /// its blocking receive, so advance the generation as well; any completion
+    /// already in flight is then rejected by the normal request-id guard.
+    fn invalidate_process_page_request(&mut self) {
+        if let Some(task) = self.process_request_task.take() {
+            task.cancel();
+        }
+        self.process_request_id = next_process_request_id(self.process_request_id);
+        self.process_loading = false;
+        self.process_last_refresh_started_at = None;
+    }
+
+    /// The only path that mutates the active page. Keeping the exit lifecycle
+    /// here prevents direct actions (AI, scans, tray), navigation, and command
+    /// palette commands from leaving a process query alive behind another page.
+    fn transition_to_page(&mut self, next: Page) -> bool {
+        let Some(transition) = PageTransition::between(self.page, next) else {
+            return false;
+        };
+        if transition.leaves_processes() {
+            self.invalidate_process_page_request();
+        }
+        if matches!(self.page, Page::Monitor | Page::Processes)
+            && !matches!(transition.next, Page::Monitor | Page::Processes)
+            && !self.monitoring_paused
+        {
+            // Keep the worker and its small system snapshot warm, but stop all
+            // periodic collection while no live surface consumes it.
+            let _ = self
+                .native_monitor
+                .as_ref()
+                .is_some_and(|runtime| runtime.pause());
+        }
+        self.page = transition.next;
+        true
+    }
+
+    /// Navigation additionally performs the destination's normal entry work.
+    /// Direct workflow transitions use `transition_to_page` so they retain
+    /// their existing provider/scan sequencing while sharing the exit guard.
+    fn navigate_to_page(&mut self, page: Page, context: &ComponentContext<Self>) {
+        if !self.transition_to_page(page) {
+            return;
+        }
+        match page {
+            Page::Processes => {
+                let _ = self.request_monitor_refresh(context);
+                if !self.monitoring_paused || self.monitoring_paused_by_lifecycle {
+                    let resumed = self
+                        .native_monitor
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.resume());
+                    if resumed {
+                        self.monitoring_paused = false;
+                        self.monitoring_paused_by_lifecycle = false;
+                        if let Some(runtime) = self.native_monitor.as_ref() {
+                            let _ = runtime.refresh();
+                        }
+                    }
+                }
+                self.process_offset = 0;
+                self.selected_process = None;
+                self.request_process_page(context, false);
+            }
+            Page::Monitor => {
+                let _ = self.request_monitor_refresh(context);
+                if !self.monitoring_paused || self.monitoring_paused_by_lifecycle {
+                    let resumed = self
+                        .native_monitor
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.resume());
+                    if resumed {
+                        self.monitoring_paused = false;
+                        self.monitoring_paused_by_lifecycle = false;
+                        if let Some(runtime) = self.native_monitor.as_ref() {
+                            let _ = runtime.refresh();
+                        }
+                    }
+                }
+            }
+            Page::History => self.request_history_list(context),
+            Page::Ai => self.request_ai_provider_status(context),
+            Page::Diagnostics | Page::Issues => {}
+        }
     }
 
     /// Execute one command-palette entry. Page tags reuse the navigation
     /// path; action tags mirror their titlebar/nav equivalents.
     fn handle_palette_command(&mut self, tag: String, context: &ComponentContext<Self>) {
         if let Some(page) = Page::from_tag(&tag) {
-            let entering_processes = page == Page::Processes && self.page != Page::Processes;
-            let entering_history = page == Page::History && self.page != Page::History;
-            let entering_ai = page == Page::Ai && self.page != Page::Ai;
-            self.page = page;
-            if entering_processes {
-                self.process_offset = 0;
-                self.selected_process_pid = None;
-                self.request_process_page(context, false);
+            self.navigate_to_page(page, context);
+            return;
+        }
+        if let Some(task_id) = tag.strip_prefix("view:") {
+            if self
+                .diagnostic_results
+                .iter()
+                .any(|result| result.task_id == task_id)
+            {
+                self.selected_result_task_id = Some(task_id.to_string());
+                self.transition_to_page(Page::Diagnostics);
+                self.status = format!("Selected diagnostic: {task_id}");
             }
-            if entering_history {
-                self.request_history_list(context);
-            }
-            if entering_ai {
-                self.request_ai_provider_status(context);
-            }
+            return;
+        }
+        if let Some(task_id) = tag.strip_prefix("run:").map(str::to_string) {
+            self.transition_to_page(Page::Diagnostics);
+            self.begin_targeted_diagnostic_scan(&task_id, context);
             return;
         }
         match tag.as_str() {
             "quick-scan" => {
-                self.page = Page::Diagnostics;
+                self.transition_to_page(Page::Diagnostics);
                 self.begin_diagnostic_scan(ScanKind::Quick, context);
             }
             "full-scan" => {
-                self.page = Page::Diagnostics;
+                self.transition_to_page(Page::Diagnostics);
                 self.begin_diagnostic_scan(ScanKind::Full, context);
             }
+            "stop-scan" => self.request_diagnostic_cancel(context),
             "export" => self.request_export_to_file(context),
+            "copy-diagnostic-report" => self.request_copy_diagnostic_report(context),
+            "support-package" => self.request_support_package(context),
             "share" => self.request_share_to_windowsforum(context),
-            "settings" => self.open_settings(),
+            "email" => self.request_email_report(context),
+            "toggle-pane" => self.toggle_navigation_rail(context),
+            "settings" => self.open_settings(context),
             "about" => self.open_about(),
             "shortcut-help" => self.shortcut_help_open = true,
             "toggle-theme" => {
-                let next = match self.theme {
-                    WindowTheme::Dark => "light",
-                    _ => "dark",
-                };
-                self.settings_snapshot.theme = next.to_string();
-                self.theme = match self.theme {
-                    WindowTheme::Dark => WindowTheme::Light,
-                    _ => WindowTheme::Dark,
-                };
+                let next_theme =
+                    match effective_window_theme(self.theme, self.effective_color_scheme) {
+                        WindowTheme::Dark => WindowTheme::Light,
+                        _ => WindowTheme::Dark,
+                    };
+                let mut submitted = self.settings_snapshot.clone();
+                submitted.theme = window_theme_setting(next_theme).to_string();
+                if self.persist_shell_settings(submitted, context) {
+                    self.theme = next_theme;
+                    self.status = format!("{} theme selected", window_theme_setting(next_theme));
+                }
             }
             _ => (),
         }
     }
 
-    /// Dispatch an authorized catalog execution. The confirmed flag is only
-    /// ever true after the Repair confirmation dialog's Primary button.
-    fn execute_remediation(
+    fn action_snapshot(&self) -> ActionSnapshot {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        self.issue_source_session_id.hash(&mut hasher);
+        self.issue_committed_epoch.hash(&mut hasher);
+        let mut results = self.diagnostic_results.iter().collect::<Vec<_>>();
+        results.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+        for result in results {
+            result.session_id.hash(&mut hasher);
+            result.task_id.hash(&mut hasher);
+            result.success.hash(&mut hasher);
+            result.output.hash(&mut hasher);
+            result.error.hash(&mut hasher);
+        }
+        let scan_fingerprint = format!(
+            "{}:{:016x}",
+            self.issue_source_session_id.as_deref().unwrap_or("no-scan"),
+            hasher.finish()
+        );
+        ActionSnapshot {
+            scan_fingerprint,
+            catalog_fingerprint: current_action_catalog_fingerprint(),
+            detected_issues: self
+                .issues
+                .iter()
+                .filter(|issue| issue.status == wfdiag_native_issues::IssueStatus::Detected)
+                .map(|issue| DetectedIssueRemediation {
+                    issue_id: issue.id.clone(),
+                    remediation_id: issue
+                        .remediation
+                        .as_ref()
+                        .map(|remediation| remediation.id.clone()),
+                })
+                .collect(),
+            is_admin: self.is_admin,
+        }
+    }
+
+    fn restore_action_approval(&mut self, pending: PendingActionApproval) {
+        match pending.return_surface {
+            ActionReviewSurface::Review => self.action_review = Some(pending.proposal),
+            ActionReviewSurface::RepairConfirmation => {
+                self.repair_confirm = Some(pending.proposal);
+            }
+        }
+    }
+
+    fn restore_action_approval_if_current(&mut self, pending: PendingActionApproval) -> bool {
+        let snapshot = self.action_snapshot();
+        let broker_still_has_proposal = self.action_runtime.as_ref().is_some_and(|runtime| {
+            runtime
+                .list_pending_proposals()
+                .iter()
+                .any(|proposal| proposal.proposal_id == pending.proposal.proposal_id)
+        });
+        if broker_still_has_proposal
+            && action_proposal_matches_snapshot(&pending.proposal, &snapshot)
+        {
+            self.restore_action_approval(pending);
+            true
+        } else {
+            if broker_still_has_proposal && let Some(runtime) = self.action_runtime.as_ref() {
+                let _ = runtime.discard(pending.proposal.proposal_id);
+            }
+            false
+        }
+    }
+
+    fn discard_action_proposal_or_restore(&mut self, pending: PendingActionApproval) {
+        let discarded = self
+            .action_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.discard(pending.proposal.proposal_id.clone()));
+        if !discarded {
+            self.restore_action_approval(pending);
+            self.status =
+                "Could not discard the staged action · native remediation broker unavailable"
+                    .to_string();
+        }
+    }
+
+    fn reconcile_staged_action_reviews(&mut self) {
+        let snapshot = self.action_snapshot();
+        let stale_review = self
+            .action_review
+            .as_ref()
+            .is_some_and(|proposal| !action_proposal_matches_snapshot(proposal, &snapshot));
+        let stale_repair = self
+            .repair_confirm
+            .as_ref()
+            .is_some_and(|proposal| !action_proposal_matches_snapshot(proposal, &snapshot));
+        let stale = [
+            stale_review.then(|| self.action_review.take()).flatten(),
+            stale_repair.then(|| self.repair_confirm.take()).flatten(),
+        ];
+        if let Some(runtime) = self.action_runtime.as_ref() {
+            for proposal in stale.into_iter().flatten() {
+                let _ = runtime.discard(proposal.proposal_id);
+            }
+        }
+    }
+
+    fn request_admin_relaunch(&mut self, context: &ComponentContext<Self>) {
+        if self.deterministic_visual
+            && self.live_test_fixture != Some(LiveTestFixture::AdminRelaunch)
+        {
+            self.status = "Visual fixture mode · elevation is disabled".to_string();
+            return;
+        }
+        if self.admin_relaunch_task.is_none() {
+            self.admin_relaunch_task = Some(spawn_relaunch_as_admin(context));
+            self.status = "Restarting with administrator rights…".to_string();
+        }
+    }
+
+    /// Stage an immutable, catalog-derived action preview. No catalog entry
+    /// can execute until the user approves the opaque proposal ID returned by
+    /// the worker and the worker revalidates a fresh authoritative snapshot.
+    fn prepare_remediation(
         &mut self,
         remediation_id: String,
-        confirmed: bool,
+        issue_id: Option<String>,
         context: &ComponentContext<Self>,
     ) {
-        let Some(runtime) = self.action_runtime.as_ref() else {
-            self.status = "Native remediation is unavailable".to_string();
+        let snapshot = self.action_snapshot();
+        self.prepare_action_selection(
+            FixPlanActionSelection {
+                actions: vec![ActionRequest {
+                    remediation_id,
+                    issue_id,
+                }],
+                expected_scan_fingerprint: snapshot.scan_fingerprint,
+                expected_catalog_fingerprint: snapshot.catalog_fingerprint,
+            },
+            context,
+        );
+    }
+
+    fn prepare_action_selection(
+        &mut self,
+        selection: FixPlanActionSelection,
+        context: &ComponentContext<Self>,
+    ) {
+        if self
+            .live_test_fixture
+            .is_some_and(|fixture| !fixture.permits_actions(&selection.actions))
+        {
+            self.status = "The validation fixture rejected an action outside its closed allowlist"
+                .to_string();
             return;
-        };
+        }
         if self.action_pending.is_some() {
-            self.status = "A remediation is already running…".to_string();
+            self.status = "A remediation request is already active…".to_string();
             return;
         }
         let Some(request_id) = advance_nonzero_generation(&mut self.action_request_id) else {
             self.status = "Native remediation request identity was exhausted".to_string();
             return;
         };
+        let snapshot = self.action_snapshot();
+        let Some(runtime) = self.action_runtime.as_ref() else {
+            self.status = "Native remediation is unavailable".to_string();
+            return;
+        };
+        let action_count = selection.actions.len();
+        let input = ActionPrepareInput {
+            actions: selection.actions,
+            expected_scan_fingerprint: Some(selection.expected_scan_fingerprint),
+            expected_catalog_fingerprint: Some(selection.expected_catalog_fingerprint),
+        };
+        if !runtime.prepare(request_id, input, snapshot) {
+            self.status = "The native remediation preview queue is unavailable".to_string();
+            return;
+        }
         self.action_pending = Some(request_id);
-        runtime.execute(request_id, remediation_id.clone(), confirmed);
-        self.status = format!("Running '{remediation_id}'…");
+        self.action_pending_approval = None;
+        self.status = format!(
+            "Preparing a review for {action_count} vetted action{}…",
+            if action_count == 1 { "" } else { "s" }
+        );
         self.resume_action_wait(context);
     }
 
-    fn resume_action_wait(&mut self, context: &ComponentContext<Self>) {
-        if self.action_wait.is_some() {
+    fn approve_action_proposal(
+        &mut self,
+        proposal: ActionProposal,
+        approval: ActionApproval,
+        return_surface: ActionReviewSurface,
+        context: &ComponentContext<Self>,
+    ) {
+        let pending = PendingActionApproval {
+            proposal,
+            return_surface,
+        };
+        if self.action_pending.is_some() {
+            self.restore_action_approval(pending);
+            self.status = "A remediation request is already active…".to_string();
             return;
         }
-        if let Some(receiver) = self.action_receiver.as_ref() {
-            self.action_wait = Some(spawn_action_wait(context, Arc::clone(receiver)));
+        let Some(request_id) = advance_nonzero_generation(&mut self.action_request_id) else {
+            self.restore_action_approval(pending);
+            self.status = "Native remediation request identity was exhausted".to_string();
+            return;
+        };
+        let snapshot = self.action_snapshot();
+        let Some(runtime) = self.action_runtime.as_ref() else {
+            self.restore_action_approval(pending);
+            self.status = "Native remediation is unavailable".to_string();
+            return;
+        };
+        if !runtime.approve(
+            request_id,
+            pending.proposal.proposal_id.clone(),
+            snapshot,
+            approval,
+        ) {
+            self.restore_action_approval(pending);
+            self.status = "The native remediation approval queue is unavailable".to_string();
+            return;
         }
+        self.action_pending = Some(request_id);
+        self.action_pending_approval = Some(pending);
+        self.status = "Revalidating the reviewed remediation…".to_string();
+        self.resume_action_wait(context);
+    }
+
+    fn resume_action_wait(&mut self, _context: &ComponentContext<Self>) {
+        self.action_wait = None;
+    }
+
+    fn resume_action_run_wait(&mut self, _context: &ComponentContext<Self>) {
+        self.action_run_wait = None;
+    }
+
+    fn apply_action_run_summary(&mut self, summary: ActionRunSummary) {
+        let run_id = summary.run_id.clone();
+        let first_observation = self
+            .action_active_run
+            .as_ref()
+            .is_none_or(|run| run.run_id != run_id)
+            && !self
+                .action_run_history
+                .iter()
+                .any(|run| run.run_id == run_id);
+        if first_observation {
+            // New runs start open so partial/failure details are immediately
+            // visible. Subsequent renders preserve the user's explicit
+            // Expander choice instead of deriving it again from live/history.
+            self.action_expanded_runs.insert(run_id.clone());
+        }
+        if summary.status.terminal() {
+            if self
+                .action_active_run
+                .as_ref()
+                .map(|run| run.run_id.as_str())
+                == Some(run_id.as_str())
+            {
+                self.action_active_run = None;
+            }
+            self.action_run_history
+                .retain(|existing| existing.run_id != run_id);
+            self.action_run_history.insert(0, summary.clone());
+            self.action_run_history.truncate(50);
+        } else {
+            self.action_active_run = Some(summary.clone());
+        }
+        let visible_ids = self
+            .action_active_run
+            .iter()
+            .chain(self.action_run_history.iter())
+            .map(|run| run.run_id.as_str())
+            .collect::<HashSet<_>>();
+        self.action_expanded_runs
+            .retain(|expanded| visible_ids.contains(expanded.as_str()));
+        self.status = action_run_status_text(&summary);
     }
 
     /// Fire-and-forget scan-completion toast, mirroring the shipping
@@ -2683,13 +6414,8 @@ impl WfdiagSpike {
             });
     }
 
-    fn resume_report_wait(&mut self, context: &ComponentContext<Self>) {
-        if self.report_wait.is_some() {
-            return;
-        }
-        if let Some(receiver) = self.report_receiver.as_ref() {
-            self.report_wait = Some(spawn_report_wait(context, Arc::clone(receiver)));
-        }
+    fn resume_report_wait(&mut self, _context: &ComponentContext<Self>) {
+        self.report_wait = None;
     }
 
     fn resume_export_wait(&mut self, context: &ComponentContext<Self>) {
@@ -2703,7 +6429,7 @@ impl WfdiagSpike {
         self.export_wait = Some(spawn_export_wait(context, receiver));
     }
 
-    fn export_results_snapshot(&self) -> Option<Arc<HashMap<String, ExportTaskResult>>> {
+    fn export_results_snapshot(&self) -> Option<SharedScanEvidence> {
         let current_session = self
             .diagnostic_results
             .first()
@@ -2719,22 +6445,7 @@ impl WfdiagSpike {
             return self.issue_source_results.as_ref().map(Arc::clone);
         }
 
-        Some(Arc::new(
-            self.diagnostic_results
-                .iter()
-                .map(|result| {
-                    (
-                        result.task_id.clone(),
-                        ExportTaskResult {
-                            success: result.success,
-                            output: result.output.clone(),
-                            error: result.error.clone(),
-                            duration_ms: result.duration_ms,
-                        },
-                    )
-                })
-                .collect(),
-        ))
+        Some(diagnostic_output_snapshot(&self.diagnostic_results))
     }
 
     fn request_share_to_windowsforum(&mut self, context: &ComponentContext<Self>) {
@@ -2797,13 +6508,190 @@ impl WfdiagSpike {
         self.resume_export_wait(context);
     }
 
+    fn request_email_report(&mut self, context: &ComponentContext<Self>) {
+        if self.deterministic_visual {
+            self.status = "Visual fixture mode · email delivery is disabled".to_string();
+            return;
+        }
+        if self.export_pending.is_some() {
+            self.status = "A report is already being prepared…".to_string();
+            return;
+        }
+        let Some(results) = self.export_results_snapshot() else {
+            self.status = "Run a scan before emailing a report".to_string();
+            return;
+        };
+        let Some(runtime) = self.export_runtime.as_ref() else {
+            self.status = self
+                .export_error
+                .clone()
+                .unwrap_or_else(|| "Native report generation is unavailable".to_string());
+            return;
+        };
+        let dates = match current_export_date_strings() {
+            Ok(dates) => dates,
+            Err(error) => {
+                self.export_error = Some(error.to_string());
+                self.status =
+                    "Failed to prepare email. Please try exporting the report instead.".to_string();
+                return;
+            }
+        };
+        let Some(request_id) = advance_nonzero_generation(&mut self.export_request_id) else {
+            self.export_error = Some("Native export request identity was exhausted".to_string());
+            self.status = "Native report generation is unavailable".to_string();
+            return;
+        };
+        let request = ExportRequest {
+            request_id,
+            kind: ExportRequestKind::Email {
+                metadata: ExportMetadata {
+                    generated: dates.generated,
+                    local_date: dates.local_date,
+                    computer_name: self.system_info.computer_name.clone(),
+                    os_version: self.system_info.os_version.clone(),
+                    is_admin: self.system_info.is_admin,
+                },
+            },
+            results,
+        };
+        if let Err(error) = runtime.enqueue(request) {
+            self.export_error = Some(error.to_string());
+            self.status =
+                "Failed to prepare email. Please try exporting the report instead.".to_string();
+            return;
+        }
+        self.export_pending = Some(PendingExport {
+            request_id,
+            action: PendingExportAction::EmailReport,
+        });
+        self.export_error = None;
+        self.status = "Preparing email report…".to_string();
+        self.resume_export_wait(context);
+    }
+
+    fn request_copy_diagnostic_report(&mut self, context: &ComponentContext<Self>) {
+        if self.deterministic_visual {
+            self.status = "Visual fixture mode · clipboard export is disabled".to_string();
+            return;
+        }
+        if self.export_pending.is_some() {
+            self.status = "A report is already being prepared…".to_string();
+            return;
+        }
+        let Some(results) = self.export_results_snapshot() else {
+            self.status = "Run a scan before copying a diagnostic report".to_string();
+            return;
+        };
+        let Some(runtime) = self.export_runtime.as_ref() else {
+            self.status = self
+                .export_error
+                .clone()
+                .unwrap_or_else(|| "Native report generation is unavailable".to_string());
+            return;
+        };
+        let dates = match current_export_date_strings() {
+            Ok(dates) => dates,
+            Err(error) => {
+                self.export_error = Some(error.to_string());
+                self.status =
+                    "Failed to prepare the clipboard report. Please try again.".to_string();
+                return;
+            }
+        };
+        let Some(request_id) = advance_nonzero_generation(&mut self.export_request_id) else {
+            self.export_error = Some("Native export request identity was exhausted".to_string());
+            self.status = "Native report generation is unavailable".to_string();
+            return;
+        };
+        let request = ExportRequest {
+            request_id,
+            kind: ExportRequestKind::ForumClipboard {
+                metadata: ExportMetadata {
+                    generated: dates.generated,
+                    local_date: dates.local_date,
+                    computer_name: self.system_info.computer_name.clone(),
+                    os_version: self.system_info.os_version.clone(),
+                    is_admin: self.system_info.is_admin,
+                },
+            },
+            results,
+        };
+        if let Err(error) = runtime.enqueue(request) {
+            self.export_error = Some(error.to_string());
+            self.status = "Failed to prepare the clipboard report. Please try again.".to_string();
+            return;
+        }
+        self.export_pending = Some(PendingExport {
+            request_id,
+            action: PendingExportAction::CopyDiagnosticReport,
+        });
+        self.export_error = None;
+        self.status = "Preparing diagnostic report for the clipboard…".to_string();
+        self.resume_export_wait(context);
+    }
+
+    fn request_support_package(&mut self, context: &ComponentContext<Self>) {
+        if self.deterministic_visual {
+            self.status = "Visual fixture mode · support-package export is disabled".to_string();
+            return;
+        }
+        if self.export_pending.is_some() {
+            self.status = "A report is already being prepared…".to_string();
+            return;
+        }
+        let Some(results) = self.export_results_snapshot() else {
+            self.status = "Run a scan before generating a support package".to_string();
+            return;
+        };
+        let Some(runtime) = self.export_runtime.as_ref() else {
+            self.status = self
+                .export_error
+                .clone()
+                .unwrap_or_else(|| "Native report generation is unavailable".to_string());
+            return;
+        };
+        let paths = match save_picker::show_support_package_save_picker() {
+            Ok(SupportPackagePickerOutcome::Cancelled) => return,
+            Ok(SupportPackagePickerOutcome::Selected(paths)) => paths,
+            Err(error) => {
+                self.export_error = Some(error.to_string());
+                self.status = format!("Support-package export failed · {error}");
+                return;
+            }
+        };
+        let Some(request_id) = advance_nonzero_generation(&mut self.export_request_id) else {
+            self.export_error = Some("Native export request identity was exhausted".to_string());
+            self.status = "Native report generation is unavailable".to_string();
+            return;
+        };
+        if let Err(error) = runtime.enqueue(ExportRequest {
+            request_id,
+            kind: ExportRequestKind::SupportPackage { include_raw: true },
+            results,
+        }) {
+            self.export_error = Some(error.to_string());
+            self.status = "Failed to prepare the support package. Please try again.".to_string();
+            return;
+        }
+        self.export_pending = Some(PendingExport {
+            request_id,
+            action: PendingExportAction::SupportPackage { paths },
+        });
+        self.export_error = None;
+        self.status = "Preparing JSON, TXT, and HTML support reports…".to_string();
+        self.resume_export_wait(context);
+    }
+
     /// Export the latest completed scan to a user-chosen file, mirroring the
     /// Store 2.5.8 flow: the native save dialog runs synchronously on this
     /// UI thread (owner-validated by `save_picker`), while rendering and
     /// file I/O stay on workers. A dialog cancellation is a silent no-op,
     /// exactly like the shipping `save()` dialog path.
     fn request_export_to_file(&mut self, context: &ComponentContext<Self>) {
-        if self.deterministic_visual {
+        if self.deterministic_visual
+            && self.live_test_fixture != Some(LiveTestFixture::ExportFallback)
+        {
             self.status = "Visual fixture mode · file export is disabled".to_string();
             return;
         }
@@ -2822,15 +6710,17 @@ impl WfdiagSpike {
                 .unwrap_or_else(|| "Native report generation is unavailable".to_string());
             return;
         };
-        let Ok(format) = ReportFormat::try_from(self.settings_snapshot.export_format.as_str())
-        else {
-            self.status = "The selected export format is not available".to_string();
-            return;
-        };
-        let Ok(SavePickerOutcome::Selected(path)) = save_picker::show_export_save_picker(format)
-        else {
-            return;
-        };
+        let format = resolved_export_format(&self.settings_snapshot.export_format);
+        let path =
+            match resolve_export_picker_selection(save_picker::show_export_save_picker(format)) {
+                Ok(Some(path)) => path,
+                Ok(None) => return,
+                Err(error) => {
+                    self.export_error = Some(error.clone());
+                    self.status = format!("Export failed · {error}");
+                    return;
+                }
+            };
         let dates = match current_export_date_strings() {
             Ok(dates) => dates,
             Err(error) => {
@@ -2997,7 +6887,7 @@ impl WfdiagSpike {
     fn commit_issue_evidence(
         &mut self,
         session_id: String,
-        results: HashMap<String, DiagnosticOutput>,
+        results: SharedScanEvidence,
         context: &ComponentContext<Self>,
     ) {
         let Some(committed_epoch) = advance_nonzero_generation(&mut self.issue_committed_epoch)
@@ -3006,8 +6896,10 @@ impl WfdiagSpike {
             return;
         };
         debug_assert_eq!(committed_epoch, self.issue_committed_epoch);
+        self.invalidate_issue_prioritization();
         self.issue_source_session_id = Some(session_id);
-        self.issue_source_results = Some(Arc::new(results));
+        self.issue_source_results = Some(results);
+        self.reconcile_staged_action_reviews();
         // Keep the last successfully projected issues visible until the new
         // guarded worker response succeeds. Preparation/enqueue/delivery
         // failures therefore cannot blank previously useful evidence.
@@ -3031,7 +6923,10 @@ impl WfdiagSpike {
         .is_some()
         {
             self.issue_enqueued_request_id = None;
+            self.invalidate_issue_prioritization();
             self.issues = completion.issues;
+            self.invalidate_fix_plan();
+            self.reconcile_staged_action_reviews();
             self.issue_projected_epoch = Some(self.issue_committed_epoch);
             self.issue_projected_session_id = current_session_id;
             self.issue_error = None;
@@ -3086,6 +6981,19 @@ impl WfdiagSpike {
         }
 
         self.resume_system_wait(context);
+        self.maybe_begin_startup_scan(context);
+    }
+
+    fn maybe_begin_startup_scan(&mut self, context: &ComponentContext<Self>) {
+        if take_startup_scan_when_ready(
+            &mut self.startup_scan_gate,
+            self.deterministic_visual,
+            self.settings_loading,
+            self.system_info_request_id,
+            self.architecture_request_id,
+        ) {
+            self.begin_diagnostic_scan(ScanKind::Quick, context);
+        }
     }
 
     fn stop_system_delivery(&mut self, reason: impl Into<String>) {
@@ -3099,15 +7007,659 @@ impl WfdiagSpike {
         self.status = reason;
     }
 
-    fn open_settings(&mut self) {
+    fn resume_provider_setup_wait(&mut self, _context: &ComponentContext<Self>) {
+        self.provider_setup_wait = None;
+    }
+
+    fn schedule_provider_model_refresh(&mut self, context: &ComponentContext<Self>) {
+        if let Some(task) = self.provider_catalog_refresh_task.take() {
+            task.cancel();
+        }
+        self.provider_catalog_refresh_revision =
+            self.provider_catalog_refresh_revision.wrapping_add(1);
+        if self.provider_catalog_refresh_revision == 0 {
+            self.provider_catalog_refresh_revision = 1;
+        }
+        if self.deterministic_visual
+            || !self.settings_open
+            || provider_setup_provider(self.provider_setup_index) == Some(AIProvider::PhiSilica)
+        {
+            return;
+        }
+        self.provider_catalog_refresh_task = Some(spawn_provider_model_refresh_delay(
+            context,
+            self.settings_dialog_epoch,
+            self.provider_catalog_refresh_revision,
+            self.provider_setup_index,
+        ));
+    }
+
+    fn begin_provider_model_refresh(
+        &mut self,
+        setup_index: usize,
+        context: &ComponentContext<Self>,
+    ) {
+        if self.deterministic_visual
+            || !self.settings_open
+            || setup_index != self.provider_setup_index
+        {
+            return;
+        }
+        if let Some(pending) = self.provider_catalog_pending {
+            self.provider_catalog_refresh_after_cancel = true;
+            if let Some(runtime) = self.provider_setup_runtime.as_ref() {
+                let _ = runtime.cancel(pending.request_id);
+            }
+            self.status = "Refreshing the provider model list…".to_string();
+            return;
+        }
+
+        let request = match provider_catalog_request_for_draft(
+            setup_index,
+            &self.settings_draft,
+            &self.provider_key_drafts,
+        ) {
+            Ok(Some(request)) => request,
+            Ok(None) => {
+                if let Some(state) = self.provider_catalogs.get_mut(setup_index) {
+                    *state = ProviderCatalogUiState::default();
+                }
+                return;
+            }
+            Err(blocked) => {
+                if let Some(state) = self.provider_catalogs.get_mut(setup_index) {
+                    state.loading = false;
+                    state.error = None;
+                    state.blocked = Some(blocked);
+                    state.stale = state.catalog.is_some();
+                }
+                return;
+            }
+        };
+        let Some(runtime) = self.provider_setup_runtime.as_ref() else {
+            let error = self
+                .provider_setup_error
+                .clone()
+                .unwrap_or_else(|| "Native model discovery is unavailable".to_string());
+            if let Some(state) = self.provider_catalogs.get_mut(setup_index) {
+                state.loading = false;
+                state.blocked = None;
+                state.error = Some(error);
+                state.stale = state.catalog.is_some();
+            }
+            return;
+        };
+        let Some(request_id) = advance_nonzero_generation(&mut self.provider_catalog_request_id)
+        else {
+            if let Some(state) = self.provider_catalogs.get_mut(setup_index) {
+                state.error = Some("Model discovery request identity was exhausted".to_string());
+            }
+            return;
+        };
+        let provider = request.provider;
+        if !runtime.list_models(request_id, request) {
+            if let Some(state) = self.provider_catalogs.get_mut(setup_index) {
+                state.loading = false;
+                state.error = Some("The native model discovery queue is busy".to_string());
+                state.stale = state.catalog.is_some();
+            }
+            return;
+        }
+        self.provider_catalog_pending = Some(PendingProviderCatalogRequest {
+            request_id,
+            provider,
+            setup_index,
+            dialog_epoch: self.settings_dialog_epoch,
+        });
+        self.provider_catalog_refresh_after_cancel = false;
+        if let Some(state) = self.provider_catalogs.get_mut(setup_index) {
+            state.loading = true;
+            state.error = None;
+            state.blocked = None;
+        }
+        self.status = format!("Loading {} models…", provider_display_name(provider));
+        self.resume_provider_setup_wait(context);
+    }
+
+    fn cancel_provider_model_request(&mut self) {
+        self.provider_catalog_refresh_after_cancel = false;
+        if let Some(task) = self.provider_catalog_refresh_task.take() {
+            task.cancel();
+        }
+        if let Some(pending) = self.provider_catalog_pending
+            && self
+                .provider_setup_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.cancel(pending.request_id))
+            && self.settings_open
+        {
+            self.status = "Cancelling model discovery…".to_string();
+        }
+    }
+
+    fn apply_provider_setup_event(
+        &mut self,
+        event: ProviderSetupWorkerEvent,
+        context: &ComponentContext<Self>,
+    ) {
+        self.provider_setup_wait = None;
+        let request_id = event.request_id();
+        let Some(pending) = self
+            .provider_catalog_pending
+            .filter(|pending| pending.request_id == request_id)
+        else {
+            self.resume_provider_setup_wait(context);
+            return;
+        };
+        match event {
+            ProviderSetupWorkerEvent::Ack { provider, .. } => {
+                if provider == pending.provider {
+                    self.status = format!("Loading {} models…", provider_display_name(provider));
+                }
+                self.resume_provider_setup_wait(context);
+                return;
+            }
+            ProviderSetupWorkerEvent::ModelsLoaded {
+                provider, catalog, ..
+            } => {
+                self.provider_catalog_pending = None;
+                if provider == pending.provider
+                    && self.settings_dialog_is_current(pending.dialog_epoch)
+                    && self.provider_setup_index == pending.setup_index
+                    && let Some(state) = self.provider_catalogs.get_mut(pending.setup_index)
+                {
+                    let count = catalog.models.len();
+                    state.catalog = Some(catalog);
+                    state.loading = false;
+                    state.error = None;
+                    state.blocked = None;
+                    state.stale = false;
+                    self.status = format!(
+                        "Loaded {count} {} model{}",
+                        provider_display_name(provider),
+                        if count == 1 { "" } else { "s" }
+                    );
+                }
+            }
+            ProviderSetupWorkerEvent::Failed {
+                provider, message, ..
+            } => {
+                self.provider_catalog_pending = None;
+                if provider == pending.provider
+                    && self.settings_dialog_is_current(pending.dialog_epoch)
+                    && let Some(state) = self.provider_catalogs.get_mut(pending.setup_index)
+                {
+                    state.loading = false;
+                    state.error = Some(message.clone());
+                    state.blocked = None;
+                    state.stale = state.catalog.is_some();
+                    self.status = format!("Model discovery failed · {message}");
+                }
+            }
+            ProviderSetupWorkerEvent::Cancelled { .. } => {
+                self.provider_catalog_pending = None;
+                if let Some(state) = self.provider_catalogs.get_mut(pending.setup_index) {
+                    state.loading = false;
+                }
+            }
+        }
+        let refresh_after_cancel = self.provider_catalog_refresh_after_cancel;
+        self.provider_catalog_refresh_after_cancel = false;
+        if refresh_after_cancel && self.settings_open {
+            self.begin_provider_model_refresh(self.provider_setup_index, context);
+        }
+        self.resume_provider_setup_wait(context);
+    }
+
+    fn stop_provider_setup_delivery(&mut self, reason: impl Into<String>) {
+        let reason = reason.into();
+        if let Some(task) = self.provider_catalog_refresh_task.take() {
+            task.cancel();
+        }
+        self.provider_setup_wait = None;
+        self.provider_catalog_pending = None;
+        self.provider_setup_receiver = None;
+        self.provider_setup_runtime = None;
+        self.provider_setup_error = Some(reason.clone());
+        if let Some(state) = self.provider_catalogs.get_mut(self.provider_setup_index) {
+            state.loading = false;
+            state.error = Some(reason);
+            state.stale = state.catalog.is_some();
+        }
+    }
+
+    fn resume_subscription_auth_wait(&mut self, _context: &ComponentContext<Self>) {
+        self.subscription_auth_wait = None;
+    }
+
+    fn begin_subscription_auth_operation(
+        &mut self,
+        provider: SubscriptionAuthProvider,
+        operation: SubscriptionAuthOperation,
+        context: &ComponentContext<Self>,
+    ) {
+        if self.deterministic_visual || !self.settings_open {
+            return;
+        }
+        if self.subscription_auth_pending.is_some() {
+            self.status = "A subscription account action is already active…".to_string();
+            return;
+        }
+        let Some(operation_id) =
+            advance_nonzero_generation(&mut self.subscription_auth_operation_id)
+        else {
+            self.status = "Subscription account request identity was exhausted".to_string();
+            return;
+        };
+        let draft_cli_path = match provider {
+            SubscriptionAuthProvider::Codex => self.settings_draft.codex_cli_path.clone(),
+            SubscriptionAuthProvider::ClaudeCode => self.settings_draft.claude_cli_path.clone(),
+        };
+        let Some(runtime) = self.subscription_auth_runtime.as_ref() else {
+            let error = self
+                .subscription_auth_error
+                .clone()
+                .unwrap_or_else(|| "Subscription account controls are unavailable".to_string());
+            if let Some(state) = self
+                .subscription_auth_states
+                .get_mut(subscription_auth_state_index(provider))
+            {
+                state.error = Some(error);
+                state.operation = None;
+            }
+            return;
+        };
+        let queued = match operation {
+            SubscriptionAuthOperation::Status => {
+                runtime.request_status(operation_id, provider, draft_cli_path)
+            }
+            SubscriptionAuthOperation::SignIn => {
+                runtime.start_sign_in(operation_id, provider, draft_cli_path)
+            }
+            SubscriptionAuthOperation::SignOut => {
+                runtime.start_sign_out(operation_id, provider, draft_cli_path)
+            }
+        };
+        if !queued {
+            if let Some(state) = self
+                .subscription_auth_states
+                .get_mut(subscription_auth_state_index(provider))
+            {
+                state.error = Some("The subscription account queue is busy".to_string());
+                state.operation = None;
+            }
+            return;
+        }
+        self.subscription_auth_pending = Some(PendingSubscriptionAuth {
+            operation_id,
+            provider,
+            operation,
+            dialog_epoch: self.settings_dialog_epoch,
+        });
+        if let Some(state) = self
+            .subscription_auth_states
+            .get_mut(subscription_auth_state_index(provider))
+        {
+            state.operation = Some(operation);
+            state.error = None;
+        }
+        self.status = match operation {
+            SubscriptionAuthOperation::Status => format!("Checking {provider} account…"),
+            SubscriptionAuthOperation::SignIn => {
+                format!("Waiting for {provider} browser sign-in…")
+            }
+            SubscriptionAuthOperation::SignOut => format!("Signing out of {provider}…"),
+        };
+        self.resume_subscription_auth_wait(context);
+    }
+
+    fn cancel_subscription_auth(&mut self) {
+        let Some(pending) = self.subscription_auth_pending else {
+            return;
+        };
+        if self
+            .subscription_auth_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.cancel(pending.operation_id))
+            && self.settings_open
+        {
+            self.status = format!("Cancelling {} account action…", pending.provider);
+        }
+    }
+
+    fn apply_subscription_auth_event(
+        &mut self,
+        event: SubscriptionAuthWorkerEvent,
+        context: &ComponentContext<Self>,
+    ) {
+        self.subscription_auth_wait = None;
+        let operation_id = event.operation_id();
+        let Some(pending) = self
+            .subscription_auth_pending
+            .filter(|pending| pending.operation_id == operation_id)
+        else {
+            self.resume_subscription_auth_wait(context);
+            return;
+        };
+        match event {
+            SubscriptionAuthWorkerEvent::Ack { .. } => {
+                self.resume_subscription_auth_wait(context);
+                return;
+            }
+            SubscriptionAuthWorkerEvent::StatusLoaded { status, .. }
+            | SubscriptionAuthWorkerEvent::Completed { status, .. } => {
+                self.subscription_auth_pending = None;
+                if let Some(state) = self
+                    .subscription_auth_states
+                    .get_mut(subscription_auth_state_index(status.provider))
+                {
+                    state.status = Some(status.clone());
+                    state.operation = None;
+                    state.error = None;
+                }
+                self.status = match status.state {
+                    SubscriptionAuthState::NotInstalled => {
+                        format!("{} CLI was not detected", status.provider)
+                    }
+                    SubscriptionAuthState::SignedOut => {
+                        format!("{} is installed · sign-in required", status.provider)
+                    }
+                    SubscriptionAuthState::SignedIn => {
+                        format!("{} account is signed in", status.provider)
+                    }
+                    SubscriptionAuthState::Unknown => {
+                        format!("{} account status could not be confirmed", status.provider)
+                    }
+                };
+                self.request_ai_provider_status(context);
+                if self.settings_dialog_is_current(pending.dialog_epoch)
+                    && subscription_auth_provider_for_setup(self.provider_setup_index)
+                        == Some(status.provider)
+                    && subscription_auth_completion_refreshes_models(pending.operation)
+                {
+                    self.schedule_provider_model_refresh(context);
+                }
+            }
+            SubscriptionAuthWorkerEvent::Failed {
+                provider, message, ..
+            } => {
+                self.subscription_auth_pending = None;
+                if let Some(state) = self
+                    .subscription_auth_states
+                    .get_mut(subscription_auth_state_index(provider))
+                {
+                    state.operation = None;
+                    state.error = Some(message.clone());
+                }
+                self.status = format!("{provider} account action failed · {message}");
+                self.request_ai_provider_status(context);
+            }
+            SubscriptionAuthWorkerEvent::Cancelled { provider, .. } => {
+                self.subscription_auth_pending = None;
+                if let Some(state) = self
+                    .subscription_auth_states
+                    .get_mut(subscription_auth_state_index(provider))
+                {
+                    state.operation = None;
+                }
+                if self.settings_open {
+                    self.status = format!("{provider} account action cancelled");
+                }
+            }
+        }
+        self.resume_subscription_auth_wait(context);
+    }
+
+    fn stop_subscription_auth_delivery(&mut self, reason: impl Into<String>) {
+        let reason = reason.into();
+        self.subscription_auth_wait = None;
+        self.subscription_auth_pending = None;
+        self.subscription_auth_receiver = None;
+        self.subscription_auth_runtime = None;
+        self.subscription_auth_error = Some(reason.clone());
+        for state in &mut self.subscription_auth_states {
+            state.operation = None;
+            state.error = Some(reason.clone());
+        }
+    }
+
+    fn resume_subscription_install_wait(&mut self, _context: &ComponentContext<Self>) {
+        self.subscription_install_wait = None;
+    }
+
+    fn request_subscription_install(&mut self, provider: SubscriptionAuthProvider) {
+        if self.deterministic_visual || !self.settings_open {
+            return;
+        }
+        if self.subscription_install_pending.is_some()
+            || self.subscription_auth_pending.is_some()
+            || self.subscription_install_prompt.is_some()
+        {
+            self.status = "A subscription CLI action is already active…".to_string();
+            return;
+        }
+        if self.subscription_install_runtime.is_none() {
+            self.status = self
+                .subscription_install_error
+                .clone()
+                .unwrap_or_else(|| "Subscription CLI installation is unavailable".to_string());
+            return;
+        }
+        self.subscription_install_prompt = Some(SubscriptionInstallPrompt::Winget {
+            provider,
+            dialog_epoch: self.settings_dialog_epoch,
+        });
+        self.subscription_install_error = None;
+    }
+
+    fn begin_subscription_install(
+        &mut self,
+        prompt: SubscriptionInstallPrompt,
+        context: &ComponentContext<Self>,
+    ) {
+        let (provider, method, dialog_epoch) = match prompt {
+            SubscriptionInstallPrompt::Winget {
+                provider,
+                dialog_epoch,
+            } => (provider, SubscriptionInstallMethod::Winget, dialog_epoch),
+            SubscriptionInstallPrompt::VendorFallback {
+                provider,
+                dialog_epoch,
+                ..
+            } => (
+                provider,
+                SubscriptionInstallMethod::VendorPowerShell,
+                dialog_epoch,
+            ),
+        };
+        if !self.settings_dialog_is_current(dialog_epoch)
+            || self.subscription_install_pending.is_some()
+        {
+            return;
+        }
+        let Some(request_id) =
+            advance_nonzero_generation(&mut self.subscription_install_request_id)
+        else {
+            self.subscription_install_error =
+                Some("Subscription installer request identity was exhausted".to_string());
+            return;
+        };
+        let Some(runtime) = self.subscription_install_runtime.as_ref() else {
+            self.subscription_install_error =
+                Some("Subscription CLI installation is unavailable".to_string());
+            return;
+        };
+        let queued = match method {
+            SubscriptionInstallMethod::Winget => {
+                runtime.install_with_winget(request_id, provider, true)
+            }
+            SubscriptionInstallMethod::VendorPowerShell => {
+                runtime.install_with_vendor_fallback(request_id, provider, true, true)
+            }
+        };
+        if !queued {
+            self.subscription_install_error =
+                Some("The subscription installer is already busy".to_string());
+            return;
+        }
+        self.subscription_install_pending = Some(PendingSubscriptionInstall {
+            request_id,
+            provider,
+            method,
+            dialog_epoch,
+        });
+        self.subscription_install_progress = None;
+        self.subscription_install_error = None;
+        self.status = format!("Starting the {provider} CLI installer…");
+        self.resume_subscription_install_wait(context);
+    }
+
+    fn cancel_subscription_install(&mut self) {
+        let Some(pending) = self.subscription_install_pending else {
+            return;
+        };
+        if self
+            .subscription_install_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.cancel(pending.request_id))
+        {
+            self.status = format!("Cancelling the {} CLI installer…", pending.provider);
+        }
+    }
+
+    fn apply_subscription_install_event(
+        &mut self,
+        event: SubscriptionInstallWorkerEvent,
+        context: &ComponentContext<Self>,
+    ) {
+        self.subscription_install_wait = None;
+        let Some(pending) = self
+            .subscription_install_pending
+            .filter(|pending| pending.request_id == event.request_id())
+        else {
+            self.resume_subscription_install_wait(context);
+            return;
+        };
+        match event {
+            SubscriptionInstallWorkerEvent::Ack { .. } => {
+                self.status = format!("Preparing the {} CLI installer…", pending.provider);
+                self.resume_subscription_install_wait(context);
+                return;
+            }
+            SubscriptionInstallWorkerEvent::Progress { progress, .. } => {
+                self.subscription_install_progress = Some(progress);
+                self.status = subscription_install_progress_label(progress).to_string();
+                self.resume_subscription_install_wait(context);
+                return;
+            }
+            SubscriptionInstallWorkerEvent::VendorFallbackConfirmationRequired {
+                provider,
+                reason,
+                ..
+            } => {
+                self.subscription_install_pending = None;
+                self.subscription_install_progress = None;
+                if self.settings_dialog_is_current(pending.dialog_epoch) {
+                    self.subscription_install_prompt =
+                        Some(SubscriptionInstallPrompt::VendorFallback {
+                            provider,
+                            reason,
+                            dialog_epoch: pending.dialog_epoch,
+                        });
+                    self.status =
+                        "winget could not finish · vendor installer approval required".to_string();
+                }
+            }
+            SubscriptionInstallWorkerEvent::Installed { status, .. } => {
+                self.subscription_install_pending = None;
+                self.subscription_install_progress = None;
+                if !status.path.is_absolute() {
+                    self.subscription_install_error = Some(
+                        "The installer did not return a verified absolute CLI path".to_string(),
+                    );
+                    self.status = "CLI installation verification failed".to_string();
+                    return;
+                }
+                let auth_status = status.auth_status();
+                if let Some(state) = self
+                    .subscription_auth_states
+                    .get_mut(subscription_auth_state_index(status.provider))
+                {
+                    state.status = Some(auth_status);
+                    state.operation = None;
+                    state.error = None;
+                }
+                if self.settings_dialog_is_current(pending.dialog_epoch) {
+                    let path = Some(status.path.to_string_lossy().into_owned());
+                    match status.provider {
+                        SubscriptionAuthProvider::Codex => {
+                            self.settings_draft.codex_cli_path = path;
+                        }
+                        SubscriptionAuthProvider::ClaudeCode => {
+                            self.settings_draft.claude_cli_path = path;
+                        }
+                    }
+                    self.schedule_provider_model_refresh(context);
+                }
+                self.subscription_install_error = None;
+                self.status = format!(
+                    "{} CLI installed · account sign-in was not started",
+                    status.provider
+                );
+                self.request_ai_provider_status(context);
+            }
+            SubscriptionInstallWorkerEvent::Failed {
+                provider, message, ..
+            } => {
+                self.subscription_install_pending = None;
+                self.subscription_install_progress = None;
+                self.subscription_install_error = Some(message.clone());
+                self.status = format!("{provider} CLI installation failed · {message}");
+            }
+            SubscriptionInstallWorkerEvent::Cancelled { provider, .. } => {
+                self.subscription_install_pending = None;
+                self.subscription_install_progress = None;
+                self.status = format!("{provider} CLI installation cancelled");
+            }
+        }
+        self.resume_subscription_install_wait(context);
+    }
+
+    fn stop_subscription_install_delivery(&mut self, reason: impl Into<String>) {
+        let reason = reason.into();
+        self.subscription_install_wait = None;
+        self.subscription_install_pending = None;
+        self.subscription_install_progress = None;
+        self.subscription_install_receiver = None;
+        self.subscription_install_runtime = None;
+        self.subscription_install_error = Some(reason.clone());
+        self.status = reason;
+    }
+
+    fn open_settings(&mut self, context: &ComponentContext<Self>) {
         if self.settings_open || self.settings_saving || self.about_open {
             return;
         }
         self.next_settings_dialog_epoch();
         self.settings_draft = self.settings_snapshot.clone();
+        self.provider_setup_index = configured_provider_setup_index(&self.settings_snapshot);
+        self.provider_key_drafts = Default::default();
+        self.provider_credential_transaction.discard();
+        self.provider_key_pending = None;
+        self.provider_key_busy = false;
         self.theme = window_theme_from_setting(&self.settings_snapshot.theme);
         self.settings_save_error = None;
+        self.subscription_install_prompt = None;
+        self.subscription_install_error = None;
         self.settings_open = true;
+        if settings_ai_status_probe_needed(
+            self.settings_open,
+            self.ai_provider_status.is_some(),
+            self.ai_status_loading,
+        ) {
+            self.request_ai_provider_status_for_settings(context);
+        }
+        self.schedule_provider_model_refresh(context);
     }
 
     fn cancel_settings(&mut self, epoch: u64) {
@@ -3115,12 +7667,26 @@ impl WfdiagSpike {
             return;
         }
         self.settings_draft = self.settings_snapshot.clone();
+        self.provider_key_drafts = Default::default();
+        self.provider_credential_transaction.discard();
+        self.provider_key_pending = None;
+        self.provider_key_busy = false;
         self.theme = window_theme_from_setting(&self.settings_snapshot.theme);
+        window_support::set_close_to_tray(self.settings_snapshot.close_to_tray);
         self.settings_save_error = None;
         self.settings_open = false;
+        self.cancel_provider_model_request();
+        self.cancel_subscription_auth();
+        self.subscription_install_prompt = None;
+        self.cancel_subscription_install();
     }
 
-    fn apply_settings_dialog_action(&mut self, epoch: u64, action: SettingsDialogAction) {
+    fn apply_settings_dialog_action(
+        &mut self,
+        epoch: u64,
+        action: SettingsDialogAction,
+        context: &ComponentContext<Self>,
+    ) {
         if !self.settings_dialog_is_current(epoch) {
             return;
         }
@@ -3145,6 +7711,8 @@ impl WfdiagSpike {
             | SettingsDialogAction::PreferredAiProviderSelectionChanged(None)
             | SettingsDialogAction::CloudFallbackSelectionChanged(None)
             | SettingsDialogAction::CodexModelSelectionChanged(None)
+            | SettingsDialogAction::ProviderModelSelectionChanged(None)
+            | SettingsDialogAction::ProviderSetupSelectionChanged(None)
             | SettingsDialogAction::MaxConcurrentTasksChanged(None) => {}
             SettingsDialogAction::ExportFormatSelectionChanged(Some(index)) => {
                 self.settings_draft.export_format = match index {
@@ -3156,10 +7724,50 @@ impl WfdiagSpike {
             }
             SettingsDialogAction::AiEnabledChanged(value) => {
                 self.settings_draft.ai_enabled = value;
+                if value
+                    && settings_ai_status_probe_needed(
+                        self.settings_open,
+                        self.ai_provider_status.is_some(),
+                        self.ai_status_loading,
+                    )
+                {
+                    self.request_ai_provider_status_for_settings(context);
+                }
             }
             SettingsDialogAction::PreferredAiProviderSelectionChanged(Some(index)) => {
                 if let Some(provider) = AI_PROVIDER_IDS.get(index) {
+                    let phi_gate = phi_preference_gate(
+                        self.ai_provider_status.as_ref(),
+                        self.ai_status_loading,
+                    );
+                    if let Err(reason) = validate_phi_preference(provider, &phi_gate) {
+                        self.settings_save_error = Some(reason.clone());
+                        self.status = "Phi Silica preference was not changed".to_string();
+                        return;
+                    }
                     self.settings_draft.preferred_ai_provider = (*provider).to_string();
+                    let preference = parse_provider_preference(provider);
+                    if preference != AIProviderPreference::Auto {
+                        let selected_provider = match preference {
+                            AIProviderPreference::Auto => AIProvider::None,
+                            AIProviderPreference::OpenAI => AIProvider::OpenAI,
+                            AIProviderPreference::PhiSilica => AIProvider::PhiSilica,
+                            AIProviderPreference::FoundryLocal => AIProvider::FoundryLocal,
+                            AIProviderPreference::Ollama => AIProvider::Ollama,
+                            AIProviderPreference::CustomOpenAI => AIProvider::CustomOpenAI,
+                            AIProviderPreference::CodexCli => AIProvider::CodexCli,
+                            AIProviderPreference::ClaudeCode => AIProvider::ClaudeCode,
+                            AIProviderPreference::Anthropic => AIProvider::Anthropic,
+                            AIProviderPreference::Gemini => AIProvider::Gemini,
+                            AIProviderPreference::DeepSeek => AIProvider::DeepSeek,
+                        };
+                        if let Some(setup_index) =
+                            provider_setup_index_for_provider(selected_provider)
+                        {
+                            self.provider_setup_index = setup_index;
+                            self.schedule_provider_model_refresh(context);
+                        }
+                    }
                 }
             }
             SettingsDialogAction::CloudFallbackSelectionChanged(Some(index)) => {
@@ -3175,6 +7783,7 @@ impl WfdiagSpike {
             SettingsDialogAction::CodexCliPathChanged(value) => {
                 self.settings_draft.codex_cli_path =
                     if value.is_empty() { None } else { Some(value) };
+                self.schedule_provider_model_refresh(context);
             }
             SettingsDialogAction::CodexModelSelectionChanged(Some(index)) => match index {
                 0 => self.settings_draft.codex_model = None,
@@ -3184,12 +7793,58 @@ impl WfdiagSpike {
                 }
                 _ => {}
             },
+            SettingsDialogAction::ProviderSetupSelectionChanged(Some(index)) => {
+                if index < PROVIDER_SETUP_LABELS.len() {
+                    self.provider_setup_index = index;
+                    self.schedule_provider_model_refresh(context);
+                }
+            }
+            SettingsDialogAction::ProviderModelSelectionChanged(Some(index)) => {
+                let model = if index == 0 {
+                    None
+                } else {
+                    self.provider_catalogs
+                        .get(self.provider_setup_index)
+                        .and_then(|state| state.catalog.as_ref())
+                        .and_then(|catalog| catalog.models.get(index - 1))
+                        .map(|model| model.id.clone())
+                };
+                if index == 0 || model.is_some() {
+                    set_provider_setup_model(
+                        self.provider_setup_index,
+                        &mut self.settings_draft,
+                        model,
+                    );
+                }
+            }
+            SettingsDialogAction::ProviderTextChanged(field, value) => {
+                let value = (!value.trim().is_empty()).then(|| value.trim().to_string());
+                let refresh_catalog = matches!(field, 1 | 3 | 5 | 11);
+                match field {
+                    0 => self.settings_draft.phi_silica_laf_token = value,
+                    1 => self.settings_draft.local_ai_endpoint = value,
+                    2 => self.settings_draft.local_ai_model = value,
+                    3 => self.settings_draft.ollama_endpoint = value,
+                    4 => self.settings_draft.ollama_model = value,
+                    5 => self.settings_draft.claude_cli_path = value,
+                    6 => self.settings_draft.claude_model = value,
+                    7 => self.settings_draft.open_ai_model = value,
+                    8 => self.settings_draft.anthropic_model = value,
+                    9 => self.settings_draft.gemini_model = value,
+                    10 => self.settings_draft.deepseek_model = value,
+                    11 => self.settings_draft.custom_endpoint = value,
+                    12 => self.settings_draft.custom_model = value,
+                    _ => {}
+                }
+                if refresh_catalog {
+                    self.schedule_provider_model_refresh(context);
+                }
+            }
             SettingsDialogAction::ScanOnStartupChanged(value) => {
                 self.settings_draft.scan_on_startup = value;
             }
             SettingsDialogAction::CloseToTrayChanged(value) => {
                 self.settings_draft.close_to_tray = value;
-                window_support::set_close_to_tray(value);
             }
             SettingsDialogAction::MaxConcurrentTasksChanged(Some(value)) => {
                 if value.is_finite() {
@@ -3210,24 +7865,54 @@ impl WfdiagSpike {
         if !self.settings_dialog_is_current(epoch) {
             return;
         }
+        let phi_gate =
+            phi_preference_gate(self.ai_provider_status.as_ref(), self.ai_status_loading);
+        if let Err(reason) =
+            validate_phi_preference(&self.settings_draft.preferred_ai_provider, &phi_gate)
+        {
+            self.settings_save_error = Some(reason.clone());
+            self.status = "Settings were not saved · Phi Silica is not ready".to_string();
+            return;
+        }
         if self.deterministic_visual {
             self.settings_snapshot = self.settings_draft.clone();
+            strip_provider_key_values(&mut self.settings_snapshot);
+            self.settings_draft = self.settings_snapshot.clone();
+            self.provider_key_drafts = Default::default();
+            self.provider_credential_transaction.discard();
+            window_support::set_close_to_tray(self.settings_snapshot.close_to_tray);
             self.settings_open = false;
             self.settings_save_error = None;
             self.status = "Settings saved".to_string();
+            self.cancel_provider_model_request();
+            self.cancel_subscription_auth();
             return;
         }
         if self.settings_loading || self.settings_saving {
             return;
         }
         if self.settings_runtime.is_none() {
+            window_support::set_close_to_tray(self.settings_snapshot.close_to_tray);
             self.settings_save_error =
                 Some("Native settings persistence is unavailable".to_string());
             return;
         }
 
         let request_id = self.next_settings_request_id();
-        let submitted = self.settings_draft.clone();
+        let mut submitted = self.settings_draft.clone();
+        for (index, provider) in ProviderKeyId::ALL.into_iter().enumerate() {
+            match self.provider_credential_transaction.staged_action(provider) {
+                Some(ProviderCredentialAction::Store) => set_provider_key_value(
+                    &mut submitted,
+                    provider,
+                    Some(self.provider_key_drafts[index].trim().to_string()),
+                ),
+                Some(ProviderCredentialAction::Clear) => {
+                    set_provider_key_value(&mut submitted, provider, Some(String::new()));
+                }
+                None => set_provider_key_value(&mut submitted, provider, None),
+            }
+        }
         self.settings_pending_save = Some(PendingSettingsSave {
             request_id,
             dialog_epoch: epoch,
@@ -3247,6 +7932,7 @@ impl WfdiagSpike {
         {
             self.settings_pending_save = None;
             self.settings_saving = false;
+            window_support::set_close_to_tray(self.settings_snapshot.close_to_tray);
             self.settings_save_error = Some(error.to_string());
             self.status = "Settings were not saved".to_string();
         }
@@ -3266,16 +7952,36 @@ impl WfdiagSpike {
                 match result {
                     Ok(mut settings) => {
                         normalize_provider_preference_for_runtime(&mut settings);
+                        apply_startup_scan_preference(
+                            &mut self.startup_scan_gate,
+                            settings.scan_on_startup,
+                        );
                         let provider_preference = settings.preferred_ai_provider.clone();
+                        self.provider_setup_index = configured_provider_setup_index(&settings);
                         self.theme = window_theme_from_setting(&settings.theme);
+                        self.pane_open = !settings.nav_rail_collapsed;
                         update_history_retention_policy(&self.history_retention_policy, &settings);
                         self.settings_snapshot = settings.clone();
                         self.settings_draft = settings;
+                        self.provider_key_drafts = Default::default();
+                        self.provider_credential_transaction.discard();
+                        window_support::set_close_to_tray(self.settings_snapshot.close_to_tray);
                         self.settings_error = None;
                         self.ai_settings_ready = true;
                         self.sync_ai_provider_preference(&provider_preference, context);
+                        if self.settings_open {
+                            if settings_ai_status_probe_needed(
+                                true,
+                                self.ai_provider_status.is_some(),
+                                self.ai_status_loading,
+                            ) {
+                                self.request_ai_provider_status_for_settings(context);
+                            }
+                            self.schedule_provider_model_refresh(context);
+                        }
                     }
                     Err(error) => {
+                        apply_startup_scan_preference(&mut self.startup_scan_gate, false);
                         self.ai_settings_ready = false;
                         self.ai_provider_status = None;
                         self.ai_status_loading = false;
@@ -3284,6 +7990,7 @@ impl WfdiagSpike {
                         self.status = "Settings could not be loaded".to_string();
                     }
                 }
+                self.maybe_begin_startup_scan(context);
             }
             SettingsEvent::Saved { request_id, result } => {
                 let Some(pending) = take_matching_pending_settings_save(
@@ -3303,48 +8010,149 @@ impl WfdiagSpike {
                             &self.history_retention_policy,
                             &pending.submitted,
                         );
-                        self.settings_snapshot = pending.submitted.clone();
+                        let mut committed = pending.submitted;
+                        strip_provider_key_values(&mut committed);
+                        self.settings_snapshot = committed.clone();
+                        self.pane_open = !self.settings_snapshot.nav_rail_collapsed;
+                        window_support::set_close_to_tray(self.settings_snapshot.close_to_tray);
                         if closes_current_dialog || !self.settings_open {
-                            self.settings_draft = pending.submitted;
+                            self.settings_draft = committed;
                             self.theme = window_theme_from_setting(&self.settings_draft.theme);
                         }
+                        self.provider_key_drafts = Default::default();
+                        self.provider_credential_transaction.discard();
+                        self.provider_key_pending = None;
+                        self.provider_key_busy = false;
                         self.settings_error = None;
                         self.settings_save_error = None;
                         if closes_current_dialog {
                             self.settings_open = false;
+                            self.cancel_provider_model_request();
+                            self.cancel_subscription_auth();
                         }
                         self.status = "Settings saved".to_string();
                         self.sync_ai_provider_preference(&provider_preference, context);
                     }
                     Err(error) => {
+                        window_support::set_close_to_tray(self.settings_snapshot.close_to_tray);
                         self.settings_save_error = Some(error.to_string());
                         self.status = "Settings were not saved".to_string();
                     }
                 }
             }
-            SettingsEvent::ProviderKeyStored { result, .. } => {
+            SettingsEvent::ProviderKeyStored { request_id, result } => {
+                let Some(pending) = self
+                    .provider_key_pending
+                    .filter(|pending| pending.request_id == request_id && pending.store)
+                else {
+                    self.resume_settings_wait(context);
+                    return;
+                };
+                self.provider_key_pending = None;
                 self.provider_key_busy = false;
+                let succeeded = result.is_ok();
                 self.status = match result {
                     Ok(()) => "API key saved".to_string(),
                     Err(error) => format!("Credential change failed: {error}"),
                 };
+                if succeeded {
+                    set_provider_key_configured(
+                        &mut self.settings_snapshot,
+                        pending.provider,
+                        true,
+                    );
+                    set_provider_key_configured(&mut self.settings_draft, pending.provider, true);
+                    self.provider_key_drafts[pending.index].clear();
+                    self.schedule_provider_model_refresh(context);
+                }
             }
-            SettingsEvent::ProviderKeyCleared { result, .. } => {
+            SettingsEvent::ProviderKeyCleared { request_id, result } => {
+                let Some(pending) = self
+                    .provider_key_pending
+                    .filter(|pending| pending.request_id == request_id && !pending.store)
+                else {
+                    self.resume_settings_wait(context);
+                    return;
+                };
+                self.provider_key_pending = None;
                 self.provider_key_busy = false;
+                let succeeded = result.is_ok();
                 self.status = match result {
                     Ok(()) => "API key cleared".to_string(),
                     Err(error) => format!("Credential change failed: {error}"),
                 };
+                if succeeded {
+                    set_provider_key_configured(
+                        &mut self.settings_snapshot,
+                        pending.provider,
+                        false,
+                    );
+                    set_provider_key_configured(&mut self.settings_draft, pending.provider, false);
+                    self.provider_key_drafts[pending.index].clear();
+                    self.schedule_provider_model_refresh(context);
+                }
+            }
+            SettingsEvent::ProviderCredentialsCommitted { request_id, result } => {
+                // The staged Settings-dialog transaction integration owns
+                // request correlation. Until one is pending, ignore a stale
+                // completion rather than mutating credential indicators.
+                let _ = (request_id, result);
+            }
+            SettingsEvent::Updated { request_id, result } => {
+                let Some(pending) = self
+                    .cloud_fallback_policy_update
+                    .take()
+                    .filter(|pending| pending.request_id == request_id)
+                else {
+                    self.resume_settings_wait(context);
+                    return;
+                };
+                match result {
+                    Ok(settings) => {
+                        self.settings_snapshot.cloud_fallback_policy =
+                            settings.cloud_fallback_policy;
+                        self.settings_draft.cloud_fallback_policy = settings.cloud_fallback_policy;
+                        match pending.policy {
+                            CloudFallbackPolicy::Allow => {
+                                self.continue_chat_fallback(pending.consent, context);
+                            }
+                            CloudFallbackPolicy::Never => {
+                                let logical_request_id = pending.consent.attempt.logical_request_id;
+                                self.finish_chat_attempt_failure(
+                                    logical_request_id,
+                                    "The local provider failed, and cloud fallback was declined."
+                                        .to_string(),
+                                );
+                            }
+                            CloudFallbackPolicy::Ask => {
+                                self.cloud_fallback_consent = Some(pending.consent);
+                                self.status =
+                                    "Choose whether this request may use a cloud provider"
+                                        .to_string();
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.cloud_fallback_consent = Some(pending.consent);
+                        self.status = format!("Cloud fallback preference was not saved · {error}");
+                    }
+                }
             }
             SettingsEvent::Stopped => worker_stopped = true,
-            SettingsEvent::Updated { .. } => {}
         }
 
         if worker_stopped {
+            apply_startup_scan_preference(&mut self.startup_scan_gate, false);
             self.settings_loading = false;
             self.settings_saving = false;
             self.settings_load_request_id = None;
             self.settings_pending_save = None;
+            self.provider_key_pending = None;
+            self.provider_key_busy = false;
+            if let Some(pending) = self.cloud_fallback_policy_update.take() {
+                self.cloud_fallback_consent = Some(pending.consent);
+            }
+            window_support::set_close_to_tray(self.settings_snapshot.close_to_tray);
             self.settings_error = Some("Native settings worker stopped".to_string());
             self.settings_save_error = None;
             self.settings_receiver = None;
@@ -3355,8 +8163,46 @@ impl WfdiagSpike {
         }
     }
 
-    fn request_process_page(&mut self, context: &ComponentContext<Self>, debounce_filter: bool) {
+    fn request_monitor_refresh(&mut self, _context: &ComponentContext<Self>) -> bool {
+        if let Some(runtime) = self.native_monitor.as_ref() {
+            let accepted = runtime.refresh();
+            if accepted {
+                self.monitor_error = None;
+            }
+            return accepted;
+        }
         if self.deterministic_visual {
+            return false;
+        }
+
+        match NativeMonitorRuntime::start_with_profile(MonitorProfile::SystemOnly) {
+            Ok((runtime, receiver)) => {
+                if let Some(wait) = self.backend_wait.take() {
+                    wait.cancel();
+                }
+                if let Some(previous) = self.backend_receiver.take() {
+                    previous.close();
+                }
+                let receiver = Arc::new(receiver);
+                receiver.set_wake_handler(UiWakeHandler::new(ui_wake_support::notify));
+                self.backend_wait = None;
+                self.backend_receiver = Some(receiver);
+                self.native_monitor = Some(Arc::new(runtime));
+                self.monitoring_paused = false;
+                self.monitoring_paused_by_lifecycle = false;
+                self.monitor_error = None;
+                self.process_error = None;
+                true
+            }
+            Err(error) => {
+                self.monitor_error = Some(format!("Native monitoring could not start: {error}"));
+                false
+            }
+        }
+    }
+
+    fn request_process_page(&mut self, context: &ComponentContext<Self>, debounce_filter: bool) {
+        if self.deterministic_visual || self.page != Page::Processes {
             return;
         }
 
@@ -3366,10 +8212,7 @@ impl WfdiagSpike {
             return;
         };
 
-        self.process_request_id = self.process_request_id.wrapping_add(1);
-        if self.process_request_id == 0 {
-            self.process_request_id = 1;
-        }
+        self.process_request_id = next_process_request_id(self.process_request_id);
         let request_id = self.process_request_id;
         let query = ProcessQuery {
             search: self.process_filter.clone(),
@@ -3382,7 +8225,10 @@ impl WfdiagSpike {
         // Replacing the task cancels a previous debounce. Completions from a
         // query already running on the monitor worker are still harmless: the
         // monotonically increasing request id rejects stale results below.
-        self.process_request_task.take();
+        if let Some(task) = self.process_request_task.take() {
+            task.cancel();
+        }
+        self.process_last_refresh_started_at = Some(Instant::now());
         self.process_loading = true;
         self.process_error = None;
         self.process_request_task = Some(context.spawn_background_with_rejection(
@@ -3430,7 +8276,7 @@ impl WfdiagSpike {
             };
         }
         self.process_offset = 0;
-        self.selected_process_pid = None;
+        self.selected_process = None;
         self.request_process_page(context, false);
     }
 
@@ -3450,7 +8296,9 @@ impl WfdiagSpike {
             self.history_request_id = 1;
         }
         let request_id = self.history_request_id;
-        self.history_request_task.take();
+        if let Some(task) = self.history_request_task.take() {
+            task.cancel();
+        }
         self.history_loading = true;
         self.history_error = None;
         self.history_request_task = Some(context.spawn_background_with_rejection(
@@ -3485,9 +8333,12 @@ impl WfdiagSpike {
             self.history_compare_request_id = 1;
         }
         let request_id = self.history_compare_request_id;
-        self.history_compare_task.take();
+        if let Some(task) = self.history_compare_task.take() {
+            task.cancel();
+        }
+        self.clear_history_task_diff();
         self.history_comparison = None;
-        self.history_error = None;
+        self.history_comparison_error = None;
 
         let Some(latest_id) = self.history_summaries.first().map(|scan| scan.id.clone()) else {
             self.selected_history_id = None;
@@ -3499,7 +8350,7 @@ impl WfdiagSpike {
             return;
         }
         let Some(runtime) = self.history_runtime.as_ref().map(Arc::clone) else {
-            self.history_error = Some("Native history is unavailable".to_string());
+            self.history_comparison_error = Some("Native history is unavailable".to_string());
             return;
         };
 
@@ -3524,6 +8375,609 @@ impl WfdiagSpike {
         ));
     }
 
+    fn begin_report_generation(&mut self, force_refresh: bool, context: &ComponentContext<Self>) {
+        if self.deterministic_visual {
+            self.status = "Visual fixture mode · report generation is disabled".to_string();
+            return;
+        }
+        if self.report_pending.is_some() {
+            self.status = "A report is already being generated…".to_string();
+            return;
+        }
+        if !self.settings_snapshot.ai_enabled {
+            self.status = "Enable AI insights in Settings before generating a report".to_string();
+            return;
+        }
+        if self.ai_status_loading {
+            self.status = "Waiting for AI provider discovery before generating…".to_string();
+            return;
+        }
+        let Some(provider_status) = self
+            .ai_provider_status
+            .as_ref()
+            .filter(|status| status.active_provider != AIProvider::None)
+            .cloned()
+        else {
+            self.status = "Set up an available AI provider before generating".to_string();
+            return;
+        };
+        if let Err(error) = self.ensure_report_runtime() {
+            self.report_error = Some(error.clone());
+            self.status = error;
+            return;
+        }
+        self.report_error = None;
+        if self.diagnostic_results.is_empty() {
+            self.transition_to_page(Page::Ai);
+            self.ai_mode = AiMode::ScanReport;
+            self.pending_ai_intent = Some(PendingAiIntent::Report { force_refresh });
+            self.pending_ai_preparation_error = None;
+            if self.diagnostics_busy() {
+                self.status =
+                    "Waiting for the active scan before generating the AI report…".to_string();
+            } else {
+                self.status = "Running a Quick Scan before generating the AI report…".to_string();
+                self.begin_diagnostic_scan(ScanKind::Quick, context);
+            }
+            return;
+        }
+        let Some(session_id) = self
+            .diagnostic_results
+            .first()
+            .map(|result| result.session_id.clone())
+        else {
+            self.status = "Run a scan before generating a report".to_string();
+            return;
+        };
+        let Some(results) = self.export_results_snapshot() else {
+            self.status = "Run a scan before generating a report".to_string();
+            return;
+        };
+        let Some(request_id) = advance_nonzero_generation(&mut self.report_request_id) else {
+            self.status = "Native report request identity was exhausted".to_string();
+            return;
+        };
+        self.pending_ai_intent = None;
+        self.report_text = None;
+        self.report_provider = None;
+        self.report_provider_use = None;
+        self.report_error = None;
+        self.report_source_session_id = Some(session_id.clone());
+        self.report_pending = Some(request_id);
+        let generation = ReportGeneration {
+            scan: ReportScan {
+                session_id,
+                results,
+            },
+            provider: provider_status.active_provider,
+            availability: provider_status.availability(),
+            comparison: None,
+            force_refresh,
+        };
+        self.status = "Preparing AI report…".to_string();
+
+        // Match the shipping automatic-baseline rule atomically on the
+        // history worker: compare the live scan with the newest persisted
+        // scan from a different session. History is optional evidence.
+        let history_tag = self
+            .diagnostic_scan_policy
+            .as_ref()
+            .map(|policy| policy.history_tag.clone())
+            .or_else(|| {
+                self.diagnostic_scan_kind
+                    .map(scan_kind_history_tag)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "Diagnostic Scan".to_string());
+        let current_record = build_history_scan_record(
+            generation.scan.session_id.clone(),
+            &self.system_info,
+            &self.diagnostic_results,
+            self.diagnostic_duration_ms,
+            history_tag,
+        );
+        if let Some(history) = self.history_runtime.as_ref()
+            && let Ok(reply) = history.request_compare_current_to_latest(current_record)
+        {
+            self.report_prepare_task = Some(spawn_report_generation_preparation(
+                context, request_id, generation, reply,
+            ));
+            return;
+        }
+
+        if self
+            .report_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.generate(request_id, generation))
+        {
+            self.resume_report_wait(context);
+        } else {
+            self.report_pending = None;
+            self.report_source_session_id = None;
+            self.report_error = Some("The native report queue is unavailable".to_string());
+            self.status = "The native report queue is unavailable".to_string();
+        }
+    }
+
+    fn chat_tool_snapshot(&self) -> ChatToolSnapshot {
+        let arch = self
+            .architecture
+            .as_ref()
+            .map(|snapshot| snapshot.emulation_status.clone())
+            .unwrap_or_else(|| "Unknown".to_string());
+        let system_overview = Some(format!(
+            "Computer name: {}\nOperating system: {}\nArchitecture: {}\nElevated: {}",
+            self.system_info.computer_name,
+            self.system_info.os_version,
+            arch,
+            if self.is_admin { "yes" } else { "no" }
+        ));
+        let session_id = self
+            .diagnostic_results
+            .first()
+            .map(|result| result.session_id.clone())
+            .or_else(|| self.diagnostic_session_id.clone());
+        let selected_tasks = if self.diagnostic_expected_task_ids.is_empty() {
+            self.diagnostic_results
+                .iter()
+                .map(|result| result.task_id.clone())
+                .collect()
+        } else {
+            self.diagnostic_expected_task_ids.clone()
+        };
+        let scan = session_id.as_ref().map(|session_id| ChatScanSnapshot {
+            session_id: session_id.clone(),
+            started_at: self
+                .diagnostic_scan_start
+                .and_then(|started| SystemTime::now().checked_sub(started.elapsed()))
+                .unwrap_or_else(SystemTime::now),
+            scan_kind: self.diagnostic_scan_kind.unwrap_or(ScanKind::Targeted),
+            selected_tasks,
+            results: self.diagnostic_results.clone(),
+            running: self.diagnostics_busy(),
+        });
+        let current_history_scan = session_id.as_ref().and_then(|session_id| {
+            (!self.diagnostic_results.is_empty() && !self.diagnostics_busy()).then(|| {
+                build_history_scan_record(
+                    session_id.clone(),
+                    &self.system_info,
+                    &self.diagnostic_results,
+                    self.diagnostic_duration_ms,
+                    self.diagnostic_scan_kind
+                        .map(scan_kind_history_tag)
+                        .unwrap_or("Diagnostic Scan")
+                        .to_string(),
+                )
+            })
+        });
+
+        ChatToolSnapshot {
+            system_overview,
+            scan,
+            current_history_scan,
+            issues: self.issues.clone(),
+            history: self.history_summaries.clone(),
+            live_stats: self.latest_system_stats.clone(),
+            remediations: wfdiag_native_issues::remediation_summaries(),
+            network_grounding_enabled: self.settings_snapshot.network_grounding_enabled,
+        }
+    }
+
+    fn chat_interaction_blocked(&self) -> bool {
+        self.pending_ai_intent.is_some()
+            || self.full_scan_consent.is_some()
+            || self.cloud_fallback_consent.is_some()
+            || self.cloud_fallback_policy_update.is_some()
+    }
+
+    fn begin_chat_send(&mut self, prompt: String, context: &ComponentContext<Self>) {
+        let prompt = prompt.trim().to_string();
+        if prompt.is_empty() {
+            return;
+        }
+        if self.chat_interaction_blocked() {
+            self.status = "Finish or cancel the pending AI request before sending another message"
+                .to_string();
+            return;
+        }
+        if self.deterministic_visual {
+            self.chat_answer = Some(format!(
+                "I checked the fixture scan for “{prompt}”. The urgent finding is low space on C:. Free at least 30 GB, then review the four recent Kernel-Power events."
+            ));
+            self.chat_last_prompt = Some(prompt);
+            self.chat_input.clear();
+            self.status = "AI response complete · OpenAI cloud".to_string();
+            return;
+        }
+        if !self.settings_snapshot.ai_enabled {
+            self.chat_answer = None;
+            self.status = "Enable AI insights in Settings before sending".to_string();
+            return;
+        }
+        if self.chat_pending.is_some() {
+            self.status = "A response is already streaming…".to_string();
+            return;
+        }
+        if let Err(error) = self.ensure_chat_runtime() {
+            self.chat_answer = None;
+            self.status = error;
+            return;
+        }
+        // Mirror the report path: a probe that is loading (or one that still
+        // needs to start after settings loaded/cleared the snapshot) defers the
+        // send instead of failing it. AiStatusFinished resumes stashed intents
+        // through resume_pending_ai_intent, which re-enters this method.
+        let gate = pending_ai_provider_gate(
+            self.settings_snapshot.ai_enabled,
+            self.ai_status_loading,
+            self.ai_provider_status.as_ref(),
+        );
+        match gate {
+            PendingAiProviderGate::Ready => {}
+            PendingAiProviderGate::Waiting | PendingAiProviderGate::Refresh => {
+                if gate == PendingAiProviderGate::Refresh {
+                    self.request_ai_provider_status(context);
+                }
+                self.pending_ai_intent = Some(PendingAiIntent::Chat {
+                    prompt: prompt.clone(),
+                });
+                self.pending_ai_preparation_error = None;
+                self.chat_last_prompt = Some(prompt);
+                self.chat_input.clear();
+                self.status = "Checking AI providers before continuing…".to_string();
+                return;
+            }
+            PendingAiProviderGate::Disabled => {
+                self.chat_answer = None;
+                self.status = "Enable AI insights in Settings before sending".to_string();
+                return;
+            }
+            PendingAiProviderGate::Unavailable => {
+                self.chat_answer = None;
+                self.status = "Set up an available AI provider before sending".to_string();
+                return;
+            }
+        }
+        let Some(provider_status) = self
+            .ai_provider_status
+            .as_ref()
+            .filter(|status| status.active_provider != AIProvider::None)
+        else {
+            self.chat_answer = None;
+            self.status = "Set up an available AI provider before sending".to_string();
+            return;
+        };
+        if requires_scan_data(&prompt) && self.diagnostic_results.is_empty() {
+            self.transition_to_page(Page::Ai);
+            self.ai_mode = AiMode::Assistant;
+            self.pending_ai_intent = Some(PendingAiIntent::Chat {
+                prompt: prompt.clone(),
+            });
+            self.pending_ai_preparation_error = None;
+            self.chat_last_prompt = Some(prompt);
+            self.chat_input.clear();
+            if self.diagnostics_busy() {
+                self.status =
+                    "Waiting for the active scan before asking the AI assistant…".to_string();
+            } else {
+                self.status = "Running a Quick Scan before asking the AI assistant…".to_string();
+                self.begin_diagnostic_scan(ScanKind::Quick, context);
+            }
+            return;
+        }
+        let preference = parse_provider_preference(&self.settings_snapshot.preferred_ai_provider);
+        let availability = provider_status.availability();
+        let Some(candidate) = next_fallback_candidate(preference, None, &[], availability) else {
+            self.chat_answer = None;
+            self.status = "Set up an available AI provider before sending".to_string();
+            return;
+        };
+        let Some(request_id) = advance_nonzero_generation(&mut self.chat_request_id) else {
+            self.status = "Native chat request identity was exhausted".to_string();
+            return;
+        };
+        let tools = self.chat_tool_snapshot();
+        let attempt = ChatAttempt {
+            logical_request_id: request_id,
+            prompt: prompt.clone(),
+            tools,
+            preference,
+            availability,
+            tried: vec![candidate.provider],
+            initial_provider: candidate.provider,
+            current_provider: candidate.provider,
+            first_failure: None,
+        };
+        if self.dispatch_chat_attempt(request_id, None, attempt, context) {
+            self.chat_answer = None;
+            self.chat_last_prompt = Some(prompt.clone());
+            self.chat_messages.push(ChatDisplayMessage {
+                request_id,
+                role: ChatDisplayRole::User,
+                text: prompt,
+                provider_use: None,
+                finish_reason: Some("submitted".to_string()),
+                terminal_message: None,
+                tools: ChatToolHistory::default(),
+                proposals: Vec::new(),
+            });
+            self.chat_messages.push(ChatDisplayMessage {
+                request_id,
+                role: ChatDisplayRole::Assistant,
+                text: String::new(),
+                provider_use: None,
+                finish_reason: None,
+                terminal_message: None,
+                tools: ChatToolHistory::default(),
+                proposals: Vec::new(),
+            });
+            self.chat_input.clear();
+        } else if self.chat_runtime.is_some() {
+            self.status = "The native AI chat queue is unavailable".to_string();
+        }
+    }
+
+    fn dispatch_chat_attempt(
+        &mut self,
+        request_id: u64,
+        previous_request_id: Option<u64>,
+        attempt: ChatAttempt,
+        context: &ComponentContext<Self>,
+    ) -> bool {
+        if let Err(error) = self.ensure_chat_runtime() {
+            self.status = error;
+            return false;
+        }
+        let provider = attempt.current_provider;
+        let fallback_from =
+            (provider != attempt.initial_provider).then_some(attempt.initial_provider);
+        let allow_fallback = next_fallback_candidate(
+            attempt.preference,
+            Some(provider),
+            &attempt.tried,
+            attempt.availability,
+        )
+        .is_some();
+        let Some(runtime) = self.chat_runtime.as_ref() else {
+            return false;
+        };
+        let queued = previous_request_id.map_or_else(
+            || {
+                runtime.send_attempt(
+                    request_id,
+                    attempt.prompt.clone(),
+                    provider,
+                    fallback_from,
+                    allow_fallback,
+                    attempt.tools.clone(),
+                )
+            },
+            |previous_request_id| {
+                runtime.retry_attempt(
+                    previous_request_id,
+                    request_id,
+                    attempt.prompt.clone(),
+                    provider,
+                    fallback_from,
+                    allow_fallback,
+                    attempt.tools.clone(),
+                )
+            },
+        );
+        if queued {
+            self.chat_pending = Some(request_id);
+            self.chat_attempt = Some(attempt);
+            self.cloud_fallback_consent = None;
+            self.status = format!(
+                "Asking the AI assistant · {}…",
+                provider_display_name(provider)
+            );
+            self.resume_chat_wait(context);
+        }
+        queued
+    }
+
+    fn continue_chat_fallback(
+        &mut self,
+        mut consent: CloudFallbackConsent,
+        context: &ComponentContext<Self>,
+    ) {
+        consent.attempt.current_provider = consent.candidate;
+        consent.attempt.tried.push(consent.candidate);
+        let logical_request_id = consent.attempt.logical_request_id;
+        let Some(request_id) = advance_nonzero_generation(&mut self.chat_request_id) else {
+            self.finish_chat_attempt_failure(
+                logical_request_id,
+                "Native chat request identity was exhausted".to_string(),
+            );
+            return;
+        };
+        if !self.dispatch_chat_attempt(
+            request_id,
+            Some(consent.previous_request_id),
+            consent.attempt,
+            context,
+        ) {
+            let message = if self.chat_runtime.is_none() {
+                self.status.clone()
+            } else {
+                "The native AI chat queue is unavailable".to_string()
+            };
+            self.finish_chat_attempt_failure(logical_request_id, message);
+        }
+    }
+
+    fn persist_cloud_fallback_decision(&mut self, policy: CloudFallbackPolicy) {
+        let Some(consent) = self.cloud_fallback_consent.take() else {
+            return;
+        };
+        let Some(request_id) = advance_nonzero_generation(&mut self.settings_request_id) else {
+            self.cloud_fallback_consent = Some(consent);
+            self.status = "Settings request identity was exhausted".to_string();
+            return;
+        };
+        let Some(runtime) = self.settings_runtime.as_ref() else {
+            self.cloud_fallback_consent = Some(consent);
+            self.status = "Native settings persistence is unavailable".to_string();
+            return;
+        };
+        let command = SettingsCommand::Update {
+            request_id,
+            update: SettingsUpdate::CloudFallbackPolicy(policy),
+        };
+        if let Err(error) = runtime.send(command) {
+            self.cloud_fallback_consent = Some(consent);
+            self.status = format!("Cloud fallback preference was not saved · {error}");
+            return;
+        }
+        self.cloud_fallback_policy_update = Some(PendingCloudFallbackPolicyUpdate {
+            request_id,
+            policy,
+            consent,
+        });
+        self.status = "Saving the cloud fallback preference…".to_string();
+    }
+
+    fn finish_chat_attempt_failure(&mut self, logical_request_id: u64, message: String) {
+        self.chat_pending = None;
+        self.chat_attempt = None;
+        self.cloud_fallback_consent = None;
+        if let Some(display) = self.chat_assistant_message_mut(logical_request_id) {
+            display.finish_reason = Some("error".to_string());
+            display.terminal_message = Some(message.clone());
+        }
+        self.status = message;
+    }
+
+    fn finish_chat_attempt_cancelled(&mut self, logical_request_id: u64) {
+        self.chat_pending = None;
+        self.chat_attempt = None;
+        self.cloud_fallback_consent = None;
+        if let Some(display) = self.chat_assistant_message_mut(logical_request_id) {
+            display.finish_reason = Some("cancelled".to_string());
+            display.terminal_message = Some("Response cancelled".to_string());
+        }
+        self.status = "AI response cancelled".to_string();
+    }
+
+    fn chat_assistant_message_mut(&mut self, request_id: u64) -> Option<&mut ChatDisplayMessage> {
+        self.chat_messages.iter_mut().rev().find(|message| {
+            message.request_id == request_id && message.role == ChatDisplayRole::Assistant
+        })
+    }
+
+    fn resume_pending_ai_intent(&mut self, context: &ComponentContext<Self>) {
+        let Some(intent) = self.pending_ai_intent.as_ref() else {
+            return;
+        };
+
+        if self.diagnostics_busy() {
+            self.status = "Waiting for the prerequisite scan before continuing AI…".to_string();
+            return;
+        }
+        if matches!(intent, PendingAiIntent::Chat { .. }) && self.chat_pending.is_some() {
+            self.status = "Waiting for the current AI response to finish…".to_string();
+            return;
+        }
+        if matches!(intent, PendingAiIntent::Report { .. }) && self.report_pending.is_some() {
+            self.status = "Waiting for the current AI report to finish…".to_string();
+            return;
+        }
+
+        match pending_ai_provider_gate(
+            self.settings_snapshot.ai_enabled,
+            self.ai_status_loading,
+            self.ai_provider_status.as_ref(),
+        ) {
+            PendingAiProviderGate::Ready => {}
+            PendingAiProviderGate::Waiting => {
+                self.status = "Checking AI providers before continuing…".to_string();
+                return;
+            }
+            PendingAiProviderGate::Disabled => {
+                let message = "Enable AI insights in Settings before continuing";
+                self.mark_pending_ai_preparation_error(message);
+                self.status = message.to_string();
+                return;
+            }
+            PendingAiProviderGate::Unavailable => {
+                let message = "Set up an available AI provider before continuing";
+                self.mark_pending_ai_preparation_error(message);
+                self.status = message.to_string();
+                return;
+            }
+            PendingAiProviderGate::Refresh => {
+                self.pending_ai_preparation_error = None;
+                self.request_ai_provider_status(context);
+                if self.ai_status_loading {
+                    self.status = "Checking AI providers before continuing…".to_string();
+                } else {
+                    let message = self.ai_status_error.clone().unwrap_or_else(|| {
+                        "Native AI provider discovery is unavailable".to_string()
+                    });
+                    self.mark_pending_ai_preparation_error(message.clone());
+                    self.status = message;
+                }
+                return;
+            }
+        }
+
+        let Some(intent) = self.pending_ai_intent.take() else {
+            return;
+        };
+        self.pending_ai_preparation_error = None;
+        match intent {
+            PendingAiIntent::Report { force_refresh } => {
+                self.transition_to_page(Page::Ai);
+                self.ai_mode = AiMode::ScanReport;
+                self.begin_report_generation(force_refresh, context);
+            }
+            PendingAiIntent::Chat { prompt } => {
+                self.transition_to_page(Page::Ai);
+                self.ai_mode = AiMode::Assistant;
+                self.begin_chat_send(prompt, context);
+            }
+        }
+    }
+
+    fn mark_pending_ai_preparation_error(&mut self, message: impl Into<String>) {
+        if self.pending_ai_intent.is_some() {
+            self.pending_ai_preparation_error = Some(message.into());
+        }
+    }
+
+    fn invalidate_report_for_new_scan(&mut self) {
+        if let Some(task) = self.report_prepare_task.take() {
+            task.cancel();
+        } else if let Some(request_id) = self.report_pending {
+            // Invalidate locally before the best-effort worker cancellation.
+            // A slow or failed cancellation must not let an old report block
+            // generation for the newly committed scan.
+            let _ = self
+                .report_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.cancel(request_id));
+        }
+        self.report_pending = None;
+        self.report_text = None;
+        self.report_provider = None;
+        self.report_provider_use = None;
+        self.report_source_session_id = None;
+        self.report_error = None;
+    }
+
+    fn invalidate_derived_diagnostic_content(&mut self) {
+        self.invalidate_report_for_new_scan();
+        self.invalidate_fix_plan();
+        self.invalidate_issue_prioritization();
+        if let Some(pending) = self.analysis_pending.take()
+            && let Some(runtime) = self.analysis_runtime.as_ref()
+        {
+            let _ = runtime.cancel(pending.request_id);
+        }
+        self.diagnostic_analyses.clear();
+    }
+
     fn diagnostics_busy(&self) -> bool {
         self.diagnostic_starting
             || self.diagnostic_running
@@ -3532,33 +8986,120 @@ impl WfdiagSpike {
     }
 
     fn update_diagnostic_counts(&mut self) {
-        self.diagnostic_completed = self.diagnostic_results.len();
-        self.diagnostic_errors = self
-            .diagnostic_results
-            .iter()
-            .filter(|result| !result.success)
-            .count();
+        if let Some(overlay) = self.targeted_diagnostic_overlay.as_ref() {
+            (self.diagnostic_completed, self.diagnostic_errors) = overlay.staged_counts();
+        } else {
+            self.diagnostic_completed = self.diagnostic_results.len();
+            self.diagnostic_errors = self
+                .diagnostic_results
+                .iter()
+                .filter(|result| !result.success)
+                .count();
+        }
         if let Some(started) = self.diagnostic_scan_start {
             self.diagnostic_duration_ms = started.elapsed().as_millis() as u64;
         }
     }
 
+    fn capture_diagnostic_snapshot(&self) -> DiagnosticSnapshot {
+        let task_ids = if self.diagnostic_expected_task_ids.is_empty() {
+            self.diagnostic_results
+                .iter()
+                .map(|result| result.task_id.clone())
+                .collect()
+        } else {
+            self.diagnostic_expected_task_ids.clone()
+        };
+        DiagnosticSnapshot {
+            results: self.diagnostic_results.clone(),
+            scan_kind: self.diagnostic_scan_kind,
+            task_ids,
+            session_id: self.diagnostic_session_id.clone().or_else(|| {
+                self.diagnostic_results
+                    .first()
+                    .map(|result| result.session_id.clone())
+            }),
+            duration_ms: self.diagnostic_duration_ms,
+            total: self.diagnostic_total,
+            completed: self.diagnostic_completed,
+            errors: self.diagnostic_errors,
+        }
+    }
+
+    fn apply_diagnostic_snapshot(&mut self, snapshot: DiagnosticSnapshot) {
+        self.diagnostic_results = snapshot.results;
+        self.diagnostic_scan_kind = snapshot.scan_kind;
+        self.diagnostic_expected_task_ids = snapshot.task_ids;
+        self.diagnostic_session_id = snapshot.session_id;
+        self.diagnostic_duration_ms = snapshot.duration_ms;
+        self.diagnostic_total = snapshot.total;
+        self.diagnostic_completed = snapshot.completed;
+        self.diagnostic_errors = snapshot.errors;
+    }
+
     fn restore_previous_diagnostics(&mut self) {
-        if let Some(previous) = self.previous_diagnostic_snapshot.take() {
-            self.diagnostic_results = previous.results;
-            self.diagnostic_scan_kind = previous.scan_kind;
-            self.diagnostic_duration_ms = previous.duration_ms;
-            self.diagnostic_total = previous.total;
-            self.diagnostic_completed = previous.completed;
-            self.diagnostic_errors = previous.errors;
+        let previous = self
+            .targeted_diagnostic_overlay
+            .take()
+            .map(TargetedDiagnosticOverlay::rollback)
+            .or_else(|| self.previous_diagnostic_snapshot.take());
+        if let Some(previous) = previous {
+            self.apply_diagnostic_snapshot(previous);
         } else {
             self.diagnostic_results.clear();
             self.diagnostic_scan_kind = None;
+            self.diagnostic_expected_task_ids.clear();
+            self.diagnostic_session_id = None;
             self.diagnostic_duration_ms = 0;
             self.diagnostic_total = 0;
             self.diagnostic_completed = 0;
             self.diagnostic_errors = 0;
         }
+    }
+
+    fn commit_targeted_diagnostic_overlay(
+        &mut self,
+        transaction_session_id: &str,
+        authoritative_results: &ScanEvidence,
+        context: &ComponentContext<Self>,
+    ) -> Result<(), String> {
+        let overlay = self
+            .targeted_diagnostic_overlay
+            .as_ref()
+            .ok_or_else(|| "targeted rerun transaction was unavailable".to_string())?;
+        let output = authoritative_results
+            .get(&overlay.target_task_id)
+            .ok_or_else(|| format!("targeted rerun did not return `{}`", overlay.target_task_id))?;
+        let replacement = DiagnosticTaskResult::new(
+            transaction_session_id,
+            overlay.target_task_id.clone(),
+            Arc::clone(output),
+        );
+        let committed = overlay.commit(replacement, &self.diagnostic_catalog)?;
+        let evidence_session_id = committed
+            .session_id
+            .clone()
+            .or_else(|| {
+                committed
+                    .results
+                    .first()
+                    .map(|result| result.session_id.clone())
+            })
+            .unwrap_or_else(|| transaction_session_id.to_string());
+        let issue_results = diagnostic_output_snapshot(&committed.results);
+
+        self.invalidate_derived_diagnostic_content();
+        self.targeted_diagnostic_overlay = None;
+        self.previous_diagnostic_snapshot = None;
+        self.apply_diagnostic_snapshot(committed);
+        self.reset_diagnostic_activity();
+        self.commit_issue_evidence(evidence_session_id, issue_results, context);
+        self.status = format!(
+            "Diagnostic rerun complete · {} collected · {} errors",
+            self.diagnostic_completed, self.diagnostic_errors
+        );
+        self.resume_pending_ai_intent(context);
+        Ok(())
     }
 
     fn reset_diagnostic_activity(&mut self) {
@@ -3577,12 +9118,17 @@ impl WfdiagSpike {
         self.diagnostic_run_task = None;
         self.diagnostic_cancel_task = None;
         self.diagnostic_scan_policy = None;
-        self.diagnostic_expected_task_ids.clear();
+        self.targeted_diagnostic_overlay = None;
+        self.diagnostic_task_statuses.clear();
         self.diagnostic_current_task = None;
         self.diagnostic_scan_start = None;
     }
 
-    fn finish_completed_diagnostic_scan(&mut self, history_error: Option<String>) {
+    fn finish_completed_diagnostic_scan(
+        &mut self,
+        history_error: Option<String>,
+        context: &ComponentContext<Self>,
+    ) {
         let label = self.diagnostic_scan_kind.map_or("Scan", scan_kind_label);
         self.previous_diagnostic_snapshot = None;
         self.reset_diagnostic_activity();
@@ -3599,6 +9145,7 @@ impl WfdiagSpike {
                 self.diagnostic_completed, self.diagnostic_errors
             );
         }
+        self.resume_pending_ai_intent(context);
     }
 
     fn begin_completed_diagnostic_finalization(
@@ -3616,7 +9163,7 @@ impl WfdiagSpike {
 
         let auto_save = scan_policy_requests_auto_save(self.diagnostic_scan_policy.as_ref());
         if !auto_save || committed_after_stop {
-            self.finish_completed_diagnostic_scan(None);
+            self.finish_completed_diagnostic_scan(None, context);
             return;
         }
 
@@ -3645,9 +9192,10 @@ impl WfdiagSpike {
             .as_ref()
             .map(|policy| policy.history_tag.clone())
         else {
-            self.finish_completed_diagnostic_scan(Some(
-                "the scan-start history policy was unavailable".to_string(),
-            ));
+            self.finish_completed_diagnostic_scan(
+                Some("the scan-start history policy was unavailable".to_string()),
+                context,
+            );
             return;
         };
         self.update_diagnostic_counts();
@@ -3659,15 +9207,16 @@ impl WfdiagSpike {
             history_tag,
         );
         let Some(runtime) = self.history_runtime.as_ref().map(Arc::clone) else {
-            self.finish_completed_diagnostic_scan(Some(
-                "native scan history is unavailable".to_string(),
-            ));
+            self.finish_completed_diagnostic_scan(
+                Some("native scan history is unavailable".to_string()),
+                context,
+            );
             return;
         };
         let reply = match runtime.request_save(scan) {
             Ok(reply) => reply,
             Err(error) => {
-                self.finish_completed_diagnostic_scan(Some(error.to_string()));
+                self.finish_completed_diagnostic_scan(Some(error.to_string()), context);
                 return;
             }
         };
@@ -3681,6 +9230,37 @@ impl WfdiagSpike {
     }
 
     fn begin_diagnostic_scan(&mut self, scan_kind: ScanKind, context: &ComponentContext<Self>) {
+        let task_ids = select_scan_tasks(
+            &self.diagnostic_catalog,
+            scan_kind,
+            self.is_admin,
+            self.settings_snapshot.quick_scan_tasks.as_deref(),
+        );
+        self.begin_diagnostic_scan_with_tasks(scan_kind, task_ids, context);
+    }
+
+    fn begin_targeted_diagnostic_scan(&mut self, task_id: &str, context: &ComponentContext<Self>) {
+        let Some(task) = self
+            .diagnostic_catalog
+            .iter()
+            .find(|task| task.id == task_id)
+        else {
+            self.status = "That diagnostic task is no longer available".to_string();
+            return;
+        };
+        if task.admin_required && !self.is_admin {
+            self.status = format!("{} requires administrator access", task.name);
+            return;
+        }
+        self.begin_diagnostic_scan_with_tasks(ScanKind::Targeted, vec![task.id.clone()], context);
+    }
+
+    fn begin_diagnostic_scan_with_tasks(
+        &mut self,
+        scan_kind: ScanKind,
+        task_ids: Vec<String>,
+        context: &ComponentContext<Self>,
+    ) {
         if self.deterministic_visual {
             // Screenshot fixtures must never launch WMI, commands, or mutate the
             // captured Store 2.5.8 state.
@@ -3707,28 +9287,38 @@ impl WfdiagSpike {
             self.status = "Native diagnostics are unavailable".to_string();
             return;
         };
-        let policy = DiagnosticScanPolicy::snapshot(&self.settings_snapshot, scan_kind);
-        let task_ids = select_scan_tasks(
-            &self.diagnostic_catalog,
-            scan_kind,
-            self.is_admin,
-            self.settings_snapshot.quick_scan_tasks.as_deref(),
-        );
         if task_ids.is_empty() {
             self.status = format!("{} has no available tasks", scan_kind_label(scan_kind));
             return;
         }
 
+        let previous = self.capture_diagnostic_snapshot();
+        self.previous_diagnostic_snapshot = None;
+        self.targeted_diagnostic_overlay = TargetedDiagnosticOverlay::for_committed_session(
+            scan_kind,
+            &task_ids,
+            previous.clone(),
+        );
+        let policy = DiagnosticScanPolicy::snapshot(
+            &self.settings_snapshot,
+            scan_kind,
+            self.targeted_diagnostic_overlay.is_some(),
+        );
+        if self.targeted_diagnostic_overlay.is_none() {
+            // Replacement scans invalidate derived content as soon as their
+            // transaction starts. A targeted rerun defers that invalidation
+            // until its single authoritative replacement commits so every
+            // failure path leaves the prior evidence and projections intact.
+            self.invalidate_derived_diagnostic_content();
+            self.previous_diagnostic_snapshot = Some(previous);
+        }
         let task_count = task_ids.len();
         self.diagnostic_expected_task_ids = task_ids.clone();
-        self.previous_diagnostic_snapshot = Some(DiagnosticSnapshot {
-            results: self.diagnostic_results.clone(),
-            scan_kind: self.diagnostic_scan_kind,
-            duration_ms: self.diagnostic_duration_ms,
-            total: self.diagnostic_total,
-            completed: self.diagnostic_completed,
-            errors: self.diagnostic_errors,
-        });
+        self.diagnostic_task_statuses = task_ids
+            .iter()
+            .cloned()
+            .map(|task_id| (task_id, TaskProgressStatus::Queued))
+            .collect();
         self.diagnostic_scan_kind = Some(scan_kind);
         self.diagnostic_scan_policy = Some(policy);
         self.diagnostic_total = task_count;
@@ -3791,16 +9381,11 @@ impl WfdiagSpike {
                             cancelled: true,
                             authoritative_results: Err("scan was cancelled".to_string()),
                         },
-                        Ok(result) => {
-                            let authoritative_results = executor
-                                .block_on(runtime.session_results(&result.session_id))
-                                .map_err(|error| error.to_string());
-                            Message::DiagnosticRunFinished {
-                                session_id: result.session_id,
-                                cancelled: false,
-                                authoritative_results,
-                            }
-                        }
+                        Ok(result) => Message::DiagnosticRunFinished {
+                            session_id: result.session_id,
+                            cancelled: false,
+                            authoritative_results: Ok(result.evidence),
+                        },
                         Err(error) => Message::DiagnosticRunFinished {
                             session_id: run_session_id,
                             cancelled: false,
@@ -3827,7 +9412,7 @@ impl WfdiagSpike {
         if self.diagnostic_finalizing {
             if let Some(task) = self.diagnostic_finalization_task.take() {
                 task.cancel();
-                self.finish_completed_diagnostic_scan(None);
+                self.finish_completed_diagnostic_scan(None, context);
             }
             return;
         }
@@ -3879,13 +9464,17 @@ impl WfdiagSpike {
                 if self.diagnostic_session_id.as_deref() != Some(&progress.session_id) {
                     return;
                 }
+                let task_id = progress.task_id.clone();
+                let task_status = progress.status;
+                self.diagnostic_task_statuses
+                    .insert(task_id.clone(), task_status);
                 let task_name = progress.task_name.unwrap_or_else(|| {
                     self.diagnostic_catalog
                         .iter()
-                        .find(|task| task.id == progress.task_id)
-                        .map_or(progress.task_id, |task| task.name.clone())
+                        .find(|task| task.id == task_id)
+                        .map_or_else(|| task_id.clone(), |task| task.name.clone())
                 });
-                if progress.status == TaskProgressStatus::Running {
+                if task_status == TaskProgressStatus::Running {
                     self.diagnostic_current_task = Some(task_name.clone());
                 }
                 self.update_diagnostic_counts();
@@ -3903,6 +9492,24 @@ impl WfdiagSpike {
             }
             UiEvent::DiagnosticResult(result) => {
                 if self.diagnostic_session_id.as_deref() != Some(&result.session_id) {
+                    return;
+                }
+                self.diagnostic_task_statuses.insert(
+                    result.task_id.clone(),
+                    if result.success {
+                        TaskProgressStatus::Completed
+                    } else {
+                        TaskProgressStatus::Failed
+                    },
+                );
+                if let Some(overlay) = self.targeted_diagnostic_overlay.as_mut() {
+                    overlay.stage(result);
+                    self.update_diagnostic_counts();
+                    let label = self.diagnostic_scan_kind.map_or("Scan", scan_kind_label);
+                    self.status = format!(
+                        "{label} · {} of {} collected · {} errors",
+                        self.diagnostic_completed, self.diagnostic_total, self.diagnostic_errors
+                    );
                     return;
                 }
                 if let Some(existing) = self
@@ -3944,6 +9551,7 @@ impl WfdiagSpike {
                 self.apply_diagnostic_event(diagnostic);
             }
             UiEvent::SystemStats(stats) => {
+                self.monitor_error = None;
                 if !self.monitoring_paused && matches!(self.page, Page::Monitor | Page::Processes) {
                     self.status = format!(
                         "Live sample · CPU {:.0}% · memory {:.0}%",
@@ -3978,7 +9586,19 @@ impl Component for WfdiagSpike {
     type Input = ();
 
     fn create(_input: &(), context: &ComponentContext<Self>) -> Self {
+        // Producers wake the native window, whose UI-thread callback enqueues
+        // one lightweight drain message. The process hook is single-assignment
+        // while the local sender may be replaced if Reactor remounts a scope.
+        let _ = ui_wake_support::install(|| {
+            let _ = window_support::post_ui_wake();
+        });
+        let ui_sender = context.sender();
+        window_support::set_ui_wake_handler(move || {
+            let _ = ui_sender.send(Message::NativeSignalReady);
+        });
+
         let visual_state = VisualState::from_env();
+        let live_test_fixture = live_test_fixture_from_env();
         let (default_width, default_height) = visual_state.default_size();
         let width = initial_window_dimension("WFDIAG_REACTOR_WIDTH", default_width);
         let height = initial_window_dimension("WFDIAG_REACTOR_HEIGHT", default_height);
@@ -3991,17 +9611,20 @@ impl Component for WfdiagSpike {
             .ok()
             .is_some_and(|value| value.eq_ignore_ascii_case("populated"));
         let diagnostic_results = if visual_state.has_scan()
+            || live_test_fixture.is_some_and(LiveTestFixture::injects_scan)
             || (fixture_mode && !matches!(initial_page, Page::Monitor | Page::Processes))
         {
-            vec![DiagnosticTaskResult {
-                session_id: "visual-fixture".to_string(),
-                task_id: "computer_system".to_string(),
-                success: true,
-                output: "Visual fixture; real results arrive through UiEvent::DiagnosticResult"
-                    .to_string(),
-                error: None,
-                duration_ms: 29,
-            }]
+            vec![DiagnosticTaskResult::new(
+                "visual-fixture",
+                "computer_system",
+                Arc::new(DiagnosticOutput {
+                    success: true,
+                    output: "Visual fixture; real results arrive through UiEvent::DiagnosticResult"
+                        .to_string(),
+                    error: None,
+                    duration_ms: 29,
+                }),
+            )]
         } else {
             Vec::new()
         };
@@ -4010,22 +9633,29 @@ impl Component for WfdiagSpike {
         } else {
             "17 collected · 0 errors".to_string()
         };
-        let deterministic_visual = fixture_mode || visual_state != VisualState::Live;
-        let (native_monitor, backend_receiver, backend_wait) = if deterministic_visual {
-            (None, None, None)
-        } else {
-            match NativeMonitorRuntime::start(false) {
-                Ok((runtime, receiver)) => {
-                    let receiver = Arc::new(receiver);
-                    let wait = spawn_backend_wait(context, Arc::clone(&receiver));
-                    (Some(Arc::new(runtime)), Some(receiver), Some(wait))
+        let deterministic_visual =
+            fixture_mode || visual_state != VisualState::Live || live_test_fixture.is_some();
+        let (native_monitor, backend_receiver, backend_wait, monitor_error) =
+            if deterministic_visual || !matches!(initial_page, Page::Monitor | Page::Processes) {
+                (None, None, None, None)
+            } else {
+                match NativeMonitorRuntime::start_with_profile(MonitorProfile::SystemOnly) {
+                    Ok((runtime, receiver)) => {
+                        let receiver = Arc::new(receiver);
+                        receiver.set_wake_handler(UiWakeHandler::new(ui_wake_support::notify));
+                        (Some(Arc::new(runtime)), Some(receiver), None, None)
+                    }
+                    Err(error) => {
+                        status = format!("Native monitoring unavailable · {error}");
+                        (
+                            None,
+                            None,
+                            None,
+                            Some(format!("Native monitoring could not start: {error}")),
+                        )
+                    }
                 }
-                Err(error) => {
-                    status = format!("Native monitoring unavailable · {error}");
-                    (None, None, None)
-                }
-            }
-        };
+            };
         let initial_system_info = if deterministic_visual {
             fixture_258_system_info()
         } else {
@@ -4094,23 +9724,25 @@ impl Component for WfdiagSpike {
                 let (runtime, receiver) = NativeDiagnosticRuntime::start(capacity);
                 let catalog = runtime.available_tasks();
                 let receiver = Arc::new(receiver);
-                let wait = spawn_diagnostic_wait(context, Arc::clone(&receiver));
-                (catalog, Some(runtime), Some(receiver), Some(wait))
+                receiver.set_wake_handler(UiWakeHandler::new(ui_wake_support::notify));
+                (catalog, Some(runtime), Some(receiver), None)
             };
-        let (export_runtime, export_receiver, export_error) = if deterministic_visual {
-            (None, None, None)
-        } else {
-            match ExportRuntime::start(export_task_catalog(&diagnostic_catalog)) {
-                Ok((runtime, receiver)) => {
-                    (Some(runtime), Some(Arc::new(Mutex::new(receiver))), None)
+        let export_fixture = live_test_fixture == Some(LiveTestFixture::ExportFallback);
+        let (export_runtime, export_receiver, export_error) =
+            if deterministic_visual && !export_fixture {
+                (None, None, None)
+            } else {
+                match ExportRuntime::start(export_task_catalog(&diagnostic_catalog)) {
+                    Ok((runtime, receiver)) => {
+                        (Some(runtime), Some(Arc::new(Mutex::new(receiver))), None)
+                    }
+                    Err(error) => (
+                        None,
+                        None,
+                        Some(format!("Native report generation is unavailable: {error}")),
+                    ),
                 }
-                Err(error) => (
-                    None,
-                    None,
-                    Some(format!("Native report generation is unavailable: {error}")),
-                ),
-            }
-        };
+            };
         let has_fixture_scan = !diagnostic_results.is_empty();
         let issue_metadata = canonical_issue_metadata_snapshot();
         let issues = if deterministic_visual && has_fixture_scan {
@@ -4140,6 +9772,14 @@ impl Component for WfdiagSpike {
             // defaults and must never leak into a live settings file.
             settings_defaults.network_grounding_enabled = true;
             settings_defaults.codex_model = Some("gpt-5.6-luna".to_string());
+        }
+        if export_fixture {
+            match load_live_test_settings() {
+                Ok(settings) => settings_defaults = settings,
+                Err(error) => {
+                    status = format!("Validation fixture settings unavailable · {error}");
+                }
+            }
         }
         let history_retention_policy = Arc::new(RwLock::new(HistoryRetentionPolicy::from(
             &settings_defaults,
@@ -4191,18 +9831,17 @@ impl Component for WfdiagSpike {
                 .as_ref()
                 .expect("live settings service is constructed above")
                 .clone();
-            match SettingsRuntime::start(service) {
+            match SettingsRuntime::start_with_wake(service, Arc::new(ui_wake_support::notify)) {
                 Ok((runtime, receiver)) => {
                     let request_id = 1;
                     if let Err(error) = runtime.send(SettingsCommand::Load { request_id }) {
                         (None, None, None, 0, None, false, Some(error.to_string()))
                     } else {
                         let receiver = Arc::new(Mutex::new(receiver));
-                        let wait = spawn_settings_wait(context, Arc::clone(&receiver));
                         (
                             Some(runtime),
                             Some(receiver),
-                            Some(wait),
+                            None,
                             request_id,
                             Some(request_id),
                             true,
@@ -4213,87 +9852,178 @@ impl Component for WfdiagSpike {
                 Err(error) => (None, None, None, 0, None, false, Some(error.to_string())),
             }
         };
-        // Investigation switch for the graceful-close defect (see runbook):
-        // WFDIAG_NO_WORKERS=chat|report|action|instance|only-chat|... skips
-        // individual workers/tasks; only-chat/only-report/only-action skip
-        // that worker while keeping the others; none keeps the watch only.
-        let skip_workers = std::env::var_os("WFDIAG_NO_WORKERS");
-        let skip_workers = skip_workers.as_deref().unwrap_or_default();
-        let skip_chat = skip_workers.is_empty() || skip_workers == "chat";
-        let (chat_runtime, chat_receiver, chat_wait) = if deterministic_visual || skip_chat || skip_workers == "only-report" || skip_workers == "only-action" || skip_workers == "only-instance" || skip_workers == "none" {
-            (None, None, None)
+        let (
+            provider_setup_runtime,
+            provider_setup_receiver,
+            provider_setup_wait,
+            provider_setup_error,
+        ) = if deterministic_visual {
+            (None, None, None, None)
         } else if let Some(settings) = settings_service.as_ref() {
-            match NativeChatRuntime::start(
+            match ProviderSetupRuntime::start(
                 settings.clone(),
                 Arc::new(FoundryCliEndpointSource::new()),
                 Arc::new(ReqwestOllamaSource),
             ) {
                 Ok((runtime, receiver)) => {
                     let receiver = Arc::new(Mutex::new(receiver));
-                    let wait = if skip_workers.is_empty() {
-                        Some(spawn_chat_wait(context, Arc::clone(&receiver)))
-                    } else {
-                        None
-                    };
-                    (Some(runtime), Some(receiver), wait)
+                    (Some(runtime), Some(receiver), None, None)
                 }
-                Err(error) => {
-                    status = format!("Native AI chat unavailable · {error}");
-                    (None, None, None)
-                }
+                Err(error) => (
+                    None,
+                    None,
+                    None,
+                    Some(format!("Native model discovery is unavailable: {error}")),
+                ),
             }
         } else {
-            (None, None, None)
+            (
+                None,
+                None,
+                None,
+                Some("Native settings are unavailable for model discovery".to_string()),
+            )
         };
-        let (report_runtime, report_receiver, report_wait) = if deterministic_visual || skip_workers == "report" || skip_workers == "only-action" || skip_workers == "only-chat" || skip_workers == "only-instance" || skip_workers == "none" {
-            (None, None, None)
+        let (
+            subscription_auth_runtime,
+            subscription_auth_receiver,
+            subscription_auth_wait,
+            subscription_auth_error,
+        ) = if deterministic_visual {
+            (None, None, None, None)
         } else if let Some(settings) = settings_service.as_ref() {
-            match NativeReportRuntime::start(
-                settings.clone(),
-                Arc::new(FoundryCliEndpointSource::new()),
-                Arc::new(ReqwestOllamaSource),
-            ) {
+            match SubscriptionAuthRuntime::start(settings.clone()) {
                 Ok((runtime, receiver)) => {
                     let receiver = Arc::new(Mutex::new(receiver));
-                    let wait = if skip_workers.is_empty() {
-                        Some(spawn_report_wait(context, Arc::clone(&receiver)))
-                    } else {
-                        None
-                    };
-                    (Some(runtime), Some(receiver), wait)
+                    (Some(runtime), Some(receiver), None, None)
                 }
-                Err(error) => {
-                    status = format!("Native AI report unavailable · {error}");
-                    (None, None, None)
-                }
+                Err(error) => (
+                    None,
+                    None,
+                    None,
+                    Some(format!(
+                        "Subscription account controls are unavailable: {error}"
+                    )),
+                ),
             }
         } else {
-            (None, None, None)
+            (
+                None,
+                None,
+                None,
+                Some("Native settings are unavailable for subscription accounts".to_string()),
+            )
         };
-        let (action_runtime, action_receiver, action_wait) = if deterministic_visual || skip_workers == "action" || skip_workers == "only-report" || skip_workers == "only-chat" || skip_workers == "only-instance" || skip_workers == "none" {
-            // Fixture mode never executes anything; the worker is not built.
-            (None, None, None)
+        let (
+            subscription_install_runtime,
+            subscription_install_receiver,
+            subscription_install_wait,
+            subscription_install_error,
+        ) = if deterministic_visual {
+            (None, None, None, None)
+        } else {
+            match SubscriptionInstallRuntime::start() {
+                Ok((runtime, receiver)) => {
+                    let receiver = Arc::new(Mutex::new(receiver));
+                    (Some(runtime), Some(receiver), None, None)
+                }
+                Err(error) => (
+                    None,
+                    None,
+                    None,
+                    Some(format!(
+                        "Subscription CLI installation is unavailable: {error}"
+                    )),
+                ),
+            }
+        };
+        // Retain construction inputs without starting the expensive AI
+        // execution workers. The first real chat/report/analysis/fix-plan
+        // request initializes only the worker it needs. The harness policy is
+        // evaluated at that same boundary, preserving WFDIAG_NO_WORKERS.
+        let ai_worker_policy = std::env::var_os("WFDIAG_NO_WORKERS").unwrap_or_default();
+        let skip_workers = ai_worker_policy.as_os_str();
+        let ai_worker_settings = settings_service.clone();
+        // Provider management and on-demand report/analysis workers share
+        // cache ownership, so Settings "clear AI cache" invalidates all of
+        // them even when a worker is initialized later.
+        let shared_ai_cache = SharedAiCache::new(100);
+        let (
+            action_runtime,
+            action_receiver,
+            action_wait,
+            action_run_receiver,
+            action_run_wait,
+            action_active_run,
+            action_run_history,
+            rehydrated_action_review,
+        ) = if visual_state == VisualState::RemediationPartial {
+            (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                vec![remediation_partial_visual_run()],
+                None,
+            )
+        } else if deterministic_visual && live_test_fixture != Some(LiveTestFixture::DeviceManager)
+        {
+            // Screenshot and validation fixtures never execute anything. The
+            // single exception is the feature-gated Device Manager fixture,
+            // whose selection gate below rejects every other catalog ID.
+            (None, None, None, None, None, None, Vec::new(), None)
+        } else if skip_workers == "action"
+            || skip_workers == "only-analysis"
+            || skip_workers == "only-fix-plan"
+            || skip_workers == "only-report"
+            || skip_workers == "only-chat"
+            || skip_workers == "only-instance"
+            || skip_workers == "none"
+        {
+            (None, None, None, None, None, None, Vec::new(), None)
         } else {
             match NativeActionRuntime::start() {
                 Ok((runtime, receiver)) => {
+                    let (run_events, snapshot) = runtime.subscribe_run_events();
                     let receiver = Arc::new(Mutex::new(receiver));
-                    let wait = if skip_workers.is_empty() {
-                        Some(spawn_action_wait(context, Arc::clone(&receiver)))
-                    } else {
-                        None
-                    };
-                    (Some(runtime), Some(receiver), wait)
+                    let run_receiver = Arc::new(Mutex::new(run_events));
+                    let review = snapshot.pending_proposals.into_iter().next();
+                    (
+                        Some(runtime),
+                        Some(receiver),
+                        None,
+                        Some(run_receiver),
+                        None,
+                        snapshot.active_run,
+                        snapshot.history,
+                        review,
+                    )
                 }
                 Err(error) => {
                     status = format!("Native remediation unavailable · {error}");
-                    (None, None, None)
+                    (None, None, None, None, None, None, Vec::new(), None)
                 }
             }
         };
-        let instance_wait = if deterministic_visual || skip_workers == "instance" {
+        let action_expanded_runs = action_active_run
+            .iter()
+            .chain(
+                action_run_history
+                    .iter()
+                    .filter(|_| visual_state == VisualState::RemediationPartial),
+            )
+            .map(|run| run.run_id.clone())
+            .collect();
+        let window_lifecycle_revision = window_support::lifecycle_snapshot().revision;
+        let instance_wait = if deterministic_visual
+            || skip_workers == "instance"
+            || instance_support::activation_wake_registered()
+        {
             None
         } else {
-            Some(spawn_instance_watch(context))
+            Some(spawn_instance_watch(context, window_lifecycle_revision))
         };
         let (ai_provider_runtime, ai_status_error) = if deterministic_visual {
             (None, None)
@@ -4308,6 +10038,7 @@ impl Component for WfdiagSpike {
                         .as_ref()
                         .expect("live package identity is constructed above"),
                 ),
+                shared_ai_cache.clone(),
             ) {
                 Ok(runtime) => (Some(runtime), None),
                 Err(error) => (
@@ -4323,18 +10054,26 @@ impl Component for WfdiagSpike {
                 .ok()
                 .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
         let update_delay_task = (!deterministic_visual).then(|| spawn_update_delay(context));
+        // Validation knob: WFDIAG_REACTOR_THEME=light|dark|system selects
+        // the startup theme (default dark, the Store 2.5.8 baseline).
+        let initial_theme =
+            window_theme_from_setting(&std::env::var("WFDIAG_REACTOR_THEME").unwrap_or_default());
+        let initial_color_scheme = if initial_theme == WindowTheme::Light {
+            ColorScheme::Light
+        } else {
+            ColorScheme::Dark
+        };
+        let initial_provider_setup_index = configured_provider_setup_index(&settings_defaults);
 
         let mut component = Self {
             page: initial_page,
-            // Validation knob: WFDIAG_REACTOR_THEME=light|dark|system selects
-            // the startup theme (default dark, the Store 2.5.8 baseline).
-            theme: window_theme_from_setting(
-                &std::env::var("WFDIAG_REACTOR_THEME").unwrap_or_default(),
-            ),
+            live_test_fixture,
+            theme: initial_theme,
+            effective_color_scheme: initial_color_scheme,
             window_size: WindowSize { width, height },
             requested_client_width: width,
             requested_client_height: height,
-            pane_open: true,
+            pane_open: !settings_defaults.nav_rail_collapsed,
             about_open: false,
             about_close_reference: ElementRef::new(),
             about_dialog_epoch: 0,
@@ -4364,6 +10103,11 @@ impl Component for WfdiagSpike {
             settings_saving: false,
             settings_error,
             settings_save_error: None,
+            startup_scan_gate: if deterministic_visual || settings_load_request_id.is_none() {
+                StartupScanGate::Consumed
+            } else {
+                StartupScanGate::AwaitingSettings
+            },
             system_runtime,
             system_receiver,
             system_wait,
@@ -4388,6 +10132,7 @@ impl Component for WfdiagSpike {
             issue_enqueued_request_id: None,
             issue_error,
             monitoring_paused: false,
+            monitoring_paused_by_lifecycle: false,
             process_filter: String::new(),
             process_page: None,
             process_sort_key: ProcessSortKey::CpuPercent,
@@ -4395,9 +10140,10 @@ impl Component for WfdiagSpike {
             process_offset: 0,
             process_request_id: 0,
             process_request_task: None,
+            process_last_refresh_started_at: None,
             process_loading: false,
             process_error: None,
-            selected_process_pid: None,
+            selected_process: None,
             history_runtime,
             history_retention_policy,
             history_summaries: Vec::new(),
@@ -4408,44 +10154,138 @@ impl Component for WfdiagSpike {
             history_request_task: None,
             history_compare_request_id: 0,
             history_compare_task: None,
+            history_expanded_task_id: None,
+            history_task_diff: None,
+            history_task_diff_error: None,
+            history_task_diff_request_id: 0,
+            history_task_diff_task: None,
             history_loading: false,
             history_error,
+            history_comparison_error: None,
             chat_input: String::new(),
+            chat_composer_reference: ElementRef::new(),
+            chat_focus_revision: 0,
             chat_answer: None,
-            chat_runtime,
-            chat_receiver,
-            chat_wait,
+            ai_worker_settings,
+            ai_worker_cache: shared_ai_cache,
+            ai_worker_policy,
+            chat_runtime: None,
+            chat_receiver: None,
+            chat_wait: None,
             chat_request_id: 0,
             chat_pending: None,
-            report_runtime,
-            report_receiver,
-            report_wait,
+            chat_attempt: None,
+            chat_last_prompt: None,
+            full_scan_consent: None,
+            cloud_fallback_consent: None,
+            cloud_fallback_policy_update: None,
+            chat_messages: Vec::new(),
+            report_runtime: None,
+            report_receiver: None,
+            report_wait: None,
+            report_prepare_task: None,
             report_request_id: 0,
             report_pending: None,
             report_text: None,
             report_provider: None,
+            report_provider_use: None,
+            report_source_session_id: None,
             report_error: None,
+            pending_ai_intent: None,
+            pending_ai_preparation_error: None,
+            fix_plan_runtime: None,
+            fix_plan_receiver: None,
+            fix_plan_wait: None,
+            fix_plan_request_id: 0,
+            fix_plan_pending: None,
+            fix_plan: None,
+            fix_plan_error: None,
             action_runtime,
             action_receiver,
             action_wait,
+            action_run_receiver,
+            action_run_wait,
+            action_active_run,
+            action_run_history,
+            action_expanded_runs,
             action_request_id: 0,
             action_pending: None,
+            action_pending_approval: None,
+            action_review: rehydrated_action_review,
             repair_confirm: None,
             admin_relaunch_task: None,
             instance_wait,
             palette_open: false,
             palette_query: String::new(),
+            palette_active_index: 0,
+            palette_query_reference: ElementRef::new(),
+            palette_button_reference: ElementRef::new(),
+            palette_result_references: std::array::from_fn(|_| ElementRef::new()),
+            palette_dialog_epoch: 0,
+            palette_focus_task: None,
             shortcut_help_open: false,
             window_hook_installed: false,
+            window_hook_retry_failures: 0,
+            window_hook_retry_task: None,
+            window_lifecycle_revision,
+            window_usable: true,
             provider_key_drafts: Default::default(),
+            provider_credential_transaction: ProviderCredentialTransaction::new(),
             provider_key_busy: false,
+            provider_key_pending: None,
+            provider_setup_index: initial_provider_setup_index,
+            provider_setup_runtime,
+            provider_setup_receiver,
+            provider_setup_wait,
+            provider_setup_error,
+            provider_catalogs: (0..PROVIDER_SETUP_LABELS.len())
+                .map(|_| ProviderCatalogUiState::default())
+                .collect(),
+            provider_catalog_request_id: 0,
+            provider_catalog_pending: None,
+            provider_catalog_refresh_revision: 0,
+            provider_catalog_refresh_task: None,
+            provider_catalog_refresh_after_cancel: false,
+            subscription_auth_runtime,
+            subscription_auth_receiver,
+            subscription_auth_wait,
+            subscription_auth_error,
+            subscription_auth_states: vec![
+                SubscriptionAuthUiState::default(),
+                SubscriptionAuthUiState::default(),
+            ],
+            subscription_auth_operation_id: 0,
+            subscription_auth_pending: None,
+            subscription_install_runtime,
+            subscription_install_receiver,
+            subscription_install_wait,
+            subscription_install_request_id: 0,
+            subscription_install_pending: None,
+            subscription_install_prompt: None,
+            subscription_install_progress: None,
+            subscription_install_error,
             history_clear_confirm: false,
+            history_label_draft: String::new(),
+            history_label_editing: false,
             history_tag_draft: String::new(),
             history_ack_busy: false,
             history_wait: None,
             history_trends: None,
             history_trends_loading: false,
+            history_trends_error: None,
+            history_trends_request_id: 0,
+            history_trends_baseline_id: None,
             selected_result_task_id: None,
+            diagnostic_filter: String::new(),
+            diagnostic_raw_output: false,
+            analysis_runtime: None,
+            analysis_receiver: None,
+            analysis_wait: None,
+            analysis_request_id: 0,
+            analysis_pending: None,
+            diagnostic_analyses: HashMap::new(),
+            issue_prioritization_pending: None,
+            issue_prioritization: IssuePrioritizationDisplay::default(),
             network_connections: None,
             network_loading: false,
             ai_mode: AiMode::Assistant,
@@ -4465,6 +10305,7 @@ impl Component for WfdiagSpike {
             status,
             diagnostic_results,
             previous_diagnostic_snapshot: None,
+            targeted_diagnostic_overlay: None,
             diagnostic_catalog,
             diagnostic_runtime,
             diagnostic_receiver,
@@ -4481,6 +10322,7 @@ impl Component for WfdiagSpike {
             },
             diagnostic_scan_policy: None,
             diagnostic_expected_task_ids: Vec::new(),
+            diagnostic_task_statuses: HashMap::new(),
             diagnostic_session_id: None,
             diagnostic_scan_start: None,
             diagnostic_duration_ms: if has_fixture_scan { 2_300 } else { 0 },
@@ -4511,6 +10353,7 @@ impl Component for WfdiagSpike {
                 _ if fixture_mode => MonitorHistory::fixture_258(),
                 _ => MonitorHistory::default(),
             },
+            monitor_error,
             native_monitor,
             backend_receiver,
             backend_wait,
@@ -4527,48 +10370,82 @@ impl Component for WfdiagSpike {
     }
 
     fn update(&mut self, message: Message, context: &ComponentContext<Self>) {
-        self.ensure_window_hook();
+        self.ensure_window_hook(context);
         match message {
+            Message::NativeSignalReady => {
+                for pending in self.drain_native_messages() {
+                    self.update(pending, context);
+                }
+            }
+            Message::WindowHookBootstrap => {}
             Message::Navigate(Some(tag)) => {
                 if let Some(page) = Page::from_tag(&tag) {
-                    let entering_processes =
-                        page == Page::Processes && self.page != Page::Processes;
-                    let entering_history = page == Page::History && self.page != Page::History;
-                    let entering_ai = page == Page::Ai && self.page != Page::Ai;
-                    self.page = page;
-                    if entering_processes {
-                        self.process_offset = 0;
-                        self.selected_process_pid = None;
-                        self.request_process_page(context, false);
-                    }
-                    if entering_history {
-                        self.request_history_list(context);
-                    }
-                    if entering_ai {
-                        self.request_ai_provider_status(context);
-                    }
+                    self.navigate_to_page(page, context);
                 } else if tag == "quick-scan" {
-                    self.page = Page::Diagnostics;
+                    self.transition_to_page(Page::Diagnostics);
                     self.begin_diagnostic_scan(ScanKind::Quick, context);
                 } else {
                     match tag.as_str() {
                         "export" => self.request_export_to_file(context),
                         "share" => self.request_share_to_windowsforum(context),
+                        "email" => self.request_email_report(context),
                         _ => (),
                     }
                 }
             }
             Message::WindowSize(size) => self.window_size = size,
-            Message::TogglePane => self.pane_open = !self.pane_open,
+            Message::ColorSchemeChanged(color_scheme) => {
+                self.effective_color_scheme = color_scheme;
+            }
+            Message::TogglePane => self.toggle_navigation_rail(context),
+            Message::ToggleTheme => {
+                self.handle_palette_command("toggle-theme".to_string(), context);
+            }
             Message::OpenAbout => self.open_about(),
             Message::TogglePalette => {
-                self.palette_open = !self.palette_open;
-                self.palette_query.clear();
+                self.set_palette_visibility(!self.palette_open, context);
             }
-            Message::ClosePalette => self.palette_open = false,
-            Message::PaletteQueryChanged(value) => self.palette_query = value,
+            Message::ClosePalette => {
+                self.set_palette_visibility(false, context);
+            }
+            Message::PaletteFocusReady { epoch, action } => {
+                if self.palette_dialog_epoch == epoch {
+                    self.palette_focus_task = None;
+                    match action {
+                        PaletteFocusAction::FocusQuery if self.palette_open => {
+                            let _ = self.palette_query_reference.request_focus();
+                        }
+                        PaletteFocusAction::RestorePrevious if !self.palette_open => {
+                            // A ContentDialog is a native popup. Reactivate its
+                            // owner before restoring the exact XAML element so
+                            // the disappearing InputSite cannot retain global
+                            // keyboard focus.
+                            instance_support::activate_main_window();
+                            if !focus_support::restore_pre_palette_focus() {
+                                let _ = self.palette_button_reference.request_focus();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Message::PaletteFocusCancelled { epoch } | Message::PaletteFocusRejected { epoch } => {
+                if self.palette_dialog_epoch == epoch {
+                    self.palette_focus_task = None;
+                }
+            }
+            Message::PaletteQueryChanged(value) => {
+                self.palette_query = value;
+                self.palette_active_index = 0;
+            }
+            Message::PaletteActiveChanged(index) => {
+                let match_count =
+                    palette_visible_matches(self.palette_command_specs(), &self.palette_query)
+                        .len();
+                self.palette_active_index = index.min(match_count.saturating_sub(1));
+            }
             Message::PaletteCommand(tag) => {
-                self.palette_open = false;
+                self.set_palette_visibility(false, context);
                 self.handle_palette_command(tag, context);
             }
             Message::ShowShortcutHelp => self.shortcut_help_open = true,
@@ -4576,15 +10453,198 @@ impl Component for WfdiagSpike {
             Message::ProviderKeyDraftChanged(index, value) => {
                 if let Some(draft) = self.provider_key_drafts.get_mut(index) {
                     *draft = value;
+                    let setup_uses_key = matches!(
+                        (self.provider_setup_index, index),
+                        (5, 0) | (6, 1) | (7, 2) | (8, 3) | (9, 4)
+                    );
+                    if setup_uses_key {
+                        self.schedule_provider_model_refresh(context);
+                    }
                 }
             }
             Message::StoreProviderKey(index) => {
                 self.submit_provider_key(index, true);
             }
+            Message::DiagnosticFilterChanged(value) => {
+                self.diagnostic_filter = value;
+                let selected_visible = self.selected_result_task_id.as_deref().is_some_and(|id| {
+                    self.diagnostic_results.iter().any(|result| {
+                        result.task_id == id
+                            && diagnostic_matches_filter(
+                                result,
+                                &self.diagnostic_catalog,
+                                &self.diagnostic_filter,
+                            )
+                    })
+                });
+                if !selected_visible {
+                    self.selected_result_task_id = self
+                        .diagnostic_results
+                        .iter()
+                        .find(|result| {
+                            diagnostic_matches_filter(
+                                result,
+                                &self.diagnostic_catalog,
+                                &self.diagnostic_filter,
+                            )
+                        })
+                        .map(|result| result.task_id.clone());
+                    self.diagnostic_raw_output = false;
+                }
+            }
+            Message::SetDiagnosticRaw(raw) => {
+                self.diagnostic_raw_output = raw;
+            }
             Message::SelectDiagnosticResult(task_id) => {
-                eprintln!("[trace] SelectDiagnosticResult message: {task_id}");
                 self.selected_result_task_id = Some(task_id.clone());
+                self.diagnostic_raw_output = false;
                 self.status = format!("Selected diagnostic: {task_id}");
+            }
+            Message::AnalyzeSelectedDiagnostic => {
+                self.begin_selected_diagnostic_analysis(false, context);
+            }
+            Message::RetrySelectedDiagnosticAnalysis => {
+                self.begin_selected_diagnostic_analysis(true, context);
+            }
+            Message::CancelDiagnosticAnalysis => {
+                if let Some(pending) = self.analysis_pending.as_ref()
+                    && self
+                        .analysis_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.cancel(pending.request_id))
+                {
+                    self.status = "Cancelling the diagnostic interpretation…".to_string();
+                }
+            }
+            Message::AnalysisWorkerEventReceived(event) => {
+                self.analysis_wait = None;
+                if self
+                    .issue_prioritization_pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.request_id == event.request_id())
+                {
+                    self.apply_issue_prioritization_event(*event, context);
+                    return;
+                }
+                let Some(pending_request_id) = self
+                    .analysis_pending
+                    .as_ref()
+                    .map(|pending| pending.request_id)
+                else {
+                    self.resume_analysis_wait(context);
+                    return;
+                };
+                if pending_request_id != event.request_id() {
+                    self.resume_analysis_wait(context);
+                    return;
+                }
+                let task_id = self
+                    .analysis_pending
+                    .as_ref()
+                    .map(|pending| pending.attempt.generation.task_id.clone())
+                    .unwrap_or_default();
+                match *event {
+                    AnalysisWorkerEvent::Ack {
+                        provider_use,
+                        grounding,
+                        cached,
+                        ..
+                    } => {
+                        let display = self.diagnostic_analyses.entry(task_id).or_default();
+                        display.provider_use = Some(provider_use);
+                        display.grounding = grounding;
+                        display.cached = cached;
+                        display.busy = true;
+                        self.status = if cached {
+                            "Loading the cached diagnostic interpretation…".to_string()
+                        } else {
+                            "The AI provider is interpreting the diagnostic…".to_string()
+                        };
+                        self.resume_analysis_wait(context);
+                    }
+                    AnalysisWorkerEvent::Done {
+                        interpretation,
+                        provider_use,
+                        grounding,
+                        cached,
+                        ..
+                    } => {
+                        self.analysis_pending = None;
+                        let provider = provider_use.provider_id.clone();
+                        let display = self.diagnostic_analyses.entry(task_id).or_default();
+                        display.interpretation = Some(interpretation);
+                        display.provider_use = Some(provider_use);
+                        display.grounding = grounding;
+                        display.cached = cached;
+                        display.error = None;
+                        display.busy = false;
+                        self.status = if cached {
+                            format!("Diagnostic interpretation ready · {provider} · cached")
+                        } else {
+                            format!("Diagnostic interpretation ready · {provider}")
+                        };
+                    }
+                    AnalysisWorkerEvent::Failed {
+                        route,
+                        provider_use,
+                        grounding,
+                        message,
+                        retryable,
+                        ..
+                    } => {
+                        let Some(mut pending) = self.analysis_pending.take() else {
+                            self.resume_analysis_wait(context);
+                            return;
+                        };
+                        let next_local = retryable.then(|| {
+                            next_auto_local_route(
+                                route.preference,
+                                &pending.attempt.tried,
+                                route.availability,
+                            )
+                        });
+                        if let Some(Some(provider)) = next_local {
+                            pending.attempt.tried.push(provider);
+                            pending.attempt.generation.route.provider = provider;
+                            pending.attempt.generation.route.fallback_from =
+                                Some(pending.attempt.initial_provider);
+                            if self.queue_diagnostic_analysis(pending.attempt, context) {
+                                return;
+                            }
+                        }
+                        let display = self.diagnostic_analyses.entry(task_id).or_default();
+                        display.provider_use = Some(provider_use);
+                        display.grounding = grounding;
+                        display.error = Some(message.clone());
+                        display.busy = false;
+                        self.status = format!("Diagnostic interpretation failed · {message}");
+                    }
+                    AnalysisWorkerEvent::Cancelled {
+                        provider_use,
+                        grounding,
+                        ..
+                    } => {
+                        self.analysis_pending = None;
+                        let display = self.diagnostic_analyses.entry(task_id).or_default();
+                        display.provider_use = Some(provider_use);
+                        display.grounding = grounding;
+                        display.busy = false;
+                        display.error = None;
+                        self.status = "Diagnostic interpretation cancelled".to_string();
+                    }
+                }
+            }
+            Message::AnalysisWorkerStopped => {
+                self.analysis_wait = None;
+                self.analysis_pending = None;
+                self.issue_prioritization_pending = None;
+                self.analysis_receiver = None;
+                self.analysis_runtime = None;
+                for display in self.diagnostic_analyses.values_mut() {
+                    display.busy = false;
+                }
+                self.issue_prioritization.busy = false;
+                self.status = "Native one-shot AI worker stopped".to_string();
             }
             Message::RequestNetworkConnections => {
                 if self.deterministic_visual || self.network_loading {
@@ -4598,8 +10658,8 @@ impl Component for WfdiagSpike {
                             .build();
                         let result = match runtime {
                             Ok(runtime) => {
-                                let connections =
-                                    runtime.block_on(wfdiag_native_monitor::get_network_connections());
+                                let connections = runtime
+                                    .block_on(wfdiag_native_monitor::get_network_connections());
                                 Ok(connections)
                             }
                             Err(error) => Err(error.to_string()),
@@ -4637,63 +10697,44 @@ impl Component for WfdiagSpike {
             Message::ClearProviderKey(index) => {
                 self.provider_key_drafts[index] = String::new();
                 self.submit_provider_key(index, false);
+                self.schedule_provider_model_refresh(context);
             }
             Message::ToggleClearHistoryConfirm(open) => {
                 self.history_clear_confirm = open;
             }
-            Message::RequestHistoryTrends => {
-                if self.deterministic_visual || self.history_trends_loading {
-                    return;
-                }
-                let Some(runtime) = self.history_runtime.as_ref().map(Arc::clone) else {
-                    self.status = "Native history is unavailable".to_string();
+            Message::BeginHistoryLabelEdit => {
+                let Some(scan_id) = self.selected_history_id.as_deref() else {
                     return;
                 };
-                self.history_trends_loading = true;
-                match runtime.request_trends(20) {
-                    Ok(mut reply) => {
-                        context.spawn_background_with_rejection(
-                            move |cancellation| loop {
-                                if cancellation.is_cancelled() {
-                                    return Message::HistoryTrendsFinished(Box::new(Err(
-                                        "The Reactor background queue rejected trends".to_string(),
-                                    )));
-                                }
-                                match reply.try_recv() {
-                                    Ok(result) => {
-                                        return Message::HistoryTrendsFinished(Box::new(
-                                            result.map_err(|error| error.to_string()),
-                                        ));
-                                    }
-                                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                                        std::thread::sleep(Duration::from_millis(50));
-                                    }
-                                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                                        return Message::HistoryTrendsFinished(Box::new(Err(
-                                            "Native history worker stopped".to_string(),
-                                        )));
-                                    }
-                                }
-                            },
-                            Message::HistoryTrendsFinished(Box::new(Err(
-                                "The Reactor background queue rejected trends".to_string(),
-                            ))),
-                        );
-                    }
-                    Err(error) => {
-                        self.history_trends_loading = false;
-                        self.status = error.to_string();
-                    }
-                }
+                self.history_label_draft =
+                    history_label_draft_for_selection(&self.history_summaries, scan_id);
+                self.history_label_editing = true;
             }
-            Message::HistoryTrendsFinished(result) => {
+            Message::CancelHistoryLabelEdit => {
+                if let Some(scan_id) = self.selected_history_id.as_deref() {
+                    self.history_label_draft =
+                        history_label_draft_for_selection(&self.history_summaries, scan_id);
+                }
+                self.history_label_editing = false;
+            }
+            Message::HistoryLabelDraftChanged(value) => {
+                self.history_label_draft = value;
+            }
+            Message::SaveHistoryLabel => {
+                self.request_history_label_save(context);
+            }
+            Message::RequestHistoryTrends => self.request_history_trends(context),
+            Message::HistoryTrendsFinished { request_id, result } => {
+                if request_id != self.history_trends_request_id {
+                    return;
+                }
                 self.history_trends_loading = false;
                 match *result {
                     Ok(trends) => {
-                        self.status = format!("Failure trends loaded for {} tasks", trends.len());
                         self.history_trends = Some(trends);
+                        self.history_trends_error = None;
                     }
-                    Err(message) => self.status = message,
+                    Err(message) => self.history_trends_error = Some(message),
                 }
             }
             Message::ClearHistoryConfirmed => {
@@ -4710,17 +10751,45 @@ impl Component for WfdiagSpike {
                 self.history_ack_busy = false;
                 match (kind, result) {
                     (HistoryAckKind::Clear, Ok(())) => {
+                        if let Some(task) = self.history_request_task.take() {
+                            task.cancel();
+                        }
+                        if let Some(task) = self.history_compare_task.take() {
+                            task.cancel();
+                        }
+                        self.history_loading = false;
                         self.history_summaries.clear();
                         self.selected_history_id = None;
                         self.history_comparison = None;
+                        self.clear_history_task_diff();
+                        self.invalidate_history_trends();
+                        self.history_label_draft.clear();
+                        self.history_label_editing = false;
                         self.history_tag_draft.clear();
                         self.status = "Scan history cleared".to_string();
+                    }
+                    (HistoryAckKind::Label, Ok(())) => {
+                        self.history_label_editing = false;
+                        self.status = if self.history_label_draft.trim().is_empty() {
+                            "Label removed".to_string()
+                        } else {
+                            "Label saved".to_string()
+                        };
+                        self.request_history_list(context);
                     }
                     (HistoryAckKind::Tags, Ok(())) => {
                         self.status = "Tags saved".to_string();
                         self.request_history_list(context);
                     }
-                    (_, Err(message)) => self.status = message,
+                    (HistoryAckKind::Label, Err(message)) => {
+                        self.status = format!("Could not save label · {message}");
+                    }
+                    (HistoryAckKind::Tags, Err(message)) => {
+                        self.status = format!("Could not save tags · {message}");
+                    }
+                    (HistoryAckKind::Clear, Err(message)) => {
+                        self.status = format!("Could not clear history · {message}");
+                    }
                 }
             }
             Message::AboutClosed { epoch } => self.close_about(epoch),
@@ -4820,46 +10889,156 @@ impl Component for WfdiagSpike {
                     self.update_notice_remaining = Duration::ZERO;
                 }
             }
-            Message::OpenSettings => self.open_settings(),
+            Message::OpenSettings => self.open_settings(context),
             Message::SettingsDialog { epoch, action } => {
-                self.apply_settings_dialog_action(epoch, action);
+                self.apply_settings_dialog_action(epoch, action, context);
             }
             Message::SettingsRuntimeEvent(event) => {
                 self.apply_settings_event(*event, context);
             }
             Message::SettingsWorkerStopped => {
                 self.settings_wait = None;
+                apply_startup_scan_preference(&mut self.startup_scan_gate, false);
                 self.settings_loading = false;
                 self.settings_saving = false;
                 self.settings_load_request_id = None;
                 self.settings_pending_save = None;
+                self.provider_key_pending = None;
+                self.provider_key_busy = false;
+                window_support::set_close_to_tray(self.settings_snapshot.close_to_tray);
                 self.settings_error = Some("Native settings worker stopped".to_string());
                 self.settings_save_error = None;
                 self.settings_receiver = None;
                 self.settings_runtime = None;
                 self.status = "Native settings persistence stopped".to_string();
             }
-            Message::SettingsWaitCancelled => {
-                self.settings_wait = None;
+            Message::ProviderModelsRefreshDue {
+                dialog_epoch,
+                refresh_revision,
+                setup_index,
+            } => {
+                if refresh_revision == self.provider_catalog_refresh_revision {
+                    self.provider_catalog_refresh_task = None;
+                    if self.settings_dialog_is_current(dialog_epoch)
+                        && setup_index == self.provider_setup_index
+                    {
+                        if let Some(provider) = subscription_auth_provider_for_setup(setup_index)
+                            && self.subscription_auth_pending.is_none()
+                        {
+                            self.begin_subscription_auth_operation(
+                                provider,
+                                SubscriptionAuthOperation::Status,
+                                context,
+                            );
+                        }
+                        // Claude's ACP catalog uses a pinned `npx -y` adapter
+                        // which may populate the local package cache. Keep that
+                        // material side effect behind the explicit Refresh
+                        // button even though the shipping React pane auto-loads.
+                        if provider_models_auto_discovery_allowed(setup_index) {
+                            self.begin_provider_model_refresh(setup_index, context);
+                        }
+                    }
+                }
             }
-            Message::SettingsWaitRejected => {
-                self.settings_wait = None;
-                self.settings_loading = false;
-                self.settings_saving = false;
-                self.settings_load_request_id = None;
-                self.settings_pending_save = None;
-                self.settings_error =
-                    Some("The Reactor background queue rejected settings delivery".to_string());
-                self.settings_save_error = None;
-                self.settings_receiver = None;
-                self.settings_runtime = None;
-                self.status = "Native settings delivery could not start".to_string();
+            Message::ProviderModelsRefreshCancelled { refresh_revision } => {
+                if refresh_revision == self.provider_catalog_refresh_revision {
+                    self.provider_catalog_refresh_task = None;
+                }
+            }
+            Message::ProviderModelsRefreshRejected { refresh_revision } => {
+                if refresh_revision == self.provider_catalog_refresh_revision {
+                    self.provider_catalog_refresh_task = None;
+                    if let Some(state) = self.provider_catalogs.get_mut(self.provider_setup_index) {
+                        state.loading = false;
+                        state.error = Some(
+                            "The Reactor background queue rejected model refresh scheduling"
+                                .to_string(),
+                        );
+                        state.stale = state.catalog.is_some();
+                    }
+                }
+            }
+            Message::RefreshProviderModels => {
+                if let Some(task) = self.provider_catalog_refresh_task.take() {
+                    task.cancel();
+                }
+                self.provider_catalog_refresh_revision =
+                    self.provider_catalog_refresh_revision.wrapping_add(1);
+                if let Some(provider) =
+                    subscription_auth_provider_for_setup(self.provider_setup_index)
+                    && self.subscription_auth_pending.is_none()
+                {
+                    self.begin_subscription_auth_operation(
+                        provider,
+                        SubscriptionAuthOperation::Status,
+                        context,
+                    );
+                }
+                self.begin_provider_model_refresh(self.provider_setup_index, context);
+            }
+            Message::CancelProviderModels => self.cancel_provider_model_request(),
+            Message::ProviderSetupWorkerEventReceived(event) => {
+                self.apply_provider_setup_event(*event, context);
+            }
+            Message::ProviderSetupWorkerStopped => {
+                self.stop_provider_setup_delivery("Native model discovery worker stopped");
+            }
+            Message::RefreshSubscriptionAuth(provider) => {
+                self.begin_subscription_auth_operation(
+                    provider,
+                    SubscriptionAuthOperation::Status,
+                    context,
+                );
+            }
+            Message::StartSubscriptionSignIn(provider) => {
+                self.begin_subscription_auth_operation(
+                    provider,
+                    SubscriptionAuthOperation::SignIn,
+                    context,
+                );
+            }
+            Message::StartSubscriptionSignOut(provider) => {
+                self.begin_subscription_auth_operation(
+                    provider,
+                    SubscriptionAuthOperation::SignOut,
+                    context,
+                );
+            }
+            Message::CancelSubscriptionAuth => self.cancel_subscription_auth(),
+            Message::SubscriptionAuthWorkerEventReceived(event) => {
+                self.apply_subscription_auth_event(*event, context);
+            }
+            Message::SubscriptionAuthWorkerStopped => {
+                self.stop_subscription_auth_delivery("Native subscription account worker stopped");
+            }
+            Message::RequestSubscriptionInstall(provider) => {
+                self.request_subscription_install(provider);
+            }
+            Message::SubscriptionInstallPromptClosed { prompt, result } => {
+                if self.subscription_install_prompt != Some(prompt) {
+                    return;
+                }
+                self.subscription_install_prompt = None;
+                if result == ContentDialogResult::Primary {
+                    self.begin_subscription_install(prompt, context);
+                }
+            }
+            Message::CancelSubscriptionInstall => self.cancel_subscription_install(),
+            Message::SubscriptionInstallWorkerEventReceived(event) => {
+                self.apply_subscription_install_event(*event, context);
+            }
+            Message::SubscriptionInstallWorkerStopped => {
+                self.stop_subscription_install_delivery(
+                    "Native subscription CLI installer worker stopped",
+                );
             }
             Message::SystemRuntimeCompleted(completion) => {
                 self.apply_system_completion(*completion, context);
             }
             Message::SystemWorkerStopped => {
                 self.stop_system_delivery("Native system information worker stopped");
+                self.maybe_begin_startup_scan(context);
             }
             Message::SystemWaitCancelled => {
                 self.system_wait = None;
@@ -4868,6 +11047,7 @@ impl Component for WfdiagSpike {
                 self.stop_system_delivery(
                     "The Reactor background queue rejected native system information delivery",
                 );
+                self.maybe_begin_startup_scan(context);
             }
             Message::IssueRuntimeCompleted(completion) => {
                 self.apply_issue_completion(*completion, context);
@@ -4924,7 +11104,9 @@ impl Component for WfdiagSpike {
                 self.diagnostic_duration_ms = 0;
                 self.diagnostic_current_task = None;
                 self.diagnostic_session_id = Some(session_id.clone());
-                self.diagnostic_results.clear();
+                if self.targeted_diagnostic_overlay.is_none() {
+                    self.diagnostic_results.clear();
+                }
                 self.status = format!("{} started", scan_kind_label(scan_kind));
 
                 if self.diagnostic_cancel_requested {
@@ -4939,6 +11121,9 @@ impl Component for WfdiagSpike {
                 self.diagnostic_cancel_requested = false;
                 self.restore_previous_diagnostics();
                 self.reset_diagnostic_activity();
+                self.mark_pending_ai_preparation_error(format!(
+                    "The prerequisite scan could not start: {error}"
+                ));
                 self.status = format!("Could not start diagnostics · {error}");
             }
             Message::DiagnosticRunFinished {
@@ -4965,8 +11150,10 @@ impl Component for WfdiagSpike {
 
                 if cancelled {
                     self.restore_previous_diagnostics();
-                    self.diagnostic_session_id = None;
                     self.reset_diagnostic_activity();
+                    self.mark_pending_ai_preparation_error(
+                        "The prerequisite scan was stopped. Retry when ready.",
+                    );
                     self.status = format!("{label} stopped · previous results restored");
                 } else {
                     let authoritative_results = match authoritative_results {
@@ -4975,8 +11162,12 @@ impl Component for WfdiagSpike {
                             let stopped =
                                 self.diagnostic_cancel_requested || self.diagnostic_cancelling;
                             self.restore_previous_diagnostics();
-                            self.diagnostic_session_id = None;
                             self.reset_diagnostic_activity();
+                            self.mark_pending_ai_preparation_error(if stopped {
+                                "The prerequisite scan was stopped. Retry when ready.".to_string()
+                            } else {
+                                format!("The prerequisite scan failed: {error}")
+                            });
                             self.status = if stopped {
                                 format!("{label} stopped · previous results restored")
                             } else {
@@ -4992,8 +11183,10 @@ impl Component for WfdiagSpike {
                     ) {
                         let completed_count = authoritative_results.len();
                         self.restore_previous_diagnostics();
-                        self.diagnostic_session_id = None;
                         self.reset_diagnostic_activity();
+                        self.mark_pending_ai_preparation_error(
+                            "The prerequisite scan returned incomplete evidence. Retry the scan.",
+                        );
                         self.status = format!(
                             "{label} returned an invalid result set ({completed_count} results for {expected_count} expected checks) · previous results restored"
                         );
@@ -5004,6 +11197,20 @@ impl Component for WfdiagSpike {
                         &authoritative_results,
                         &self.diagnostic_catalog,
                     );
+                    if self.targeted_diagnostic_overlay.is_some() {
+                        if let Err(error) = self.commit_targeted_diagnostic_overlay(
+                            &session_id,
+                            &authoritative_results,
+                            context,
+                        ) {
+                            self.restore_previous_diagnostics();
+                            self.reset_diagnostic_activity();
+                            self.status = format!(
+                                "Targeted Scan failed · {error} · previous results restored"
+                            );
+                        }
+                        return;
+                    }
                     self.diagnostic_results = results;
                     self.update_diagnostic_counts();
                     // Issue detection is tied to the complete authoritative
@@ -5017,6 +11224,9 @@ impl Component for WfdiagSpike {
             }
             Message::DiagnosticRunRejected => {
                 let label = self.diagnostic_scan_kind.map_or("Scan", scan_kind_label);
+                self.mark_pending_ai_preparation_error(
+                    "The prerequisite scan could not enter the background queue.",
+                );
                 self.status = format!("{label} could not enter the Reactor background queue");
                 self.diagnostic_run_task = None;
                 self.request_diagnostic_cancel(context);
@@ -5029,7 +11239,7 @@ impl Component for WfdiagSpike {
                     && self.diagnostic_session_id.as_deref() == Some(&session_id)
                 {
                     self.diagnostic_finalization_task = None;
-                    self.finish_completed_diagnostic_scan(None);
+                    self.finish_completed_diagnostic_scan(None, context);
                 }
             }
             Message::DiagnosticFinalizationRejected { session_id } => {
@@ -5037,9 +11247,10 @@ impl Component for WfdiagSpike {
                     && self.diagnostic_session_id.as_deref() == Some(&session_id)
                 {
                     self.diagnostic_finalization_task = None;
-                    self.finish_completed_diagnostic_scan(Some(
-                        "the Reactor background queue rejected scan finalization".to_string(),
-                    ));
+                    self.finish_completed_diagnostic_scan(
+                        Some("the Reactor background queue rejected scan finalization".to_string()),
+                        context,
+                    );
                 }
             }
             Message::DiagnosticHistorySaveFinished { session_id, result } => {
@@ -5053,7 +11264,7 @@ impl Component for WfdiagSpike {
                 if saved {
                     self.history_error = None;
                 }
-                self.finish_completed_diagnostic_scan(result.err());
+                self.finish_completed_diagnostic_scan(result.err(), context);
                 if saved && self.page == Page::History {
                     self.request_history_list(context);
                 }
@@ -5063,9 +11274,10 @@ impl Component for WfdiagSpike {
                     && self.diagnostic_session_id.as_deref() == Some(&session_id)
                 {
                     self.diagnostic_history_save_task = None;
-                    self.finish_completed_diagnostic_scan(Some(
-                        "the scan-history acknowledgement was cancelled".to_string(),
-                    ));
+                    self.finish_completed_diagnostic_scan(
+                        Some("the scan-history acknowledgement was cancelled".to_string()),
+                        context,
+                    );
                 }
             }
             Message::DiagnosticHistorySaveRejected { session_id } => {
@@ -5073,9 +11285,13 @@ impl Component for WfdiagSpike {
                     && self.diagnostic_session_id.as_deref() == Some(&session_id)
                 {
                     self.diagnostic_history_save_task = None;
-                    self.finish_completed_diagnostic_scan(Some(
-                        "the Reactor background queue rejected scan-history delivery".to_string(),
-                    ));
+                    self.finish_completed_diagnostic_scan(
+                        Some(
+                            "the Reactor background queue rejected scan-history delivery"
+                                .to_string(),
+                        ),
+                        context,
+                    );
                 }
             }
             Message::DiagnosticCancelFinished { session_id, error } => {
@@ -5098,8 +11314,10 @@ impl Component for WfdiagSpike {
                     // cancellation acknowledgement is terminal in that case.
                     let label = self.diagnostic_scan_kind.map_or("Scan", scan_kind_label);
                     self.restore_previous_diagnostics();
-                    self.diagnostic_session_id = None;
                     self.reset_diagnostic_activity();
+                    self.mark_pending_ai_preparation_error(
+                        "The prerequisite scan was stopped. Retry when ready.",
+                    );
                     self.status = format!("{label} stopped · previous results restored");
                 } else {
                     // Do not make the cancellation acknowledgement terminal
@@ -5143,30 +11361,14 @@ impl Component for WfdiagSpike {
                     self.diagnostic_runtime.take();
                     if self.diagnostics_busy() && !self.diagnostic_finalizing {
                         self.restore_previous_diagnostics();
-                        self.diagnostic_session_id = None;
                         self.reset_diagnostic_activity();
                     }
                     if !self.diagnostic_finalizing {
+                        self.mark_pending_ai_preparation_error(
+                            "Native diagnostic delivery stopped before the prerequisite scan completed.",
+                        );
                         self.status = "Native diagnostic event delivery stopped".to_string();
                     }
-                } else if let Some(receiver) = self.diagnostic_receiver.as_ref() {
-                    self.diagnostic_wait =
-                        Some(spawn_diagnostic_wait(context, Arc::clone(receiver)));
-                }
-            }
-            Message::DiagnosticWaitRejected => {
-                self.diagnostic_wait = None;
-                if let Some(receiver) = self.diagnostic_receiver.take() {
-                    receiver.close();
-                }
-                self.diagnostic_runtime.take();
-                if self.diagnostics_busy() && !self.diagnostic_finalizing {
-                    self.restore_previous_diagnostics();
-                    self.diagnostic_session_id = None;
-                    self.reset_diagnostic_activity();
-                }
-                if !self.diagnostic_finalizing {
-                    self.status = "Native diagnostic delivery could not continue".to_string();
                 }
             }
             Message::AiStatusFinished { request_id, result } => {
@@ -5187,10 +11389,18 @@ impl Component for WfdiagSpike {
                                 format!("AI provider ready · {active}")
                             };
                         }
+                        if active != AIProvider::None && self.pending_ai_intent.is_some() {
+                            self.resume_pending_ai_intent(context);
+                        } else if active == AIProvider::None && self.pending_ai_intent.is_some() {
+                            self.mark_pending_ai_preparation_error(
+                                "Set up an available AI provider before continuing",
+                            );
+                        }
                     }
                     Err(error) => {
                         self.ai_provider_status = None;
                         self.ai_status_error = Some(error.clone());
+                        self.mark_pending_ai_preparation_error(error.clone());
                         if self.page == Page::Ai {
                             self.status = format!("AI provider check failed · {error}");
                         }
@@ -5201,6 +11411,9 @@ impl Component for WfdiagSpike {
                 if request_id == self.ai_status_request_id {
                     self.ai_status_task = None;
                     self.ai_status_loading = false;
+                    self.mark_pending_ai_preparation_error(
+                        "AI provider discovery was cancelled. Retry when ready.",
+                    );
                 }
             }
             Message::AiStatusRejected { request_id } => {
@@ -5211,14 +11424,114 @@ impl Component for WfdiagSpike {
                     self.ai_status_error = Some(
                         "The Reactor background queue rejected AI provider discovery".to_string(),
                     );
+                    self.mark_pending_ai_preparation_error(
+                        "The Reactor background queue rejected AI provider discovery",
+                    );
                 }
             }
             Message::CancelChat => {
-                if self.chat_runtime.as_ref().is_some_and(NativeChatRuntime::cancel) {
+                if let Some(pending) = self.cloud_fallback_policy_update.take() {
+                    self.finish_chat_attempt_cancelled(pending.consent.attempt.logical_request_id);
+                    return;
+                }
+                if let Some(consent) = self.cloud_fallback_consent.take() {
+                    self.finish_chat_attempt_cancelled(consent.attempt.logical_request_id);
+                    return;
+                }
+                let logical_request_id = self.chat_attempt.as_ref().map_or_else(
+                    || self.chat_pending.unwrap_or_default(),
+                    |attempt| attempt.logical_request_id,
+                );
+                if self
+                    .chat_runtime
+                    .as_ref()
+                    .is_some_and(NativeChatRuntime::cancel)
+                {
                     self.status = "Cancelling the AI response…".to_string();
+                } else if self.chat_pending.is_some() {
+                    self.finish_chat_attempt_cancelled(logical_request_id);
+                    self.status =
+                        "AI response stopped locally · native cancellation was unavailable"
+                            .to_string();
                 }
             }
+            Message::NewConversation => {
+                if self.chat_pending.is_some() || self.chat_interaction_blocked() {
+                    self.status =
+                        "Finish or cancel the current AI request before starting a new conversation"
+                            .to_string();
+                    return;
+                }
+                // An uninitialized lazy worker has no native conversation to
+                // reset; clearing the local transcript is already complete.
+                let reset = self
+                    .chat_runtime
+                    .as_ref()
+                    .is_none_or(NativeChatRuntime::new_session);
+                self.chat_pending = None;
+                self.chat_attempt = None;
+                self.chat_answer = None;
+                self.chat_input.clear();
+                self.chat_focus_revision = self.chat_focus_revision.wrapping_add(1);
+                self.chat_last_prompt = None;
+                self.chat_messages.clear();
+                self.full_scan_consent = None;
+                self.cloud_fallback_consent = None;
+                self.cloud_fallback_policy_update = None;
+                if matches!(self.pending_ai_intent, Some(PendingAiIntent::Chat { .. })) {
+                    self.pending_ai_intent = None;
+                    self.pending_ai_preparation_error = None;
+                }
+                self.status = if reset {
+                    "New AI conversation started".to_string()
+                } else {
+                    "The native AI conversation could not be reset".to_string()
+                };
+            }
+            Message::AllowCloudFallback => {
+                self.persist_cloud_fallback_decision(CloudFallbackPolicy::Allow);
+            }
+            Message::NeverCloudFallback => {
+                self.persist_cloud_fallback_decision(CloudFallbackPolicy::Never);
+            }
+            Message::ApproveFullScan => {
+                if self.chat_pending.is_some() {
+                    self.status =
+                        "Wait for the current AI response to finish before starting the Full Scan"
+                            .to_string();
+                    return;
+                }
+                if self.diagnostics_busy() {
+                    self.status = "Wait for the active scan to finish before starting a Full Scan"
+                        .to_string();
+                    return;
+                }
+                let Some(consent) = self.full_scan_consent.take() else {
+                    return;
+                };
+                let current_scan_id = self
+                    .diagnostic_results
+                    .first()
+                    .map(|result| result.session_id.as_str());
+                if current_scan_id != Some(consent.source_scan_id.as_str()) {
+                    self.status =
+                        "The scan changed; ask again before running a Full Scan".to_string();
+                    return;
+                }
+                self.pending_ai_intent = Some(PendingAiIntent::Chat {
+                    prompt: consent.original_prompt,
+                });
+                self.pending_ai_preparation_error = None;
+                self.begin_diagnostic_scan(ScanKind::Full, context);
+            }
+            Message::DismissFullScan => {
+                self.full_scan_consent = None;
+                self.status = "Full Scan request dismissed".to_string();
+            }
             Message::ChatWorkerEventReceived(event) => {
+                // Each wait task receives exactly one event. Release its
+                // completed handle before attempting to arm the next wait.
+                self.chat_wait = None;
                 let Some(pending) = self.chat_pending else {
                     return;
                 };
@@ -5226,122 +11539,326 @@ impl Component for WfdiagSpike {
                     self.resume_chat_wait(context);
                     return;
                 }
+                let logical_request_id = self
+                    .chat_attempt
+                    .as_ref()
+                    .map_or(pending, |attempt| attempt.logical_request_id);
                 match *event {
                     ChatWorkerEvent::Delta { text, .. } => {
                         self.chat_answer
                             .get_or_insert_with(String::new)
                             .push_str(&text);
+                        if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
+                            message.text.push_str(&text);
+                        }
                         self.resume_chat_wait(context);
                     }
-                    ChatWorkerEvent::ToolActivity { summary, .. } => {
+                    ChatWorkerEvent::ToolActivity {
+                        history, summary, ..
+                    } => {
+                        if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
+                            message.tools = history;
+                        }
                         self.status = summary;
                         self.resume_chat_wait(context);
                     }
-                    ChatWorkerEvent::Done { provider, .. } => {
-                        self.chat_pending = None;
-                        self.chat_wait = None;
-                        self.status = format!("AI response complete · {provider}");
+                    ChatWorkerEvent::Proposal {
+                        remediation_id,
+                        issue_id,
+                        ..
+                    } => {
+                        if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
+                            message.proposals.push(format!(
+                                "{}{}",
+                                remediation_id,
+                                issue_id
+                                    .as_deref()
+                                    .map_or_else(String::new, |issue| format!(" for {issue}"))
+                            ));
+                        }
+                        self.prepare_remediation(remediation_id, issue_id, context);
+                        self.resume_chat_wait(context);
                     }
-                    ChatWorkerEvent::Failed { message, .. } => {
+                    ChatWorkerEvent::FullScanRequested {
+                        source_scan_id,
+                        reason,
+                        ..
+                    } => {
+                        let source_is_current = self
+                            .diagnostic_results
+                            .first()
+                            .is_some_and(|result| result.session_id == source_scan_id);
+                        if source_is_current && self.diagnostic_scan_kind != Some(ScanKind::Full) {
+                            self.full_scan_consent = Some(FullScanConsent {
+                                source_scan_id,
+                                reason,
+                                original_prompt: self.chat_last_prompt.clone().unwrap_or_default(),
+                            });
+                            self.status =
+                                "The AI assistant requested a Full Scan for more evidence"
+                                    .to_string();
+                        }
+                        self.resume_chat_wait(context);
+                    }
+                    ChatWorkerEvent::Done {
+                        provider,
+                        provider_use,
+                        finish_reason,
+                        tool_history,
+                        ..
+                    } => {
                         self.chat_pending = None;
-                        self.chat_wait = None;
-                        self.chat_answer = None;
+                        self.chat_attempt = None;
+                        let completion_notice = chat_completion_notice(&finish_reason);
+                        if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
+                            message.provider_use = Some(provider_use);
+                            message.finish_reason = Some(finish_reason);
+                            message.terminal_message = completion_notice.map(str::to_string);
+                            message.tools = tool_history;
+                        }
+                        self.status = completion_notice.map_or_else(
+                            || format!("AI response complete · {provider}"),
+                            |notice| format!("AI response complete · {provider} · {notice}"),
+                        );
+                        self.resume_pending_ai_intent(context);
+                    }
+                    ChatWorkerEvent::RetryableFailure {
+                        message,
+                        tool_history,
+                        ..
+                    } => {
+                        self.chat_pending = None;
+                        if let Some(display) = self.chat_assistant_message_mut(logical_request_id) {
+                            display.tools = tool_history;
+                        }
+                        let Some(mut attempt) = self.chat_attempt.take() else {
+                            self.finish_chat_attempt_failure(logical_request_id, message);
+                            self.resume_pending_ai_intent(context);
+                            return;
+                        };
+                        if attempt.first_failure.is_none() {
+                            attempt.first_failure = Some(message);
+                        }
+                        let Some(candidate) = next_fallback_candidate(
+                            attempt.preference,
+                            Some(attempt.current_provider),
+                            &attempt.tried,
+                            attempt.availability,
+                        ) else {
+                            let first_failure = attempt
+                                .first_failure
+                                .unwrap_or_else(|| "No fallback provider is available".to_string());
+                            self.finish_chat_attempt_failure(logical_request_id, first_failure);
+                            self.resume_pending_ai_intent(context);
+                            return;
+                        };
+                        let reason = attempt.first_failure.clone().unwrap_or_default();
+                        let consent = CloudFallbackConsent {
+                            previous_request_id: pending,
+                            attempt,
+                            candidate: candidate.provider,
+                            reason,
+                        };
+                        if candidate.crosses_local_to_cloud {
+                            match self.settings_snapshot.cloud_fallback_policy {
+                                CloudFallbackPolicy::Allow => {
+                                    self.continue_chat_fallback(consent, context);
+                                }
+                                CloudFallbackPolicy::Never => {
+                                    self.finish_chat_attempt_failure(
+                                        logical_request_id,
+                                        format!(
+                                            "{} Cloud fallback is disabled in Settings.",
+                                            consent.reason
+                                        ),
+                                    );
+                                    self.resume_pending_ai_intent(context);
+                                }
+                                CloudFallbackPolicy::Ask => {
+                                    self.chat_attempt = Some(consent.attempt.clone());
+                                    self.cloud_fallback_consent = Some(consent);
+                                    self.status =
+                                        "Local AI was unavailable · cloud permission required"
+                                            .to_string();
+                                    self.resume_chat_wait(context);
+                                }
+                            }
+                        } else {
+                            self.continue_chat_fallback(consent, context);
+                        }
+                    }
+                    ChatWorkerEvent::Failed {
+                        message,
+                        finish_reason,
+                        tool_history,
+                        ..
+                    } => {
+                        self.chat_pending = None;
+                        self.chat_attempt = None;
+                        if let Some(display) = self.chat_assistant_message_mut(logical_request_id) {
+                            display.finish_reason = Some(finish_reason);
+                            display.terminal_message = Some(message.clone());
+                            display.tools = tool_history;
+                        }
                         self.status = message;
+                        self.resume_pending_ai_intent(context);
                     }
-                    ChatWorkerEvent::Cancelled { .. } => {
+                    ChatWorkerEvent::Cancelled {
+                        finish_reason,
+                        tool_history,
+                        ..
+                    } => {
                         self.chat_pending = None;
-                        self.chat_wait = None;
+                        self.chat_attempt = None;
+                        if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
+                            message.finish_reason = Some(finish_reason);
+                            message.terminal_message = Some("Response cancelled".to_string());
+                            message.tools = tool_history;
+                        }
                         self.status = "AI response cancelled".to_string();
+                        self.resume_pending_ai_intent(context);
                     }
                 }
             }
             Message::ChatWorkerStopped => {
                 self.chat_wait = None;
                 self.chat_pending = None;
+                self.chat_attempt = None;
+                self.cloud_fallback_consent = None;
                 self.chat_receiver = None;
                 self.chat_runtime = None;
                 self.status = "Native AI chat worker stopped".to_string();
             }
-            Message::ChatWaitCancelled => {
-                self.chat_wait = None;
+            Message::GenerateReport => self.begin_report_generation(false, context),
+            Message::RegenerateReport => self.begin_report_generation(true, context),
+            Message::CancelPendingAiIntent => {
+                if self.pending_ai_intent.take().is_some() {
+                    self.pending_ai_preparation_error = None;
+                    self.status = if self.diagnostics_busy() {
+                        "AI request cancelled · the active diagnostic scan will continue"
+                            .to_string()
+                    } else {
+                        "AI request cancelled".to_string()
+                    };
+                }
             }
-            Message::ChatWaitRejected => {
-                self.chat_wait = None;
-                self.chat_pending = None;
-                self.status = "The native chat queue rejected a worker hand-off".to_string();
+            Message::RetryPendingAiIntent => {
+                if self.pending_ai_intent.is_none() {
+                    return;
+                }
+                self.pending_ai_preparation_error = None;
+                if !self.diagnostic_results.is_empty() {
+                    self.resume_pending_ai_intent(context);
+                } else if self.diagnostics_busy() {
+                    self.status = "Waiting for the active scan before continuing AI…".to_string();
+                } else {
+                    self.status = "Retrying the prerequisite Quick Scan…".to_string();
+                    self.begin_diagnostic_scan(ScanKind::Quick, context);
+                }
             }
-            Message::GenerateReport => {
-                if self.deterministic_visual {
-                    self.status = "Visual fixture mode · report generation is disabled".to_string();
+            Message::ExplainLatestScan => {
+                self.transition_to_page(Page::Ai);
+                self.ai_mode = AiMode::ScanReport;
+                self.begin_report_generation(false, context);
+            }
+            Message::ReportGenerationPrepared {
+                request_id,
+                generation,
+            } => {
+                self.report_prepare_task = None;
+                if self.report_pending != Some(request_id) {
                     return;
                 }
-                if self.report_pending.is_some() {
-                    self.status = "A report is already being generated…".to_string();
+                if let Err(error) = self.ensure_report_runtime() {
+                    self.report_pending = None;
+                    self.report_source_session_id = None;
+                    self.report_error = Some(error.clone());
+                    self.status = error;
                     return;
                 }
-                if !self.settings_snapshot.ai_enabled {
-                    self.status =
-                        "Enable AI insights in Settings before generating a report".to_string();
-                    return;
-                }
-                let Some(provider) = self
-                    .ai_provider_status
+                if self
+                    .report_runtime
                     .as_ref()
-                    .map(|status| status.active_provider)
-                    .filter(|provider| *provider != AIProvider::None)
-                else {
-                    self.status = "Set up an available AI provider before generating".to_string();
-                    return;
-                };
-                let Some(runtime) = self.report_runtime.as_ref() else {
-                    self.status = self
-                        .report_error
-                        .clone()
-                        .unwrap_or_else(|| "Native AI report generation is unavailable".to_string());
-                    return;
-                };
-                let Some(session_id) = self
-                    .diagnostic_results
-                    .first()
-                    .map(|result| result.session_id.clone())
-                else {
-                    self.status = "Run a scan before generating a report".to_string();
-                    return;
-                };
-                let Some(results) = self.export_results_snapshot() else {
-                    self.status = "Run a scan before generating a report".to_string();
-                    return;
-                };
-                let Some(request_id) = advance_nonzero_generation(&mut self.report_request_id)
-                else {
-                    self.status = "Native report request identity was exhausted".to_string();
-                    return;
-                };
-                self.report_text = None;
-                self.report_provider = None;
-                self.report_error = None;
-                self.report_pending = Some(request_id);
-                runtime.generate(
-                    request_id,
-                    ReportScan {
-                        session_id,
-                        results: (*results).clone(),
-                    },
-                    provider,
-                    false,
-                );
-                self.status = "Preparing AI report…".to_string();
-                self.resume_report_wait(context);
+                    .is_some_and(|runtime| runtime.generate(request_id, *generation))
+                {
+                    self.resume_report_wait(context);
+                } else {
+                    self.report_pending = None;
+                    self.report_source_session_id = None;
+                    self.report_error = Some("The native report queue is unavailable".to_string());
+                    self.status = "The native report queue is unavailable".to_string();
+                }
+            }
+            Message::ReportGenerationPreparationCancelled { request_id } => {
+                self.report_prepare_task = None;
+                if self.report_pending == Some(request_id) {
+                    self.report_pending = None;
+                    self.report_text = None;
+                    self.report_provider = None;
+                    self.report_provider_use = None;
+                    self.report_source_session_id = None;
+                    self.status = "AI report cancelled".to_string();
+                }
+            }
+            Message::ReportGenerationPreparationRejected { request_id } => {
+                self.report_prepare_task = None;
+                if self.report_pending == Some(request_id) {
+                    self.report_pending = None;
+                    self.report_text = None;
+                    self.report_provider = None;
+                    self.report_provider_use = None;
+                    self.report_source_session_id = None;
+                    self.report_error = Some(
+                        "The Reactor background queue rejected report preparation".to_string(),
+                    );
+                    self.status =
+                        "The Reactor background queue rejected report preparation".to_string();
+                }
             }
             Message::CancelReport => {
+                if let Some(task) = self.report_prepare_task.take() {
+                    task.cancel();
+                    self.report_pending = None;
+                    self.report_text = None;
+                    self.report_provider = None;
+                    self.report_provider_use = None;
+                    self.report_source_session_id = None;
+                    self.report_error = None;
+                    self.status = "AI report cancelled".to_string();
+                    return;
+                }
                 if let (Some(runtime), Some(pending)) =
                     (self.report_runtime.as_ref(), self.report_pending)
                     && runtime.cancel(pending)
                 {
                     self.status = "Cancelling the AI report…".to_string();
+                    return;
+                }
+                if self.report_pending.is_some() {
+                    self.report_pending = None;
+                    self.report_text = None;
+                    self.report_provider = None;
+                    self.report_provider_use = None;
+                    self.report_source_session_id = None;
+                    self.report_error = None;
+                    self.status = "AI report stopped locally · native cancellation was unavailable"
+                        .to_string();
+                }
+            }
+            Message::CopyReport => {
+                let Some(report) = self.report_text.as_deref() else {
+                    self.status = "There is no completed AI report to copy".to_string();
+                    return;
+                };
+                match write_text_to_clipboard(report) {
+                    Ok(()) => self.status = "AI report copied to the clipboard".to_string(),
+                    Err(error) => self.status = format!("Could not copy the AI report · {error}"),
                 }
             }
             Message::ReportWorkerEventReceived(event) => {
+                // See the chat path above: clear the completed one-event wait
+                // before deltas rearm it.
+                self.report_wait = None;
                 let Some(pending) = self.report_pending else {
                     return;
                 };
@@ -5349,17 +11866,55 @@ impl Component for WfdiagSpike {
                     self.resume_report_wait(context);
                     return;
                 }
+                let source_is_current = self.report_source_session_id.as_deref()
+                    == self
+                        .diagnostic_results
+                        .first()
+                        .map(|result| result.session_id.as_str());
+                if !source_is_current {
+                    if matches!(
+                        *event,
+                        ReportWorkerEvent::Ack { .. } | ReportWorkerEvent::Delta { .. }
+                    ) {
+                        self.resume_report_wait(context);
+                    } else {
+                        self.report_pending = None;
+                        self.report_text = None;
+                        self.report_provider = None;
+                        self.report_provider_use = None;
+                        self.report_source_session_id = None;
+                    }
+                    return;
+                }
                 match *event {
+                    ReportWorkerEvent::Ack {
+                        provider,
+                        provider_use,
+                        ..
+                    } => {
+                        self.report_provider = Some(provider);
+                        self.report_provider_use = Some(provider_use);
+                        self.resume_report_wait(context);
+                    }
                     ReportWorkerEvent::Delta { text, .. } => {
                         self.report_text
                             .get_or_insert_with(String::new)
                             .push_str(&text);
                         self.resume_report_wait(context);
                     }
-                    ReportWorkerEvent::Done { provider, cached, .. } => {
+                    ReportWorkerEvent::Done {
+                        provider,
+                        provider_use,
+                        cached,
+                        report,
+                        ..
+                    } => {
                         self.report_pending = None;
-                        self.report_wait = None;
+                        if let Some(report) = report {
+                            self.report_text = Some(report);
+                        }
                         self.report_provider = Some(provider.clone());
+                        self.report_provider_use = Some(provider_use);
                         self.status = if cached {
                             format!("AI report ready · {provider} · cached")
                         } else {
@@ -5368,13 +11923,19 @@ impl Component for WfdiagSpike {
                     }
                     ReportWorkerEvent::Failed { message, .. } => {
                         self.report_pending = None;
-                        self.report_wait = None;
+                        self.report_text = None;
+                        self.report_provider = None;
+                        self.report_provider_use = None;
+                        self.report_source_session_id = None;
                         self.report_error = Some(message.clone());
                         self.status = message;
                     }
                     ReportWorkerEvent::Cancelled { .. } => {
                         self.report_pending = None;
-                        self.report_wait = None;
+                        self.report_text = None;
+                        self.report_provider = None;
+                        self.report_provider_use = None;
+                        self.report_source_session_id = None;
                         self.report_error = None;
                         self.status = "AI report cancelled".to_string();
                     }
@@ -5387,44 +11948,98 @@ impl Component for WfdiagSpike {
                 self.report_runtime = None;
                 self.status = "Native AI report worker stopped".to_string();
             }
-            Message::ReportWaitCancelled => {
-                self.report_wait = None;
-            }
-            Message::ReportWaitRejected => {
-                self.report_wait = None;
-                self.report_pending = None;
-                self.status = "The native report queue rejected a worker hand-off".to_string();
-            }
             Message::RunRemediation(remediation_id) => {
-                if self.deterministic_visual {
-                    self.status =
-                        "Visual fixture mode · remediation is disabled".to_string();
+                if self.deterministic_visual
+                    && self.live_test_fixture != Some(LiveTestFixture::DeviceManager)
+                {
+                    self.status = "Visual fixture mode · remediation is disabled".to_string();
                     return;
                 }
                 let Some(spec) = remediation::find(&remediation_id) else {
                     self.status = format!("Unknown remediation '{remediation_id}'");
                     return;
                 };
-                if spec.tier == RemediationTier::Repair {
-                    // Production execution of a Repair is reachable only after
-                    // this explicit confirmation; the engine's own gate would
-                    // still refuse an unauthorized run.
-                    self.repair_confirm = Some(spec.summary());
+                let issue_id = self
+                    .issues
+                    .iter()
+                    .find(|issue| {
+                        issue.status == wfdiag_native_issues::IssueStatus::Detected
+                            && issue.remediation.as_ref().map(|item| item.id.as_str())
+                                == Some(remediation_id.as_str())
+                    })
+                    .map(|issue| issue.id.clone());
+                if issue_id.is_none() && !spec.maintenance {
+                    self.status =
+                        format!("'{}' is no longer mapped to a detected issue", spec.label);
                     return;
                 }
-                self.execute_remediation(remediation_id, false, context);
+                self.prepare_remediation(remediation_id, issue_id, context);
             }
-            Message::RepairDialogClosed {
-                remediation_id,
+            Message::ActionReviewDialogClosed {
+                proposal_id,
                 result,
             } => {
-                let confirmed = self.repair_confirm.take().is_some()
-                    && result == ContentDialogResult::Primary;
-                if confirmed {
-                    self.execute_remediation(remediation_id, true, context);
+                let Some(proposal) = self.action_review.take() else {
+                    return;
+                };
+                if proposal.proposal_id != proposal_id {
+                    self.action_review = Some(proposal);
+                    return;
+                }
+                let admin_blocked = !self.is_admin
+                    && proposal
+                        .actions
+                        .iter()
+                        .any(|action| action.remediation.admin_required);
+                if result == ContentDialogResult::Primary && admin_blocked {
+                    self.action_review = Some(proposal);
+                    self.request_admin_relaunch(context);
+                } else if result == ContentDialogResult::Primary {
+                    let approval = if action_proposal_contains_repair(&proposal) {
+                        ActionApproval::RepairConfirmed
+                    } else {
+                        ActionApproval::Reviewed
+                    };
+                    self.approve_action_proposal(
+                        proposal,
+                        approval,
+                        ActionReviewSurface::Review,
+                        context,
+                    );
+                } else {
+                    self.discard_action_proposal_or_restore(PendingActionApproval {
+                        proposal,
+                        return_surface: ActionReviewSurface::Review,
+                    });
+                }
+            }
+            Message::RepairDialogClosed {
+                proposal_id,
+                result,
+            } => {
+                let Some(proposal) = self.repair_confirm.take() else {
+                    return;
+                };
+                if proposal.proposal_id != proposal_id {
+                    self.repair_confirm = Some(proposal);
+                    return;
+                }
+                if result == ContentDialogResult::Primary {
+                    self.approve_action_proposal(
+                        proposal,
+                        ActionApproval::RepairConfirmed,
+                        ActionReviewSurface::RepairConfirmation,
+                        context,
+                    );
+                } else {
+                    self.discard_action_proposal_or_restore(PendingActionApproval {
+                        proposal,
+                        return_surface: ActionReviewSurface::RepairConfirmation,
+                    });
                 }
             }
             Message::ActionWorkerEventReceived(event) => {
+                self.action_wait = None;
                 let Some(pending) = self.action_pending else {
                     return;
                 };
@@ -5433,28 +12048,67 @@ impl Component for WfdiagSpike {
                     return;
                 }
                 match *event {
-                    ActionWorkerEvent::Done { result, .. } => {
+                    ActionWorkerEvent::Prepared { proposal, .. } => {
                         self.action_pending = None;
-                        self.action_wait = None;
-                        let success = result.success;
-                        self.status = result.message.clone();
-                        if success {
+                        self.action_pending_approval = None;
+                        if action_proposal_matches_snapshot(&proposal, &self.action_snapshot()) {
+                            let action_count = proposal.actions.len();
+                            self.action_review = Some(proposal);
+                            self.status = format!(
+                                "Review {action_count} vetted remediation action{}",
+                                if action_count == 1 { "" } else { "s" }
+                            );
+                        } else {
+                            if let Some(runtime) = self.action_runtime.as_ref() {
+                                let _ = runtime.discard(proposal.proposal_id);
+                            }
+                            self.status =
+                                "Discarded a stale remediation preview; review the current issue again"
+                                    .to_string();
+                        }
+                    }
+                    ActionWorkerEvent::Done { execution, .. } => {
+                        self.action_pending = None;
+                        self.action_pending_approval = None;
+                        let any_success =
+                            execution.summary.actions.iter().any(|item| {
+                                item.result.as_ref().is_some_and(|result| result.success)
+                            });
+                        self.apply_action_run_summary(execution.summary);
+                        if any_success {
                             // The fix may have changed what detection sees.
-                            if self.page == Page::Issues && !self.deterministic_visual {
+                            // Refresh the authoritative projection even when
+                            // the user navigated away while a long-running
+                            // repair was active; returning to Issues must not
+                            // show a known-stale pre-repair result set.
+                            if !self.deterministic_visual {
                                 self.request_issue_detection(context);
                             }
                         }
                     }
                     ActionWorkerEvent::Failed { message, .. } => {
                         self.action_pending = None;
-                        self.action_wait = None;
-                        self.status = message;
+                        let restored = self.action_pending_approval.take().is_some_and(|pending| {
+                            self.restore_action_approval_if_current(pending)
+                        });
+                        self.status = if restored {
+                            format!("{message} · the staged action is still available for review")
+                        } else {
+                            message
+                        };
                     }
-                    ActionWorkerEvent::NeedsConfirmation { remediation_id, .. } => {
+                    ActionWorkerEvent::NeedsRepairConfirmation { proposal, .. } => {
                         self.action_pending = None;
-                        self.action_wait = None;
-                        if let Some(spec) = remediation::find(&remediation_id) {
-                            self.repair_confirm = Some(spec.summary());
+                        self.action_pending_approval = None;
+                        if self.restore_action_approval_if_current(PendingActionApproval {
+                            proposal,
+                            return_surface: ActionReviewSurface::RepairConfirmation,
+                        }) {
+                            self.status = "Explicit repair confirmation is required".to_string();
+                        } else {
+                            self.status =
+                                "The remediation preview changed before repair confirmation"
+                                    .to_string();
                         }
                     }
                 }
@@ -5462,99 +12116,303 @@ impl Component for WfdiagSpike {
             Message::ActionWorkerStopped => {
                 self.action_wait = None;
                 self.action_pending = None;
+                self.action_pending_approval = None;
                 self.action_receiver = None;
                 self.action_runtime = None;
                 self.status = "Native remediation worker stopped".to_string();
             }
-            Message::ActionWaitCancelled => {
-                self.action_wait = None;
+            Message::InstanceWaitCancelled => {
+                self.instance_wait = None;
             }
-            Message::ActionWaitRejected => {
-                self.action_wait = None;
-                self.action_pending = None;
-                self.status = "The native remediation queue rejected a worker hand-off".to_string();
+            Message::WindowHookRetryReady => {
+                self.window_hook_retry_task = None;
+                self.ensure_window_hook(context);
+            }
+            Message::WindowHookRetryRejected => {
+                self.window_hook_retry_task = None;
+                self.status = "Native window integration retry was interrupted; the next UI action will retry"
+                    .to_string();
+            }
+            Message::ActionRunEventReceived(event) => {
+                self.action_run_wait = None;
+                let summary = event.summary;
+                let refresh_issues = summary.status.terminal()
+                    && summary
+                        .actions
+                        .iter()
+                        .any(|action| action.result.as_ref().is_some_and(|result| result.success));
+                self.apply_action_run_summary(summary);
+                if refresh_issues && !self.deterministic_visual {
+                    self.request_issue_detection(context);
+                }
+                self.resume_action_run_wait(context);
+            }
+            Message::ActionRunStreamStopped => {
+                self.action_run_wait = None;
+                self.action_run_receiver = None;
+                if self.action_active_run.is_some() {
+                    self.status =
+                        "Remediation status delivery stopped; the last known state is shown"
+                            .to_string();
+                }
+            }
+            Message::CancelActionRun => {
+                let Some(run_id) = self
+                    .action_active_run
+                    .as_ref()
+                    .map(|run| run.run_id.clone())
+                else {
+                    self.status = "No remediation run is active".to_string();
+                    return;
+                };
+                let result = self
+                    .action_runtime
+                    .as_ref()
+                    .ok_or_else(|| "Native remediation is unavailable".to_string())
+                    .and_then(|runtime| runtime.cancel(&run_id));
+                match result {
+                    Ok(summary) => self.apply_action_run_summary(summary),
+                    Err(error) => self.status = format!("Could not stop remediation · {error}"),
+                }
+            }
+            Message::ActionRunExpandedChanged { run_id, expanded } => {
+                let visible = self
+                    .action_active_run
+                    .as_ref()
+                    .is_some_and(|run| run.run_id == run_id)
+                    || self
+                        .action_run_history
+                        .iter()
+                        .any(|run| run.run_id == run_id);
+                if visible {
+                    if expanded {
+                        self.action_expanded_runs.insert(run_id);
+                    } else {
+                        self.action_expanded_runs.remove(&run_id);
+                    }
+                }
             }
             Message::AskAiAboutIssue(issue_id) => {
                 let Some(issue) = self.issues.iter().find(|issue| issue.id == issue_id) else {
                     return;
                 };
-                self.chat_input = format!(
-                    "How do I fix \"{}\"? ({} — {})",
-                    issue.title, issue.category, issue.description
+                let remediation = issue.remediation.as_ref().map_or_else(
+                    || "No vetted remediation is mapped to this issue.".to_string(),
+                    |remediation| {
+                        format!(
+                            "Vetted remediation: {} (catalog id {}).",
+                            remediation.label, remediation.id
+                        )
+                    },
                 );
+                let prompt = format!(
+                    "Explain this detected Windows issue and give safe next steps using the scan evidence and read-only tools. Issue id: {}. Title: {}. Category: {}. Severity: {:?}. Description: {}. Recommendation: {}. {} Do not claim any repair was run; stage only vetted catalog actions if useful.",
+                    issue.id,
+                    issue.title,
+                    issue.category,
+                    issue.severity,
+                    issue.description,
+                    issue.recommendation,
+                    remediation,
+                );
+                self.transition_to_page(Page::Ai);
                 self.ai_mode = AiMode::Assistant;
-                self.status = "Ask added to the chat input · press Send".to_string();
+                self.begin_chat_send(prompt, context);
+            }
+            Message::PrioritizeIssues => {
+                self.begin_issue_prioritization(self.issue_prioritization.text.is_some(), context);
+            }
+            Message::CancelIssuePrioritization => {
+                if let Some(pending) = self.issue_prioritization_pending.as_ref()
+                    && self
+                        .analysis_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.cancel(pending.request_id))
+                {
+                    self.status = "Cancelling issue prioritization…".to_string();
+                }
             }
             Message::ProposeFixPlan => {
-                // The model may only reference the vetted catalog's labels;
-                // its output never reaches execution — the user still runs
-                // each action through the tier-gated buttons above.
-                let detected: Vec<String> = self
-                    .issues
-                    .iter()
-                    .filter(|issue| issue.detected)
-                    .map(|issue| format!("- {} ({})", issue.title, issue.category))
-                    .collect();
-                let catalog: Vec<String> = self
-                    .issue_maintenance
-                    .iter()
-                    .map(|entry| format!("- {} ({:?})", entry.label, entry.tier))
-                    .collect();
-                self.chat_input = format!(
-                    "Propose an ordered fix plan for these detected issues: {}. Only suggest these vetted actions: {}",
-                    detected.join("; "),
-                    catalog.join(" "),
-                );
-                self.ai_mode = AiMode::Assistant;
-                self.status = "Fix-plan prompt added to the chat input · press Send".to_string();
+                self.begin_fix_plan(context);
+            }
+            Message::CancelFixPlan => {
+                if let Some(pending) = self.fix_plan_pending.as_ref()
+                    && self
+                        .fix_plan_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.cancel(pending.request_id))
+                {
+                    self.status = "Cancelling the AI fix plan…".to_string();
+                }
+            }
+            Message::ReviewFixPlanActions(selection) => {
+                self.prepare_action_selection(selection, context);
+            }
+            Message::FixPlanWorkerEventReceived(event) => {
+                self.fix_plan_wait = None;
+                let Some(pending) = self
+                    .fix_plan_pending
+                    .as_ref()
+                    .filter(|pending| pending.request_id == event.request_id())
+                    .cloned()
+                else {
+                    if self.fix_plan_pending.is_some() {
+                        self.resume_fix_plan_wait(context);
+                    }
+                    return;
+                };
+                match *event {
+                    FixPlanWorkerEvent::Ack { provider_use, .. } => {
+                        self.status = format!(
+                            "Generating vetted fix plan with {}…",
+                            provider_use.provider_id
+                        );
+                        self.resume_fix_plan_wait(context);
+                    }
+                    FixPlanWorkerEvent::Done { plan, .. } => {
+                        self.fix_plan_pending = None;
+                        let current = self.action_snapshot();
+                        if plan.scan_fingerprint != current.scan_fingerprint
+                            || plan.catalog_fingerprint != current.catalog_fingerprint
+                        {
+                            self.fix_plan = None;
+                            self.fix_plan_error = Some(
+                                "The scan or remediation catalog changed while the plan was being generated. Generate a fresh plan."
+                                    .to_string(),
+                            );
+                            self.status = "Discarded a stale AI fix plan".to_string();
+                        } else {
+                            let entry_count = plan.entries.len();
+                            let provider = plan.provider_use.provider_id.clone();
+                            self.fix_plan = Some(plan);
+                            self.fix_plan_error = None;
+                            self.status = format!(
+                                "Fix plan ready · {entry_count} vetted action{} · {provider}",
+                                if entry_count == 1 { "" } else { "s" }
+                            );
+                        }
+                    }
+                    FixPlanWorkerEvent::Failed {
+                        route,
+                        message,
+                        retryable,
+                        ..
+                    } => {
+                        self.fix_plan_pending = None;
+                        let mut attempt = pending.attempt;
+                        let next = retryable.then(|| {
+                            next_auto_local_route(
+                                route.preference,
+                                &attempt.tried,
+                                route.availability,
+                            )
+                        });
+                        if let Some(Some(provider)) = next {
+                            attempt.tried.push(provider);
+                            attempt.generation.route = FixPlanRoute {
+                                preference: route.preference,
+                                provider,
+                                availability: route.availability,
+                                fallback_from: Some(route.provider),
+                            };
+                            self.status = format!(
+                                "{} could not generate the plan · trying private provider {provider}…",
+                                route.provider
+                            );
+                            let _ = self.queue_fix_plan(attempt, context);
+                        } else {
+                            let message = if attempt.tried.len() > 1 {
+                                format!(
+                                    "AI fix planning failed after private providers starting with {}: {message}",
+                                    attempt.initial_provider
+                                )
+                            } else {
+                                message
+                            };
+                            self.fix_plan = None;
+                            self.fix_plan_error = Some(message.clone());
+                            self.status = message;
+                        }
+                    }
+                    FixPlanWorkerEvent::Cancelled { .. } => {
+                        self.fix_plan_pending = None;
+                        self.fix_plan_error = None;
+                        self.status = "AI fix plan cancelled".to_string();
+                    }
+                }
+            }
+            Message::FixPlanWorkerStopped => {
+                self.fix_plan_wait = None;
+                self.fix_plan_pending = None;
+                self.fix_plan_receiver = None;
+                self.fix_plan_runtime = None;
+                self.fix_plan_error = Some("Native AI fix-plan worker stopped".to_string());
+                self.status = "Native AI fix-plan worker stopped".to_string();
             }
             Message::RestartAsAdmin => {
-                if self.deterministic_visual {
-                    self.status = "Visual fixture mode · elevation is disabled".to_string();
-                    return;
-                }
-                if self.admin_relaunch_task.is_none() {
-                    self.admin_relaunch_task = Some(spawn_relaunch_as_admin(context));
-                }
+                self.request_admin_relaunch(context);
             }
             Message::InstanceActivated => {
                 // Another launch asked this instance to the foreground.
                 instance_support::activate_main_window();
-                self.instance_wait = Some(spawn_instance_watch(context));
+                if !instance_support::activation_wake_registered() {
+                    self.instance_wait = Some(spawn_instance_watch(
+                        context,
+                        self.window_lifecycle_revision,
+                    ));
+                }
+            }
+            Message::WindowLifecycleChanged(observed) => {
+                // Coalesce rapid deactivate/reactivate or hide/show pairs so
+                // a queued intermediate snapshot cannot cause a visible
+                // pause/resume flicker after the window is already usable.
+                let current = window_support::lifecycle_snapshot();
+                let snapshot = if current.revision == observed.revision {
+                    observed
+                } else {
+                    current
+                };
+                if !instance_support::activation_wake_registered() {
+                    self.instance_wait = Some(spawn_instance_watch(context, snapshot.revision));
+                }
+                self.apply_window_lifecycle(snapshot, context);
+                if snapshot.focused && self.palette_open {
+                    // Re-activation (Alt+Tab, AppActivate, or an instance
+                    // handoff) must preserve the palette's editing target.
+                    // This is lifecycle-driven and adds no idle polling.
+                    let _ = self.palette_query_reference.request_focus();
+                }
+            }
+            Message::GlobalShortcut(shortcut) => {
+                if !instance_support::activation_wake_registered() {
+                    self.instance_wait = Some(spawn_instance_watch(
+                        context,
+                        self.window_lifecycle_revision,
+                    ));
+                }
+                self.handle_global_shortcut(shortcut, context);
             }
             Message::TrayCommand(command) => {
-                self.instance_wait = Some(spawn_instance_watch(context));
+                if !instance_support::activation_wake_registered() {
+                    self.instance_wait = Some(spawn_instance_watch(
+                        context,
+                        self.window_lifecycle_revision,
+                    ));
+                }
                 match command {
                     window_support::TRAY_COMMAND_SHOW => {
                         match instance_support::main_window_hwnd() {
                             Some(window) if window_support::is_visible(window) => {
                                 window_support::hide(window);
-                                // Store parity: monitoring pauses while the
-                                // window is hidden (visibility cleanup).
-                                if !self.monitoring_paused
-                                    && self.native_monitor.as_ref().is_some_and(|runtime| {
-                                        runtime.pause()
-                                    })
-                                {
-                                    self.monitoring_paused = true;
-                                    self.status = "Hidden to tray · monitoring paused".to_string();
-                                }
                             }
                             Some(window) => {
                                 window_support::restore(window);
-                                if self.monitoring_paused
-                                    && self.native_monitor.as_ref().is_some_and(|runtime| {
-                                        runtime.resume()
-                                    })
-                                {
-                                    self.monitoring_paused = false;
-                                }
                             }
                             None => instance_support::activate_main_window(),
                         }
                     }
                     window_support::TRAY_COMMAND_QUICK_SCAN => {
-                        self.page = Page::Diagnostics;
+                        self.transition_to_page(Page::Diagnostics);
                         self.begin_diagnostic_scan(ScanKind::Quick, context);
                     }
                     window_support::TRAY_COMMAND_EXIT => {
@@ -5573,7 +12431,18 @@ impl Component for WfdiagSpike {
             Message::RestartAsAdminFinished(result) => {
                 self.admin_relaunch_task = None;
                 match result {
-                    Ok(true) => self.status = "Relaunching with administrator rights…".to_string(),
+                    Ok(true) => {
+                        self.status = "Relaunching with administrator rights…".to_string();
+                        // The elevated child waits on the process-owned
+                        // single-instance mutex. Close this copy for real (not
+                        // to tray) so that child can become the new primary.
+                        window_support::request_forced_close();
+                        if !context.window().request_close() {
+                            window_support::cancel_forced_close();
+                            self.status = "The elevated copy launched, but this window could not close · exit the current copy and try again"
+                                .to_string();
+                        }
+                    }
                     // Dismissed UAC prompt — keep running, no error.
                     Ok(false) => self.status = "Administrator relaunch was cancelled".to_string(),
                     Err(message) => self.status = message,
@@ -5589,6 +12458,7 @@ impl Component for WfdiagSpike {
                     self.resume_export_wait(context);
                     return;
                 }
+                let request_id = pending.request_id;
                 match (pending.action, completed.result) {
                     (
                         PendingExportAction::ShareToWindowsForum,
@@ -5613,6 +12483,55 @@ impl Component for WfdiagSpike {
                             self.status = "Failed to prepare share. Please try again.".to_string();
                         }
                     },
+                    (PendingExportAction::EmailReport, Ok(ExportPayload::Email(email))) => {
+                        match write_text_to_clipboard(&email.clipboard_body) {
+                            Ok(()) => match launch_email_compose_draft(&email) {
+                                Ok(()) => {
+                                    self.export_error = None;
+                                    self.status = "Email ready · report copied to clipboard · paste with Ctrl+V"
+                                    .to_string();
+                                }
+                                Err(error) => {
+                                    self.export_error = Some(error.to_string());
+                                    self.status = "Report copied to clipboard, but Windows could not open a new email"
+                                    .to_string();
+                                }
+                            },
+                            Err(error) => {
+                                self.export_error = Some(error.to_string());
+                                self.status = "Failed to prepare email. Please try exporting the report instead."
+                                .to_string();
+                            }
+                        }
+                    }
+                    (
+                        PendingExportAction::CopyDiagnosticReport,
+                        Ok(ExportPayload::ForumClipboard(report)),
+                    ) => match write_text_to_clipboard(&report) {
+                        Ok(()) => {
+                            self.export_error = None;
+                            self.status = "Diagnostic report copied to the clipboard".to_string();
+                        }
+                        Err(error) => {
+                            self.export_error = Some(error.to_string());
+                            self.status = "Failed to copy the diagnostic report. Please try again."
+                                .to_string();
+                        }
+                    },
+                    (
+                        PendingExportAction::SupportPackage { paths },
+                        Ok(ExportPayload::SupportPackage(payload)),
+                    ) => {
+                        self.export_error = None;
+                        self.status = "Writing JSON, TXT, and HTML support reports…".to_string();
+                        self.export_pending = Some(PendingExport {
+                            request_id,
+                            action: PendingExportAction::SupportPackage {
+                                paths: paths.clone(),
+                            },
+                        });
+                        spawn_support_package_write(context, request_id, paths, payload);
+                    }
                     (
                         PendingExportAction::SaveToFile { path },
                         Ok(ExportPayload::Report(content)),
@@ -5620,12 +12539,22 @@ impl Component for WfdiagSpike {
                         self.export_error = None;
                         self.status =
                             format!("Writing {} report…", export_format_label(path.format()));
-                        spawn_export_file_write(context, path, content);
+                        self.export_pending = Some(PendingExport {
+                            request_id,
+                            action: PendingExportAction::SaveToFile { path: path.clone() },
+                        });
+                        spawn_export_file_write(context, request_id, path, content);
                     }
                     (_, Ok(_)) => {
                         self.export_error =
                             Some("Native export worker returned an unexpected payload".to_string());
                         self.status = "Failed to prepare share. Please try again.".to_string();
+                    }
+                    (PendingExportAction::EmailReport, Err(error)) => {
+                        self.export_error = Some(error.to_string());
+                        self.status =
+                            "Failed to prepare email. Please try exporting the report instead."
+                                .to_string();
                     }
                     (_, Err(error)) => {
                         self.export_error = Some(error.to_string());
@@ -5633,17 +12562,54 @@ impl Component for WfdiagSpike {
                     }
                 }
             }
-            Message::ExportFileSaved(result) => match *result {
-                Ok(path) => {
-                    self.export_error = None;
-                    self.status = format!("Results saved to {}", path.display());
+            Message::ExportFileSaved { request_id, result } => {
+                if !pending_export_write_is_current(
+                    self.export_pending.as_ref(),
+                    request_id,
+                    ExportWriteKind::File,
+                ) {
+                    return;
                 }
-                Err(error) => {
-                    self.export_error = Some(error);
-                    self.status =
-                        "Failed to save the file. Please try a different location.".to_string();
+                self.export_pending = None;
+                match *result {
+                    Ok(path) => {
+                        self.export_error = None;
+                        self.status = format!("Results saved to {}", path.display());
+                    }
+                    Err(error) => {
+                        self.export_error = Some(error);
+                        self.status =
+                            "Failed to save the file. Please try a different location.".to_string();
+                    }
                 }
-            },
+            }
+            Message::SupportPackageSaved { request_id, result } => {
+                if !pending_export_write_is_current(
+                    self.export_pending.as_ref(),
+                    request_id,
+                    ExportWriteKind::SupportPackage,
+                ) {
+                    return;
+                }
+                self.export_pending = None;
+                match *result {
+                    Ok(paths) => {
+                        self.export_error = None;
+                        self.status = format!(
+                            "Support package saved · {} · {} · {}",
+                            paths.json.display(),
+                            paths.text.display(),
+                            paths.html.display()
+                        );
+                    }
+                    Err(error) => {
+                        self.status = format!(
+                            "Support package could not be written completely · {error} · Try exporting individual files"
+                        );
+                        self.export_error = Some(error);
+                    }
+                }
+            }
             Message::ExportWorkerStopped => {
                 self.export_wait = None;
                 self.export_pending = None;
@@ -5665,22 +12631,36 @@ impl Component for WfdiagSpike {
             Message::SetAiMode(mode) => self.ai_mode = mode,
             Message::ToggleMonitoring => {
                 let pause = !self.monitoring_paused;
-                let accepted = self.native_monitor.as_ref().is_some_and(|runtime| {
-                    if pause {
-                        runtime.pause()
-                    } else {
-                        runtime.resume()
-                    }
-                });
-                if accepted {
-                    self.monitoring_paused = pause;
-                    self.status = if pause {
-                        "Live monitoring paused".to_string()
-                    } else {
-                        "Live monitoring resumed".to_string()
-                    };
-                } else {
+                if self.native_monitor.is_none() {
                     self.status = "Native monitoring control is unavailable".to_string();
+                } else if !pause && !self.window_usable {
+                    // Preserve the user's resume intent without waking the
+                    // monitor while the app is hidden, minimized, or inactive.
+                    self.monitoring_paused_by_lifecycle = true;
+                    self.status =
+                        "Live monitoring will resume when the window is active".to_string();
+                } else {
+                    let accepted = self.native_monitor.as_ref().is_some_and(|runtime| {
+                        if pause {
+                            runtime.pause()
+                        } else {
+                            runtime.resume()
+                        }
+                    });
+                    if accepted {
+                        self.monitoring_paused = pause;
+                        self.monitoring_paused_by_lifecycle = false;
+                        if !pause && let Some(runtime) = self.native_monitor.as_ref() {
+                            let _ = runtime.refresh();
+                        }
+                        self.status = if pause {
+                            "Live monitoring paused".to_string()
+                        } else {
+                            "Live monitoring resumed".to_string()
+                        };
+                    } else {
+                        self.status = "Native monitoring control is unavailable".to_string();
+                    }
                 }
             }
             Message::Refresh => {
@@ -5706,11 +12686,8 @@ impl Component for WfdiagSpike {
                             .unwrap_or_else(|| "Native issue detection is unavailable".to_string())
                     };
                 } else {
-                    let accepted = self
-                        .native_monitor
-                        .as_ref()
-                        .is_some_and(|runtime| runtime.refresh());
-                    if self.page == Page::Processes {
+                    let accepted = self.request_monitor_refresh(context);
+                    if self.page == Page::Processes && accepted {
                         self.request_process_page(context, false);
                     }
                     self.status = if accepted {
@@ -5723,13 +12700,13 @@ impl Component for WfdiagSpike {
             Message::ProcessFilterChanged(value) => {
                 self.process_filter = value;
                 self.process_offset = 0;
-                self.selected_process_pid = None;
+                self.selected_process = None;
                 self.request_process_page(context, true);
             }
             Message::ProcessSort(sort_key) => self.set_process_sort(sort_key, context),
             Message::ProcessPrevious => {
                 self.process_offset = self.process_offset.saturating_sub(PROCESS_PAGE_SIZE);
-                self.selected_process_pid = None;
+                self.selected_process = None;
                 self.request_process_page(context, false);
             }
             Message::ProcessNext => {
@@ -5737,12 +12714,12 @@ impl Component for WfdiagSpike {
                     && page.offset.saturating_add(page.items.len()) < page.total
                 {
                     self.process_offset = page.offset.saturating_add(page.limit);
-                    self.selected_process_pid = None;
+                    self.selected_process = None;
                     self.request_process_page(context, false);
                 }
             }
             Message::ProcessQueryFinished { request_id, result } => {
-                if request_id != self.process_request_id {
+                if request_id != self.process_request_id || self.page != Page::Processes {
                     return;
                 }
                 self.process_request_task = None;
@@ -5750,12 +12727,8 @@ impl Component for WfdiagSpike {
                 match result {
                     Ok(page) => {
                         self.process_offset = page.offset;
-                        if self
-                            .selected_process_pid
-                            .is_some_and(|pid| !page.items.iter().any(|row| row.pid == pid))
-                        {
-                            self.selected_process_pid = None;
-                        }
+                        self.selected_process =
+                            reconcile_process_selection(self.selected_process, &page.items);
                         self.status = format!(
                             "Process inventory · {} of {} shown",
                             page.items.len(),
@@ -5785,10 +12758,15 @@ impl Component for WfdiagSpike {
                     self.status = "Process refresh could not start".to_string();
                 }
             }
-            Message::SelectProcess(pid) => self.selected_process_pid = pid,
+            Message::SelectProcess(identity) => self.selected_process = identity,
             Message::RefreshHistory => self.request_history_list(context),
             Message::HistoryFilterChanged(value) => self.history_filter = value,
             Message::SelectHistory(scan_id) => {
+                self.history_label_draft =
+                    history_label_draft_for_selection(&self.history_summaries, &scan_id);
+                self.history_label_editing = false;
+                self.history_tag_draft =
+                    history_tag_draft_for_selection(&self.history_summaries, &scan_id);
                 self.selected_history_id = Some(scan_id.clone());
                 self.request_history_comparison(scan_id, context);
             }
@@ -5800,16 +12778,50 @@ impl Component for WfdiagSpike {
                 self.history_loading = false;
                 match result {
                     Ok(summaries) => {
+                        let previous_latest_id =
+                            self.history_summaries.first().map(|scan| scan.id.clone());
+                        let current_latest_id = summaries.first().map(|scan| scan.id.clone());
+                        let trends_baseline_changed = history_trends_baseline_changed(
+                            self.history_trends_baseline_id.as_deref(),
+                            current_latest_id.as_deref(),
+                        );
+                        let comparison_refresh_target = history_comparison_refresh_target(
+                            previous_latest_id.as_deref(),
+                            &summaries,
+                            self.selected_history_id.as_deref(),
+                        );
                         if self.selected_history_id.as_ref().is_some_and(|selected| {
                             !summaries.iter().any(|scan| &scan.id == selected)
                         }) {
                             self.selected_history_id = None;
                             self.history_comparison = None;
-                            self.history_compare_task = None;
+                            self.clear_history_task_diff();
+                            self.history_label_draft.clear();
+                            self.history_label_editing = false;
+                            self.history_tag_draft.clear();
+                            if let Some(task) = self.history_compare_task.take() {
+                                task.cancel();
+                            }
                         }
                         self.status = format!("History loaded · {} scans", summaries.len());
                         self.history_summaries = summaries;
                         self.history_error = None;
+                        if trends_baseline_changed {
+                            self.invalidate_history_trends();
+                            if current_latest_id.is_some() {
+                                self.request_history_trends(context);
+                            }
+                        }
+                        if let Some(selected_id) = comparison_refresh_target {
+                            self.request_history_comparison(selected_id, context);
+                        } else if !self.history_label_editing
+                            && let Some(selected_id) = self.selected_history_id.as_deref()
+                        {
+                            self.history_label_draft = history_label_draft_for_selection(
+                                &self.history_summaries,
+                                selected_id,
+                            );
+                        }
                     }
                     Err(error) => {
                         self.history_error = Some(error.clone());
@@ -5827,14 +12839,63 @@ impl Component for WfdiagSpike {
                         self.status =
                             format!("History comparison · {} changes", comparison.total_changes);
                         self.history_comparison = Some(*comparison);
-                        self.history_error = None;
+                        self.history_comparison_error = None;
                     }
                     Err(error) => {
                         self.history_comparison = None;
-                        self.history_error = Some(error.clone());
+                        self.history_comparison_error = Some(error.clone());
                         self.status = format!("Could not compare history · {error}");
                     }
                 }
+            }
+            Message::ToggleHistoryTaskDetail(task_id) => {
+                self.toggle_history_task_detail(task_id, context);
+            }
+            Message::HistoryTaskDiffFinished {
+                request_id,
+                task_id,
+                result,
+            } => {
+                if !history_task_diff_result_is_current(
+                    request_id,
+                    self.history_task_diff_request_id,
+                    &task_id,
+                    self.history_expanded_task_id.as_deref(),
+                ) {
+                    return;
+                }
+                self.history_task_diff_task = None;
+                match result {
+                    Ok(projection) => {
+                        self.status = "Stored task details loaded".to_string();
+                        self.history_task_diff = Some(*projection);
+                        self.history_task_diff_error = None;
+                    }
+                    Err(error) => {
+                        self.history_task_diff = None;
+                        self.history_task_diff_error = Some(error.clone());
+                        self.status = format!("Could not load stored task details · {error}");
+                    }
+                }
+            }
+            Message::HistoryTaskDiffRejected {
+                request_id,
+                task_id,
+            } => {
+                if !history_task_diff_result_is_current(
+                    request_id,
+                    self.history_task_diff_request_id,
+                    &task_id,
+                    self.history_expanded_task_id.as_deref(),
+                ) {
+                    return;
+                }
+                self.history_task_diff_task = None;
+                self.history_task_diff = None;
+                self.history_task_diff_error = Some(
+                    "The Reactor background queue rejected the task-detail request".to_string(),
+                );
+                self.status = "Stored task details could not start".to_string();
             }
             Message::HistoryQueryRejected {
                 request_id,
@@ -5845,89 +12906,46 @@ impl Component for WfdiagSpike {
                         return;
                     }
                     self.history_compare_task = None;
+                    self.history_comparison_error = Some(
+                        "The Reactor background queue rejected the history comparison".to_string(),
+                    );
                 } else {
                     if request_id != self.history_request_id {
                         return;
                     }
                     self.history_request_task = None;
                     self.history_loading = false;
+                    self.history_error = Some(
+                        "The Reactor background queue rejected the history request".to_string(),
+                    );
                 }
-                self.history_error =
-                    Some("The Reactor background queue rejected the history request".to_string());
                 self.status = "History request could not start".to_string();
             }
-            Message::ChatInputChanged(value) => self.chat_input = value,
-            Message::UsePrompt(value) => self.chat_input = value,
-            Message::SendChat => {
-                eprintln!("[trace] SendChat: ai_enabled={} chat_pending={:?} chat_runtime={} provider_status={:?}",
-                    self.settings_snapshot.ai_enabled,
-                    self.chat_pending,
-                    self.chat_runtime.is_some(),
-                    self.ai_provider_status.as_ref().map(|s| s.active_provider));
-                if !self.chat_input.trim().is_empty() {
-                    if self.deterministic_visual {
-                        self.chat_answer = Some(format!(
-                            "I checked the fixture scan for “{}”. The urgent finding is low space on C:. Free at least 30 GB, then review the four recent Kernel-Power events.",
-                            self.chat_input.trim()
-                        ));
-                        self.chat_input.clear();
-                        self.status = "AI response complete · OpenAI cloud".to_string();
-                    } else if !self.settings_snapshot.ai_enabled {
-                        self.chat_answer = None;
-                        self.status = "Enable AI insights in Settings before sending".to_string();
-                    } else if self.chat_pending.is_some() {
-                        self.status = "A response is already streaming…".to_string();
-                    } else if self.chat_runtime.is_none() {
-                        self.status = "Native AI chat worker is unavailable".to_string();
-                    } else if self
-                        .ai_provider_status
-                        .as_ref()
-                        .is_some_and(|status| status.active_provider != AIProvider::None)
-                    {
-                        let provider = self
-                            .ai_provider_status
-                            .as_ref()
-                            .map(|status| status.active_provider)
-                            .expect("provider status was just checked");
-                        let Some(runtime) = self.chat_runtime.as_ref() else {
-                            return;
-                        };
-                        let Some(request_id) =
-                            advance_nonzero_generation(&mut self.chat_request_id)
-                        else {
-                            self.status = "Native chat request identity was exhausted".to_string();
-                            return;
-                        };
-                        let prompt = self.chat_input.trim().to_string();
-                        let arch = self
-                            .architecture
-                            .as_ref()
-                            .map(|snapshot| snapshot.emulation_status.clone())
-                            .unwrap_or_else(|| "Unknown".to_string());
-                        let overview = format!(
-                            "Computer name: {}\nOperating system: {}\nArchitecture: {}\nElevated: {}",
-                            self.system_info.computer_name,
-                            self.system_info.os_version,
-                            arch,
-                            if self.is_admin { "yes" } else { "no" }
-                        );
-                        self.chat_answer = None;
-                        self.chat_pending = Some(request_id);
-                        runtime.send(request_id, prompt, provider, Some(overview));
-                        self.chat_input.clear();
-                        self.status = "Asking the AI assistant…".to_string();
-                        self.resume_chat_wait(context);
-                    } else {
-                        self.chat_answer = None;
-                        self.status = "Set up an available AI provider before sending".to_string();
-                    }
+            Message::ChatInputChanged(value) => {
+                if !self.chat_interaction_blocked() {
+                    self.chat_input = value;
                 }
             }
+            Message::UsePrompt(value) => {
+                if self.chat_pending.is_some() || self.chat_interaction_blocked() {
+                    self.status = "Finish or cancel the current AI request before starting another"
+                        .to_string();
+                } else {
+                    self.begin_chat_send(value, context);
+                }
+            }
+            Message::SendChat => {
+                self.begin_chat_send(self.chat_input.clone(), context);
+            }
             Message::BackendBatch { events, terminated } => {
+                let process_refresh_due = self.process_last_refresh_started_at.is_none_or(|last| {
+                    Instant::now().duration_since(last) >= PROCESS_LIVE_REFRESH_INTERVAL
+                });
                 let process_tick = !terminated
                     && !self.monitoring_paused
                     && self.page == Page::Processes
                     && self.process_request_task.is_none()
+                    && process_refresh_due
                     && events
                         .iter()
                         .any(|event| matches!(event, UiEvent::SystemStats(_)));
@@ -5937,32 +12955,20 @@ impl Component for WfdiagSpike {
                 if terminated {
                     self.backend_wait = None;
                     self.monitoring_paused = true;
-                    self.process_request_task = None;
-                    self.process_loading = false;
+                    self.monitoring_paused_by_lifecycle = false;
+                    self.invalidate_process_page_request();
                     self.process_error = Some("Native monitoring worker stopped".to_string());
+                    self.monitor_error = Some("Native monitoring worker stopped".to_string());
                     if let Some(receiver) = self.backend_receiver.take() {
                         receiver.close();
                     }
                     self.native_monitor.take();
                     self.status = "Native monitoring worker stopped".to_string();
-                } else if let Some(receiver) = self.backend_receiver.as_ref() {
-                    self.backend_wait = Some(spawn_backend_wait(context, Arc::clone(receiver)));
+                } else {
                     if process_tick {
                         self.request_process_page(context, false);
                     }
                 }
-            }
-            Message::BackendWaitRejected => {
-                self.backend_wait = None;
-                self.monitoring_paused = true;
-                self.process_request_task = None;
-                self.process_loading = false;
-                self.process_error = Some("Native monitoring delivery stopped".to_string());
-                if let Some(receiver) = self.backend_receiver.take() {
-                    receiver.close();
-                }
-                self.native_monitor.take();
-                self.status = "Native monitoring delivery stopped".to_string();
             }
             Message::Navigate(None) => {}
         }
@@ -5985,27 +12991,82 @@ impl Component for WfdiagSpike {
                     max_height: None,
                 }),
         );
+        context.on_color_scheme(context.callback(Message::ColorSchemeChanged));
         context.on_window_size(context.callback(Message::WindowSize));
 
-        let palette = Palette::for_theme(self.theme);
+        // Effects run after windows-reactor publishes this view's native
+        // CreateWindow commands. Use that ordering to bootstrap the Win32
+        // bridge exactly once on the healthy path; bounded background retry
+        // is reserved for a genuinely slow or rejected hook installation.
+        let window_hook_bootstrap = !self.deterministic_visual
+            && !self.window_hook_installed
+            && self.window_hook_retry_task.is_none();
+        let window_hook_sender = context.sender();
+        context.use_effect(
+            "native-window-hook-bootstrap",
+            window_hook_bootstrap,
+            move || {
+                if window_hook_bootstrap {
+                    let _ = window_hook_sender.send(Message::WindowHookBootstrap);
+                }
+                None
+            },
+        );
+
+        let effective_theme = effective_window_theme(self.theme, self.effective_color_scheme);
+        let palette = Palette::for_theme(effective_theme);
         let narrow = self.window_size.width < 940.0;
-        // Store 2.5.8 switches to the compact 64 px rail at this breakpoint.
+        let diagnostics_compact = diagnostics_uses_compact_layout(self.window_size.width);
+        let rail_forced_collapsed = navigation_rail_forced_collapsed(self.window_size.width);
+        // Keep content-specific compact layouts independent from the shipping
+        // shell's 1100 px forced rail collapse.
         // Keep the user's expanded preference so the full pane returns when the
         // window grows again, but never let it consume the compact content area.
-        let pane_expanded = self.pane_open && !narrow;
+        let pane_expanded = self.pane_open && !rail_forced_collapsed;
         let issue_projection_current = issue_projection_matches_evidence(
             self.issue_projected_epoch,
             self.issue_projected_session_id.as_deref(),
             self.issue_committed_epoch,
             self.issue_source_session_id.as_deref(),
         );
+        let selected_analysis = self
+            .selected_result_task_id
+            .as_deref()
+            .or_else(|| {
+                self.diagnostic_results
+                    .first()
+                    .map(|result| result.task_id.as_str())
+            })
+            .and_then(|task_id| self.diagnostic_analyses.get(task_id));
+        let diagnostic_ai_available = self.settings_snapshot.ai_enabled
+            && self.ai_worker_available(AiWorkerKind::Analysis)
+            && self
+                .ai_provider_status
+                .as_ref()
+                .is_some_and(|status| status.active_provider != AIProvider::None);
+        let chat_composer_reference = self.chat_composer_reference.clone();
+        let focus_chat_composer = self.page == Page::Ai
+            && self.ai_mode == AiMode::Assistant
+            && self.chat_focus_revision > 0;
+        context.use_effect(
+            "chat-composer-focus",
+            (focus_chat_composer, self.chat_focus_revision),
+            move || {
+                if focus_chat_composer {
+                    let _ = chat_composer_reference.request_focus();
+                }
+                None
+            },
+        );
         let page = match self.page {
             Page::Diagnostics => diagnostics_page(
                 palette,
-                self.theme,
-                narrow,
+                effective_theme,
+                diagnostics_compact,
                 &self.diagnostic_results,
                 &self.diagnostic_catalog,
+                &self.diagnostic_expected_task_ids,
+                &self.diagnostic_task_statuses,
                 self.diagnostics_busy(),
                 self.diagnostic_cancelling,
                 self.diagnostic_completed,
@@ -6015,13 +13076,25 @@ impl Component for WfdiagSpike {
                 context.message(Message::RequestQuickScan),
                 context.message(Message::RequestFullScan),
                 context.message(Message::CancelScan),
+                context.message(Message::ExplainLatestScan),
                 self.selected_result_task_id.clone(),
                 context.callback(Message::SelectDiagnosticResult),
+                &self.diagnostic_filter,
+                context.callback(Message::DiagnosticFilterChanged),
+                self.diagnostic_raw_output,
+                context.message(Message::SetDiagnosticRaw(false)),
+                context.message(Message::SetDiagnosticRaw(true)),
+                selected_analysis,
+                diagnostic_ai_available,
+                context.message(Message::AnalyzeSelectedDiagnostic),
+                context.message(Message::RetrySelectedDiagnosticAnalysis),
+                context.message(Message::CancelDiagnosticAnalysis),
             ),
             Page::Monitor => monitor_page(
                 palette,
                 narrow,
                 self.monitoring_paused,
+                self.monitor_error.as_deref(),
                 self.latest_system_stats.as_ref(),
                 &self.monitor_history,
                 context.message(Message::ToggleMonitoring),
@@ -6032,7 +13105,6 @@ impl Component for WfdiagSpike {
             ),
             Page::Processes => processes_page(
                 palette,
-                narrow,
                 self.window_size.width,
                 pane_expanded,
                 &self.process_filter,
@@ -6042,7 +13114,7 @@ impl Component for WfdiagSpike {
                 self.process_sort_key,
                 self.process_sort_direction,
                 self.deterministic_visual,
-                self.selected_process_pid,
+                self.selected_process,
                 self.monitoring_paused,
                 context.callback(Message::ProcessFilterChanged),
                 context.callback(Message::ProcessSort),
@@ -6061,31 +13133,70 @@ impl Component for WfdiagSpike {
                 self.settings_snapshot.ai_enabled,
                 self.ai_mode,
                 &self.chat_input,
+                &self.chat_composer_reference,
                 self.chat_answer.as_deref(),
+                &self.chat_messages,
+                self.full_scan_consent.as_ref(),
+                self.cloud_fallback_consent.as_ref().or_else(|| {
+                    self.cloud_fallback_policy_update
+                        .as_ref()
+                        .map(|pending| &pending.consent)
+                }),
                 self.ai_provider_status.as_ref(),
                 self.ai_status_loading,
                 self.ai_status_error.as_deref(),
+                AiPreparationUi {
+                    intent: self.pending_ai_intent.as_ref(),
+                    error: self.pending_ai_preparation_error.as_deref(),
+                    scan_busy: self.diagnostics_busy(),
+                    scan_cancelling: self.diagnostic_cancelling,
+                    completed: self.diagnostic_completed,
+                    total: self.diagnostic_total,
+                    current_task: self.diagnostic_current_task.as_deref(),
+                },
                 context.message(Message::SetAiMode(AiMode::Assistant)),
                 context.message(Message::SetAiMode(AiMode::ScanReport)),
                 context.callback(Message::ChatInputChanged),
                 context.callback(Message::UsePrompt),
                 context.message(Message::SendChat),
+                context.message(Message::NewConversation),
+                context.message(Message::AllowCloudFallback),
+                context.message(Message::NeverCloudFallback),
+                context.message(Message::ApproveFullScan),
+                context.message(Message::DismissFullScan),
                 context.message(Message::OpenSettings),
+                context.message(Message::CancelPendingAiIntent),
+                context.message(Message::RetryPendingAiIntent),
                 self.report_text.as_deref(),
                 self.report_provider.as_deref(),
+                self.report_provider_use.as_ref(),
                 self.report_pending.is_some(),
                 self.report_error.as_deref(),
                 !self.diagnostic_results.is_empty(),
                 context.message(Message::GenerateReport),
+                context.message(Message::RegenerateReport),
                 context.message(Message::CancelReport),
+                context.message(Message::CopyReport),
                 self.chat_pending.is_some(),
                 context.message(Message::CancelChat),
             ),
             Page::Issues => issues_page(
                 palette,
-                self.theme,
+                effective_theme,
                 &self.issues,
                 &self.issue_maintenance,
+                self.fix_plan.as_ref(),
+                self.fix_plan_pending.is_some(),
+                self.fix_plan_error.as_deref(),
+                &self.issue_prioritization,
+                self.action_active_run.as_ref(),
+                &self.action_run_history,
+                &self.action_expanded_runs,
+                self.action_pending.is_some()
+                    || self.action_review.is_some()
+                    || self.repair_confirm.is_some()
+                    || self.action_active_run.is_some(),
+                self.settings_snapshot.ai_enabled,
                 self.is_admin,
                 self.issue_pending.is_some(),
                 self.issue_error.as_deref(),
@@ -6094,7 +13205,16 @@ impl Component for WfdiagSpike {
                 context.message(Message::RequestQuickScan),
                 context.callback(Message::RunRemediation),
                 context.callback(Message::AskAiAboutIssue),
+                context.message(Message::PrioritizeIssues),
+                context.message(Message::CancelIssuePrioritization),
                 context.message(Message::ProposeFixPlan),
+                context.message(Message::CancelFixPlan),
+                context.callback(Message::ReviewFixPlanActions),
+                context.message(Message::CancelActionRun),
+                context.callback(|(run_id, expanded)| Message::ActionRunExpandedChanged {
+                    run_id,
+                    expanded,
+                }),
                 context.message(Message::RestartAsAdmin),
             ),
             Page::History => history_page(
@@ -6105,40 +13225,53 @@ impl Component for WfdiagSpike {
                 &self.history_summaries,
                 &self.history_filter,
                 self.selected_history_id.as_deref(),
+                self.history_label_draft.as_str(),
+                self.history_label_editing,
                 self.history_tag_draft.as_str(),
                 self.history_comparison.as_ref(),
                 self.history_compare_task.is_some(),
+                self.history_comparison_error.as_deref(),
+                self.history_expanded_task_id.as_deref(),
+                self.history_task_diff.as_ref(),
+                self.history_task_diff_task.is_some(),
+                self.history_task_diff_error.as_deref(),
                 self.history_loading,
                 self.history_error.as_deref(),
                 self.history_ack_busy,
                 context.message(Message::RefreshHistory),
                 context.callback(Message::HistoryFilterChanged),
                 context.callback(Message::SelectHistory),
+                context.message(Message::BeginHistoryLabelEdit),
+                context.message(Message::CancelHistoryLabelEdit),
+                context.callback(Message::HistoryLabelDraftChanged),
+                context.message(Message::SaveHistoryLabel),
                 context.callback(Message::HistoryTagDraftChanged),
                 context.message(Message::SaveHistoryTags),
+                context.callback(Message::ToggleHistoryTaskDetail),
                 context.message(Message::ToggleClearHistoryConfirm(true)),
                 context.message(Message::ClearHistoryConfirmed),
                 context.message(Message::ToggleClearHistoryConfirm(false)),
                 self.history_clear_confirm,
                 self.history_trends.as_deref(),
                 self.history_trends_loading,
+                self.history_trends_error.as_deref(),
                 context.message(Message::RequestHistoryTrends),
             ),
         };
 
         let status_icon = if self.diagnostic_results.is_empty() {
-            if self.theme == WindowTheme::Light {
+            if effective_theme == WindowTheme::Light {
                 STATUS_INFO_LIGHT
             } else {
                 STATUS_INFO_DARK
             }
         } else if self.diagnostic_results.iter().any(|result| !result.success) {
-            if self.theme == WindowTheme::Light {
+            if effective_theme == WindowTheme::Light {
                 STATUS_WARN_LIGHT
             } else {
                 STATUS_WARN_DARK
             }
-        } else if self.theme == WindowTheme::Light {
+        } else if effective_theme == WindowTheme::Light {
             STATUS_OK_LIGHT
         } else {
             STATUS_OK_DARK
@@ -6203,19 +13336,26 @@ impl Component for WfdiagSpike {
                     )),
             );
 
-        let page_host: View = if self.page == Page::Diagnostics {
-            Border::new()
+        let page_host: View = match (self.page, diagnostics_compact) {
+            (Page::Diagnostics, false) => Border::new()
                 .padding(Thickness::new(26.0, 14.0, 26.0, 18.0))
-                .content(page)
-        } else {
-            ScrollViewer::new()
+                .content(page),
+            (Page::Diagnostics, true) => ScrollViewer::new()
+                .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
+                .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                .content(
+                    Border::new()
+                        .padding(Thickness::new(26.0, 14.0, 26.0, 18.0))
+                        .content(page),
+                ),
+            _ => ScrollViewer::new()
                 .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
                 .vertical_scroll_bar_visibility(ScrollBarVisibility::Hidden)
                 .content(
                     Border::new()
                         .padding(Thickness::new(26.0, 14.0, 26.0, 18.0))
                         .content(page),
-                )
+                ),
         };
 
         let content_panel = Border::new()
@@ -6281,7 +13421,7 @@ impl Component for WfdiagSpike {
         })
         .collect::<Vec<_>>();
 
-        let pane_toggle: View = if narrow {
+        let pane_toggle: View = if rail_forced_collapsed {
             View::empty()
         } else {
             nav_button(
@@ -6384,83 +13524,218 @@ impl Component for WfdiagSpike {
             .is_back_button_visible(false)
             .is_pane_toggle_button_visible(false);
 
-        let palette_commands: &[(&str, &str)] = &[
-            ("Diagnostics", "diagnostics"),
-            ("Live Monitor", "monitor"),
-            ("Processes", "processes"),
-            ("AI Analysis", "ai"),
-            ("Issues", "issues"),
-            ("History", "history"),
-            ("Quick Scan", "quick-scan"),
-            ("Full Scan", "full-scan"),
-            ("Export report", "export"),
-            ("Share to WindowsForum", "share"),
-            ("Settings", "settings"),
-            ("About", "about"),
-            ("Toggle theme", "toggle-theme"),
-            ("Keyboard shortcuts", "shortcut-help"),
-        ];
-        let palette_query_lower = self.palette_query.to_ascii_lowercase();
-        let palette_rows: Vec<KeyedView> = palette_commands
-            .iter()
-            .filter(|(label, _)| {
-                self.palette_query.is_empty()
-                    || label.to_ascii_lowercase().contains(&palette_query_lower)
-            })
-            .map(|(label, tag)| {
-                let execute = context.message(Message::PaletteCommand((*tag).to_string()));
-                KeyedView::new(
-                    *tag,
-                    Button::new()
-                        .width(430.0)
-                        .style(ButtonStyle::Subtle)
-                        .horizontal_alignment(HorizontalAlignment::Left)
-                        .on_click(execute)
+        // The shell publishes frequently while telemetry and scans are live.
+        // A closed palette must stay a zero-cost overlay: do not allocate its
+        // specs, fuzzy-match them, or construct row controls until it opens.
+        let palette_rows = if self.palette_open {
+            let palette_matches =
+                palette_visible_matches(self.palette_command_specs(), &self.palette_query);
+            let palette_match_count = palette_matches.len();
+            let active_palette_index = self
+                .palette_active_index
+                .min(palette_match_count.saturating_sub(1));
+            let mut palette_rows = Vec::new();
+            let mut previous_section = None;
+            for (index, matched) in palette_matches.into_iter().enumerate() {
+                let match_indices = matched.indices;
+                let command = matched.command;
+                if previous_section != Some(command.section) {
+                    previous_section = Some(command.section);
+                    palette_rows.push(KeyedView::new(
+                        format!("palette-section:{}", command.section),
+                        TextBlock::new()
+                            .text(command.section.to_ascii_uppercase())
+                            .margin(Thickness::new(12.0, 10.0, 12.0, 4.0))
+                            .font_size(10.0)
+                            .font_weight(FontWeight::BOLD)
+                            .foreground(palette.muted)
+                            .automation_heading_level(AutomationHeadingLevel::Level3),
+                    ));
+                }
+                let tag = command.tag.into_owned();
+                let execute = context.message(Message::PaletteCommand(tag.clone()));
+                let activate = context.callback(move |_| Message::PaletteActiveChanged(index));
+                let active = index == active_palette_index;
+                let icon = command.icon;
+                let label = command.label.into_owned();
+                let automation_label = label.clone();
+                let automation_id = format!("palette-item-{}", tag.replace(':', "-"));
+                let enabled = command.enabled;
+                let label_view =
+                    command_palette_highlighted_label(palette, label, &match_indices, enabled);
+                let shortcut: View = command.shortcut.map_or_else(View::empty, |shortcut| {
+                    command_palette_key_chip(palette, shortcut.into_owned())
+                });
+                palette_rows.push(KeyedView::new(
+                    tag,
+                    Border::new()
+                        .background(if active {
+                            palette.active
+                        } else {
+                            Color::transparent()
+                        })
+                        .corner_radius(6.0)
+                        .on_pointer_entered(activate)
                         .content(
-                            TextBlock::new()
-                                .text((*label).to_string())
-                                .horizontal_alignment(HorizontalAlignment::Left),
+                            Button::new()
+                                .height(36.0)
+                                .style(ButtonStyle::Subtle)
+                                .horizontal_alignment(HorizontalAlignment::Stretch)
+                                .horizontal_content_alignment(HorizontalAlignment::Stretch)
+                                .vertical_content_alignment(VerticalAlignment::Center)
+                                // Popup realization in WinUI 3 cannot repackage
+                                // boxed Thickness/CornerRadius values from a local
+                                // resource dictionary. Keep only brush overrides;
+                                // the Subtle style supplies native geometry.
+                                .resource_overrides(
+                                    ResourceOverrides::new()
+                                        .set("ButtonBackground", Color::transparent())
+                                        .set("ButtonBackgroundPointerOver", palette.active)
+                                        .set("ButtonBackgroundPressed", palette.active)
+                                        .set(
+                                            "ButtonForeground",
+                                            if active {
+                                                palette.accent
+                                            } else {
+                                                palette.muted
+                                            },
+                                        )
+                                        .set("ButtonForegroundDisabled", palette.muted),
+                                )
+                                .is_enabled(enabled)
+                                .automation_name(automation_label)
+                                .automation_id(automation_id)
+                                .element_ref(&self.palette_result_references[index])
+                                .on_click(execute)
+                                .content(
+                                    Grid::new()
+                                        .columns([
+                                            GridLength::Pixel(22.0),
+                                            GridLength::Star(1.0),
+                                            GridLength::Pixel(88.0),
+                                        ])
+                                        .column_spacing(8.0)
+                                        .children((
+                                            icons::path(icon)
+                                                .width(14.0)
+                                                .height(14.0)
+                                                .vertical_alignment(VerticalAlignment::Center),
+                                            label_view,
+                                            Border::new()
+                                                .grid_column(2)
+                                                .horizontal_alignment(HorizontalAlignment::Right)
+                                                .vertical_alignment(VerticalAlignment::Center)
+                                                .content(shortcut),
+                                        )),
+                                ),
                         ),
-                )
+                ));
+            }
+            if palette_rows.is_empty() {
+                palette_rows.push(KeyedView::new(
+                    "palette-empty",
+                    TextBlock::new()
+                        .text("No matching commands")
+                        .margin(Thickness::new(16.0, 30.0, 16.0, 30.0))
+                        .font_size(13.0)
+                        .foreground(palette.muted)
+                        .horizontal_alignment(HorizontalAlignment::Center),
+                ));
+            }
+            palette_rows
+        } else {
+            Vec::new()
+        };
+        let palette_open = self.palette_open;
+        let palette_epoch = self.palette_dialog_epoch;
+        let palette_query_reference = self.palette_query_reference.clone();
+        context.use_effect(
+            "command-palette-focus",
+            (palette_open, palette_epoch),
+            move || {
+                if palette_open {
+                    let _ = palette_query_reference.request_focus();
+                }
+                None
+            },
+        );
+        // Keep the palette in a permanently mounted ContentDialog. Reactor's
+        // dialog lifecycle is designed for live open/close transitions; a
+        // conditional Grid subtree can fail a native Children insertion.
+        // Expensive result rows are still created only while it is open.
+        let query_changed = context.callback(Message::PaletteQueryChanged);
+        let palette_width = (self.window_size.width - 48.0).clamp(360.0, 560.0);
+        let palette_list_height = (self.window_size.height * 0.60 - 94.0).clamp(220.0, 430.0);
+        let close_palette = context.message(Message::ClosePalette);
+        let palette_dialog = ContentDialog::new()
+            .is_open(self.palette_open)
+            .on_closed(move |_| {
+                let _ = close_palette.call(());
             })
-            .collect();
-        let palette_dialog = if self.palette_open {
-            let query_changed = context.callback(Message::PaletteQueryChanged);
-            let close = context.message(Message::ClosePalette);
-            ContentDialog::new()
-                .title("Command palette")
-                .is_open(true)
-                .close_button_text("Close")
-                .on_closed(move |_| {
-                    let _ = close.call(());
-                })
-                .content(
-                    StackPanel::new()
-                        .width(460.0)
-                        .spacing(9.0)
+            .content(
+                Border::new().width(palette_width).content(
+                    Grid::new()
+                        .automation_name("Command palette")
+                        .rows([
+                            GridLength::Pixel(54.0),
+                            GridLength::Auto,
+                            GridLength::Pixel(39.0),
+                        ])
                         .children((
                             Border::new()
-                                .background(palette.card_strong)
+                                .padding(Thickness::new(16.0, 7.0, 13.0, 7.0))
                                 .border_brush(palette.border)
-                                .border_thickness(1.0)
-                                .corner_radius(6.0)
-                                .padding(Thickness::new(10.0, 7.0, 10.0, 7.0))
+                                .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
                                 .content(
-                                    TextBox::new()
-                                        .placeholder_text("Type a command…")
-                                        .on_text_changed(query_changed),
+                                    Grid::new()
+                                        .columns([
+                                            GridLength::Pixel(19.0),
+                                            GridLength::Star(1.0),
+                                            GridLength::Pixel(42.0),
+                                        ])
+                                        .column_spacing(9.0)
+                                        .children((
+                                            icons::path(FaIcon::MagnifyingGlass)
+                                                .width(14.0)
+                                                .height(14.0)
+                                                .vertical_alignment(VerticalAlignment::Center),
+                                            TextBox::new()
+                                                .grid_column(1)
+                                                .height(40.0)
+                                                .text(self.palette_query.clone())
+                                                .automation_name("Search commands")
+                                                .placeholder_text(
+                                                    "Search commands, screens and diagnostics…",
+                                                )
+                                                .background(Color::transparent())
+                                                .border_thickness(Thickness::uniform(0.0))
+                                                .on_text_changed(query_changed)
+                                                .element_ref(&self.palette_query_reference),
+                                            Border::new()
+                                                .grid_column(2)
+                                                .horizontal_alignment(HorizontalAlignment::Right)
+                                                .vertical_alignment(VerticalAlignment::Center)
+                                                .content(command_palette_key_chip(palette, "Esc")),
+                                        )),
                                 ),
                             ScrollViewer::new()
-                                .max_height(360.0)
+                                .grid_row(1)
+                                .max_height(palette_list_height)
+                                .margin(Thickness::uniform(6.0))
+                                .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
                                 .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
                                 .content(
                                     StackPanel::new().spacing(2.0).keyed_children(palette_rows),
                                 ),
+                            Border::new()
+                                .grid_row(2)
+                                .padding(Thickness::xy(14.0, 0.0))
+                                .border_brush(palette.border)
+                                .border_thickness(Thickness::new(0.0, 1.0, 0.0, 0.0))
+                                .content(command_palette_footer(palette, palette_width >= 450.0)),
                         )),
-                )
-        } else {
-            View::empty()
-        };
+                ),
+            );
         let shortcut_rows: &[(&str, &str)] = &[
             ("Ctrl+K", "Open the command palette"),
             ("Ctrl+1 … Ctrl+6", "Switch between screens"),
@@ -6470,45 +13745,54 @@ impl Component for WfdiagSpike {
             ("Ctrl+/", "Show this shortcut list"),
             ("Esc", "Close dialogs and overlays"),
         ];
-        let shortcut_dialog = if self.shortcut_help_open {
-            let close = context.message(Message::CloseShortcutHelp);
-            ContentDialog::new()
-                .title("Keyboard Shortcuts")
-                .is_open(true)
-                .close_button_text("Close")
-                .on_closed(move |_| {
-                    let _ = close.call(());
-                })
-                .content(
-                    Border::new()
-                        .width(400.0)
-                        .background(palette.card_strong)
-                        .padding(Thickness::new(14.0, 10.0, 14.0, 10.0))
-                        .content(StackPanel::new().spacing(6.0).keyed_children(
+        // Keep the dialog node mounted and toggle its native open property.
+        // Inserting a late ContentDialog after several empty overlay siblings
+        // can desynchronize the current windows-reactor child index; a stable
+        // node also preserves clean row geometry across repeated opens.
+        let close_shortcuts = context.message(Message::CloseShortcutHelp);
+        let shortcut_dialog = ContentDialog::new()
+            .title("Keyboard Shortcuts")
+            .is_open(self.shortcut_help_open)
+            .close_button_text("Close")
+            .on_closed(move |_| {
+                let _ = close_shortcuts.call(());
+            })
+            .content(
+                Border::new()
+                    .width(400.0)
+                    .background(palette.card_strong)
+                    .padding(Thickness::new(14.0, 10.0, 14.0, 10.0))
+                    .content(
+                        StackPanel::new().spacing(6.0).keyed_children(
                             shortcut_rows
                                 .iter()
                                 .map(|(keys, description)| {
                                     KeyedView::new(
                                         *keys,
                                         Grid::new()
+                                            .min_height(28.0)
                                             .columns([GridLength::Star(1.0), GridLength::Auto])
+                                            .column_spacing(16.0)
                                             .children((
                                                 TextBlock::new()
                                                     .text((*description).to_string())
-                                                    .font_size(13.0),
+                                                    .font_size(13.0)
+                                                    .text_wrapping(TextWrapping::Wrap)
+                                                    .vertical_alignment(VerticalAlignment::Center),
                                                 TextBlock::new()
+                                                    .grid_column(1)
                                                     .text((*keys).to_string())
                                                     .font_size(12.0)
-                                                    .foreground(palette.muted),
+                                                    .font_weight(FontWeight::SEMI_BOLD)
+                                                    .foreground(palette.muted)
+                                                    .vertical_alignment(VerticalAlignment::Center),
                                             )),
                                     )
                                 })
                                 .collect::<Vec<_>>(),
-                        )),
-                )
-        } else {
-            View::empty()
-        };
+                        ),
+                    ),
+            );
 
         let title_settings = Button::new()
             .grid_row(0)
@@ -6529,6 +13813,7 @@ impl Component for WfdiagSpike {
             .horizontal_alignment(HorizontalAlignment::Right)
             .style(ButtonStyle::Subtle)
             .on_click(context.message(Message::TogglePalette))
+            .element_ref(&self.palette_button_reference)
             .automation_name("Open the command palette")
             .content(fa_icon_label(FaIcon::MagnifyingGlass, ""));
         let title_help = Button::new()
@@ -6541,6 +13826,27 @@ impl Component for WfdiagSpike {
             .on_click(context.message(Message::ShowShortcutHelp))
             .automation_name("Keyboard shortcuts")
             .content(icons::path(FaIcon::CircleInfo));
+        let (theme_icon, theme_automation_name) = if effective_theme == WindowTheme::Dark {
+            (FaIcon::Sun, "Switch to light theme")
+        } else {
+            (FaIcon::Moon, "Switch to dark theme")
+        };
+        let title_theme = Button::new()
+            .grid_row(0)
+            .width(46.0)
+            .height(42.0)
+            .margin(Thickness::new(0.0, 0.0, 282.0, 0.0))
+            .horizontal_alignment(HorizontalAlignment::Right)
+            .style(ButtonStyle::Subtle)
+            .on_click(context.message(Message::ToggleTheme))
+            .automation_name(theme_automation_name)
+            .content(icons::path(theme_icon));
+        let title_actions = Grid::new().grid_row(0).children((
+            title_theme,
+            title_help,
+            title_palette,
+            title_settings,
+        ));
 
         let body = Grid::new()
             .grid_row(1)
@@ -6552,7 +13858,7 @@ impl Component for WfdiagSpike {
 
         let light_wallpaper = Border::new()
             .grid_row_span(2)
-            .opacity(if self.theme == WindowTheme::Light {
+            .opacity(if effective_theme == WindowTheme::Light {
                 1.0
             } else {
                 0.0
@@ -6565,7 +13871,7 @@ impl Component for WfdiagSpike {
             );
         let dark_wallpaper = Border::new()
             .grid_row_span(2)
-            .opacity(if self.theme == WindowTheme::Light {
+            .opacity(if effective_theme == WindowTheme::Light {
                 0.0
             } else {
                 1.0
@@ -6591,17 +13897,42 @@ impl Component for WfdiagSpike {
                 )
             })
         };
-        let settings_editable = !self.settings_loading && !self.settings_saving;
+        let settings_editable = !self.settings_loading
+            && !self.settings_saving
+            && self.subscription_install_pending.is_none();
         let settings_can_save =
             settings_editable && (self.deterministic_visual || self.settings_runtime.is_some());
+        let settings_phi_gate =
+            phi_preference_gate(self.ai_provider_status.as_ref(), self.ai_status_loading);
         let settings: View = if self.settings_open {
             let epoch = self.settings_dialog_epoch;
+            let subscription_provider =
+                subscription_auth_provider_for_setup(self.provider_setup_index)
+                    .unwrap_or(SubscriptionAuthProvider::Codex);
+            let subscription_state = subscription_auth_provider_for_setup(
+                self.provider_setup_index,
+            )
+            .and_then(|provider| {
+                self.subscription_auth_states
+                    .get(subscription_auth_state_index(provider))
+            });
+            let subscription_install_active = self
+                .subscription_install_pending
+                .is_some_and(|pending| pending.provider == subscription_provider);
             settings_dialog(
                 palette,
-                self.theme,
+                effective_theme,
                 self.visual_state == VisualState::SettingsBottom,
                 &self.settings_draft,
-                !self.deterministic_visual,
+                &settings_phi_gate,
+                self.deterministic_visual,
+                self.provider_setup_index,
+                self.provider_catalogs.get(self.provider_setup_index),
+                subscription_state,
+                self.subscription_auth_error.as_deref(),
+                subscription_install_active,
+                self.subscription_install_progress.as_ref(),
+                self.subscription_install_error.as_deref(),
                 settings_editable,
                 settings_can_save,
                 self.settings_saving,
@@ -6658,6 +13989,26 @@ impl Component for WfdiagSpike {
                     epoch,
                     action: SettingsDialogAction::CodexModelSelectionChanged(value),
                 }),
+                context.callback(move |value| Message::SettingsDialog {
+                    epoch,
+                    action: SettingsDialogAction::ProviderSetupSelectionChanged(value),
+                }),
+                context.callback(move |value| Message::SettingsDialog {
+                    epoch,
+                    action: SettingsDialogAction::ProviderModelSelectionChanged(value),
+                }),
+                context.message(Message::RefreshProviderModels),
+                context.message(Message::CancelProviderModels),
+                context.message(Message::RefreshSubscriptionAuth(subscription_provider)),
+                context.message(Message::StartSubscriptionSignIn(subscription_provider)),
+                context.message(Message::StartSubscriptionSignOut(subscription_provider)),
+                context.message(Message::CancelSubscriptionAuth),
+                context.message(Message::RequestSubscriptionInstall(subscription_provider)),
+                context.message(Message::CancelSubscriptionInstall),
+                context.callback(move |(field, value)| Message::SettingsDialog {
+                    epoch,
+                    action: SettingsDialogAction::ProviderTextChanged(field, value),
+                }),
                 context.message(Message::SettingsDialog {
                     epoch,
                     action: SettingsDialogAction::Cancel,
@@ -6671,10 +14022,12 @@ impl Component for WfdiagSpike {
                     self.settings_snapshot.open_ai_api_key_set,
                     self.settings_snapshot.anthropic_api_key_set,
                     self.settings_snapshot.gemini_api_key_set,
+                    self.settings_snapshot.deepseek_api_key_set,
                     self.settings_snapshot.custom_api_key_set,
                 ],
                 self.provider_key_busy,
-                context.callback(move |(index, value)| Message::ProviderKeyDraftChanged(index, value)),
+                context
+                    .callback(move |(index, value)| Message::ProviderKeyDraftChanged(index, value)),
                 context.callback(Message::StoreProviderKey),
                 context.callback(Message::ClearProviderKey),
                 &self.diagnostic_catalog,
@@ -6765,31 +14118,109 @@ impl Component for WfdiagSpike {
             context.message(Message::AboutClosed { epoch: about_epoch }),
         );
 
-        let repair_dialog = if let Some(summary) = self.repair_confirm.as_ref() {
-            // Repair preview comes only from catalog constants; no argv is
-            // ever constructed from model or user input.
-            let steps = remediation::find(&summary.id)
-                .map(|spec| spec.preview_steps())
-                .unwrap_or_default();
-            let mut preview = String::from(
-                "This repair alters system state and may require elevation. It will run:\n",
+        let action_review_dialog = if let Some(proposal) = self.action_review.as_ref() {
+            let presentation = action_review_presentation(proposal, self.is_admin);
+            let mut preview = format!(
+                "Review the exact, catalog-backed action{}. This approval expires after 10 minutes and can be used only once.\n",
+                if presentation.batch { "s" } else { "" }
             );
-            for step in &steps {
-                preview.push_str("\n· ");
-                preview.push_str(step);
+            for action in &proposal.actions {
+                preview.push('\n');
+                preview.push_str(&action.remediation.label);
+                preview.push_str(" — ");
+                preview.push_str(&action.remediation.description);
+                for step in &action.steps {
+                    preview.push_str("\n  · ");
+                    preview.push_str(step);
+                }
             }
-            if summary.requires_restart {
-                preview.push_str("\n\nA restart is required afterwards.");
+            if presentation.admin_blocked {
+                preview.push_str(
+                    "\n\nThis action needs administrator rights. Restart the app as administrator first.",
+                );
+            } else if proposal
+                .actions
+                .iter()
+                .any(|action| action.remediation.admin_required)
+            {
+                preview.push_str("\n\nRuns with administrator rights.");
             }
-            let remediation_id = summary.id.clone();
-            let on_closed = context.callback(move |result| Message::RepairDialogClosed {
-                remediation_id: remediation_id.clone(),
+            if presentation.schedules_restart {
+                preview.push_str(
+                    "\n\nSave your work first. Windows will restart 60 seconds after approval; run shutdown /a to cancel.",
+                );
+            } else if presentation.requires_restart {
+                preview.push_str("\n\nA restart is required for this change to take effect.");
+            }
+            if presentation.long_running {
+                preview.push_str(
+                    "\n\nThis can take 10–30 minutes. Keep the app open until it finishes.",
+                );
+                preview.push_str(if presentation.can_stop {
+                    " You can stop it safely."
+                } else {
+                    " It cannot be stopped safely once it starts."
+                });
+            }
+            let proposal_id = proposal.proposal_id.clone();
+            let on_closed = context.callback(move |result| Message::ActionReviewDialogClosed {
+                proposal_id: proposal_id.clone(),
                 result,
             });
             ContentDialog::new()
-                .title("Run this repair?")
+                .title(presentation.title)
                 .is_open(true)
-                .primary_button_text("Run repair")
+                .primary_button_text(presentation.primary_label)
+                .secondary_button_text("Cancel")
+                .on_closed(on_closed)
+                .content(
+                    Border::new()
+                        .width(438.0)
+                        .background(palette.card_strong)
+                        .padding(Thickness::new(18.0, 14.0, 18.0, 14.0))
+                        .content(
+                            TextBlock::new()
+                                .text(preview)
+                                .font_size(12.5)
+                                .is_text_selection_enabled(true)
+                                .text_wrapping(TextWrapping::Wrap),
+                        ),
+                )
+        } else {
+            View::empty()
+        };
+
+        let repair_dialog = if let Some(proposal) = self.repair_confirm.as_ref() {
+            // This second, explicit gate is reached only after the broker has
+            // revalidated the immutable preview and identified a Repair tier.
+            let presentation = action_review_presentation(proposal, self.is_admin);
+            let mut preview = String::from("Confirm the exact repair steps below:\n");
+            for action in &proposal.actions {
+                for step in &action.steps {
+                    preview.push_str("\n· ");
+                    preview.push_str(step);
+                }
+            }
+            if presentation.schedules_restart {
+                preview.push_str(
+                    "\n\nSave your work first. Windows will restart 60 seconds after approval; run shutdown /a to cancel.",
+                );
+            } else if presentation.requires_restart {
+                preview.push_str("\n\nA restart is required for this change to take effect.");
+            }
+            let proposal_id = proposal.proposal_id.clone();
+            let on_closed = context.callback(move |result| Message::RepairDialogClosed {
+                proposal_id: proposal_id.clone(),
+                result,
+            });
+            ContentDialog::new()
+                .title(presentation.title)
+                .is_open(true)
+                .primary_button_text(if presentation.schedules_restart {
+                    "Schedule restart"
+                } else {
+                    "Run repair once"
+                })
                 .secondary_button_text("Cancel")
                 .on_closed(on_closed)
                 .content(
@@ -6801,6 +14232,75 @@ impl Component for WfdiagSpike {
                             TextBlock::new()
                                 .text(preview)
                                 .font_size(12.5)
+                                .is_text_selection_enabled(true)
+                                .text_wrapping(TextWrapping::Wrap),
+                        ),
+                )
+        } else {
+            View::empty()
+        };
+
+        let subscription_install_dialog = if let Some(prompt) = self.subscription_install_prompt {
+            let (title, primary, body) = match prompt {
+                SubscriptionInstallPrompt::Winget { provider, .. } => {
+                    let cli = match provider {
+                        SubscriptionAuthProvider::Codex => "OpenAI Codex CLI",
+                        SubscriptionAuthProvider::ClaudeCode => "Anthropic Claude Code CLI",
+                    };
+                    (
+                        format!("Install {cli}?"),
+                        "Install with winget",
+                        format!(
+                            "WFDiag will ask Windows Package Manager to install the official {cli} package. The installer runs only after this confirmation. After installation, WFDiag verifies the absolute executable path and does not sign in automatically."
+                        ),
+                    )
+                }
+                SubscriptionInstallPrompt::VendorFallback {
+                    provider, reason, ..
+                } => {
+                    let cli = match provider {
+                        SubscriptionAuthProvider::Codex => "OpenAI Codex CLI",
+                        SubscriptionAuthProvider::ClaudeCode => "Anthropic Claude Code CLI",
+                    };
+                    let reason = match reason {
+                        SubscriptionInstallFallbackReason::WingetUnavailable => {
+                            "Windows Package Manager is unavailable"
+                        }
+                        SubscriptionInstallFallbackReason::WingetFailed => {
+                            "Windows Package Manager could not complete the installation"
+                        }
+                        SubscriptionInstallFallbackReason::ExplicitApprovalMissing => {
+                            "the vendor fallback has not been approved"
+                        }
+                    };
+                    (
+                        "Run the vendor PowerShell installer?".to_string(),
+                        "Run vendor installer",
+                        format!(
+                            "{reason}. This is a separate approval to download and execute the current {cli} PowerShell bootstrap maintained by the vendor. Vendor scripts can change over time. WFDiag contains the process tree, applies a timeout, verifies the installed executable, and still does not sign in automatically."
+                        ),
+                    )
+                }
+            };
+            let on_closed = context.callback(move |result| {
+                Message::SubscriptionInstallPromptClosed { prompt, result }
+            });
+            ContentDialog::new()
+                .title(title)
+                .is_open(true)
+                .primary_button_text(primary)
+                .secondary_button_text("Cancel")
+                .on_closed(on_closed)
+                .content(
+                    Border::new()
+                        .width(430.0)
+                        .padding(Thickness::new(18.0, 14.0, 18.0, 14.0))
+                        .background(palette.card_strong)
+                        .content(
+                            TextBlock::new()
+                                .text(body)
+                                .font_size(12.5)
+                                .is_text_selection_enabled(true)
                                 .text_wrapping(TextWrapping::Wrap),
                         ),
                 )
@@ -6810,11 +14310,9 @@ impl Component for WfdiagSpike {
 
         Grid::new()
             .rows([GridLength::Pixel(42.0), GridLength::Star(1.0)])
-            // Reactor's pinned accelerator enum can only express Control plus
-            // these keys (no main-row digits, K, slash, or Shift), so the
-            // shipping Ctrl+1..6/K///Shift+Q/Shift+F set is upstream-blocked;
-            // the palette and shortcut list stay reachable from the titlebar,
-            // and Ctrl+Numpad1..6 cover screen switching where expressible.
+            // Keep Reactor's native accelerators for Ctrl+R and the numpad
+            // aliases. The isolated window subclass supplies the shipping
+            // main-row/K/slash/Shift chords through the component watcher.
             .key_accelerators(KeyAccelerators::new([
                 KeyAccelerator::new(
                     AcceleratorKey::R,
@@ -6858,17 +14356,22 @@ impl Component for WfdiagSpike {
                 Border::new().grid_row_span(2).background(palette.dim),
                 title_brand,
                 title_bar,
-                title_palette,
-                title_help,
-                title_settings,
+                title_actions,
                 body,
                 update_notice,
                 settings,
                 about_scrim,
                 about,
-                repair_dialog,
-                palette_dialog,
-                shortcut_dialog,
+                // One permanent overlay host keeps the root Grid topology
+                // stable. Dialog nodes remain mounted and toggle native open
+                // state rather than being inserted into the live tree.
+                Grid::new().grid_row_span(2).children((
+                    palette_dialog,
+                    shortcut_dialog,
+                    action_review_dialog,
+                    repair_dialog,
+                    subscription_install_dialog,
+                )),
             ))
     }
 }
@@ -7321,6 +14824,91 @@ fn fa_icon_label(icon: FaIcon, label: impl Into<String>) -> View {
         .children((icons::path(icon), label.into()))
 }
 
+fn command_palette_key_chip(palette: Palette, keys: impl Into<String>) -> View {
+    Border::new()
+        .min_height(20.0)
+        .padding(Thickness::xy(6.0, 1.0))
+        .background(palette.card)
+        .border_brush(palette.border)
+        .border_thickness(1.0)
+        .corner_radius(4.0)
+        .content(
+            TextBlock::new()
+                .text(keys)
+                .font_size(10.0)
+                .foreground(palette.muted)
+                .vertical_alignment(VerticalAlignment::Center),
+        )
+}
+
+fn command_palette_highlighted_label(
+    palette: Palette,
+    label: String,
+    _indices: &[usize],
+    enabled: bool,
+) -> View {
+    let normal = if enabled { palette.text } else { palette.muted };
+    // Reactor does not yet expose TextBlock inline Runs. Multiple adjacent
+    // TextBlocks cannot ellipsize as one label and can force the shortcut
+    // column outside the popup viewport. Keep the fuzzy match in the search
+    // model while rendering one bounded native text element.
+    TextBlock::new()
+        .grid_column(1)
+        .text(label)
+        .font_size(13.5)
+        .foreground(normal)
+        .text_trimming(TextTrimming::CharacterEllipsis)
+        .vertical_alignment(VerticalAlignment::Center)
+        .into()
+}
+
+fn command_palette_footer(palette: Palette, expanded: bool) -> View {
+    if !expanded {
+        return TextBlock::new()
+            .text("↑ ↓ navigate   ·   Enter run   ·   Esc close")
+            .font_size(11.0)
+            .foreground(palette.muted)
+            .vertical_alignment(VerticalAlignment::Center)
+            .into();
+    }
+
+    let footer_label = |label: &'static str| {
+        TextBlock::new()
+            .text(label)
+            .font_size(11.0)
+            .foreground(palette.muted)
+            .vertical_alignment(VerticalAlignment::Center)
+    };
+    StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(14.0)
+        .vertical_alignment(VerticalAlignment::Center)
+        .children((
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(4.0)
+                .children((
+                    command_palette_key_chip(palette, "↑"),
+                    command_palette_key_chip(palette, "↓"),
+                    footer_label("navigate"),
+                )),
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(5.0)
+                .children((
+                    command_palette_key_chip(palette, "Enter"),
+                    footer_label("run"),
+                )),
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(5.0)
+                .children((
+                    command_palette_key_chip(palette, "Esc"),
+                    footer_label("close"),
+                )),
+        ))
+}
+
 fn page_header(palette: Palette, page: Page, trailing: impl Into<View>) -> View {
     Grid::new()
         .columns([GridLength::Star(1.0), GridLength::Auto])
@@ -7397,76 +14985,23 @@ fn placed(view: impl Into<View>, column: i32, row: i32) -> View {
 }
 
 fn monitor_graph(palette: Palette, series: &[f64], max: f64) -> View {
-    const WIDTH: f64 = 300.0;
-    const HEIGHT: f64 = 72.0;
-    const BASELINE: f64 = 68.0;
-    const FILL_STRIPS: usize = 48;
-
-    let max = if max.is_finite() && max > 0.0 {
-        max
+    let geometry = monitor_graph_geometry(series, max);
+    let area_opacity = if palette.accent.r == 77 {
+        36.0 / 255.0
     } else {
-        1.0
+        31.0 / 255.0
     };
-    let graph_y = |value: f64| {
-        let value = if value.is_finite() { value } else { 0.0 };
-        BASELINE - (value / max).clamp(0.0, 1.0) * (HEIGHT - 12.0)
-    };
-    let points = if series.len() > 1 {
-        series
-            .iter()
-            .enumerate()
-            .map(|(index, value)| {
-                (
-                    index as f64 * (WIDTH / (series.len() - 1) as f64),
-                    graph_y(*value),
-                )
-            })
-            .collect::<Vec<_>>()
-    } else {
-        vec![(0.0, BASELINE), (WIDTH, BASELINE)]
-    };
-    let chart_fill = Color::argb(
-        if palette.accent.r == 77 { 36 } else { 31 },
-        palette.accent.r,
-        palette.accent.g,
-        palette.accent.b,
-    );
-
-    let mut graph_children = Vec::with_capacity(FILL_STRIPS + points.len());
-    for strip in 0..FILL_STRIPS {
-        let sample_progress = (strip as f64 + 0.5) / FILL_STRIPS as f64;
-        let y = if series.len() > 1 {
-            let sample_position = sample_progress * (series.len() - 1) as f64;
-            let lower = sample_position.floor() as usize;
-            let upper = (lower + 1).min(series.len() - 1);
-            let fraction = sample_position - lower as f64;
-            let value = series[lower] + (series[upper] - series[lower]) * fraction;
-            graph_y(value)
-        } else {
-            BASELINE
-        };
-        graph_children.push(KeyedView::new(
-            format!("area-{strip}"),
-            Rectangle::new()
-                .width(WIDTH / FILL_STRIPS as f64 + 0.05)
-                .height(HEIGHT - y)
-                .fill(chart_fill)
-                .canvas_left(strip as f64 * WIDTH / FILL_STRIPS as f64)
-                .canvas_top(y),
-        ));
-    }
-    for (index, segment) in points.windows(2).enumerate() {
-        graph_children.push(KeyedView::new(
-            format!("line-{index}"),
-            Line::new()
-                .stroke(palette.accent)
-                .stroke_thickness(1.6)
-                .x1(segment[0].0)
-                .y1(segment[0].1)
-                .x2(segment[1].0)
-                .y2(segment[1].1),
-        ));
-    }
+    let graph_paths: [PathIcon; MONITOR_GRAPH_PATH_COUNT] = [
+        PathIcon::new()
+            .data(geometry.area)
+            .width(MONITOR_GRAPH_WIDTH)
+            .height(MONITOR_GRAPH_HEIGHT)
+            .opacity(area_opacity),
+        PathIcon::new()
+            .data(geometry.ribbon)
+            .width(MONITOR_GRAPH_WIDTH)
+            .height(MONITOR_GRAPH_HEIGHT),
+    ];
 
     Viewbox::new()
         .height(62.0)
@@ -7474,10 +15009,28 @@ fn monitor_graph(palette: Palette, series: &[f64], max: f64) -> View {
         .stretch(Stretch::Fill)
         .slot(
             ViewboxSlot::Child,
-            Canvas::new()
-                .width(WIDTH)
-                .height(HEIGHT)
-                .keyed_children(graph_children),
+            Button::new()
+                .width(MONITOR_GRAPH_WIDTH)
+                .height(MONITOR_GRAPH_HEIGHT)
+                .is_enabled(false)
+                .horizontal_content_alignment(HorizontalAlignment::Stretch)
+                .vertical_content_alignment(VerticalAlignment::Stretch)
+                .resource_overrides(
+                    ResourceOverrides::new()
+                        .set("ButtonBackground", Color::transparent())
+                        .set("ButtonBackgroundDisabled", Color::transparent())
+                        .set("ButtonForeground", palette.accent)
+                        .set("ButtonForegroundDisabled", palette.accent)
+                        .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
+                        .set("ButtonPadding", Thickness::uniform(0.0))
+                        .set("ControlCornerRadius", CornerRadius::uniform(0.0)),
+                )
+                .content(
+                    Canvas::new()
+                        .width(MONITOR_GRAPH_WIDTH)
+                        .height(MONITOR_GRAPH_HEIGHT)
+                        .children(graph_paths),
+                ),
         )
 }
 
@@ -7589,8 +15142,123 @@ fn format_diagnostic_duration(duration_ms: u64) -> String {
     }
 }
 
+fn diagnostic_matches_filter(
+    result: &DiagnosticTaskResult,
+    catalog: &[DiagnosticTask],
+    filter: &str,
+) -> bool {
+    let filter = filter.trim().to_ascii_lowercase();
+    if filter.is_empty() {
+        return true;
+    }
+    let task = catalog.iter().find(|task| task.id == result.task_id);
+    result.task_id.to_ascii_lowercase().contains(&filter)
+        || task.is_some_and(|task| {
+            task.name.to_ascii_lowercase().contains(&filter)
+                || task.category.to_ascii_lowercase().contains(&filter)
+                || task.description.to_ascii_lowercase().contains(&filter)
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiagnosticCategoryProgress {
+    category: String,
+    total: usize,
+    completed: usize,
+    running: usize,
+    failed: usize,
+    cancelled: usize,
+}
+
+impl DiagnosticCategoryProgress {
+    fn terminal(&self) -> usize {
+        self.completed + self.failed + self.cancelled
+    }
+}
+
+fn diagnostic_category_progress(
+    catalog: &[DiagnosticTask],
+    expected_task_ids: &[String],
+    task_statuses: &HashMap<String, TaskProgressStatus>,
+) -> Vec<DiagnosticCategoryProgress> {
+    let mut categories: Vec<DiagnosticCategoryProgress> = Vec::new();
+    for task_id in expected_task_ids {
+        let category = catalog
+            .iter()
+            .find(|task| task.id == *task_id)
+            .map_or("Other", |task| task.category.as_str());
+        let index = categories
+            .iter()
+            .position(|progress| progress.category == category)
+            .unwrap_or_else(|| {
+                categories.push(DiagnosticCategoryProgress {
+                    category: category.to_string(),
+                    total: 0,
+                    completed: 0,
+                    running: 0,
+                    failed: 0,
+                    cancelled: 0,
+                });
+                categories.len() - 1
+            });
+        let progress = &mut categories[index];
+        progress.total += 1;
+        match task_statuses
+            .get(task_id)
+            .copied()
+            .unwrap_or(TaskProgressStatus::Queued)
+        {
+            TaskProgressStatus::Queued => {}
+            TaskProgressStatus::Running => progress.running += 1,
+            TaskProgressStatus::Completed => progress.completed += 1,
+            TaskProgressStatus::Failed => progress.failed += 1,
+            TaskProgressStatus::Cancelled => progress.cancelled += 1,
+        }
+    }
+    categories
+}
+
+fn diagnostic_category_progress_chip(
+    palette: Palette,
+    progress: &DiagnosticCategoryProgress,
+) -> View {
+    let terminal = progress.terminal();
+    let (foreground, background, state) = if progress.failed > 0 {
+        (palette.err, palette.err_bg, "failed")
+    } else if progress.cancelled > 0 {
+        (palette.warn, palette.warn_bg, "cancelled")
+    } else if terminal == progress.total {
+        (palette.ok, palette.ok_bg, "complete")
+    } else if progress.running > 0 {
+        (palette.accent, palette.active, "running")
+    } else {
+        (palette.muted, palette.dim, "queued")
+    };
+    let label = format!("{} {terminal}/{}", progress.category, progress.total);
+
+    Border::new()
+        .height(25.0)
+        .margin(Thickness::new(0.0, 0.0, 6.0, 6.0))
+        .padding(Thickness::xy(10.0, 0.0))
+        .background(background)
+        .corner_radius(999.0)
+        .content(
+            TextBlock::new()
+                .text(label.clone())
+                .font_size(10.5)
+                .font_weight(FontWeight::SEMI_BOLD)
+                .foreground(foreground)
+                .vertical_alignment(VerticalAlignment::Center)
+                .automation_name(format!("{label}, {state}")),
+        )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn diagnostics_scanning_page(
     palette: Palette,
+    catalog: &[DiagnosticTask],
+    expected_task_ids: &[String],
+    task_statuses: &HashMap<String, TaskProgressStatus>,
     completed: usize,
     total: usize,
     current_task: Option<&str>,
@@ -7612,6 +15280,13 @@ fn diagnostics_scanning_page(
     } else {
         format!("{progress:.0}%")
     };
+    let category_chips = diagnostic_category_progress(catalog, expected_task_ids, task_statuses)
+        .into_iter()
+        .map(|progress| {
+            let key = progress.category.clone();
+            (key, diagnostic_category_progress_chip(palette, &progress))
+        })
+        .collect::<Vec<_>>();
 
     let hero = StackPanel::new()
         .horizontal_alignment(HorizontalAlignment::Center)
@@ -7659,9 +15334,16 @@ fn diagnostics_scanning_page(
                 .font_size(11.5)
                 .foreground(palette.muted)
                 .horizontal_alignment(HorizontalAlignment::Center),
+            VariableSizedWrapGrid::new()
+                .margin(Thickness::new(0.0, 14.0, 0.0, 0.0))
+                .max_width(640.0)
+                .orientation(Orientation::Horizontal)
+                .item_height(31.0)
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .keyed_children(category_chips),
             Button::new()
                 .height(33.0)
-                .margin(Thickness::new(0.0, 24.0, 0.0, 0.0))
+                .margin(Thickness::new(0.0, 18.0, 0.0, 0.0))
                 .is_enabled(!cancelling)
                 .on_click(cancel_scan)
                 .automation_name("Stop scan")
@@ -7711,32 +15393,116 @@ fn live_collected_statistic(palette: Palette, collected: usize, completed: usize
     ))
 }
 
+const MAX_DIAGNOSTIC_PREVIEW_CHARS: usize = 48_000;
+const MAX_STRUCTURED_OUTPUT_INPUT_BYTES: usize = 128 * 1024;
+const MAX_STRUCTURED_OUTPUT_ROWS: usize = 256;
+const MAX_STRUCTURED_OUTPUT_BYTES: usize = 48 * 1024;
+const MAX_RAW_PRETTY_INPUT_BYTES: usize = 32 * 1024;
+const MAX_RAW_FALLBACK_BYTES: usize = 24 * 1024;
+const RAW_OUTPUT_TRUNCATION_NOTICE: &str =
+    "… Raw output truncated before formatting; the complete result remains available for export.";
+
+#[derive(Debug, Eq, PartialEq)]
+struct FormattedOutputRows {
+    rows: Vec<(String, String)>,
+    byte_len: usize,
+    truncated: bool,
+}
+
+impl FormattedOutputRows {
+    fn new() -> Self {
+        Self {
+            rows: Vec::new(),
+            byte_len: 0,
+            truncated: false,
+        }
+    }
+
+    fn accepts(&mut self, key_bytes: usize, value_bytes: usize) -> bool {
+        if self.truncated {
+            return false;
+        }
+        let row_bytes = key_bytes.saturating_add(value_bytes);
+        if self.rows.len() >= MAX_STRUCTURED_OUTPUT_ROWS
+            || self.byte_len.saturating_add(row_bytes) > MAX_STRUCTURED_OUTPUT_BYTES
+        {
+            self.truncated = true;
+            return false;
+        }
+        self.byte_len += row_bytes;
+        true
+    }
+
+    fn push(&mut self, key: String, value: String) {
+        if !self.accepts(key.len(), value.len()) {
+            return;
+        }
+        self.rows.push((key, value));
+    }
+
+    fn push_str(&mut self, key: String, value: &str) {
+        if !self.accepts(key.len(), value.len()) {
+            return;
+        }
+        self.rows.push((key, value.to_string()));
+    }
+}
+
+fn bounded_utf8_prefix(text: &str, max_bytes: usize) -> (&str, bool) {
+    if text.len() <= max_bytes {
+        return (text, false);
+    }
+    let mut end = max_bytes.min(text.len());
+    while end != 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
+}
+
+fn oversized_structured_preview(output: &str) -> FormattedOutputRows {
+    let key = "Output preview".to_string();
+    let value_budget = MAX_STRUCTURED_OUTPUT_BYTES.saturating_sub(key.len());
+    let (preview, _) = bounded_utf8_prefix(output, value_budget);
+    FormattedOutputRows {
+        byte_len: key.len().saturating_add(preview.len()),
+        rows: vec![(key, preview.to_string())],
+        truncated: true,
+    }
+}
+
 /// Mirror of the shipping detail view's output conversion: JSON objects
 /// flatten into human-facing key/value rows ("group · key"); non-JSON
-/// output stays raw text.
-fn format_output_key_values(
-    task_id: &str,
-    output: &str,
-) -> Option<Vec<(String, String)>> {
+/// output stays raw text. Parsing and row materialization are bounded before
+/// touching the complete collector payload.
+fn format_output_key_values(task_id: &str, output: &str) -> Option<FormattedOutputRows> {
+    let oversized = output.len() > MAX_STRUCTURED_OUTPUT_INPUT_BYTES;
+    let candidate = if oversized {
+        bounded_utf8_prefix(output, MAX_STRUCTURED_OUTPUT_INPUT_BYTES).0
+    } else {
+        output
+    };
     // Collector output decoded from PowerShell may carry a leading BOM
     // (U+FEFF), which str::trim does not remove; strip it explicitly.
-    let trimmed = output.trim().trim_start_matches('\u{feff}').trim();
-    eprintln!(
-        "[trace] kv format for {task_id}: len={} starts={:?} parse={}",
-        trimmed.len(),
-        trimmed.chars().take(12).collect::<String>(),
-        serde_json::from_str::<serde_json::Value>(trimmed).is_ok()
-    );
-    let value: serde_json::Value = if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        serde_json::from_str(trimmed).ok()?
-    } else {
+    let trimmed = candidate.trim().trim_start_matches('\u{feff}').trim();
+    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
         return None;
-    };
-    let mut rows: Vec<(String, String)> = Vec::new();
-    fn flatten(prefix: &str, value: &serde_json::Value, rows: &mut Vec<(String, String)>) {
+    }
+    if oversized {
+        return Some(oversized_structured_preview(trimmed));
+    }
+
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let mut rows = FormattedOutputRows::new();
+    fn flatten(prefix: &str, value: &serde_json::Value, rows: &mut FormattedOutputRows) {
+        if rows.truncated {
+            return;
+        }
         match value {
             serde_json::Value::Object(map) => {
                 for (key, entry) in map {
+                    if rows.truncated {
+                        break;
+                    }
                     let path = if prefix.is_empty() {
                         key.clone()
                     } else {
@@ -7750,6 +15516,9 @@ fn format_output_key_values(
             // ("0 · key"), scalars join inline.
             serde_json::Value::Array(items) => {
                 for (index, item) in items.iter().enumerate() {
+                    if rows.truncated {
+                        break;
+                    }
                     let path = if prefix.is_empty() {
                         index.to_string()
                     } else {
@@ -7757,32 +15526,32 @@ fn format_output_key_values(
                     };
                     match item {
                         serde_json::Value::String(text) => {
-                            rows.push((path, text.clone()));
+                            rows.push_str(path, text);
                         }
                         serde_json::Value::Number(number) => {
-                            rows.push((path, number.to_string()));
+                            rows.push(path, number.to_string());
                         }
                         serde_json::Value::Bool(flag) => {
-                            rows.push((path, flag.to_string()));
+                            rows.push(path, flag.to_string());
                         }
                         other => flatten(&path, other, rows),
                     }
                 }
             }
             serde_json::Value::Null => {
-                rows.push((prefix.to_string(), String::new()));
+                rows.push(prefix.to_string(), String::new());
             }
             serde_json::Value::String(text) => {
-                rows.push((prefix.to_string(), text.clone()));
+                rows.push_str(prefix.to_string(), text);
             }
-            other => rows.push((prefix.to_string(), other.to_string())),
+            other => rows.push(prefix.to_string(), other.to_string()),
         }
     }
     // pending_reboot's raw schema needs the same explanation as the
     // shipping detail view: expose restart state instead of raw flags.
     if task_id == "pending_reboot" {
         let serde_json::Value::Object(map) = &value else {
-            return Some(Vec::new());
+            return Some(FormattedOutputRows::new());
         };
         let reasons: Vec<String> = map
             .get("reasons")
@@ -7791,10 +15560,12 @@ fn format_output_key_values(
         let high_confidence = reasons
             .iter()
             .any(|reason| reason == "windows_update" || reason == "component_based_servicing");
-        let legacy_deferred = reasons.iter().any(|reason| {
-            reason == "pending_file_rename" || reason == "pending_file_operations"
-        });
-        let explicit = map.get("restart_required").and_then(|value| value.as_bool());
+        let legacy_deferred = reasons
+            .iter()
+            .any(|reason| reason == "pending_file_rename" || reason == "pending_file_operations");
+        let explicit = map
+            .get("restart_required")
+            .and_then(|value| value.as_bool());
         let legacy = map.get("pending").and_then(|value| value.as_bool());
         let restart_required = explicit.unwrap_or(match legacy {
             Some(legacy_pending) => {
@@ -7803,10 +15574,10 @@ fn format_output_key_values(
             }
             None => false,
         });
-        rows.push((
+        rows.push(
             "Restart required".to_string(),
-                if restart_required { "Yes" } else { "No" }.to_string(),
-            ));
+            if restart_required { "Yes" } else { "No" }.to_string(),
+        );
         if !reasons.is_empty() {
             let required_by: Vec<&str> = reasons
                 .iter()
@@ -7817,10 +15588,13 @@ fn format_output_key_values(
                 })
                 .collect();
             if !required_by.is_empty() {
-                rows.push(("Required by".to_string(), required_by.join(", ")));
+                rows.push("Required by".to_string(), required_by.join(", "));
             }
         }
         for (key, entry) in map {
+            if rows.truncated {
+                break;
+            }
             if key == "restart_required" || key == "pending" || key == "reasons" {
                 continue;
             }
@@ -7830,57 +15604,541 @@ fn format_output_key_values(
         return Some(rows);
     }
     flatten("", &value, &mut rows);
-    (!rows.is_empty()).then_some(rows)
+    (!rows.rows.is_empty() || rows.truncated).then_some(rows)
 }
 
 #[cfg(test)]
 mod output_format_tests {
     use super::*;
 
+    fn diagnostic_task(id: &str, category: &str) -> DiagnosticTask {
+        DiagnosticTask {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            category: category.to_string(),
+            admin_required: false,
+        }
+    }
+
+    #[test]
+    fn scan_category_progress_keeps_selected_task_order_and_counts_states() {
+        let catalog = vec![
+            diagnostic_task("os", "System"),
+            diagnostic_task("disk", "Storage"),
+            diagnostic_task("bios", "System"),
+        ];
+        let expected = ["disk", "os", "bios"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let statuses = HashMap::from([
+            ("disk".to_string(), TaskProgressStatus::Completed),
+            ("os".to_string(), TaskProgressStatus::Running),
+            ("bios".to_string(), TaskProgressStatus::Failed),
+        ]);
+
+        let progress = diagnostic_category_progress(&catalog, &expected, &statuses);
+        assert_eq!(progress.len(), 2);
+        assert_eq!(progress[0].category, "Storage");
+        assert_eq!(progress[0].completed, 1);
+        assert_eq!(progress[0].terminal(), 1);
+        assert_eq!(progress[1].category, "System");
+        assert_eq!(progress[1].total, 2);
+        assert_eq!(progress[1].running, 1);
+        assert_eq!(progress[1].failed, 1);
+        assert_eq!(progress[1].terminal(), 1);
+    }
+
+    #[test]
+    fn scan_category_progress_treats_missing_metadata_and_status_as_queued_other() {
+        let expected = vec!["unknown".to_string()];
+        let progress = diagnostic_category_progress(&[], &expected, &HashMap::new());
+
+        assert_eq!(
+            progress,
+            vec![DiagnosticCategoryProgress {
+                category: "Other".to_string(),
+                total: 1,
+                completed: 0,
+                running: 0,
+                failed: 0,
+                cancelled: 0,
+            }]
+        );
+    }
+
     #[test]
     fn json_output_flattens_to_key_values() {
         let rows = format_output_key_values(
             "processor",
             r#"{"Name":"Snapdragon X","NumberOfCores":12,"_DERIVATION":["A","B"]}"#,
-        );
-        let rows = rows.expect("JSON object must produce rows");
+        )
+        .expect("JSON object must produce rows");
+        assert!(!rows.truncated);
         assert!(
-            rows.contains(&("Name".to_string(), "Snapdragon X".to_string())),
+            rows.rows
+                .contains(&("Name".to_string(), "Snapdragon X".to_string())),
             "rows were: {rows:?}"
         );
-        assert!(rows.contains(&("NumberOfCores".to_string(), "12".to_string())));
+        assert!(
+            rows.rows
+                .contains(&("NumberOfCores".to_string(), "12".to_string()))
+        );
     }
 
     #[test]
     fn json_output_with_bom_still_parses() {
-        let with_bom = format!("\u{feff}{{\"Name\":\"X\"}}");
-        let rows = format_output_key_values("os_info", &with_bom);
-        assert!(rows.is_some());
+        let with_bom = "\u{feff}{\"Name\":\"X\"}".to_string();
+        let rows = format_output_key_values("os_info", &with_bom).expect("BOM JSON parses");
+        assert_eq!(rows.rows, [("Name".to_string(), "X".to_string())]);
+        assert!(!rows.truncated);
     }
 
     #[test]
     fn non_json_output_stays_raw() {
         assert!(format_output_key_values("os_info", "plain text output").is_none());
     }
+
+    #[test]
+    fn structured_output_caps_rows_and_bytes() {
+        let output = serde_json::to_string(
+            &(0..MAX_STRUCTURED_OUTPUT_ROWS + 10)
+                .map(|index| format!("value-{index}"))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let rows = format_output_key_values("large_array", &output).unwrap();
+        assert_eq!(rows.rows.len(), MAX_STRUCTURED_OUTPUT_ROWS);
+        assert!(rows.byte_len <= MAX_STRUCTURED_OUTPUT_BYTES);
+        assert!(rows.truncated);
+
+        let oversized_value = serde_json::json!({
+            "blob": "x".repeat(MAX_STRUCTURED_OUTPUT_BYTES)
+        })
+        .to_string();
+        let rows = format_output_key_values("large_value", &oversized_value).unwrap();
+        assert!(rows.rows.is_empty());
+        assert!(rows.byte_len <= MAX_STRUCTURED_OUTPUT_BYTES);
+        assert!(rows.truncated);
+    }
+
+    #[test]
+    fn oversized_structured_input_uses_a_bounded_preview_without_parsing() {
+        let output = format!(
+            "{{\"payload\":\"{}\",\"tail\":not-valid-json}}",
+            "x".repeat(MAX_STRUCTURED_OUTPUT_INPUT_BYTES)
+        );
+        let rows = format_output_key_values("oversized", &output).unwrap();
+        assert_eq!(rows.rows.len(), 1);
+        assert!(rows.byte_len <= MAX_STRUCTURED_OUTPUT_BYTES);
+        assert!(rows.truncated);
+        assert!(!rows.rows[0].1.contains("not-valid-json"));
+    }
+
+    #[test]
+    fn diagnostic_raw_document_preserves_structured_output_and_metadata() {
+        let mut task = diagnostic_task("os_info", "System");
+        task.name = "Operating System".to_string();
+        task.admin_required = true;
+        let result = DiagnosticTaskResult::new(
+            "session",
+            "os_info",
+            Arc::new(DiagnosticOutput {
+                success: true,
+                output: r#"{"build":26100,"secure":true}"#.to_string(),
+                error: None,
+                duration_ms: 42,
+            }),
+        );
+
+        let value: serde_json::Value =
+            serde_json::from_str(&diagnostic_raw_document(&result, Some(&task))).unwrap();
+        assert_eq!(value["task_id"], "os_info");
+        assert_eq!(value["name"], "Operating System");
+        assert_eq!(value["category"], "System");
+        assert_eq!(value["success"], true);
+        assert_eq!(value["duration_ms"], 42);
+        assert_eq!(value["admin_required"], true);
+        assert!(value["error"].is_null());
+        assert_eq!(value["output"]["build"], 26100);
+        assert_eq!(value["output"]["secure"], true);
+        assert!(value.get("output_truncated").is_none());
+    }
+
+    #[test]
+    fn failed_raw_document_keeps_error_and_partial_plain_text_output() {
+        let result = DiagnosticTaskResult::new(
+            "session",
+            "disk",
+            Arc::new(DiagnosticOutput {
+                success: false,
+                output: "partial disk evidence".to_string(),
+                error: Some("access denied".to_string()),
+                duration_ms: 7,
+            }),
+        );
+
+        let value: serde_json::Value =
+            serde_json::from_str(&diagnostic_raw_document(&result, None)).unwrap();
+        assert_eq!(value["name"], "disk");
+        assert_eq!(value["category"], "Other");
+        assert_eq!(value["admin_required"], false);
+        assert_eq!(value["error"], "access denied");
+        assert_eq!(value["output"], "partial disk evidence");
+        assert_eq!(diagnostic_output_preview(&result), "partial disk evidence");
+    }
+
+    #[test]
+    fn oversized_previews_are_bounded_without_mutating_the_shared_result() {
+        let output = format!(
+            "{}RAW_TAIL_SENTINEL",
+            "x".repeat(MAX_DIAGNOSTIC_PREVIEW_CHARS + 100)
+        );
+        let result = DiagnosticTaskResult::new(
+            "session",
+            "large",
+            Arc::new(DiagnosticOutput {
+                success: true,
+                output: output.clone(),
+                error: None,
+                duration_ms: 1,
+            }),
+        );
+
+        let preview = diagnostic_output_preview(&result);
+        assert!(preview.contains("Output preview truncated"));
+        let value: serde_json::Value =
+            serde_json::from_str(&diagnostic_raw_document(&result, None)).unwrap();
+        let raw_output = value["output"].as_str().unwrap();
+        assert!(value["output_truncated"].as_bool().unwrap());
+        assert!(raw_output.len() < output.len());
+        assert!(raw_output.contains(RAW_OUTPUT_TRUNCATION_NOTICE));
+        assert!(!raw_output.contains("RAW_TAIL_SENTINEL"));
+        assert_eq!(result.output, output);
+    }
 }
 
 fn diagnostic_output_preview(result: &DiagnosticTaskResult) -> String {
-    let output = result
-        .error
-        .as_deref()
-        .filter(|error| !error.trim().is_empty())
-        .unwrap_or(&result.output);
-    if output.is_empty() {
-        return "No output was returned by this diagnostic.".to_string();
+    visible_text_preview(&result.output, "(no output)")
+}
+
+fn visible_text_preview(text: &str, empty_label: &str) -> String {
+    if text.is_empty() {
+        return empty_label.to_string();
     }
 
-    const MAX_PREVIEW_CHARS: usize = 48_000;
-    let mut preview: String = output.chars().take(MAX_PREVIEW_CHARS + 1).collect();
-    if preview.chars().count() > MAX_PREVIEW_CHARS {
-        preview = preview.chars().take(MAX_PREVIEW_CHARS).collect();
+    let mut preview: String = text
+        .chars()
+        .take(MAX_DIAGNOSTIC_PREVIEW_CHARS + 1)
+        .collect();
+    if preview.chars().count() > MAX_DIAGNOSTIC_PREVIEW_CHARS {
+        preview = preview.chars().take(MAX_DIAGNOSTIC_PREVIEW_CHARS).collect();
         preview.push_str("\n\n… Output preview truncated; the complete result remains in memory.");
     }
     preview
+}
+
+fn diagnostic_raw_document(result: &DiagnosticTaskResult, task: Option<&DiagnosticTask>) -> String {
+    let source_is_bounded = result.output.len() <= MAX_RAW_PRETTY_INPUT_BYTES;
+    let output = if source_is_bounded {
+        let trimmed = result.output.trim().trim_start_matches('\u{feff}').trim();
+        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            serde_json::from_str::<serde_json::Value>(trimmed)
+                .unwrap_or_else(|_| serde_json::Value::String(result.output.clone()))
+        } else {
+            serde_json::Value::String(result.output.clone())
+        }
+    } else {
+        let (source_preview, _) = bounded_utf8_prefix(&result.output, MAX_RAW_FALLBACK_BYTES);
+        let mut preview = String::with_capacity(
+            source_preview
+                .len()
+                .saturating_add(RAW_OUTPUT_TRUNCATION_NOTICE.len())
+                .saturating_add(2),
+        );
+        preview.push_str(source_preview);
+        preview.push_str("\n\n");
+        preview.push_str(RAW_OUTPUT_TRUNCATION_NOTICE);
+        serde_json::Value::String(preview)
+    };
+    let mut document = serde_json::json!({
+        "task_id": result.task_id,
+        "name": task.map_or(result.task_id.as_str(), |task| task.name.as_str()),
+        "category": task.map_or("Other", |task| task.category.as_str()),
+        "success": result.success,
+        "duration_ms": result.duration_ms,
+        "admin_required": task.is_some_and(|task| task.admin_required),
+        "error": result.error,
+        "output": output,
+    });
+    if !source_is_bounded {
+        document
+            .as_object_mut()
+            .expect("diagnostic raw document is an object")
+            .insert(
+                "output_truncated".to_string(),
+                serde_json::Value::Bool(true),
+            );
+    }
+    serde_json::to_string_pretty(&document)
+        .expect("diagnostic raw document contains only serializable values")
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DiagnosticGroundingSourceProjection {
+    title: String,
+    source: String,
+    target: Option<String>,
+}
+
+fn safe_diagnostic_grounding_link_target(raw: &str) -> Option<String> {
+    let target = safe_markdown_link_target(raw)?;
+    let scheme = target.split_once(':')?.0;
+    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")).then_some(target)
+}
+
+fn project_diagnostic_grounding_source(
+    source: &GroundingTraceSource,
+) -> DiagnosticGroundingSourceProjection {
+    DiagnosticGroundingSourceProjection {
+        title: source.title.clone(),
+        source: source.source.clone(),
+        target: source
+            .url
+            .as_deref()
+            .and_then(safe_diagnostic_grounding_link_target),
+    }
+}
+
+fn diagnostic_grounding_source_row(source: &GroundingTraceSource) -> View {
+    let source = project_diagnostic_grounding_source(source);
+    let mut inlines = vec![RichTextInline::Run(RichTextRun::plain("• "))];
+    if let Some(target) = source.target {
+        inlines.push(RichTextInline::Hyperlink(RichTextHyperlink {
+            text: source.title,
+            uri: target,
+        }));
+    } else {
+        inlines.push(RichTextInline::Run(RichTextRun::plain(source.title)));
+    }
+    if !source.source.trim().is_empty() {
+        inlines.push(RichTextInline::Run(RichTextRun::plain(format!(
+            " · {}",
+            source.source
+        ))));
+    }
+    RichTextBlock::new()
+        .paragraphs(RichText::single_paragraph(inlines))
+        .font_size(10.5)
+        .is_text_selection_enabled(true)
+        .text_wrapping(TextWrapping::Wrap)
+        .into()
+}
+
+fn diagnostic_grounding_view(palette: Palette, trace: &GroundingTrace) -> View {
+    let summary = if trace.source_count == 0 {
+        trace.error.as_deref().map_or_else(
+            || "Live grounding found no sources".to_string(),
+            |error| format!("Live grounding unavailable · {error}"),
+        )
+    } else {
+        let noun = if trace.source_count == 1 {
+            "source"
+        } else {
+            "sources"
+        };
+        format!("Live grounding · {} {noun}", trace.source_count)
+    };
+    let error: View = if trace.source_count > 0 {
+        trace.error.as_deref().map_or_else(View::empty, |error| {
+            TextBlock::new()
+                .text(error)
+                .font_size(10.5)
+                .foreground(palette.err)
+                .is_text_selection_enabled(true)
+                .text_wrapping(TextWrapping::Wrap)
+                .into()
+        })
+    } else {
+        View::empty()
+    };
+    let sources = trace
+        .sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            KeyedView::new(
+                format!("diagnostic-grounding-source-{index}"),
+                diagnostic_grounding_source_row(source),
+            )
+        })
+        .collect::<Vec<_>>();
+    let sources: View = if sources.is_empty() {
+        View::empty()
+    } else {
+        StackPanel::new().spacing(2.0).keyed_children(sources)
+    };
+    StackPanel::new().spacing(3.0).children((
+        TextBlock::new()
+            .text(summary)
+            .font_size(10.5)
+            .foreground(palette.muted)
+            .is_text_selection_enabled(true)
+            .text_wrapping(TextWrapping::Wrap),
+        error,
+        sources,
+    ))
+}
+
+fn diagnostic_analysis_panel(
+    palette: Palette,
+    analysis: Option<&DiagnosticAnalysisDisplay>,
+    available: bool,
+    analyze: Callback<()>,
+    retry: Callback<()>,
+    cancel: Callback<()>,
+) -> View {
+    if analysis.is_none() && !available {
+        return View::empty();
+    }
+    let analysis = analysis.cloned().unwrap_or_default();
+    let provider = analysis.provider_use.as_ref().map_or_else(
+        || "AI Analysis".to_string(),
+        |provider| {
+            let model = provider
+                .actual_models
+                .first()
+                .or(provider.requested_model.as_ref())
+                .map(|model| format!(" · {model}"))
+                .unwrap_or_default();
+            let fallback = provider
+                .fallback_from
+                .as_deref()
+                .map(|source| format!(" · fallback from {source}"))
+                .unwrap_or_default();
+            format!("AI Analysis · {}{model}{fallback}", provider.provider_id)
+        },
+    );
+    let grounding: View = analysis
+        .grounding
+        .as_ref()
+        .map_or_else(View::empty, |trace| {
+            diagnostic_grounding_view(palette, trace)
+        });
+    let body: View = if analysis.busy {
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(9.0)
+            .children((
+                ProgressRing::new().width(18.0).height(18.0).is_active(true),
+                TextBlock::new()
+                    .text("Interpreting the current diagnostic evidence…")
+                    .font_size(12.0)
+                    .foreground(palette.muted)
+                    .vertical_alignment(VerticalAlignment::Center),
+                Button::new()
+                    .on_click(cancel)
+                    .automation_name("Cancel diagnostic analysis")
+                    .content("Cancel"),
+            ))
+    } else if let Some(error) = analysis.error.as_deref() {
+        StackPanel::new().spacing(8.0).children((
+            TextBlock::new()
+                .text(error)
+                .font_size(12.0)
+                .foreground(palette.err)
+                .text_wrapping(TextWrapping::Wrap),
+            Button::new()
+                .horizontal_alignment(HorizontalAlignment::Left)
+                .on_click(retry)
+                .automation_name("Retry diagnostic analysis")
+                .content("Retry analysis"),
+        ))
+    } else if let Some(interpretation) = analysis.interpretation.as_deref() {
+        StackPanel::new().spacing(8.0).children((
+            grounding,
+            render_markdown_lite(
+                interpretation,
+                MarkdownStyle::with_palette(palette.text, palette.card_strong, palette.border),
+            ),
+            Button::new()
+                .horizontal_alignment(HorizontalAlignment::Left)
+                .on_click(retry)
+                .automation_name("Retry diagnostic analysis")
+                .content(if analysis.cached {
+                    "Refresh cached analysis"
+                } else {
+                    "Retry analysis"
+                }),
+        ))
+    } else {
+        Button::new()
+            .horizontal_alignment(HorizontalAlignment::Left)
+            .on_click(analyze)
+            .automation_name("Interpret this diagnostic")
+            .content(fa_icon_label(
+                FaIcon::WandMagicSparkles,
+                "Interpret this diagnostic",
+            ))
+    };
+
+    Border::new()
+        .margin(Thickness::new(0.0, 16.0, 0.0, 0.0))
+        .padding(Thickness::uniform(14.0))
+        .background(palette.dim)
+        .border_brush(palette.border)
+        .border_thickness(1.0)
+        .corner_radius(8.0)
+        .content(
+            StackPanel::new().spacing(10.0).children((
+                Grid::new()
+                    .columns([GridLength::Pixel(24.0), GridLength::Star(1.0)])
+                    .children((
+                        Image::new()
+                            .source_data(EncodedImage::from_static(BOT_AVATAR))
+                            .width(20.0)
+                            .height(20.0),
+                        TextBlock::new()
+                            .text(provider)
+                            .grid_column(1)
+                            .font_size(12.0)
+                            .font_weight(FontWeight::SEMI_BOLD)
+                            .vertical_alignment(VerticalAlignment::Center),
+                    )),
+                body,
+            )),
+        )
+}
+
+fn diagnostic_output_mode_button(
+    palette: Palette,
+    label: &'static str,
+    selected: bool,
+    action: Callback<()>,
+) -> View {
+    Button::new()
+        .height(28.0)
+        .min_width(if label == "Output" { 70.0 } else { 56.0 })
+        .on_click(action)
+        .automation_name(format!("Show diagnostic {label}"))
+        .resource_overrides(
+            ResourceOverrides::new()
+                .set(
+                    "ButtonBackground",
+                    if selected {
+                        palette.active
+                    } else {
+                        Color::transparent()
+                    },
+                )
+                .set("ButtonBackgroundPointerOver", palette.active)
+                .set("ButtonBackgroundPressed", palette.active)
+                .set("ButtonForeground", palette.text)
+                .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
+                .set("ControlCornerRadius", CornerRadius::uniform(5.0)),
+        )
+        .content(label)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7893,10 +16151,55 @@ fn diagnostics_live_results_page(
     duration_ms: u64,
     selected_task_id: Option<&str>,
     select_result: Callback<String>,
+    filter: &str,
+    filter_changed: Callback<String>,
+    raw_output: bool,
+    show_output: Callback<()>,
+    show_raw: Callback<()>,
+    explain_scan: Callback<()>,
+    analysis: Option<&DiagnosticAnalysisDisplay>,
+    analysis_available: bool,
+    analyze: Callback<()>,
+    retry_analysis: Callback<()>,
+    cancel_analysis: Callback<()>,
 ) -> View {
-    let selected_task_id_effective = selected_task_id.filter(|id| {
-        results.iter().any(|result| result.task_id == *id)
-    }).unwrap_or_else(|| results[0].task_id.as_str());
+    let visible_results = results
+        .iter()
+        .filter(|result| diagnostic_matches_filter(result, catalog, filter))
+        .collect::<Vec<_>>();
+    if visible_results.is_empty() {
+        return Grid::new()
+            .rows([GridLength::Auto, GridLength::Star(1.0)])
+            .children((
+                page_header(palette, Page::Diagnostics, View::empty()),
+                StackPanel::new()
+                    .grid_row(1)
+                    .spacing(16.0)
+                    .margin(Thickness::new(0.0, 24.0, 0.0, 0.0))
+                    .children((
+                        TextBox::new()
+                            .height(32.0)
+                            .text(filter)
+                            .placeholder_text("Filter diagnostics…")
+                            .on_text_changed(filter_changed),
+                        Border::new()
+                            .padding(Thickness::uniform(28.0))
+                            .background(palette.card)
+                            .border_brush(palette.border)
+                            .border_thickness(1.0)
+                            .corner_radius(9.0)
+                            .content(
+                                TextBlock::new()
+                                    .text("No diagnostics match this filter.")
+                                    .foreground(palette.muted)
+                                    .horizontal_alignment(HorizontalAlignment::Center),
+                            ),
+                    )),
+            ));
+    }
+    let selected_task_id_effective = selected_task_id
+        .filter(|id| visible_results.iter().any(|result| result.task_id == *id))
+        .unwrap_or_else(|| visible_results[0].task_id.as_str());
     let collected = results.iter().filter(|result| result.success).count();
     let errors = results.len().saturating_sub(collected);
     let duration = format_diagnostic_duration(duration_ms);
@@ -7917,7 +16220,7 @@ fn diagnostics_live_results_page(
         STATUS_WARN_DARK
     };
 
-    let rows = results
+    let rows = visible_results
         .iter()
         .map(|result| {
             let task = catalog.iter().find(|task| task.id == result.task_id);
@@ -7935,9 +16238,7 @@ fn diagnostics_live_results_page(
     let first_in_group_flags: Vec<bool> = rows
         .iter()
         .enumerate()
-        .map(|(index, (_, _, category, _, _))| {
-            index == 0 || rows[index - 1].2 != *category
-        })
+        .map(|(index, (_, _, category, _, _))| index == 0 || rows[index - 1].2 != *category)
         .collect();
     let group_counts: std::collections::HashMap<String, usize> = rows.iter().fold(
         std::collections::HashMap::new(),
@@ -7989,52 +16290,70 @@ fn diagnostics_live_results_page(
             } else {
                 FontWeight::NORMAL
             };
-            let task_row = Button::new()
+            let pointer_task_id = task_id.clone();
+            let pointer_select = select_result.clone();
+            let task_row = Border::new()
                 .height(32.0)
-                .resource_overrides(
-                    ResourceOverrides::new()
-                        .set("ButtonBackground", row_background)
-                        .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
-                        .set("ButtonBackgroundPointerOver", row_background)
-                        .set("ButtonBackgroundPressed", row_background),
-                )
-                .on_click({
-                    let task_id = task_id.clone();
-                    let select_result = select_result.clone();
-                    move || {
-                        let _ = select_result.call(task_id.clone());
-                    }
+                .background(row_background)
+                .corner_radius(6.0)
+                // WinUI Button.Click fires on pointer release. Select on
+                // pointer press as well so the native row acknowledges the
+                // user's action immediately; Click remains for keyboard use.
+                .on_pointer_pressed(move |_| {
+                    let _ = pointer_select.call(pointer_task_id.clone());
                 })
-                .automation_name(format!("Diagnostic result: {name}"))
                 .content(
-                    Grid::new()
-                        .columns([
-                            GridLength::Pixel(7.0),
-                            GridLength::Star(1.0),
-                            GridLength::Auto,
-                        ])
-                        .column_spacing(9.0)
-                        .children((
-                            Border::new()
-                                .width(7.0)
-                                .height(7.0)
-                                .background(if passed { palette.accent } else { palette.err })
-                                .corner_radius(999.0)
-                                .vertical_alignment(VerticalAlignment::Center),
-                            TextBlock::new()
-                                .text(name.clone())
-                                .grid_column(1)
-                                .font_size(12.5)
-                                .font_weight(name_weight)
-                                .text_trimming(TextTrimming::CharacterEllipsis)
-                                .vertical_alignment(VerticalAlignment::Center),
-                            TextBlock::new()
-                                .text(duration)
-                                .grid_column(2)
-                                .font_size(10.5)
-                                .foreground(palette.muted)
-                                .vertical_alignment(VerticalAlignment::Center),
-                        )),
+                    Button::new()
+                        .height(32.0)
+                        .resource_overrides(
+                            ResourceOverrides::new()
+                                .set("ButtonBackground", Color::transparent())
+                                .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
+                                .set("ButtonBackgroundPointerOver", palette.active)
+                                .set("ButtonBackgroundPressed", palette.active),
+                        )
+                        .on_click({
+                            let task_id = task_id.clone();
+                            let select_result = select_result.clone();
+                            move || {
+                                let _ = select_result.call(task_id.clone());
+                            }
+                        })
+                        .automation_name(format!("Diagnostic result: {name}"))
+                        .content(
+                            Grid::new()
+                                .columns([
+                                    GridLength::Pixel(7.0),
+                                    GridLength::Star(1.0),
+                                    GridLength::Auto,
+                                ])
+                                .column_spacing(9.0)
+                                .children((
+                                    Border::new()
+                                        .width(7.0)
+                                        .height(7.0)
+                                        .background(if passed {
+                                            palette.accent
+                                        } else {
+                                            palette.err
+                                        })
+                                        .corner_radius(999.0)
+                                        .vertical_alignment(VerticalAlignment::Center),
+                                    TextBlock::new()
+                                        .text(name.clone())
+                                        .grid_column(1)
+                                        .font_size(12.5)
+                                        .font_weight(name_weight)
+                                        .text_trimming(TextTrimming::CharacterEllipsis)
+                                        .vertical_alignment(VerticalAlignment::Center),
+                                    TextBlock::new()
+                                        .text(duration)
+                                        .grid_column(2)
+                                        .font_size(10.5)
+                                        .foreground(palette.muted)
+                                        .vertical_alignment(VerticalAlignment::Center),
+                                )),
+                        ),
                 );
             KeyedView::new(
                 task_id,
@@ -8061,7 +16380,7 @@ fn diagnostics_live_results_page(
                                     TextBlock::new()
                                         .text(format!(
                                             "{} of {} diagnostics",
-                                            results.len(),
+                                            visible_results.len(),
                                             results.len()
                                         ))
                                         .font_size(11.5)
@@ -8084,7 +16403,9 @@ fn diagnostics_live_results_page(
                         .content(
                             TextBox::new()
                                 .height(30.0)
-                                .placeholder_text("Filter diagnostics…"),
+                                .text(filter)
+                                .placeholder_text("Filter diagnostics…")
+                                .on_text_changed(filter_changed),
                         ),
                     ScrollViewer::new()
                         .grid_row(2)
@@ -8097,25 +16418,20 @@ fn diagnostics_live_results_page(
                 )),
         );
 
-    let selected = results
+    let selected = visible_results
         .iter()
+        .copied()
         .find(|result| result.task_id == selected_task_id_effective)
-        .unwrap_or(&results[0]);
+        .unwrap_or(visible_results[0]);
     let selected_task = catalog.iter().find(|task| task.id == selected.task_id);
     let selected_name =
         selected_task.map_or_else(|| selected.task_id.clone(), |task| task.name.clone());
     let selected_category = selected_task.map_or("Other", |task| task.category.as_str());
+    let selected_admin_required = selected_task.is_some_and(|task| task.admin_required);
     let selected_duration = format_diagnostic_duration(selected.duration_ms);
-    let selected_output_rows = format_output_key_values(&selected.task_id, &selected.output);
-    let selected_output = selected_output_rows.as_ref().map_or_else(
-        || diagnostic_output_preview(selected),
-        |rows| {
-            rows.iter()
-                .map(|(key, value)| format!("{key}: {value}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        },
-    );
+    let selected_output_rows = (!raw_output)
+        .then(|| format_output_key_values(&selected.task_id, &selected.output))
+        .flatten();
     let desktop_icon = if theme == WindowTheme::Light {
         DESKTOP_LIGHT
     } else {
@@ -8124,7 +16440,7 @@ fn diagnostics_live_results_page(
     let selected_status = if selected.success {
         "● Collected"
     } else {
-        "● Error"
+        "● Collection error"
     };
     let selected_status_color = if selected.success {
         palette.accent
@@ -8136,6 +16452,183 @@ fn diagnostics_live_results_page(
     } else {
         palette.err_bg
     };
+    let selected_output_view: View = if let Some(rows) = selected_output_rows {
+        let truncated = rows.truncated;
+        let mut grid_rows: Vec<KeyedView> = rows
+            .rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, (key, value))| {
+                KeyedView::new(
+                    index,
+                    Border::new()
+                        .padding(Thickness::new(0.0, 4.0, 0.0, 4.0))
+                        .border_brush(palette.border)
+                        .border_thickness(Thickness::new(0.0, 0.0, 0.0, 0.5))
+                        .content(
+                            Grid::new()
+                                .columns([GridLength::Pixel(240.0), GridLength::Star(1.0)])
+                                .children((
+                                    TextBlock::new()
+                                        .text(key)
+                                        .font_size(12.0)
+                                        .font_weight(FontWeight::SEMI_BOLD)
+                                        .text_wrapping(TextWrapping::Wrap)
+                                        .vertical_alignment(VerticalAlignment::Top),
+                                    TextBlock::new()
+                                        .text(value)
+                                        .grid_column(1)
+                                        .font_size(12.0)
+                                        .foreground(palette.muted)
+                                        .is_text_selection_enabled(true)
+                                        .text_wrapping(TextWrapping::Wrap),
+                                )),
+                        ),
+                )
+            })
+            .collect();
+        if truncated {
+            grid_rows.push(KeyedView::new(
+                grid_rows.len(),
+                Border::new()
+                    .padding(Thickness::new(0.0, 8.0, 0.0, 2.0))
+                    .content(
+                        TextBlock::new()
+                            .text(format!(
+                                "… Structured output truncated at {MAX_STRUCTURED_OUTPUT_ROWS} rows or {} KiB; the complete result remains available for export.",
+                                MAX_STRUCTURED_OUTPUT_BYTES / 1024
+                            ))
+                            .font_size(11.5)
+                            .foreground(palette.warn)
+                            .text_wrapping(TextWrapping::Wrap),
+                    ),
+            ));
+        }
+        StackPanel::new().keyed_children(grid_rows)
+    } else {
+        let selected_output = if raw_output {
+            visible_text_preview(
+                &diagnostic_raw_document(selected, selected_task),
+                "(no raw diagnostic document)",
+            )
+        } else {
+            diagnostic_output_preview(selected)
+        };
+        TextBlock::new()
+            .text(selected_output)
+            .font_size(12.0)
+            .foreground(palette.text)
+            .is_text_selection_enabled(true)
+            .text_wrapping(TextWrapping::Wrap)
+            .into()
+    };
+    let failure_callout: View = if selected.success {
+        View::empty()
+    } else {
+        Border::new()
+            .padding(Thickness::new(14.0, 12.0, 14.0, 12.0))
+            .background(palette.err_bg)
+            .border_brush(palette.err)
+            .border_thickness(1.0)
+            .corner_radius(6.0)
+            .content(
+                Grid::new()
+                    .columns([GridLength::Pixel(24.0), GridLength::Star(1.0)])
+                    .column_spacing(10.0)
+                    .children((
+                        TextBlock::new()
+                            .text("!")
+                            .font_size(18.0)
+                            .font_weight(FontWeight::BOLD)
+                            .foreground(palette.err),
+                        StackPanel::new()
+                            .grid_column(1)
+                            .spacing(4.0)
+                            .children((
+                                TextBlock::new()
+                                    .text(
+                                        selected
+                                            .error
+                                            .as_deref()
+                                            .filter(|error| !error.trim().is_empty())
+                                            .unwrap_or("Diagnostic collection failed"),
+                                    )
+                                    .font_size(12.5)
+                                    .font_weight(FontWeight::SEMI_BOLD)
+                                    .foreground(palette.err)
+                                    .is_text_selection_enabled(true)
+                                    .text_wrapping(TextWrapping::Wrap),
+                                TextBlock::new()
+                                    .text("This diagnostic could not complete. Administrator-only diagnostics require relaunching the app elevated.")
+                                    .font_size(12.0)
+                                    .foreground(palette.muted)
+                                    .text_wrapping(TextWrapping::Wrap),
+                            )),
+                    )),
+            )
+    };
+    let analysis_view = diagnostic_analysis_panel(
+        palette,
+        analysis,
+        analysis_available,
+        analyze,
+        retry_analysis,
+        cancel_analysis,
+    );
+    let output_tabs = Border::new()
+        .horizontal_alignment(HorizontalAlignment::Left)
+        .background(palette.card_strong)
+        .corner_radius(6.0)
+        .padding(Thickness::uniform(2.0))
+        .content(
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(2.0)
+                .children((
+                    diagnostic_output_mode_button(palette, "Output", !raw_output, show_output),
+                    diagnostic_output_mode_button(palette, "Raw", raw_output, show_raw),
+                )),
+        );
+    let admin_badge: View = if selected_admin_required {
+        Border::new()
+            .height(28.0)
+            .padding(Thickness::xy(11.0, 0.0))
+            .background(palette.warn_bg)
+            .corner_radius(999.0)
+            .content(
+                TextBlock::new()
+                    .text("◆ Admin")
+                    .font_size(11.5)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .foreground(palette.warn)
+                    .vertical_alignment(VerticalAlignment::Center),
+            )
+    } else {
+        View::empty()
+    };
+    let status_badges = StackPanel::new()
+        .grid_column(2)
+        .orientation(Orientation::Horizontal)
+        .spacing(7.0)
+        .vertical_alignment(VerticalAlignment::Center)
+        .children((
+            Border::new()
+                .min_width(if selected.success { 100.0 } else { 132.0 })
+                .height(28.0)
+                .padding(Thickness::xy(12.0, 0.0))
+                .background(selected_status_bg)
+                .corner_radius(999.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(
+                    TextBlock::new()
+                        .text(selected_status)
+                        .font_size(11.5)
+                        .font_weight(FontWeight::SEMI_BOLD)
+                        .foreground(selected_status_color)
+                        .vertical_alignment(VerticalAlignment::Center),
+                ),
+            admin_badge,
+        ));
 
     let detail_card = Border::new()
         .background(palette.card)
@@ -8188,22 +16681,7 @@ fn diagnostics_live_results_page(
                                                 .font_size(11.5)
                                                 .foreground(palette.muted),
                                         )),
-                                    Border::new()
-                                        .grid_column(2)
-                                        .width(90.0)
-                                        .height(28.0)
-                                        .padding(Thickness::xy(12.0, 0.0))
-                                        .background(selected_status_bg)
-                                        .corner_radius(999.0)
-                                        .vertical_alignment(VerticalAlignment::Center)
-                                        .content(
-                                            TextBlock::new()
-                                                .text(selected_status)
-                                                .font_size(11.5)
-                                                .font_weight(FontWeight::SEMI_BOLD)
-                                                .foreground(selected_status_color)
-                                                .vertical_alignment(VerticalAlignment::Center),
-                                        ),
+                                    status_badges,
                                 )),
                         ),
                     ScrollViewer::new()
@@ -8212,76 +16690,25 @@ fn diagnostics_live_results_page(
                         .content(
                             Border::new()
                                 .padding(Thickness::uniform(16.0))
-                                .content(if let Some(rows) = selected_output_rows.as_ref() {
-                                    let grid_rows: Vec<KeyedView> = rows
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(index, (key, value))| {
-                                            KeyedView::new(
-                                                index,
-                                                Border::new()
-                                                    .padding(Thickness::new(0.0, 4.0, 0.0, 4.0))
-                                                    .border_brush(palette.border)
-                                                    .border_thickness(Thickness::new(
-                                                        0.0, 0.0, 0.0, 0.5,
-                                                    ))
-                                                    .content(
-                                                        Grid::new()
-                                                            .columns([
-                                                                GridLength::Pixel(240.0),
-                                                                GridLength::Star(1.0),
-                                                            ])
-                                                            .children((
-                                                                TextBlock::new()
-                                                                    .text(key.clone())
-                                                                    .font_size(12.0)
-                                                                    .font_weight(
-                                                                        FontWeight::SEMI_BOLD,
-                                                                    )
-                                                                    .text_wrapping(
-                                                                        TextWrapping::Wrap,
-                                                                    )
-                                                                    .vertical_alignment(
-                                                                        VerticalAlignment::Top,
-                                                                    ),
-                                                                TextBlock::new()
-                                                                    .text(value.clone())
-                                                                    .grid_column(1)
-                                                                    .font_size(12.0)
-                                                                    .foreground(palette.muted)
-                                                                    .is_text_selection_enabled(
-                                                                        true,
-                                                                    )
-                                                                    .text_wrapping(
-                                                                        TextWrapping::Wrap,
-                                                                    ),
-                                                            )),
-                                                    ),
-                                            )
-                                        })
-                                        .collect();
-                                    StackPanel::new().keyed_children(grid_rows)
-                                } else {
-                                    TextBlock::new()
-                                        .text(selected_output)
-                                        .font_size(12.0)
-                                        .foreground(if selected.success {
-                                            palette.text
-                                        } else {
-                                            palette.err
-                                        })
-                                        .is_text_selection_enabled(true)
-                                        .text_wrapping(TextWrapping::Wrap)
-                                        .into()
-                                }),
+                                .content(
+                                    StackPanel::new()
+                                        .spacing(12.0)
+                                        .children((
+                                            failure_callout,
+                                            output_tabs,
+                                            selected_output_view,
+                                            analysis_view,
+                                        )),
+                                ),
                         ),
                 )),
         );
 
     let body: View = if narrow {
-        StackPanel::new()
-            .spacing(14.0)
-            .children((task_card, detail_card))
+        StackPanel::new().spacing(14.0).children((
+            Border::new().height(320.0).content(task_card),
+            Border::new().height(520.0).content(detail_card),
+        ))
     } else {
         Grid::new()
             .columns([GridLength::Pixel(295.0), GridLength::Star(1.0)])
@@ -8344,6 +16771,8 @@ fn diagnostics_live_results_page(
                                 .grid_column(1)
                                 .width(154.0)
                                 .height(33.0)
+                                .on_click(explain_scan)
+                                .automation_name("Explain this scan with AI")
                                 .content(
                                     StackPanel::new()
                                         .orientation(Orientation::Horizontal)
@@ -8374,6 +16803,8 @@ fn diagnostics_page(
     narrow: bool,
     results: &[DiagnosticTaskResult],
     catalog: &[DiagnosticTask],
+    expected_task_ids: &[String],
+    task_statuses: &HashMap<String, TaskProgressStatus>,
     scan_active: bool,
     scan_cancelling: bool,
     completed: usize,
@@ -8383,12 +16814,26 @@ fn diagnostics_page(
     quick_scan: Callback<()>,
     full_scan: Callback<()>,
     cancel_scan: Callback<()>,
+    explain_scan: Callback<()>,
     selected_result_task_id: Option<String>,
     select_result: Callback<String>,
+    filter: &str,
+    filter_changed: Callback<String>,
+    raw_output: bool,
+    show_output: Callback<()>,
+    show_raw: Callback<()>,
+    analysis: Option<&DiagnosticAnalysisDisplay>,
+    analysis_available: bool,
+    analyze: Callback<()>,
+    retry_analysis: Callback<()>,
+    cancel_analysis: Callback<()>,
 ) -> View {
     if scan_active {
         return diagnostics_scanning_page(
             palette,
+            catalog,
+            expected_task_ids,
+            task_statuses,
             completed,
             total,
             current_task,
@@ -8412,6 +16857,17 @@ fn diagnostics_page(
             duration_ms,
             selected_result_task_id.as_deref(),
             select_result,
+            filter,
+            filter_changed,
+            raw_output,
+            show_output,
+            show_raw,
+            explain_scan,
+            analysis,
+            analysis_available,
+            analyze,
+            retry_analysis,
+            cancel_analysis,
         );
     }
 
@@ -8723,9 +17179,10 @@ fn diagnostics_page(
         );
 
     let body: View = if narrow {
-        StackPanel::new()
-            .spacing(14.0)
-            .children((task_card, detail_card))
+        StackPanel::new().spacing(14.0).children((
+            Border::new().height(320.0).content(task_card),
+            Border::new().height(520.0).content(detail_card),
+        ))
     } else {
         Grid::new()
             .columns([GridLength::Pixel(295.0), GridLength::Star(1.0)])
@@ -8761,6 +17218,8 @@ fn diagnostics_page(
                                 .grid_column(1)
                                 .width(154.0)
                                 .height(33.0)
+                                .on_click(explain_scan)
+                                .automation_name("Explain this scan with AI")
                                 .content(
                                     StackPanel::new()
                                         .orientation(Orientation::Horizontal)
@@ -9033,6 +17492,7 @@ fn monitor_page(
     palette: Palette,
     narrow: bool,
     paused: bool,
+    error: Option<&str>,
     stats: Option<&SystemStats>,
     history: &MonitorHistory,
     toggle: Callback<()>,
@@ -9053,7 +17513,7 @@ fn monitor_page(
                 88.0,
                 toggle,
             ),
-            monitor_action_button(palette, FaIcon::Refresh, "Refresh", 96.0, refresh),
+            monitor_action_button(palette, FaIcon::Refresh, "Refresh", 96.0, refresh.clone()),
         ));
     let (
         cpu_hint,
@@ -9307,7 +17767,9 @@ fn monitor_page(
                     .foreground(palette.muted),
             ),
             Some([]) => View::from(
-                TextBlock::new().text("No TCP connections found.").font_size(12.0),
+                TextBlock::new()
+                    .text("No TCP connections found.")
+                    .font_size(12.0),
             ),
             Some(list) => {
                 let items: Vec<KeyedView> = list
@@ -9316,28 +17778,67 @@ fn monitor_page(
                     .enumerate()
                     .map(|(index, connection)| {
                         KeyedView::new(
-                            index,
-                            Grid::new()
-                                .columns([
-                                    GridLength::Pixel(52.0),
-                                    GridLength::Star(2.0),
-                                    GridLength::Star(2.0),
-                                    GridLength::Pixel(96.0),
-                                ])
-                                .children((
-                                    TextBlock::new().text(connection.protocol.clone()).font_size(11.5),
-                                    TextBlock::new().text(connection.local_addr.clone()).font_size(11.5),
-                                    TextBlock::new().text(connection.remote_addr.clone()).font_size(11.5),
-                                    TextBlock::new()
-                                        .text(connection.status.clone())
-                                        .font_size(11.5)
-                                        .foreground(palette.muted),
-                                )),
+                            format!(
+                                "{index}:{}:{}:{}:{}",
+                                connection.protocol,
+                                connection.local_addr,
+                                connection.remote_addr,
+                                connection.status
+                            ),
+                            Border::new()
+                                .min_height(32.0)
+                                .border_brush(palette.border)
+                                .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
+                                .content(
+                                    Grid::new()
+                                        .columns(network_connection_columns(narrow))
+                                        .column_spacing(8.0)
+                                        .children((
+                                            TextBlock::new()
+                                                .text(connection.protocol.clone())
+                                                .font_size(11.5)
+                                                .vertical_alignment(VerticalAlignment::Center),
+                                            TextBlock::new()
+                                                .grid_column(1)
+                                                .text(connection.local_addr.clone())
+                                                .font_size(11.5)
+                                                .text_trimming(TextTrimming::CharacterEllipsis)
+                                                .vertical_alignment(VerticalAlignment::Center),
+                                            TextBlock::new()
+                                                .grid_column(2)
+                                                .text(connection.remote_addr.clone())
+                                                .font_size(11.5)
+                                                .text_trimming(TextTrimming::CharacterEllipsis)
+                                                .vertical_alignment(VerticalAlignment::Center),
+                                            TextBlock::new()
+                                                .grid_column(3)
+                                                .text(connection.status.clone())
+                                                .font_size(11.5)
+                                                .foreground(palette.muted)
+                                                .text_trimming(TextTrimming::CharacterEllipsis)
+                                                .vertical_alignment(VerticalAlignment::Center),
+                                        )),
+                                ),
                         )
                     })
                     .collect();
                 StackPanel::new().spacing(2.0).keyed_children(items)
             }
+        };
+        let column_headers: View = if connections.is_some_and(|list| !list.is_empty()) {
+            Grid::new()
+                .min_height(28.0)
+                .columns(network_connection_columns(narrow))
+                .column_spacing(8.0)
+                .background(palette.card_strong)
+                .children((
+                    network_connection_header("PROTOCOL", 0, palette),
+                    network_connection_header("LOCAL ADDRESS", 1, palette),
+                    network_connection_header("REMOTE ADDRESS", 2, palette),
+                    network_connection_header("STATE", 3, palette),
+                ))
+        } else {
+            View::empty()
         };
         Border::new()
             .background(palette.card)
@@ -9345,8 +17846,45 @@ fn monitor_page(
             .border_thickness(1.0)
             .corner_radius(9.0)
             .padding(Thickness::new(14.0, 12.0, 14.0, 12.0))
-            .content(StackPanel::new().spacing(8.0).children((header, rows)))
+            .content(
+                StackPanel::new()
+                    .spacing(8.0)
+                    .children((header, column_headers, rows)),
+            )
     };
+    let error_notice: View = error.map_or_else(View::empty, |error| {
+        Border::new()
+            .padding(Thickness::new(12.0, 9.0, 12.0, 9.0))
+            .background(palette.err_bg)
+            .border_brush(palette.err)
+            .border_thickness(1.0)
+            .corner_radius(7.0)
+            .content(
+                Grid::new()
+                    .columns([GridLength::Star(1.0), GridLength::Auto])
+                    .column_spacing(10.0)
+                    .children((
+                        TextBlock::new()
+                            .text(if stats.is_some() {
+                                format!(
+                                    "Live telemetry stopped · {error} · showing the last successful sample"
+                                )
+                            } else {
+                                format!("Live telemetry unavailable · {error}")
+                            })
+                            .font_size(11.5)
+                            .foreground(palette.err)
+                            .text_wrapping(TextWrapping::Wrap)
+                            .vertical_alignment(VerticalAlignment::Center),
+                        Button::new()
+                            .grid_column(1)
+                            .height(30.0)
+                            .on_click(refresh)
+                            .automation_name("Retry live monitoring")
+                            .content("Retry"),
+                    )),
+            )
+    });
     StackPanel::new().spacing(16.0).children((
         page_header(palette, Page::Monitor, View::empty()),
         Border::new()
@@ -9369,6 +17907,7 @@ fn monitor_page(
                         Border::new().grid_column(2).content(actions),
                     )),
             ),
+        error_notice,
         Border::new()
             .margin(Thickness::new(0.0, 1.0, 0.0, 0.0))
             .content(metrics),
@@ -9376,6 +17915,35 @@ fn monitor_page(
             .margin(Thickness::new(0.0, 1.0, 0.0, 0.0))
             .content(connections_card),
     ))
+}
+
+fn network_connection_columns(narrow: bool) -> [GridLength; 4] {
+    if narrow {
+        [
+            GridLength::Pixel(48.0),
+            GridLength::Star(1.0),
+            GridLength::Star(1.0),
+            GridLength::Pixel(82.0),
+        ]
+    } else {
+        [
+            GridLength::Pixel(60.0),
+            GridLength::Star(1.0),
+            GridLength::Star(1.0),
+            GridLength::Pixel(104.0),
+        ]
+    }
+}
+
+fn network_connection_header(label: &'static str, column: i32, palette: Palette) -> TextBlock {
+    TextBlock::new()
+        .grid_column(column)
+        .text(label)
+        .font_size(9.5)
+        .font_weight(FontWeight::SEMI_BOLD)
+        .foreground(palette.muted)
+        .vertical_alignment(VerticalAlignment::Center)
+        .text_trimming(TextTrimming::CharacterEllipsis)
 }
 
 fn table_header(label: &str, column: i32) -> TextBlock {
@@ -9623,10 +18191,11 @@ impl ProcessFixture258 {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct ProcessViewRow {
     name: String,
     pid: u32,
+    start_time: i64,
     cpu: f64,
     memory: String,
     memory_percent: f64,
@@ -9640,6 +18209,10 @@ struct ProcessViewRow {
 }
 
 impl ProcessViewRow {
+    fn identity(&self) -> ProcessIdentity {
+        ProcessIdentity::new(self.pid, self.start_time)
+    }
+
     fn icon(&self) -> FaIcon {
         let name = self.name.to_ascii_lowercase();
         if name.contains("msmpeng") {
@@ -9663,6 +18236,7 @@ impl From<ProcessFixture258> for ProcessViewRow {
         Self {
             name: process.name.to_string(),
             pid: process.pid,
+            start_time: ProcessIdentity::UNKNOWN_START_TIME,
             cpu: process.cpu,
             memory: process.memory.to_string(),
             memory_percent: process.memory_percent,
@@ -9682,6 +18256,7 @@ impl From<&ProcessRow> for ProcessViewRow {
         Self {
             name: process.name.clone(),
             pid: process.pid,
+            start_time: process.start_time,
             cpu: f64::from(process.cpu_percent),
             memory: format_megabytes(process.memory_mb),
             memory_percent: f64::from(process.memory_percent),
@@ -9723,10 +18298,41 @@ fn format_bytes(value: u64) -> String {
     }
 }
 
+#[derive(Clone, PartialEq)]
+struct ProcessRowInput {
+    palette: Palette,
+    narrow: bool,
+    row_width: f64,
+    process: ProcessViewRow,
+    selected: bool,
+    select_process: Callback<Option<ProcessIdentity>>,
+}
+
+struct ProcessRowComponent;
+
+impl Component for ProcessRowComponent {
+    type Input = ProcessRowInput;
+    type Message = ();
+
+    fn create(_input: &Self::Input, _context: &ComponentContext<Self>) -> Self {
+        Self
+    }
+
+    fn view(&self, input: &Self::Input, _context: &mut ViewContext<Self>) -> View {
+        process_row_258(
+            input.palette,
+            input.narrow,
+            input.row_width,
+            &input.process,
+            input.selected,
+            input.select_process.clone(),
+        )
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn processes_page(
     palette: Palette,
-    narrow: bool,
     window_width: f64,
     pane_expanded: bool,
     filter: &str,
@@ -9736,23 +18342,21 @@ fn processes_page(
     sort_key: ProcessSortKey,
     sort_direction: ProcessSortDirection,
     deterministic_visual: bool,
-    selected_pid: Option<u32>,
+    selected_identity: Option<ProcessIdentity>,
     paused: bool,
     filter_changed: Callback<String>,
     sort_processes: Callback<ProcessSortKey>,
     previous: Callback<()>,
     next: Callback<()>,
-    select_process: Callback<Option<u32>>,
+    select_process: Callback<Option<ProcessIdentity>>,
     toggle: Callback<()>,
     refresh: Callback<()>,
 ) -> View {
     // ItemsRepeater's default StackLayout measures each realized child at its
-    // desired width rather than stretching it to the table. Derive the row
-    // width from the shell's responsive geometry so every row shares the
-    // header's column boundaries in expanded, collapsed, and compact modes.
-    let pane_width = if pane_expanded { 230.0 } else { 64.0 };
-    let details_width = if narrow { 0.0 } else { 300.0 + 12.0 };
-    let row_width = (window_width - pane_width - 72.0 - details_width).max(1.0);
+    // desired width instead of stretching it to the table. Keep every row on
+    // the header's exact column boundaries and switch the details pane below
+    // the table before that pane would squeeze the process-name column away.
+    let (narrow, row_width) = process_layout_metrics(window_width, pane_expanded);
     let needle = filter.trim().to_ascii_lowercase();
     let (display_rows, total, offset, limit) = if deterministic_visual {
         let rows = PROCESS_ROWS_258
@@ -9777,27 +18381,31 @@ fn processes_page(
     } else {
         (Vec::new(), 0, 0, PROCESS_PAGE_SIZE)
     };
-    let visible = display_rows.len();
-    let selected = selected_pid.and_then(|pid| {
+    let visible = display_rows.len().min(PROCESS_PAGE_SIZE);
+    let selected = selected_identity.and_then(|identity| {
         display_rows
             .iter()
-            .find(|process| process.pid == pid)
+            .take(visible)
+            .find(|process| identity.matches_observation(process.identity()))
             .cloned()
     });
-    let rows = display_rows
-        .iter()
-        .map(|process| {
-            KeyedView::new(
-                process.pid,
-                process_row_258(
+    // Positional keys never change, even when CPU sorting reorders every row
+    // or the live page count shrinks. Reactor can update realized slot inputs
+    // without resetting the ItemsRepeater's virtual collection.
+    let rows = fixed_process_slots(&display_rows)
+        .map(|(index, process)| {
+            let row = process.map_or_else(View::empty, |process| {
+                View::component::<ProcessRowComponent>(ProcessRowInput {
                     palette,
                     narrow,
                     row_width,
-                    process,
-                    selected_pid == Some(process.pid),
-                    select_process.clone(),
-                ),
-            )
+                    process: process.clone(),
+                    selected: selected_identity
+                        .is_some_and(|identity| identity.matches_observation(process.identity())),
+                    select_process: select_process.clone(),
+                })
+            });
+            KeyedView::new(index, row)
         })
         .collect::<Vec<_>>();
 
@@ -9806,7 +18414,7 @@ fn processes_page(
         .spacing(8.0)
         .children((
             Button::new()
-                .on_click(refresh)
+                .on_click(refresh.clone())
                 .automation_name("Refresh processes")
                 .content(fa_icon_label(FaIcon::Refresh, "Refresh")),
             Button::new().on_click(toggle).content(fa_icon_label(
@@ -9867,7 +18475,7 @@ fn processes_page(
             ))
     };
 
-    let rows_view: View = if visible == 0 {
+    let empty_message: View = if visible == 0 {
         let message = if let Some(error) = error {
             format!("Could not load processes: {error}")
         } else if loading && !deterministic_visual {
@@ -9886,11 +18494,14 @@ fn processes_page(
                 .vertical_alignment(VerticalAlignment::Center),
         )
     } else {
+        View::empty()
+    };
+    let rows_view = Grid::new().children((
         ItemsRepeater::new()
             .horizontal_alignment(HorizontalAlignment::Stretch)
-            .items(rows)
-            .into()
-    };
+            .items(rows),
+        empty_message,
+    ));
 
     let table = Border::new()
         .background(palette.card)
@@ -9923,12 +18534,46 @@ fn processes_page(
             .column_spacing(12.0)
             .children((table, placed(detail, 1, 0)))
     };
+    let stale_error: View = if visible > 0 {
+        error.map_or_else(View::empty, |error| {
+            Border::new()
+                .padding(Thickness::new(12.0, 9.0, 12.0, 9.0))
+                .background(palette.err_bg)
+                .border_brush(palette.err)
+                .border_thickness(1.0)
+                .corner_radius(7.0)
+                .content(
+                    Grid::new()
+                        .columns([GridLength::Star(1.0), GridLength::Auto])
+                        .column_spacing(10.0)
+                        .children((
+                            TextBlock::new()
+                                .text(format!(
+                                    "Process refresh failed · {error} · showing the last successful page"
+                                ))
+                                .font_size(11.5)
+                                .foreground(palette.err)
+                                .text_wrapping(TextWrapping::Wrap)
+                                .vertical_alignment(VerticalAlignment::Center),
+                            Button::new()
+                                .grid_column(1)
+                                .height(30.0)
+                                .is_enabled(!loading)
+                                .on_click(refresh)
+                                .content("Retry"),
+                        )),
+                )
+        })
+    } else {
+        View::empty()
+    };
 
     StackPanel::new().spacing(16.0).children((
         page_header(palette, Page::Processes, View::empty()),
         Border::new()
             .margin(Thickness::new(0.0, 1.0, 0.0, 0.0))
             .content(toolbar),
+        stale_error,
         Border::new()
             .margin(Thickness::new(0.0, -4.0, 0.0, 0.0))
             .content(layout),
@@ -9937,13 +18582,17 @@ fn processes_page(
 
 fn process_columns_258(narrow: bool) -> [GridLength; 6] {
     if narrow {
+        // Keep the compact fixed-width total at 434 DIP so the process-name
+        // column and explicit row width are unchanged at the 720-DIP minimum.
+        // The smaller meter frees enough room for complete PID, memory, and
+        // thread values without sacrificing the status column.
         [
             GridLength::Star(1.0),
-            GridLength::Pixel(58.0),
-            GridLength::Pixel(104.0),
-            GridLength::Pixel(130.0),
+            GridLength::Pixel(60.0),
+            GridLength::Pixel(88.0),
+            GridLength::Pixel(142.0),
             GridLength::Pixel(78.0),
-            GridLength::Pixel(64.0),
+            GridLength::Pixel(66.0),
         ]
     } else {
         [
@@ -9955,6 +18604,22 @@ fn process_columns_258(narrow: bool) -> [GridLength; 6] {
             GridLength::Pixel(110.0),
         ]
     }
+}
+
+fn process_header_horizontal_padding_258(narrow: bool) -> f64 {
+    if narrow { 6.0 } else { 18.0 }
+}
+
+fn process_cell_horizontal_margin_258(narrow: bool) -> f64 {
+    if narrow { 8.0 } else { 18.0 }
+}
+
+fn process_name_horizontal_margin_258(narrow: bool) -> f64 {
+    if narrow { 12.0 } else { 18.0 }
+}
+
+fn process_meter_width_258(narrow: bool) -> f64 {
+    if narrow { 44.0 } else { 56.0 }
 }
 
 fn process_header_258(
@@ -9971,6 +18636,7 @@ fn process_header_258(
         .children((
             process_header_cell_258(
                 palette,
+                narrow,
                 "PROCESS",
                 0,
                 ProcessSortKey::Name,
@@ -9980,6 +18646,7 @@ fn process_header_258(
             ),
             process_header_cell_258(
                 palette,
+                narrow,
                 "PID",
                 1,
                 ProcessSortKey::Pid,
@@ -9989,6 +18656,7 @@ fn process_header_258(
             ),
             process_header_cell_258(
                 palette,
+                narrow,
                 "CPU",
                 2,
                 ProcessSortKey::CpuPercent,
@@ -9998,6 +18666,7 @@ fn process_header_258(
             ),
             process_header_cell_258(
                 palette,
+                narrow,
                 "MEMORY",
                 3,
                 ProcessSortKey::MemoryMb,
@@ -10007,6 +18676,7 @@ fn process_header_258(
             ),
             process_header_cell_258(
                 palette,
+                narrow,
                 "STATUS",
                 4,
                 ProcessSortKey::Status,
@@ -10016,6 +18686,7 @@ fn process_header_258(
             ),
             process_header_cell_258(
                 palette,
+                narrow,
                 "THREADS",
                 5,
                 ProcessSortKey::ThreadCount,
@@ -10028,6 +18699,7 @@ fn process_header_258(
 
 fn process_header_cell_258(
     palette: Palette,
+    narrow: bool,
     label: &'static str,
     column: i32,
     column_key: ProcessSortKey,
@@ -10060,7 +18732,10 @@ fn process_header_cell_258(
                 .set("ButtonBackgroundPressed", palette.active)
                 .set("ButtonForeground", palette.muted)
                 .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
-                .set("ButtonPadding", Thickness::xy(18.0, 0.0))
+                .set(
+                    "ButtonPadding",
+                    Thickness::xy(process_header_horizontal_padding_258(narrow), 0.0),
+                )
                 .set("ControlCornerRadius", CornerRadius::uniform(0.0)),
         )
         .automation_name(format!("Sort processes by {label}"))
@@ -10089,10 +18764,10 @@ fn process_row_258(
     row_width: f64,
     process: &ProcessViewRow,
     selected: bool,
-    select_process: Callback<Option<u32>>,
+    select_process: Callback<Option<ProcessIdentity>>,
 ) -> View {
     let select = select_process.clone();
-    let pid = process.pid;
+    let identity = process.identity();
     let row = Grid::new()
         .height(37.0)
         .horizontal_alignment(HorizontalAlignment::Stretch)
@@ -10101,26 +18776,35 @@ fn process_row_258(
             StackPanel::new()
                 .orientation(Orientation::Horizontal)
                 .spacing(9.0)
-                .margin(Thickness::xy(18.0, 0.0))
+                .margin(Thickness::xy(
+                    process_name_horizontal_margin_258(narrow),
+                    0.0,
+                ))
                 .vertical_alignment(VerticalAlignment::Center)
                 .children((
                     icons::path(process.icon()),
                     TextBlock::new()
                         .text(process.name.clone())
                         .font_size(12.0)
+                        .foreground(palette.text)
                         .text_trimming(TextTrimming::CharacterEllipsis),
                 )),
-            process_table_cell_258(palette, process.pid.to_string(), 1),
-            process_cpu_cell_258(palette, process.cpu, 2),
-            process_memory_cell_258(palette, process, 3),
-            process_table_cell_258(palette, process.status.clone(), 4),
-            process_table_cell_258(palette, process.threads.to_string(), 5),
+            process_table_cell_258(palette, narrow, process.pid.to_string(), 1),
+            process_cpu_cell_258(palette, narrow, process.cpu, 2),
+            process_memory_cell_258(palette, narrow, process, 3),
+            process_table_cell_258(palette, narrow, process.status.clone(), 4),
+            process_table_cell_258(palette, narrow, process.threads.to_string(), 5),
         ));
 
     Border::new()
         .width(row_width)
         .height(37.0)
         .horizontal_alignment(HorizontalAlignment::Stretch)
+        .background(if selected {
+            palette.active
+        } else {
+            Color::transparent()
+        })
         .border_brush(palette.border)
         .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
         .content(
@@ -10130,14 +18814,7 @@ fn process_row_258(
                 .horizontal_content_alignment(HorizontalAlignment::Stretch)
                 .resource_overrides(
                     ResourceOverrides::new()
-                        .set(
-                            "ButtonBackground",
-                            if selected {
-                                palette.active
-                            } else {
-                                Color::transparent()
-                            },
-                        )
+                        .set("ButtonBackground", Color::transparent())
                         .set("ButtonBackgroundPointerOver", palette.active)
                         .set("ButtonBackgroundPressed", palette.active)
                         .set("ButtonForeground", palette.text)
@@ -10147,23 +18824,32 @@ fn process_row_258(
                 )
                 .automation_name(format!("{} PID {}", process.name, process.pid))
                 .on_click(move || {
-                    let _ = select.call(Some(pid));
+                    let _ = select.call(Some(identity));
                 })
                 .content(row),
         )
 }
 
-fn process_table_cell_258(palette: Palette, text: impl Into<String>, column: i32) -> TextBlock {
+fn process_table_cell_258(
+    palette: Palette,
+    narrow: bool,
+    text: impl Into<String>,
+    column: i32,
+) -> TextBlock {
     TextBlock::new()
         .text(text)
         .grid_column(column)
-        .margin(Thickness::xy(18.0, 0.0))
+        .margin(Thickness::xy(
+            process_cell_horizontal_margin_258(narrow),
+            0.0,
+        ))
         .font_size(11.5)
         .foreground(palette.muted)
         .vertical_alignment(VerticalAlignment::Center)
 }
 
-fn process_percent_stack_258(palette: Palette, percent: f64) -> View {
+fn process_percent_stack_258(palette: Palette, narrow: bool, percent: f64) -> View {
+    let meter_width = process_meter_width_258(narrow);
     StackPanel::new().spacing(3.0).children((
         TextBlock::new()
             .text(format!("{percent:.1}%"))
@@ -10171,14 +18857,14 @@ fn process_percent_stack_258(palette: Palette, percent: f64) -> View {
             .foreground(palette.muted)
             .horizontal_alignment(HorizontalAlignment::Right),
         Border::new()
-            .width(56.0)
+            .width(meter_width)
             .height(4.0)
             .background(palette_track())
             .corner_radius(999.0)
             .horizontal_alignment(HorizontalAlignment::Left)
             .content(
                 Border::new()
-                    .width((percent.clamp(0.0, 100.0) * 0.56).max(1.0))
+                    .width((percent.clamp(0.0, 100.0) * meter_width / 100.0).max(1.0))
                     .height(4.0)
                     .background(if percent > 80.0 {
                         palette.err
@@ -10193,18 +18879,30 @@ fn process_percent_stack_258(palette: Palette, percent: f64) -> View {
     ))
 }
 
-fn process_cpu_cell_258(palette: Palette, percent: f64, column: i32) -> View {
+fn process_cpu_cell_258(palette: Palette, narrow: bool, percent: f64, column: i32) -> View {
     Border::new()
         .grid_column(column)
-        .margin(Thickness::xy(18.0, 3.0))
-        .content(process_percent_stack_258(palette, percent))
+        .margin(Thickness::xy(
+            process_cell_horizontal_margin_258(narrow),
+            3.0,
+        ))
+        .content(process_percent_stack_258(palette, narrow, percent))
 }
 
-fn process_memory_cell_258(palette: Palette, process: &ProcessViewRow, column: i32) -> View {
+fn process_memory_cell_258(
+    palette: Palette,
+    narrow: bool,
+    process: &ProcessViewRow,
+    column: i32,
+) -> View {
+    let meter_width = process_meter_width_258(narrow);
     Grid::new()
         .grid_column(column)
-        .margin(Thickness::xy(18.0, 0.0))
-        .columns([GridLength::Star(1.0), GridLength::Pixel(56.0)])
+        .margin(Thickness::xy(
+            process_cell_horizontal_margin_258(narrow),
+            0.0,
+        ))
+        .columns([GridLength::Star(1.0), GridLength::Pixel(meter_width)])
         .column_spacing(8.0)
         .children((
             TextBlock::new()
@@ -10216,7 +18914,11 @@ fn process_memory_cell_258(palette: Palette, process: &ProcessViewRow, column: i
             Border::new()
                 .grid_column(1)
                 .margin(Thickness::new(0.0, 3.0, 0.0, 3.0))
-                .content(process_percent_stack_258(palette, process.memory_percent)),
+                .content(process_percent_stack_258(
+                    palette,
+                    narrow,
+                    process.memory_percent,
+                )),
         ))
 }
 
@@ -10271,7 +18973,7 @@ fn process_pagination_258(
 fn process_details_258(
     palette: Palette,
     process: &ProcessViewRow,
-    select_process: Callback<Option<u32>>,
+    select_process: Callback<Option<ProcessIdentity>>,
 ) -> View {
     let close = select_process.clone();
     Border::new()
@@ -10475,26 +19177,44 @@ fn ai_page(
     ai_enabled: bool,
     mode: AiMode,
     input: &str,
+    composer_reference: &ElementRef<TextBox>,
     answer: Option<&str>,
+    chat_messages: &[ChatDisplayMessage],
+    full_scan_consent: Option<&FullScanConsent>,
+    cloud_fallback_consent: Option<&CloudFallbackConsent>,
     provider_status: Option<&AIProviderStatus>,
     provider_loading: bool,
     provider_error: Option<&str>,
+    preparation: AiPreparationUi<'_>,
     assistant_mode: Callback<()>,
     report_mode: Callback<()>,
     input_changed: Callback<String>,
     use_prompt: Callback<String>,
     send: Callback<()>,
+    new_conversation: Callback<()>,
+    allow_cloud_fallback: Callback<()>,
+    never_cloud_fallback: Callback<()>,
+    approve_full_scan: Callback<()>,
+    dismiss_full_scan: Callback<()>,
     open_settings: Callback<()>,
+    cancel_preparation: Callback<()>,
+    retry_preparation: Callback<()>,
     report_text: Option<&str>,
     report_provider: Option<&str>,
+    report_provider_use: Option<&ProviderUse>,
     report_generating: bool,
     report_error: Option<&str>,
     report_has_scan: bool,
     generate_report: Callback<()>,
+    regenerate_report: Callback<()>,
     cancel_report: Callback<()>,
+    copy_report: Callback<()>,
     chat_pending: bool,
     cancel_chat: Callback<()>,
 ) -> View {
+    let chat_interaction_blocked = preparation.intent.is_some()
+        || full_scan_consent.is_some()
+        || cloud_fallback_consent.is_some();
     let prompts = [
         "Summarize my latest scan",
         "What failed and why?",
@@ -10517,6 +19237,9 @@ fn ai_page(
                     .content(
                         Button::new()
                             .height(27.0)
+                            .is_enabled(
+                                !provider_loading && !chat_pending && !chat_interaction_blocked,
+                            )
                             .resource_overrides(
                                 ResourceOverrides::new()
                                     .set("ButtonBackground", Color::transparent())
@@ -10630,7 +19353,7 @@ fn ai_page(
                                 .set("ControlCornerRadius", CornerRadius::uniform(5.0)),
                         )
                         .automation_name("Open AI settings")
-                        .on_click(open_settings)
+                        .on_click(open_settings.clone())
                         .content(icons::path(FaIcon::Settings)),
                 )),
         );
@@ -10646,7 +19369,10 @@ fn ai_page(
                 .children((mode_switch, placed(runtime_pill, 1, 0))),
         );
 
-    let workspace_height = (window_height - 243.0).max(if narrow { 550.0 } else { 650.0 });
+    // The composer is part of the workspace's fixed bottom row. Matching the
+    // workspace to the actual client height keeps it pinned in view instead
+    // of forcing users to scroll past an artificial 550/650 px minimum.
+    let workspace_height = ai_workspace_height(window_height);
 
     let workspace = if mode == AiMode::Assistant {
         ai_assistant_workspace(
@@ -10655,7 +19381,11 @@ fn ai_page(
             workspace_height,
             visual_state,
             input,
+            composer_reference,
             answer,
+            chat_messages,
+            full_scan_consent,
+            cloud_fallback_consent,
             prompt_buttons,
             input_changed,
             deterministic_visual,
@@ -10664,21 +19394,39 @@ fn ai_page(
             provider_ready || deterministic_visual,
             configure_ai,
             send,
+            new_conversation,
+            allow_cloud_fallback,
+            never_cloud_fallback,
+            approve_full_scan,
+            dismiss_full_scan,
+            preparation,
+            cancel_preparation.clone(),
+            retry_preparation.clone(),
             chat_pending,
             cancel_chat,
         )
     } else {
         ai_scan_report_workspace(
             palette,
-            narrow,
             workspace_height,
             report_text,
             report_provider,
+            report_provider_use,
             report_generating,
             report_error,
+            deterministic_visual,
+            ai_enabled,
+            provider_loading,
+            provider_ready || deterministic_visual,
+            open_settings,
             report_has_scan,
             generate_report,
+            regenerate_report,
             cancel_report,
+            copy_report,
+            preparation,
+            cancel_preparation,
+            retry_preparation,
         )
     };
 
@@ -10740,6 +19488,217 @@ fn ai_mode_button(
         )
 }
 
+fn chat_tool_activity_view(palette: Palette, activity: &ChatToolActivity) -> View {
+    let state_color = match activity.state {
+        ChatToolActivityState::Done => palette.ok,
+        ChatToolActivityState::Failed | ChatToolActivityState::TimedOut => palette.err,
+        ChatToolActivityState::Cancelled | ChatToolActivityState::CancelRequested => palette.warn,
+        ChatToolActivityState::Queued | ChatToolActivityState::Running => palette.accent,
+    };
+    let duration = activity
+        .duration_ms
+        .map(|duration| format!(" · {duration} ms"))
+        .unwrap_or_default();
+    let details = activity
+        .model_error
+        .as_deref()
+        .or(activity.model_output.as_deref())
+        .or(activity.result_preview.as_deref())
+        .unwrap_or("No tool output is available yet.");
+    Expander::new().is_expanded(false).slots([
+        SlotView::new(
+            ExpanderSlot::Header,
+            Grid::new()
+                .columns([GridLength::Star(1.0), GridLength::Auto])
+                .column_spacing(10.0)
+                .children((
+                    StackPanel::new().spacing(2.0).children((
+                        TextBlock::new()
+                            .text(activity.tool.clone())
+                            .font_size(11.5)
+                            .font_weight(FontWeight::SEMI_BOLD),
+                        TextBlock::new()
+                            .text(activity.args_summary.clone())
+                            .font_size(10.0)
+                            .foreground(palette.muted)
+                            .text_trimming(TextTrimming::CharacterEllipsis),
+                    )),
+                    TextBlock::new()
+                        .grid_column(1)
+                        .text(format!("{}{}", activity.state.as_str(), duration))
+                        .font_size(10.0)
+                        .font_weight(FontWeight::SEMI_BOLD)
+                        .foreground(state_color)
+                        .vertical_alignment(VerticalAlignment::Center),
+                )),
+        ),
+        SlotView::new(
+            ExpanderSlot::Content,
+            TextBlock::new()
+                .text(details)
+                .font_size(10.5)
+                .foreground(if activity.model_error.is_some() {
+                    palette.err
+                } else {
+                    palette.muted
+                })
+                .is_text_selection_enabled(true)
+                .text_wrapping(TextWrapping::Wrap),
+        ),
+    ])
+}
+
+fn chat_tool_history_view(palette: Palette, history: &ChatToolHistory) -> View {
+    if history.activities().is_empty() {
+        return View::empty();
+    }
+    let rows = history
+        .activities()
+        .iter()
+        .map(|activity| {
+            KeyedView::new(
+                activity.call_id.clone(),
+                chat_tool_activity_view(palette, activity),
+            )
+        })
+        .collect::<Vec<_>>();
+    StackPanel::new()
+        .max_width(760.0)
+        .spacing(4.0)
+        .keyed_children(rows)
+}
+
+fn ai_preparation_panel(
+    palette: Palette,
+    title: &'static str,
+    description: &'static str,
+    preparation: AiPreparationUi<'_>,
+    cancel: Callback<()>,
+    retry: Callback<()>,
+) -> View {
+    let progress = if preparation.total == 0 {
+        0.0
+    } else {
+        (preparation.completed as f64 / preparation.total as f64 * 100.0).clamp(0.0, 100.0)
+    };
+    let activity: View = if let Some(error) = preparation.error {
+        StackPanel::new().spacing(10.0).children((
+            TextBlock::new()
+                .text(error.to_string())
+                .font_size(12.0)
+                .foreground(palette.err)
+                .text_wrapping(TextWrapping::Wrap)
+                .max_width(560.0)
+                .horizontal_alignment(HorizontalAlignment::Center),
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(8.0)
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .children((
+                    Button::new()
+                        .height(32.0)
+                        .resource_overrides(primary_button_resources())
+                        .on_click(retry)
+                        .automation_name("Retry pending AI request")
+                        .content("Retry"),
+                    Button::new()
+                        .height(32.0)
+                        .on_click(cancel)
+                        .automation_name("Cancel pending AI request")
+                        .content("Cancel AI request"),
+                )),
+        ))
+    } else {
+        let activity_text = if preparation.scan_cancelling {
+            "Stopping the prerequisite scan…".to_string()
+        } else if preparation.scan_busy {
+            preparation.current_task.map_or_else(
+                || "Starting the prerequisite scan…".to_string(),
+                |task| format!("Scanning · {task}"),
+            )
+        } else {
+            "Waiting to start the prerequisite scan…".to_string()
+        };
+        let retry_action: View = if preparation.scan_busy {
+            View::empty()
+        } else {
+            Button::new()
+                .height(32.0)
+                .resource_overrides(primary_button_resources())
+                .on_click(retry)
+                .automation_name("Start prerequisite scan")
+                .content("Start scan")
+        };
+        StackPanel::new().spacing(10.0).children((
+            TextBlock::new()
+                .text(activity_text)
+                .font_size(12.0)
+                .foreground(palette.muted)
+                .horizontal_alignment(HorizontalAlignment::Center),
+            ProgressBar::new()
+                .width(310.0)
+                .height(4.0)
+                .minimum(0.0)
+                .maximum(100.0)
+                .value(progress)
+                .is_indeterminate(preparation.scan_busy && preparation.total == 0),
+            TextBlock::new()
+                .text(if preparation.total == 0 {
+                    "Preparing scan plan".to_string()
+                } else {
+                    format!(
+                        "{} of {} diagnostics collected",
+                        preparation.completed, preparation.total
+                    )
+                })
+                .font_size(10.5)
+                .foreground(palette.muted)
+                .horizontal_alignment(HorizontalAlignment::Center),
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(8.0)
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .children((
+                    retry_action,
+                    Button::new()
+                        .height(32.0)
+                        .on_click(cancel)
+                        .automation_name("Cancel pending AI request")
+                        .content("Cancel AI request"),
+                )),
+        ))
+    };
+
+    StackPanel::new()
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .vertical_alignment(VerticalAlignment::Center)
+        .spacing(10.0)
+        .children((
+            Border::new()
+                .width(48.0)
+                .height(48.0)
+                .background(palette.active)
+                .corner_radius(10.0)
+                .content(
+                    icons::path(FaIcon::MagnifyingGlass)
+                        .width(22.0)
+                        .height(22.0),
+                ),
+            TextBlock::new()
+                .text(title)
+                .font_size(18.0)
+                .font_weight(FontWeight::BOLD),
+            TextBlock::new()
+                .text(description)
+                .font_size(12.0)
+                .foreground(palette.muted)
+                .text_wrapping(TextWrapping::Wrap)
+                .max_width(540.0)
+                .horizontal_alignment(HorizontalAlignment::Center),
+            activity,
+        ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ai_assistant_workspace(
     palette: Palette,
@@ -10747,7 +19706,11 @@ fn ai_assistant_workspace(
     workspace_height: f64,
     visual_state: VisualState,
     input: &str,
+    composer_reference: &ElementRef<TextBox>,
     answer: Option<&str>,
+    chat_messages: &[ChatDisplayMessage],
+    full_scan_consent: Option<&FullScanConsent>,
+    cloud_fallback_consent: Option<&CloudFallbackConsent>,
     prompt_buttons: Vec<KeyedView>,
     input_changed: Callback<String>,
     deterministic_visual: bool,
@@ -10756,10 +19719,119 @@ fn ai_assistant_workspace(
     provider_ready: bool,
     open_settings: Callback<()>,
     send: Callback<()>,
+    new_conversation: Callback<()>,
+    allow_cloud_fallback: Callback<()>,
+    never_cloud_fallback: Callback<()>,
+    approve_full_scan: Callback<()>,
+    dismiss_full_scan: Callback<()>,
+    preparation: AiPreparationUi<'_>,
+    cancel_preparation: Callback<()>,
+    retry_preparation: Callback<()>,
     chat_pending: bool,
     cancel_chat: Callback<()>,
 ) -> View {
-    let body: View = if visual_state == VisualState::IssueToChat {
+    let conversation_active = visual_state.is_conversation() || !chat_messages.is_empty();
+    let interaction_blocked = preparation.intent.is_some()
+        || full_scan_consent.is_some()
+        || cloud_fallback_consent.is_some();
+    let body: View = if let Some(consent) = cloud_fallback_consent {
+        StackPanel::new()
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .vertical_alignment(VerticalAlignment::Center)
+            .spacing(11.0)
+            .children((
+                icons::path(FaIcon::Globe).width(30.0).height(30.0),
+                TextBlock::new()
+                    .text(format!(
+                        "Continue with {}?",
+                        provider_display_name(consent.candidate)
+                    ))
+                    .font_size(17.0)
+                    .font_weight(FontWeight::BOLD),
+                TextBlock::new()
+                    .text(format!(
+                        "{} could not answer before producing any output. {}",
+                        provider_display_name(consent.attempt.current_provider),
+                        consent.reason
+                    ))
+                    .font_size(12.5)
+                    .foreground(palette.muted)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .max_width(540.0)
+                    .horizontal_alignment(HorizontalAlignment::Center),
+                TextBlock::new()
+                    .text("Continuing may send this question and its bounded diagnostic evidence to the configured cloud provider. Your choice is saved in Settings.")
+                    .font_size(11.5)
+                    .foreground(palette.muted)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .max_width(540.0)
+                    .horizontal_alignment(HorizontalAlignment::Center),
+                StackPanel::new()
+                    .orientation(Orientation::Horizontal)
+                    .spacing(8.0)
+                    .horizontal_alignment(HorizontalAlignment::Center)
+                    .children((
+                        Button::new()
+                            .on_click(allow_cloud_fallback)
+                            .automation_name("Allow cloud fallback")
+                            .content("Allow cloud fallback"),
+                        Button::new()
+                            .on_click(never_cloud_fallback)
+                            .automation_name("Never use cloud fallback")
+                            .content("Never use cloud"),
+                    )),
+            ))
+    } else if let Some(consent) = full_scan_consent {
+        StackPanel::new()
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .vertical_alignment(VerticalAlignment::Center)
+            .spacing(11.0)
+            .children((
+                icons::path(FaIcon::MagnifyingGlass).width(30.0).height(30.0),
+                TextBlock::new()
+                    .text("Run a Full Scan for more evidence?")
+                    .font_size(17.0)
+                    .font_weight(FontWeight::BOLD),
+                TextBlock::new()
+                    .text(consent.reason.clone())
+                    .font_size(12.5)
+                    .foreground(palette.muted)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .max_width(520.0)
+                    .horizontal_alignment(HorizontalAlignment::Center),
+                TextBlock::new()
+                    .text("The scan will start only after you approve. Your original question will be asked again with the completed Full Scan evidence.")
+                    .font_size(11.5)
+                    .foreground(palette.muted)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .max_width(520.0)
+                    .horizontal_alignment(HorizontalAlignment::Center),
+                StackPanel::new()
+                    .orientation(Orientation::Horizontal)
+                    .spacing(8.0)
+                    .horizontal_alignment(HorizontalAlignment::Center)
+                    .children((
+                        Button::new()
+                            .is_enabled(!chat_pending && !preparation.scan_busy)
+                            .on_click(approve_full_scan)
+                            .automation_name("Approve Full Scan")
+                            .content("Run Full Scan"),
+                        Button::new()
+                            .on_click(dismiss_full_scan)
+                            .automation_name("Dismiss Full Scan request")
+                            .content("Not now"),
+                    )),
+            ))
+    } else if preparation.is_chat() {
+        ai_preparation_panel(
+            palette,
+            "Preparing diagnostic context",
+            "Your question will be sent automatically after the prerequisite scan completes.",
+            preparation,
+            cancel_preparation,
+            retry_preparation,
+        )
+    } else if visual_state == VisualState::IssueToChat {
         ai_issue_to_chat_body(palette)
     } else if matches!(
         visual_state,
@@ -10768,6 +19840,119 @@ fn ai_assistant_workspace(
             | VisualState::AiConversationBottomCompact
     ) {
         ai_conversation_body(palette, visual_state)
+    } else if !chat_messages.is_empty() {
+        let rows = chat_messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| {
+                let is_user = message.role == ChatDisplayRole::User;
+                let speaker = if is_user {
+                    "You".to_string()
+                } else {
+                    message.provider_use.as_ref().map_or_else(
+                        || "WindowsForum Assistant".to_string(),
+                        |provider| {
+                            let model = provider
+                                .actual_models
+                                .first()
+                                .or(provider.requested_model.as_ref())
+                                .map(|model| format!(" · {model}"))
+                                .unwrap_or_default();
+                            let fallback = provider
+                                .fallback_from
+                                .as_deref()
+                                .map(|source| format!(" · fallback from {source}"))
+                                .unwrap_or_default();
+                            format!("{}{}{}", provider.provider_id, model, fallback)
+                        },
+                    )
+                };
+                let text = if message.text.is_empty() && message.finish_reason.is_none() {
+                    "Thinking…".to_string()
+                } else {
+                    message.text.clone()
+                };
+                let message_content: View = if is_user {
+                    TextBlock::new()
+                        .text(text)
+                        .font_size(12.5)
+                        .is_text_selection_enabled(true)
+                        .text_wrapping(TextWrapping::Wrap)
+                        .into()
+                } else {
+                    render_markdown_lite(
+                        &text,
+                        MarkdownStyle::with_palette(
+                            palette.text,
+                            palette.card_strong,
+                            palette.border,
+                        ),
+                    )
+                };
+                let tools = chat_tool_history_view(palette, &message.tools);
+                let proposals: View = if message.proposals.is_empty() {
+                    View::empty()
+                } else {
+                    TextBlock::new()
+                        .text(format!(
+                            "Review requested: {}",
+                            message.proposals.join(", ")
+                        ))
+                        .font_size(10.5)
+                        .foreground(palette.warn)
+                        .text_wrapping(TextWrapping::Wrap)
+                        .into()
+                };
+                let terminal: View =
+                    message
+                        .terminal_message
+                        .as_ref()
+                        .map_or_else(View::empty, |terminal| {
+                            TextBlock::new()
+                                .text(terminal.clone())
+                                .font_size(10.5)
+                                .foreground(palette.muted)
+                                .into()
+                        });
+                KeyedView::new(
+                    format!("{}-{index}", message.request_id),
+                    StackPanel::new()
+                        .max_width(if narrow { 620.0 } else { 760.0 })
+                        .horizontal_alignment(if is_user {
+                            HorizontalAlignment::Right
+                        } else {
+                            HorizontalAlignment::Left
+                        })
+                        .spacing(4.0)
+                        .children((
+                            TextBlock::new()
+                                .text(speaker)
+                                .font_size(10.5)
+                                .font_weight(FontWeight::SEMI_BOLD)
+                                .foreground(palette.muted),
+                            Border::new()
+                                .padding(Thickness::new(14.0, 10.0, 14.0, 10.0))
+                                .background(if is_user {
+                                    palette.card_strong
+                                } else {
+                                    palette.active
+                                })
+                                .corner_radius(10.0)
+                                .content(message_content),
+                            tools,
+                            proposals,
+                            terminal,
+                        )),
+                )
+            })
+            .collect::<Vec<_>>();
+        ScrollViewer::new()
+            .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+            .content(
+                Border::new()
+                    .padding(Thickness::new(24.0, 18.0, 24.0, 18.0))
+                    .content(StackPanel::new().spacing(13.0).keyed_children(rows)),
+            )
     } else if let Some(answer) = answer {
         ScrollViewer::new()
             .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
@@ -10792,12 +19977,14 @@ fn ai_assistant_workspace(
                                         .background(palette.active)
                                         .corner_radius(10.0)
                                         .horizontal_alignment(HorizontalAlignment::Left)
-                                        .content(
-                                            TextBlock::new()
-                                                .text(answer)
-                                                .font_size(12.5)
-                                                .text_wrapping(TextWrapping::Wrap),
-                                        ),
+                                        .content(render_markdown_lite(
+                                            answer,
+                                            MarkdownStyle::with_palette(
+                                                palette.text,
+                                                palette.card_strong,
+                                                palette.border,
+                                            ),
+                                        )),
                                 )),
                             )),
                     ),
@@ -10881,26 +20068,32 @@ fn ai_assistant_workspace(
             ))
     };
 
-    let header_trailing: View = if visual_state.is_conversation() {
-        StackPanel::new()
+    let header_trailing: View = if conversation_active {
+        Button::new()
             .grid_column(1)
-            .orientation(Orientation::Horizontal)
-            .spacing(7.0)
-            .vertical_alignment(VerticalAlignment::Center)
-            .children((
-                SymbolIcon::new()
-                    .symbol(Symbol::Add)
-                    .width(11.0)
-                    .height(11.0),
-                TextBlock::new()
-                    .text("New conversation")
-                    .font_size(11.5)
-                    .foreground(palette.muted),
-            ))
+            .is_enabled(!chat_pending && !interaction_blocked)
+            .on_click(new_conversation)
+            .automation_name("New conversation")
+            .content(
+                StackPanel::new()
+                    .orientation(Orientation::Horizontal)
+                    .spacing(7.0)
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .children((
+                        SymbolIcon::new()
+                            .symbol(Symbol::Add)
+                            .width(11.0)
+                            .height(11.0),
+                        TextBlock::new()
+                            .text("New conversation")
+                            .font_size(11.5)
+                            .foreground(palette.muted),
+                    )),
+            )
     } else {
         View::empty()
     };
-    let prompts: View = if visual_state.is_conversation()
+    let prompts: View = if conversation_active
         || (!deterministic_visual && (provider_loading || !ai_enabled || !provider_ready))
     {
         View::empty()
@@ -10913,7 +20106,9 @@ fn ai_assistant_workspace(
             .keyed_children(prompt_buttons)
     };
 
-    let composer_placeholder = if !deterministic_visual && provider_loading {
+    let composer_placeholder = if preparation.intent.is_some() {
+        "Preparing scan evidence…"
+    } else if !deterministic_visual && provider_loading {
         "Checking AI provider…"
     } else if !deterministic_visual && (!ai_enabled || !provider_ready) {
         "Configure an AI provider to start…"
@@ -10984,9 +20179,11 @@ fn ai_assistant_workspace(
                                             deterministic_visual
                                                 || (ai_enabled
                                                     && provider_ready
-                                                    && !provider_loading),
+                                                    && !provider_loading
+                                                    && !interaction_blocked),
                                         )
                                         .on_text_changed(input_changed)
+                                        .element_ref(composer_reference)
                                         .automation_name("Chat message"),
                                     if chat_pending {
                                         Button::new()
@@ -11003,7 +20200,11 @@ fn ai_assistant_workspace(
                                             .width(83.0)
                                             .height(32.0)
                                             .resource_overrides(primary_button_resources())
-                                            .is_enabled(provider_ready && !input.trim().is_empty())
+                                            .is_enabled(
+                                                provider_ready
+                                                    && !interaction_blocked
+                                                    && !input.trim().is_empty(),
+                                            )
                                             .on_click(send)
                                             .automation_name("Send chat message")
                                             .content(fa_icon_label(FaIcon::PaperPlane, "Send"))
@@ -11313,20 +20514,157 @@ fn primary_button_resources() -> ResourceOverrides {
         .set("ControlCornerRadius", CornerRadius::uniform(7.0))
 }
 
+fn report_provider_attribution(
+    fallback_provider: Option<&str>,
+    provider_use: Option<&ProviderUse>,
+) -> String {
+    let Some(provider_use) = provider_use else {
+        return fallback_provider.map_or_else(
+            || "Generated by the local AI assistant".to_string(),
+            |provider| format!("Generated by {provider}"),
+        );
+    };
+
+    let provider = if provider_use.provider_id.trim().is_empty() {
+        fallback_provider.unwrap_or("the AI assistant")
+    } else {
+        provider_use.provider_id.as_str()
+    };
+    let actual_models = provider_use.actual_models.join(", ");
+    let requested_model = provider_use
+        .requested_model
+        .as_deref()
+        .filter(|model| !model.trim().is_empty());
+
+    let mut attribution = format!("Generated by {provider}");
+    if !actual_models.is_empty() {
+        attribution.push_str(" · ");
+        attribution.push_str(&actual_models);
+        if requested_model.is_some_and(|requested| {
+            !provider_use
+                .actual_models
+                .iter()
+                .any(|actual| actual == requested)
+        }) {
+            attribution.push_str(" (requested ");
+            attribution.push_str(requested_model.unwrap_or_default());
+            attribution.push(')');
+        }
+    } else if let Some(requested) = requested_model {
+        attribution.push_str(" · requested ");
+        attribution.push_str(requested);
+    }
+    if let Some(source) = provider_use
+        .fallback_from
+        .as_deref()
+        .filter(|source| !source.trim().is_empty())
+    {
+        attribution.push_str(" · fallback from ");
+        attribution.push_str(source);
+    }
+    attribution
+}
+
 #[allow(clippy::too_many_arguments)] // mirror ai_page's explicit view-parameter style
 fn ai_scan_report_workspace(
     palette: Palette,
-    narrow: bool,
     workspace_height: f64,
     report_text: Option<&str>,
     report_provider: Option<&str>,
+    report_provider_use: Option<&ProviderUse>,
     report_generating: bool,
     report_error: Option<&str>,
+    deterministic_visual: bool,
+    ai_enabled: bool,
+    provider_loading: bool,
+    provider_ready: bool,
+    open_settings: Callback<()>,
     has_scan: bool,
     generate: Callback<()>,
+    regenerate: Callback<()>,
     cancel: Callback<()>,
+    copy: Callback<()>,
+    preparation: AiPreparationUi<'_>,
+    cancel_preparation: Callback<()>,
+    retry_preparation: Callback<()>,
 ) -> View {
-    let body: View = if !has_scan {
+    let body: View = if preparation.is_report() {
+        ai_preparation_panel(
+            palette,
+            "Preparing report evidence",
+            "The health report will start automatically after the prerequisite scan completes.",
+            preparation,
+            cancel_preparation,
+            retry_preparation,
+        )
+    } else if !report_generating
+        && report_text.is_none()
+        && !deterministic_visual
+        && provider_loading
+    {
+        StackPanel::new()
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .vertical_alignment(VerticalAlignment::Center)
+            .spacing(10.0)
+            .children((
+                icons::path(FaIcon::Refresh).width(28.0).height(28.0),
+                TextBlock::new()
+                    .text("Checking AI availability…")
+                    .font_size(18.0)
+                    .font_weight(FontWeight::BOLD),
+                TextBlock::new()
+                    .text("Report generation will be available when provider discovery completes.")
+                    .font_size(12.5)
+                    .foreground(palette.muted)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .max_width(470.0),
+            ))
+    } else if !report_generating
+        && report_text.is_none()
+        && !deterministic_visual
+        && (!ai_enabled || !provider_ready)
+    {
+        StackPanel::new()
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .vertical_alignment(VerticalAlignment::Center)
+            .spacing(9.0)
+            .children((
+                icons::path(if ai_enabled {
+                    FaIcon::CircleInfo
+                } else {
+                    FaIcon::Gear
+                })
+                .width(30.0)
+                .height(30.0),
+                TextBlock::new()
+                    .text(if ai_enabled {
+                        "Connect an AI provider"
+                    } else {
+                        "AI insights are turned off"
+                    })
+                    .font_size(18.0)
+                    .font_weight(FontWeight::BOLD),
+                TextBlock::new()
+                    .text(if ai_enabled {
+                        "Choose an available local, subscription, or API provider before generating a report."
+                    } else {
+                        "Enable AI insights in Settings to generate scan reports."
+                    })
+                    .font_size(12.5)
+                    .foreground(palette.muted)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .max_width(470.0),
+                Button::new()
+                    .height(32.0)
+                    .resource_overrides(primary_button_resources())
+                    .on_click(open_settings)
+                    .content(if ai_enabled {
+                        "Configure AI"
+                    } else {
+                        "Open Settings"
+                    }),
+            ))
+    } else if !has_scan {
         StackPanel::new()
             .horizontal_alignment(HorizontalAlignment::Center)
             .vertical_alignment(VerticalAlignment::Center)
@@ -11348,6 +20686,10 @@ fn ai_scan_report_workspace(
                     .foreground(palette.muted)
                     .text_wrapping(TextWrapping::Wrap)
                     .max_width(470.0),
+                Button::new()
+                    .on_click(generate)
+                    .automation_name("Run Quick Scan and generate report")
+                    .content("Run Quick Scan & Generate"),
             ))
     } else if let Some(error) = report_error {
         StackPanel::new()
@@ -11369,7 +20711,7 @@ fn ai_scan_report_workspace(
                     .text_wrapping(TextWrapping::Wrap)
                     .max_width(470.0)
                     .horizontal_alignment(HorizontalAlignment::Center),
-                Button::new().on_click(generate).content("Try again"),
+                Button::new().on_click(regenerate).content("Try again"),
             ))
     } else if report_generating {
         StackPanel::new()
@@ -11382,7 +20724,11 @@ fn ai_scan_report_workspace(
                     .height(48.0)
                     .background(palette.active)
                     .corner_radius(10.0)
-                    .content(icons::path(FaIcon::WandMagicSparkles).width(23.0).height(23.0)),
+                    .content(
+                        icons::path(FaIcon::WandMagicSparkles)
+                            .width(23.0)
+                            .height(23.0),
+                    ),
                 TextBlock::new()
                     .text("Generating report…")
                     .font_size(18.0)
@@ -11400,10 +20746,10 @@ fn ai_scan_report_workspace(
         ScrollViewer::new()
             .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
             .content(
-                Border::new().padding(Thickness::new(24.0, 20.0, 24.0, 20.0)).content(
-                    StackPanel::new()
-                        .spacing(12.0)
-                        .children((
+                Border::new()
+                    .padding(Thickness::new(24.0, 20.0, 24.0, 20.0))
+                    .content(
+                        StackPanel::new().spacing(12.0).children((
                             Grid::new()
                                 .columns([GridLength::Star(1.0), GridLength::Auto])
                                 .children((
@@ -11411,23 +20757,44 @@ fn ai_scan_report_workspace(
                                         .text("Scan health report")
                                         .font_size(17.0)
                                         .font_weight(FontWeight::BOLD),
-                                    Button::new()
-                                        .on_click(generate)
-                                        .automation_name("Regenerate report")
-                                        .content("Regenerate"),
+                                    StackPanel::new()
+                                        .grid_column(1)
+                                        .orientation(Orientation::Horizontal)
+                                        .spacing(8.0)
+                                        .children((
+                                            Button::new()
+                                                .on_click(copy)
+                                                .automation_name("Copy report")
+                                                .content("Copy"),
+                                            Button::new()
+                                                .is_enabled(
+                                                    deterministic_visual
+                                                        || (ai_enabled
+                                                            && provider_ready
+                                                            && !provider_loading),
+                                                )
+                                                .on_click(regenerate)
+                                                .automation_name("Regenerate report")
+                                                .content("Regenerate"),
+                                        )),
                                 )),
                             TextBlock::new()
-                                .text(report_provider
-                                    .map(|provider| format!("Generated by {provider}"))
-                                    .unwrap_or_else(|| "Generated by the local AI assistant".to_string()))
+                                .text(report_provider_attribution(
+                                    report_provider,
+                                    report_provider_use,
+                                ))
                                 .font_size(11.5)
                                 .foreground(palette.muted),
-                            TextBlock::new()
-                                .text(text.to_string())
-                                .font_size(13.0)
-                                .text_wrapping(TextWrapping::Wrap),
+                            render_markdown_lite(
+                                text,
+                                MarkdownStyle::with_palette(
+                                    palette.text,
+                                    palette.card_strong,
+                                    palette.border,
+                                ),
+                            ),
                         )),
-                ),
+                    ),
             )
     } else {
         StackPanel::new()
@@ -11459,7 +20826,7 @@ fn ai_scan_report_workspace(
             ))
     };
     Border::new()
-        .height(workspace_height.max(if narrow { 550.0 } else { 650.0 }))
+        .height(workspace_height)
         .background(palette.card)
         .border_brush(palette.border)
         .border_thickness(1.0)
@@ -11473,6 +20840,15 @@ fn issues_page(
     theme: WindowTheme,
     issues: &[Issue],
     maintenance: &[RemediationSummary],
+    fix_plan: Option<&ValidatedFixPlan>,
+    fix_plan_pending: bool,
+    fix_plan_error: Option<&str>,
+    issue_prioritization: &IssuePrioritizationDisplay,
+    active_action_run: Option<&ActionRunSummary>,
+    action_run_history: &[ActionRunSummary],
+    action_expanded_runs: &HashSet<String>,
+    action_busy: bool,
+    ai_enabled: bool,
     is_admin: bool,
     detection_pending: bool,
     detection_error: Option<&str>,
@@ -11481,7 +20857,13 @@ fn issues_page(
     quick_scan: Callback<()>,
     run_remediation: Callback<String>,
     ask_ai: Callback<String>,
+    prioritize_issues: Callback<()>,
+    cancel_issue_prioritization: Callback<()>,
     propose_fix_plan: Callback<()>,
+    cancel_fix_plan: Callback<()>,
+    review_fix_plan_actions: Callback<FixPlanActionSelection>,
+    cancel_action_run: Callback<()>,
+    set_action_run_expanded: Callback<(String, bool)>,
     restart_admin: Callback<()>,
 ) -> View {
     if !has_committed_evidence || issues.is_empty() {
@@ -11494,6 +20876,11 @@ fn issues_page(
             detection_error,
             quick_scan,
             run_remediation,
+            active_action_run,
+            action_run_history,
+            action_expanded_runs,
+            cancel_action_run,
+            set_action_run_expanded,
         );
     }
 
@@ -11553,11 +20940,59 @@ fn issues_page(
         ));
     }
 
+    if active_action_run.is_some() || !action_run_history.is_empty() {
+        children.push(KeyedView::new(
+            "action-run",
+            action_run_panel(
+                palette,
+                active_action_run,
+                action_run_history,
+                action_expanded_runs,
+                cancel_action_run,
+                set_action_run_expanded.clone(),
+            ),
+        ));
+    }
+
     if !projection.detected.is_empty() {
         children.push(KeyedView::new(
             "ai-assistance",
-            issue_ai_assistance(palette, propose_fix_plan),
+            issue_ai_assistance(
+                palette,
+                issue_prioritization.busy,
+                fix_plan_pending,
+                ai_enabled,
+                prioritize_issues,
+                cancel_issue_prioritization,
+                propose_fix_plan,
+                cancel_fix_plan,
+            ),
         ));
+        if issue_prioritization.busy
+            || issue_prioritization.text.is_some()
+            || issue_prioritization.error.is_some()
+        {
+            children.push(KeyedView::new(
+                "ai-prioritization",
+                issue_prioritization_panel(palette, issue_prioritization),
+            ));
+        }
+        if fix_plan_pending || fix_plan.is_some() || fix_plan_error.is_some() {
+            children.push(KeyedView::new(
+                "ai-fix-plan",
+                fix_plan_panel(
+                    palette,
+                    theme,
+                    issues,
+                    maintenance,
+                    fix_plan,
+                    fix_plan_pending,
+                    fix_plan_error,
+                    action_busy,
+                    review_fix_plan_actions,
+                ),
+            ));
+        }
     }
 
     if !is_admin {
@@ -11576,7 +21011,7 @@ fn issues_page(
                 Some(("Restart as administrator", FaIcon::UserShield, move || {
                     let _ = restart_admin.call(());
                 })),
-                None::<(&str, fn())>,
+                None::<(&str, bool, fn())>,
                 112.0,
                 198.0,
             ),
@@ -11615,7 +21050,7 @@ fn issues_page(
                 (!issue.recommendation.is_empty()).then_some(issue.recommendation.as_str()),
                 Some((issue.category.as_str(), severity_label)),
                 primary_action,
-                Some(("Ask AI", ask_ai_callback)),
+                Some(("Ask AI", ai_enabled, ask_ai_callback)),
                 153.0,
                 190.0,
             ),
@@ -11625,9 +21060,10 @@ fn issues_page(
     if projection.counts.passed > 0 {
         children.push(KeyedView::new(
             "passed",
-            compact_issue_row(
+            issue_check_group(
                 palette,
                 &format!("{} checks passed", projection.counts.passed),
+                &projection.passed,
                 true,
             ),
         ));
@@ -11635,9 +21071,10 @@ fn issues_page(
     if projection.counts.unknown > 0 {
         children.push(KeyedView::new(
             "unknown",
-            compact_issue_row(
+            issue_check_group(
                 palette,
                 &format!("Couldn’t verify ({})", projection.counts.unknown),
+                &projection.unknown,
                 true,
             ),
         ));
@@ -11654,6 +21091,300 @@ fn issues_page(
         .content(StackPanel::new().spacing(12.0).keyed_children(children))
 }
 
+const fn action_item_status_label(status: ActionItemStatus) -> &'static str {
+    match status {
+        ActionItemStatus::Pending => "Pending",
+        ActionItemStatus::Running => "Running",
+        ActionItemStatus::Succeeded => "Succeeded",
+        ActionItemStatus::Partial => "Partial",
+        ActionItemStatus::Failed => "Failed",
+        ActionItemStatus::Cancelled => "Cancelled",
+        ActionItemStatus::Skipped => "Skipped",
+    }
+}
+
+fn action_item_status_color(palette: Palette, status: ActionItemStatus) -> Color {
+    match status {
+        ActionItemStatus::Succeeded => palette.ok,
+        ActionItemStatus::Partial | ActionItemStatus::Cancelled | ActionItemStatus::Skipped => {
+            palette.warn
+        }
+        ActionItemStatus::Failed => palette.err,
+        ActionItemStatus::Pending | ActionItemStatus::Running => palette.accent,
+    }
+}
+
+fn remediation_step_label(status: remediation::RemediationStepStatus) -> &'static str {
+    match status {
+        remediation::RemediationStepStatus::Succeeded => "Succeeded",
+        remediation::RemediationStepStatus::AlreadySatisfied => "Already satisfied",
+        remediation::RemediationStepStatus::Failed => "Failed",
+        remediation::RemediationStepStatus::Cancelled => "Cancelled",
+    }
+}
+
+fn action_item_run_view(palette: Palette, action: &action_support::ActionItemRun) -> View {
+    let mut details = Vec::new();
+    if let Some(result) = action.result.as_ref() {
+        details.push(KeyedView::new(
+            "message",
+            TextBlock::new()
+                .text(result.message.clone())
+                .font_size(11.5)
+                .foreground(if result.success {
+                    palette.text
+                } else {
+                    palette.muted
+                })
+                .is_text_selection_enabled(true)
+                .text_wrapping(TextWrapping::Wrap),
+        ));
+        for (index, step) in result.steps.iter().enumerate() {
+            let detail = step
+                .detail
+                .as_deref()
+                .filter(|detail| !detail.trim().is_empty())
+                .map(|detail| format!(" · {detail}"))
+                .unwrap_or_default();
+            details.push(KeyedView::new(
+                format!("step:{index}"),
+                TextBlock::new()
+                    .text(format!(
+                        "{} — {}{}",
+                        step.action,
+                        remediation_step_label(step.status),
+                        detail
+                    ))
+                    .font_size(10.5)
+                    .foreground(match step.status {
+                        remediation::RemediationStepStatus::Succeeded
+                        | remediation::RemediationStepStatus::AlreadySatisfied => palette.ok,
+                        remediation::RemediationStepStatus::Failed => palette.err,
+                        remediation::RemediationStepStatus::Cancelled => palette.warn,
+                    })
+                    .is_text_selection_enabled(true)
+                    .text_wrapping(TextWrapping::Wrap),
+            ));
+        }
+        if result.requires_restart {
+            details.push(KeyedView::new(
+                "restart",
+                TextBlock::new()
+                    .text("A Windows restart is required for this action to take effect.")
+                    .font_size(10.5)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .foreground(palette.warn)
+                    .text_wrapping(TextWrapping::Wrap),
+            ));
+        }
+    } else if let Some(error) = action.error.as_deref() {
+        details.push(KeyedView::new(
+            "error",
+            TextBlock::new()
+                .text(error.to_string())
+                .font_size(11.0)
+                .foreground(palette.err)
+                .is_text_selection_enabled(true)
+                .text_wrapping(TextWrapping::Wrap),
+        ));
+    } else {
+        details.push(KeyedView::new(
+            "pending",
+            TextBlock::new()
+                .text(match action.status {
+                    ActionItemStatus::Running => "The vetted action is running…",
+                    ActionItemStatus::Cancelled => "The action was cancelled before it started.",
+                    ActionItemStatus::Skipped => "The action was skipped.",
+                    _ => "Waiting for this vetted action to start…",
+                })
+                .font_size(10.5)
+                .foreground(palette.muted),
+        ));
+    }
+
+    // These per-action details are intentionally static. A status-derived
+    // controlled Expander accepted pointer toggles and then snapped back on
+    // the next unrelated render. The run-level Expander remains interactive;
+    // once open, exact action results are always readable and stable.
+    Border::new()
+        .padding(Thickness::new(10.0, 8.0, 10.0, 8.0))
+        .background(palette.card_strong)
+        .border_brush(palette.border)
+        .border_thickness(1.0)
+        .corner_radius(6.0)
+        .content(
+            StackPanel::new().spacing(7.0).children((
+                Grid::new()
+                    .columns([GridLength::Star(1.0), GridLength::Auto])
+                    .column_spacing(10.0)
+                    .children((
+                        TextBlock::new()
+                            .text(action.label.clone())
+                            .font_size(11.5)
+                            .font_weight(FontWeight::SEMI_BOLD)
+                            .text_trimming(TextTrimming::CharacterEllipsis),
+                        TextBlock::new()
+                            .grid_column(1)
+                            .text(action_item_status_label(action.status))
+                            .font_size(10.5)
+                            .font_weight(FontWeight::SEMI_BOLD)
+                            .foreground(action_item_status_color(palette, action.status)),
+                    )),
+                StackPanel::new().spacing(6.0).keyed_children(details),
+            )),
+        )
+}
+
+fn action_run_summary_view(
+    palette: Palette,
+    run: &ActionRunSummary,
+    live: bool,
+    expanded: bool,
+    expanded_changed: Callback<bool>,
+    cancel: Callback<()>,
+) -> View {
+    let can_cancel = run.status == ActionRunStatus::Running
+        && run.actions.iter().any(|action| {
+            action.cancellable
+                && matches!(
+                    action.status,
+                    ActionItemStatus::Pending | ActionItemStatus::Running
+                )
+        });
+    let cancel_action: View = if live && !run.status.terminal() {
+        Button::new()
+            .grid_column(1)
+            .height(30.0)
+            .is_enabled(can_cancel)
+            .on_click(cancel)
+            .automation_name("Cancel remediation run")
+            .content(if run.status == ActionRunStatus::CancelRequested {
+                "Stopping…"
+            } else if can_cancel {
+                "Cancel"
+            } else {
+                "Cannot cancel"
+            })
+    } else {
+        View::empty()
+    };
+    let actions = run
+        .actions
+        .iter()
+        .map(|action| {
+            KeyedView::new(
+                action.remediation_id.clone(),
+                action_item_run_view(palette, action),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    Expander::new()
+        .is_expanded(expanded)
+        .on_is_expanded_changed(expanded_changed)
+        .slots([
+            SlotView::new(
+                ExpanderSlot::Header,
+                Grid::new()
+                    .columns([GridLength::Star(1.0), GridLength::Auto])
+                    .column_spacing(10.0)
+                    .children((
+                        StackPanel::new().spacing(2.0).children((
+                            TextBlock::new()
+                                .text(if live {
+                                    "Active remediation"
+                                } else {
+                                    "Recent remediation"
+                                })
+                                .font_size(12.0)
+                                .font_weight(FontWeight::SEMI_BOLD),
+                            TextBlock::new()
+                                .text(action_run_status_text(run))
+                                .font_size(10.5)
+                                .foreground(palette.muted)
+                                .text_wrapping(TextWrapping::Wrap),
+                        )),
+                        cancel_action,
+                    )),
+            ),
+            SlotView::new(
+                ExpanderSlot::Content,
+                StackPanel::new().spacing(6.0).keyed_children(actions),
+            ),
+        ])
+}
+
+fn action_run_panel(
+    palette: Palette,
+    active: Option<&ActionRunSummary>,
+    history: &[ActionRunSummary],
+    expanded_runs: &HashSet<String>,
+    cancel: Callback<()>,
+    set_expanded: Callback<(String, bool)>,
+) -> View {
+    let mut runs = Vec::new();
+    if let Some(active) = active {
+        let run_id = active.run_id.clone();
+        let forward = set_expanded.clone();
+        runs.push(KeyedView::new(
+            format!("run:{}", active.run_id),
+            action_run_summary_view(
+                palette,
+                active,
+                true,
+                expanded_runs.contains(&active.run_id),
+                Callback::new(move |expanded| {
+                    let _ = forward.call((run_id.clone(), expanded));
+                }),
+                cancel.clone(),
+            ),
+        ));
+    }
+    for run in history
+        .iter()
+        .filter(|run| active.is_none_or(|active| active.run_id != run.run_id))
+        .take(3)
+    {
+        let run_id = run.run_id.clone();
+        let forward = set_expanded.clone();
+        runs.push(KeyedView::new(
+            format!("run:{}", run.run_id),
+            action_run_summary_view(
+                palette,
+                run,
+                false,
+                expanded_runs.contains(&run.run_id),
+                Callback::new(move |expanded| {
+                    let _ = forward.call((run_id.clone(), expanded));
+                }),
+                cancel.clone(),
+            ),
+        ));
+    }
+
+    Border::new()
+        .padding(Thickness::new(14.0, 12.0, 14.0, 12.0))
+        .background(palette.card)
+        .border_brush(palette.border)
+        .border_thickness(1.0)
+        .corner_radius(9.0)
+        .content(
+            StackPanel::new().spacing(8.0).children((
+                StackPanel::new().spacing(2.0).children((
+                    TextBlock::new()
+                        .text("Remediation activity")
+                        .font_size(12.5)
+                        .font_weight(FontWeight::BOLD),
+                    TextBlock::new()
+                        .text("Live status and exact per-step results from vetted catalog actions")
+                        .font_size(10.5)
+                        .foreground(palette.muted),
+                )),
+                StackPanel::new().spacing(6.0).keyed_children(runs),
+            )),
+        )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn issues_empty_page(
     palette: Palette,
@@ -11664,6 +21395,11 @@ fn issues_empty_page(
     detection_error: Option<&str>,
     quick_scan: Callback<()>,
     run_remediation: Callback<String>,
+    active_action_run: Option<&ActionRunSummary>,
+    action_run_history: &[ActionRunSummary],
+    action_expanded_runs: &HashSet<String>,
+    cancel_action_run: Callback<()>,
+    set_action_run_expanded: Callback<(String, bool)>,
 ) -> View {
     let (title, description) = if detection_pending {
         (
@@ -11736,14 +21472,99 @@ fn issues_empty_page(
             )),
     );
 
-    StackPanel::new().spacing(0.0).children((
-        page_header(palette, Page::Issues, View::empty()),
-        hero,
-        maintenance_card(palette, maintenance, run_remediation),
-    ))
+    let action_panel: View = if active_action_run.is_some() || !action_run_history.is_empty() {
+        Border::new()
+            .margin(Thickness::new(0.0, 0.0, 0.0, 12.0))
+            .content(action_run_panel(
+                palette,
+                active_action_run,
+                action_run_history,
+                action_expanded_runs,
+                cancel_action_run,
+                set_action_run_expanded,
+            ))
+    } else {
+        View::empty()
+    };
+
+    // A clean scan still shows all eight always-available maintenance rows.
+    // The hero plus that catalog is taller than the normal workspace, so the
+    // empty branch needs the same reachable overflow behavior as the detected
+    // issue branch above. Without this viewer only the first few rows are
+    // realized and neither keyboard nor UI Automation can reach the rest.
+    ScrollViewer::new()
+        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+        .content(StackPanel::new().spacing(0.0).children((
+            page_header(palette, Page::Issues, View::empty()),
+            hero,
+            action_panel,
+            maintenance_card(palette, maintenance, run_remediation),
+        )))
 }
 
-fn issue_ai_assistance(palette: Palette, propose_fix_plan: Callback<()>) -> View {
+const fn issue_ai_action_enabled(ai_enabled: bool, competing_action_busy: bool) -> bool {
+    ai_enabled && !competing_action_busy
+}
+
+#[allow(clippy::too_many_arguments)]
+fn issue_ai_assistance(
+    palette: Palette,
+    prioritization_busy: bool,
+    fix_plan_busy: bool,
+    ai_enabled: bool,
+    prioritize: Callback<()>,
+    cancel_prioritization: Callback<()>,
+    propose_fix_plan: Callback<()>,
+    cancel_fix_plan: Callback<()>,
+) -> View {
+    let prioritization_action: View = if prioritization_busy {
+        Button::new()
+            .height(32.0)
+            .on_click(cancel_prioritization)
+            .automation_name("Cancel issue prioritization")
+            .content(fa_icon_label(FaIcon::Xmark, "Cancel prioritization"))
+    } else {
+        Button::new()
+            .height(32.0)
+            .is_enabled(issue_ai_action_enabled(ai_enabled, fix_plan_busy))
+            .on_click(prioritize)
+            .resource_overrides(
+                ResourceOverrides::new()
+                    .set("ButtonBackground", Color::transparent())
+                    .set("ButtonBackgroundPointerOver", palette.active)
+                    .set("ButtonBackgroundPressed", palette.active)
+                    .set("ButtonBackgroundDisabled", Color::transparent())
+                    .set("ButtonForeground", palette.text)
+                    .set("ButtonForegroundDisabled", palette.muted)
+                    .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
+                    .set("ButtonPadding", Thickness::xy(10.0, 0.0)),
+            )
+            .content(fa_icon_label(FaIcon::RankingStar, "Prioritize"))
+    };
+    let plan_action: View = if fix_plan_busy {
+        Button::new()
+            .height(32.0)
+            .on_click(cancel_fix_plan)
+            .automation_name("Cancel fix plan")
+            .content(fa_icon_label(FaIcon::Xmark, "Cancel"))
+    } else {
+        Button::new()
+            .height(32.0)
+            .is_enabled(issue_ai_action_enabled(ai_enabled, prioritization_busy))
+            .on_click(propose_fix_plan)
+            .resource_overrides(
+                ResourceOverrides::new()
+                    .set("ButtonBackground", Color::transparent())
+                    .set("ButtonBackgroundPointerOver", palette.active)
+                    .set("ButtonBackgroundPressed", palette.active)
+                    .set("ButtonBackgroundDisabled", Color::transparent())
+                    .set("ButtonForeground", palette.text)
+                    .set("ButtonForegroundDisabled", palette.muted)
+                    .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
+                    .set("ButtonPadding", Thickness::xy(10.0, 0.0)),
+            )
+            .content(fa_icon_label(FaIcon::ListCheck, "Propose fix plan"))
+    };
     Border::new()
         .height(61.0)
         .padding(Thickness::xy(18.0, 0.0))
@@ -11777,25 +21598,310 @@ fn issue_ai_assistance(palette: Palette, propose_fix_plan: Callback<()>) -> View
                         .orientation(Orientation::Horizontal)
                         .spacing(8.0)
                         .vertical_alignment(VerticalAlignment::Center)
-                        .children((
-                            issue_ghost_button(palette, FaIcon::RankingStar, "Prioritize"),
-                            Button::new()
-                                .height(32.0)
-                                .on_click(propose_fix_plan)
-                                .resource_overrides(
-                                    ResourceOverrides::new()
-                                        .set("ButtonBackground", Color::transparent())
-                                        .set("ButtonBackgroundPointerOver", palette.active)
-                                        .set("ButtonBackgroundPressed", palette.active)
-                                        .set("ButtonBackgroundDisabled", Color::transparent())
-                                        .set("ButtonForeground", palette.text)
-                                        .set("ButtonForegroundDisabled", palette.text)
-                                        .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
-                                        .set("ButtonPadding", Thickness::xy(10.0, 0.0)),
-                                )
-                                .content(fa_icon_label(FaIcon::ListCheck, "Propose fix plan")),
-                        )),
+                        .children((prioritization_action, plan_action)),
                 )),
+        )
+}
+
+fn issue_prioritization_panel(
+    palette: Palette,
+    prioritization: &IssuePrioritizationDisplay,
+) -> View {
+    let body: View = if prioritization.busy && prioritization.text.is_none() {
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(10.0)
+            .children((
+                ProgressRing::new().width(20.0).height(20.0).is_active(true),
+                TextBlock::new()
+                    .text("Prioritizing issues…")
+                    .font_size(12.5)
+                    .foreground(palette.muted)
+                    .vertical_alignment(VerticalAlignment::Center),
+            ))
+    } else if let Some(error) = prioritization.error.as_deref() {
+        TextBlock::new()
+            .text(format!("AI triage failed · {error}"))
+            .font_size(12.5)
+            .foreground(palette.err)
+            .text_wrapping(TextWrapping::Wrap)
+            .into()
+    } else if let Some(text) = prioritization.text.as_deref() {
+        render_markdown_lite(
+            text,
+            MarkdownStyle::with_palette(palette.text, palette.card_strong, palette.border),
+        )
+    } else {
+        View::empty()
+    };
+    let attribution =
+        prioritization
+            .provider_use
+            .as_ref()
+            .map_or_else(String::new, |provider_use| {
+                let mut text = format!("Provider: {}", provider_use.provider_id);
+                if prioritization.cached {
+                    text.push_str(" · cached");
+                }
+                text
+            });
+    let attribution: View = if attribution.is_empty() {
+        View::empty()
+    } else {
+        TextBlock::new()
+            .text(attribution)
+            .font_size(10.5)
+            .foreground(palette.muted)
+            .into()
+    };
+
+    Border::new()
+        .padding(Thickness::uniform(16.0))
+        .background(palette.dim)
+        .border_brush(palette.border)
+        .border_thickness(1.0)
+        .corner_radius(9.0)
+        .content(StackPanel::new().spacing(8.0).children((body, attribution)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fix_plan_panel(
+    palette: Palette,
+    theme: WindowTheme,
+    issues: &[Issue],
+    maintenance: &[RemediationSummary],
+    plan: Option<&ValidatedFixPlan>,
+    pending: bool,
+    error: Option<&str>,
+    action_busy: bool,
+    review_actions: Callback<FixPlanActionSelection>,
+) -> View {
+    if pending {
+        return Border::new()
+            .padding(Thickness::uniform(18.0))
+            .background(palette.card)
+            .border_brush(palette.border)
+            .border_thickness(1.0)
+            .corner_radius(9.0)
+            .content(
+                StackPanel::new()
+                    .orientation(Orientation::Horizontal)
+                    .spacing(10.0)
+                    .children((
+                        ProgressRing::new().width(20.0).height(20.0).is_active(true),
+                        TextBlock::new()
+                            .text("Generating and validating an ordered fix plan…")
+                            .font_size(12.5)
+                            .vertical_alignment(VerticalAlignment::Center),
+                    )),
+            );
+    }
+
+    if let Some(error) = error {
+        return issue_detection_notice(palette, error, true);
+    }
+
+    let Some(plan) = plan else {
+        return View::empty();
+    };
+    let find_remediation = |remediation_id: &str| {
+        issues
+            .iter()
+            .filter_map(|issue| issue.remediation.as_ref())
+            .chain(maintenance.iter())
+            .find(|remediation| remediation.id == remediation_id)
+    };
+
+    let mut batch_seen = HashSet::new();
+    let batch_actions = plan
+        .entries
+        .iter()
+        .filter(|entry| {
+            issues
+                .iter()
+                .any(|issue| issue.detected && issue.id == entry.issue_id)
+        })
+        .filter_map(|entry| {
+            let remediation = find_remediation(&entry.remediation_id)?;
+            (remediation.batch_eligible && batch_seen.insert(remediation.id.clone())).then(|| {
+                ActionRequest {
+                    remediation_id: remediation.id.clone(),
+                    issue_id: Some(entry.issue_id.clone()),
+                }
+            })
+        })
+        .take(action_support::MAX_BATCH_ACTIONS)
+        .collect::<Vec<_>>();
+    let batch_button: View = if batch_actions.len() > 1 {
+        let review = review_actions.clone();
+        let selection = FixPlanActionSelection {
+            actions: batch_actions.clone(),
+            expected_scan_fingerprint: plan.scan_fingerprint.clone(),
+            expected_catalog_fingerprint: plan.catalog_fingerprint.clone(),
+        };
+        Button::new()
+            .height(34.0)
+            .is_enabled(!action_busy)
+            .automation_name(format!(
+                "Review {} low-impact fix-plan actions together",
+                batch_actions.len()
+            ))
+            .on_click(move || {
+                let _ = review.call(selection.clone());
+            })
+            .resource_overrides(issue_primary_button_resources())
+            .content(fa_icon_label(
+                FaIcon::ListCheck,
+                format!("Review {} low-impact actions together", batch_actions.len()),
+            ))
+    } else {
+        View::empty()
+    };
+
+    let mut rows = Vec::new();
+    for entry in &plan.entries {
+        let Some(issue) = issues
+            .iter()
+            .find(|issue| issue.detected && issue.id == entry.issue_id)
+        else {
+            continue;
+        };
+        let Some(remediation) = find_remediation(&entry.remediation_id) else {
+            continue;
+        };
+        let (tint, accent, icon_data, _) = issue_severity_visual(palette, theme, issue.severity);
+        let tier = match entry.tier {
+            RemediationTier::OpenTool => "Open tool",
+            RemediationTier::AutoSafe => "Auto-safe",
+            RemediationTier::Repair => "Repair",
+        };
+        let review = review_actions.clone();
+        let selection = FixPlanActionSelection {
+            actions: vec![ActionRequest {
+                remediation_id: remediation.id.clone(),
+                issue_id: Some(entry.issue_id.clone()),
+            }],
+            expected_scan_fingerprint: plan.scan_fingerprint.clone(),
+            expected_catalog_fingerprint: plan.catalog_fingerprint.clone(),
+        };
+        let remediation_label = remediation.label.clone();
+        let automation_name = format!("Review fix-plan action {remediation_label}");
+        rows.push(KeyedView::new(
+            format!("{}:{}", entry.issue_id, entry.remediation_id),
+            Border::new()
+                .min_height(98.0)
+                .padding(Thickness::uniform(14.0))
+                .background(palette.card)
+                .border_brush(palette.border)
+                .border_thickness(1.0)
+                .corner_radius(8.0)
+                .content(
+                    Grid::new()
+                        .columns([
+                            GridLength::Pixel(36.0),
+                            GridLength::Star(1.0),
+                            GridLength::Auto,
+                        ])
+                        .column_spacing(12.0)
+                        .children((
+                            Border::new()
+                                .width(36.0)
+                                .height(36.0)
+                                .background(tint)
+                                .corner_radius(9.0)
+                                .content(
+                                    Image::new()
+                                        .source_data(EncodedImage::from_static(icon_data))
+                                        .width(17.0)
+                                        .height(17.0),
+                                ),
+                            StackPanel::new().grid_column(1).spacing(5.0).children((
+                                TextBlock::new()
+                                    .text(issue.title.clone())
+                                    .font_weight(FontWeight::BOLD),
+                                render_markdown_lite(
+                                    &entry.rationale,
+                                    MarkdownStyle::with_palette(
+                                        palette.text,
+                                        palette.card_strong,
+                                        palette.border,
+                                    ),
+                                ),
+                                TextBlock::new()
+                                    .text(tier)
+                                    .font_size(10.5)
+                                    .font_weight(FontWeight::SEMI_BOLD)
+                                    .foreground(accent),
+                            )),
+                            Button::new()
+                                .grid_column(2)
+                                .height(32.0)
+                                .is_enabled(!action_busy)
+                                .automation_name(automation_name)
+                                .on_click(move || {
+                                    let _ = review.call(selection.clone());
+                                })
+                                .resource_overrides(issue_primary_button_resources())
+                                .content(fa_icon_label(
+                                    remediation_icon(remediation),
+                                    &remediation_label,
+                                )),
+                        )),
+                ),
+        ));
+    }
+
+    let entries: View = if rows.is_empty() {
+        render_markdown_lite(
+            if plan.entries.is_empty() {
+                &plan.notes
+            } else {
+                "This plan no longer matches the current detected issues."
+            },
+            MarkdownStyle::with_palette(palette.text, palette.card_strong, palette.border),
+        )
+    } else {
+        StackPanel::new().spacing(8.0).keyed_children(rows)
+    };
+    let notes: View = if !plan.notes.trim().is_empty() && !plan.entries.is_empty() {
+        render_markdown_lite(
+            &plan.notes,
+            MarkdownStyle::with_palette(palette.text, palette.card_strong, palette.border),
+        )
+    } else {
+        View::empty()
+    };
+    let provider = report_provider_attribution(
+        Some(plan.provider_use.provider_id.as_str()),
+        Some(&plan.provider_use),
+    );
+
+    Border::new()
+        .padding(Thickness::uniform(16.0))
+        .background(palette.dim)
+        .border_brush(palette.border)
+        .border_thickness(1.0)
+        .corner_radius(9.0)
+        .content(
+            StackPanel::new().spacing(9.0).children((
+                Grid::new()
+                    .columns([GridLength::Star(1.0), GridLength::Auto])
+                    .children((
+                        TextBlock::new()
+                            .text("Vetted fix plan")
+                            .font_size(14.0)
+                            .font_weight(FontWeight::BOLD),
+                        TextBlock::new()
+                            .grid_column(1)
+                            .text(provider)
+                            .font_size(10.5)
+                            .foreground(palette.muted)
+                            .vertical_alignment(VerticalAlignment::Center),
+                    )),
+                batch_button,
+                entries,
+                notes,
+            )),
         )
 }
 
@@ -11879,7 +21985,11 @@ fn maintenance_card(
         )
 }
 
-fn maintenance_row(palette: Palette, remediation: &RemediationSummary, run: impl Fn() + 'static) -> View {
+fn maintenance_row(
+    palette: Palette,
+    remediation: &RemediationSummary,
+    run: impl Fn() + 'static,
+) -> View {
     let mut title = remediation.label.clone();
     if remediation.tier == RemediationTier::Repair {
         title.push_str(" repair");
@@ -11940,24 +22050,6 @@ fn issue_primary_button_resources() -> ResourceOverrides {
         .set("ControlCornerRadius", CornerRadius::uniform(7.0))
 }
 
-fn issue_ghost_button(palette: Palette, icon: FaIcon, label: &str) -> View {
-    Button::new()
-        .height(32.0)
-        .is_enabled(false)
-        .resource_overrides(
-            ResourceOverrides::new()
-                .set("ButtonBackground", Color::transparent())
-                .set("ButtonBackgroundPointerOver", palette.active)
-                .set("ButtonBackgroundPressed", palette.active)
-                .set("ButtonBackgroundDisabled", Color::transparent())
-                .set("ButtonForeground", palette.text)
-                .set("ButtonForegroundDisabled", palette.text)
-                .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
-                .set("ButtonPadding", Thickness::xy(10.0, 0.0)),
-        )
-        .content(fa_icon_label(icon, label))
-}
-
 #[allow(clippy::too_many_arguments)]
 fn issue_card(
     palette: Palette,
@@ -11970,7 +22062,7 @@ fn issue_card(
     recommendation: Option<&str>,
     chips: Option<(&str, &str)>,
     primary_action: Option<(&str, FaIcon, impl Fn() + 'static)>,
-    secondary_action: Option<(&str, impl Fn() + 'static)>,
+    secondary_action: Option<(&str, bool, impl Fn() + 'static)>,
     min_height: f64,
     action_width: f64,
 ) -> View {
@@ -12009,13 +22101,14 @@ fn issue_card(
         View::empty()
     };
 
-    let secondary_action: View = if let Some((label, on_click)) = secondary_action {
+    let secondary_action: View = if let Some((label, enabled, on_click)) = secondary_action {
         Button::new()
             .width(action_width)
             .style(ButtonStyle::Subtle)
+            .is_enabled(enabled)
             .on_click(on_click)
             .resource_overrides(
-                ResourceOverrides::new().set("ButtonForegroundDisabled", palette.text),
+                ResourceOverrides::new().set("ButtonForegroundDisabled", palette.muted),
             )
             .content(fa_icon_label(FaIcon::CommentDots, label))
     } else {
@@ -12123,35 +22216,82 @@ fn issue_chip(
         .content(content)
 }
 
-fn compact_issue_row(palette: Palette, label: &str, chevron: bool) -> View {
-    let content: View = if chevron {
-        StackPanel::new()
-            .orientation(Orientation::Horizontal)
-            .spacing(8.0)
-            .vertical_alignment(VerticalAlignment::Center)
-            .children((
-                icons::path(FaIcon::ChevronRight).width(9.0).height(9.0),
+fn issue_check_group(palette: Palette, label: &str, issues: &[&Issue], passed: bool) -> View {
+    let rows = issues
+        .iter()
+        .map(|issue| {
+            let indicator: View = if passed {
                 TextBlock::new()
-                    .text(label)
+                    .text("✓")
+                    .font_size(11.0)
+                    .font_weight(FontWeight::BOLD)
+                    .foreground(palette.ok)
+                    .into()
+            } else {
+                TextBlock::new()
+                    .text("—")
                     .font_size(12.0)
-                    .font_weight(FontWeight::BOLD),
-            ))
-    } else {
-        TextBlock::new()
-            .text(label)
-            .font_size(12.0)
-            .font_weight(FontWeight::BOLD)
-            .into()
-    };
+                    .font_weight(FontWeight::BOLD)
+                    .foreground(palette.muted)
+                    .into()
+            };
+            KeyedView::new(
+                issue.id.clone(),
+                Border::new()
+                    .min_height(34.0)
+                    .padding(Thickness::new(2.0, 5.0, 2.0, 5.0))
+                    .border_brush(palette.border)
+                    .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
+                    .content(
+                        Grid::new()
+                            .columns([
+                                GridLength::Pixel(16.0),
+                                GridLength::Auto,
+                                GridLength::Star(1.0),
+                            ])
+                            .column_spacing(8.0)
+                            .children((
+                                indicator,
+                                TextBlock::new()
+                                    .grid_column(1)
+                                    .text(issue.title.clone())
+                                    .font_size(12.0)
+                                    .font_weight(FontWeight::SEMI_BOLD)
+                                    .vertical_alignment(VerticalAlignment::Top),
+                                TextBlock::new()
+                                    .grid_column(2)
+                                    .text(issue.description.clone())
+                                    .font_size(12.0)
+                                    .foreground(palette.muted)
+                                    .text_wrapping(TextWrapping::Wrap),
+                            )),
+                    ),
+            )
+        })
+        .collect::<Vec<_>>();
 
     Border::new()
-        .height(40.0)
-        .padding(Thickness::xy(14.0, 0.0))
         .background(palette.card)
         .border_brush(palette.border)
         .border_thickness(1.0)
         .corner_radius(8.0)
-        .content(content)
+        .content(
+            Expander::new().is_expanded(false).slots([
+                SlotView::new(
+                    ExpanderSlot::Header,
+                    TextBlock::new()
+                        .text(label)
+                        .font_size(12.0)
+                        .font_weight(FontWeight::BOLD),
+                ),
+                SlotView::new(
+                    ExpanderSlot::Content,
+                    Border::new()
+                        .padding(Thickness::new(14.0, 0.0, 14.0, 10.0))
+                        .content(StackPanel::new().keyed_children(rows)),
+                ),
+            ]),
+        )
 }
 
 fn issue_severity_visual(
@@ -12191,23 +22331,36 @@ fn history_page(
     summaries: &[ScanSummary],
     filter: &str,
     selected_id: Option<&str>,
+    selected_label: &str,
+    label_editing: bool,
     selected_tags: &str,
     comparison: Option<&ComparisonSummary>,
     comparison_loading: bool,
+    comparison_error: Option<&str>,
+    expanded_task_id: Option<&str>,
+    task_diff: Option<&HistoryTaskDiffProjection>,
+    task_diff_loading: bool,
+    task_diff_error: Option<&str>,
     loading: bool,
     error: Option<&str>,
     ack_busy: bool,
     refresh: Callback<()>,
     filter_changed: Callback<String>,
     select_history: Callback<String>,
+    begin_label_edit: Callback<()>,
+    cancel_label_edit: Callback<()>,
+    label_changed: Callback<String>,
+    save_label: Callback<()>,
     tag_changed: Callback<String>,
     save_tags: Callback<()>,
+    toggle_task_detail: Callback<String>,
     clear_request: Callback<()>,
     clear_confirmed: Callback<()>,
     clear_cancelled: Callback<()>,
     clear_confirm_open: bool,
     trends: Option<&[TaskTrend]>,
     trends_loading: bool,
+    trends_error: Option<&str>,
     load_trends: Callback<()>,
 ) -> View {
     if deterministic_visual {
@@ -12219,23 +22372,36 @@ fn history_page(
         summaries,
         filter,
         selected_id,
+        selected_label,
+        label_editing,
         selected_tags,
         comparison,
         comparison_loading,
+        comparison_error,
+        expanded_task_id,
+        task_diff,
+        task_diff_loading,
+        task_diff_error,
         loading,
         error,
         ack_busy,
         refresh,
         filter_changed,
         select_history,
+        begin_label_edit,
+        cancel_label_edit,
+        label_changed,
+        save_label,
         tag_changed,
         save_tags,
+        toggle_task_detail,
         clear_request,
         clear_confirmed,
         clear_cancelled,
         clear_confirm_open,
         trends,
         trends_loading,
+        trends_error,
         load_trends,
     )
 }
@@ -12247,44 +22413,42 @@ fn history_live_page(
     summaries: &[ScanSummary],
     filter: &str,
     selected_id: Option<&str>,
+    selected_label: &str,
+    label_editing: bool,
     selected_tags: &str,
     comparison: Option<&ComparisonSummary>,
     comparison_loading: bool,
+    comparison_error: Option<&str>,
+    expanded_task_id: Option<&str>,
+    task_diff: Option<&HistoryTaskDiffProjection>,
+    task_diff_loading: bool,
+    task_diff_error: Option<&str>,
     loading: bool,
     error: Option<&str>,
     ack_busy: bool,
     refresh: Callback<()>,
     filter_changed: Callback<String>,
     select_history: Callback<String>,
+    begin_label_edit: Callback<()>,
+    cancel_label_edit: Callback<()>,
+    label_changed: Callback<String>,
+    save_label: Callback<()>,
     tag_changed: Callback<String>,
     save_tags: Callback<()>,
+    toggle_task_detail: Callback<String>,
     clear_request: Callback<()>,
     clear_confirmed: Callback<()>,
     clear_cancelled: Callback<()>,
     clear_confirm_open: bool,
     trends: Option<&[TaskTrend]>,
     trends_loading: bool,
+    trends_error: Option<&str>,
     load_trends: Callback<()>,
 ) -> View {
     let needle = filter.trim().to_ascii_lowercase();
     let filtered = summaries
         .iter()
-        .filter(|scan| {
-            needle.is_empty()
-                || scan.id.to_ascii_lowercase().contains(&needle)
-                || scan.computer_name.to_ascii_lowercase().contains(&needle)
-                || scan
-                    .label
-                    .as_deref()
-                    .unwrap_or("Quick Scan")
-                    .to_ascii_lowercase()
-                    .contains(&needle)
-                || scan
-                    .timestamp
-                    .to_iso_string()
-                    .to_ascii_lowercase()
-                    .contains(&needle)
-        })
+        .filter(|scan| history_scan_matches_filter(scan, &needle))
         .collect::<Vec<_>>();
 
     let session_rows = filtered
@@ -12315,7 +22479,7 @@ fn history_live_page(
                     )
                     .automation_name(format!(
                         "Compare scan {} from {}",
-                        scan.label.as_deref().unwrap_or("Quick Scan"),
+                        history_display_label(scan),
                         scan.timestamp.to_iso_string()
                     ))
                     .on_click(move || {
@@ -12324,7 +22488,7 @@ fn history_live_page(
                     .content(history_row(
                         palette,
                         &history_timestamp(scan),
-                        scan.label.as_deref().unwrap_or("Quick Scan"),
+                        history_display_label(scan),
                         &scan.success_count.to_string(),
                         &failure_count,
                         &format_diagnostic_duration(scan.duration_ms),
@@ -12367,13 +22531,28 @@ fn history_live_page(
         )));
 
     let latest_id = summaries.first().map(|scan| scan.id.as_str());
+    let selected_scan = selected_id.and_then(|id| summaries.iter().find(|scan| scan.id == id));
     let diff = history_live_comparison(
         palette,
         selected_id,
         latest_id,
+        selected_scan,
+        selected_label,
+        label_editing,
+        ack_busy,
         comparison,
         comparison_loading,
-        error,
+        comparison_error,
+        expanded_task_id,
+        task_diff,
+        task_diff_loading,
+        task_diff_error,
+        trends,
+        begin_label_edit,
+        cancel_label_edit,
+        label_changed,
+        save_label,
+        toggle_task_detail,
     );
     let body: View = if narrow {
         StackPanel::new().spacing(14.0).children((sessions, diff))
@@ -12383,10 +22562,37 @@ fn history_live_page(
             .column_spacing(14.0)
             .children((sessions, placed(diff, 1, 0)))
     };
-    let count_label = if loading && !summaries.is_empty() {
-        format!("{} scans · refreshing…", summaries.len())
-    } else {
+    let visible_count = filtered.len();
+    let count = if needle.is_empty() {
         format!("{} scans", summaries.len())
+    } else {
+        format!("{} of {} scans", visible_count, summaries.len())
+    };
+    let count_label = if loading && !summaries.is_empty() {
+        format!("{count} · refreshing…")
+    } else {
+        count
+    };
+    let list_error_notice: View = if let Some(error) = error
+        && !summaries.is_empty()
+    {
+        Border::new()
+            .padding(Thickness::new(12.0, 9.0, 12.0, 9.0))
+            .background(palette.err_bg)
+            .border_brush(palette.err)
+            .border_thickness(1.0)
+            .corner_radius(7.0)
+            .content(
+                TextBlock::new()
+                    .text(format!(
+                        "History refresh failed · {error} · showing the last successful list"
+                    ))
+                    .font_size(11.5)
+                    .foreground(palette.err)
+                    .text_wrapping(TextWrapping::Wrap),
+            )
+    } else {
+        View::empty()
     };
 
     StackPanel::new().spacing(16.0).children((
@@ -12428,6 +22634,7 @@ fn history_live_page(
                             .content(fa_icon_label(FaIcon::Trash, "Clear history")),
                     )),
             )),
+        list_error_notice,
         body,
         {
             let load_trends_button = Button::new()
@@ -12439,55 +22646,69 @@ fn history_live_page(
                 } else {
                     fa_icon_label(FaIcon::ChartLine, "Failure trends")
                 });
-            let trends_panel: View = match trends {
-                None => View::from(
+            let trends_panel: View = if let Some(error) = trends_error {
+                TextBlock::new()
+                    .text(format!("Failure trends unavailable · {error}"))
+                    .font_size(12.0)
+                    .foreground(palette.muted)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .into()
+            } else {
+                match trends {
+                    None => View::from(
                     TextBlock::new()
-                        .text("Load failure trends across recent scans.")
+                        .text(if trends_loading {
+                            "Loading failure trends across recent scans…"
+                        } else {
+                            "Load failure trends across recent scans."
+                        })
                         .font_size(12.0)
                         .foreground(palette.muted),
-                ),
-                Some(items) => {
-                    let mut sorted: Vec<&TaskTrend> = items.iter().collect();
-                    sorted.sort_by(|a, b| b.failed.cmp(&a.failed).then(a.task_id.cmp(&b.task_id)));
-                    let rows: Vec<KeyedView> = sorted
-                        .iter()
-                        .take(8)
-                        .filter(|trend| trend.failed > 0)
-                        .enumerate()
-                        .map(|(index, trend)| {
-                            KeyedView::new(
-                                index,
-                                Grid::new()
-                                    .columns([
-                                        GridLength::Star(1.0),
-                                        GridLength::Pixel(120.0),
-                                    ])
-                                    .children((
-                                        TextBlock::new()
-                                            .text(trend.task_id.clone())
-                                            .font_size(11.5)
-                                            .text_trimming(TextTrimming::CharacterEllipsis),
-                                        TextBlock::new()
-                                            .text(format!(
-                                                "{} failed / {} scans",
-                                                trend.failed, trend.scans_considered
-                                            ))
-                                            .grid_column(1)
-                                            .font_size(11.5)
-                                            .foreground(palette.err),
-                                    )),
+                    ),
+                    Some(items) => {
+                        let mut sorted: Vec<&TaskTrend> = items.iter().collect();
+                        sorted
+                            .sort_by(|a, b| b.failed.cmp(&a.failed).then(a.task_id.cmp(&b.task_id)));
+                        let rows: Vec<KeyedView> = sorted
+                            .iter()
+                            .take(8)
+                            .filter(|trend| trend.failed > 0)
+                            .enumerate()
+                            .map(|(index, trend)| {
+                                KeyedView::new(
+                                    index,
+                                    Grid::new()
+                                        .columns([
+                                            GridLength::Star(1.0),
+                                            GridLength::Pixel(120.0),
+                                        ])
+                                        .children((
+                                            TextBlock::new()
+                                                .text(trend.task_id.clone())
+                                                .font_size(11.5)
+                                                .text_trimming(TextTrimming::CharacterEllipsis),
+                                            TextBlock::new()
+                                                .text(format!(
+                                                    "{} failed / {} scans",
+                                                    trend.failed, trend.scans_considered
+                                                ))
+                                                .grid_column(1)
+                                                .font_size(11.5)
+                                                .foreground(palette.err),
+                                        )),
+                                )
+                            })
+                            .collect();
+                        if rows.is_empty() {
+                            View::from(
+                                TextBlock::new()
+                                    .text("No recurring failures in recent scans.")
+                                    .font_size(12.0)
+                                    .foreground(palette.muted),
                             )
-                        })
-                        .collect();
-                    if rows.is_empty() {
-                        View::from(
-                            TextBlock::new()
-                                .text("No recurring failures in recent scans.")
-                                .font_size(12.0)
-                                .foreground(palette.muted),
-                        )
-                    } else {
-                        StackPanel::new().spacing(3.0).keyed_children(rows)
+                        } else {
+                            StackPanel::new().spacing(3.0).keyed_children(rows)
+                        }
                     }
                 }
             };
@@ -12498,7 +22719,7 @@ fn history_live_page(
         {
             let tags_editor: View = selected_id
                 .and_then(|id| summaries.iter().find(|scan| scan.id == id))
-                .map(|summary| {
+                .map(|_| {
                     StackPanel::new()
                         .orientation(Orientation::Horizontal)
                         .spacing(8.0)
@@ -12510,11 +22731,7 @@ fn history_live_page(
                             TextBox::new()
                                 .width(320.0)
                                 .height(32.0)
-                                .text(if selected_tags.is_empty() {
-                                    summary.tags.join(", ")
-                                } else {
-                                    selected_tags.to_string()
-                                })
+                                .text(selected_tags.to_string())
                                 .placeholder_text("comma-separated tags")
                                 .is_enabled(!ack_busy)
                                 .on_text_changed(tag_changed)
@@ -12619,20 +22836,46 @@ fn history_section_header(palette: Palette, title: &str, hint: Option<&str>) -> 
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn history_live_comparison(
     palette: Palette,
     selected_id: Option<&str>,
     latest_id: Option<&str>,
+    selected_scan: Option<&ScanSummary>,
+    selected_label: &str,
+    label_editing: bool,
+    ack_busy: bool,
     comparison: Option<&ComparisonSummary>,
     comparison_loading: bool,
     error: Option<&str>,
+    expanded_task_id: Option<&str>,
+    task_diff: Option<&HistoryTaskDiffProjection>,
+    task_diff_loading: bool,
+    task_diff_error: Option<&str>,
+    trends: Option<&[TaskTrend]>,
+    begin_label_edit: Callback<()>,
+    cancel_label_edit: Callback<()>,
+    label_changed: Callback<String>,
+    save_label: Callback<()>,
+    toggle_task_detail: Callback<String>,
 ) -> View {
+    let label_editor = history_label_editor(
+        palette,
+        selected_scan,
+        selected_label,
+        label_editing,
+        ack_busy,
+        begin_label_edit,
+        cancel_label_edit,
+        label_changed,
+        save_label,
+    );
     let body: View = if let Some(comparison) = comparison {
-        let changed = comparison
+        let output_changed = comparison
             .status_unchanged
             .iter()
             .filter(|change| change.output_changed)
-            .collect::<Vec<_>>();
+            .count();
         let mut rows = vec![
             KeyedView::new(
                 "metric-failures",
@@ -12657,24 +22900,48 @@ fn history_live_comparison(
                 history_metric(
                     palette,
                     "Output changed",
-                    changed.len().to_string(),
+                    output_changed.to_string(),
                     palette.text,
                 ),
             ),
         ];
-        rows.extend(changed.into_iter().map(|change| {
-            KeyedView::new(
-                format!("changed-{}", change.task_id),
-                history_change(
-                    palette,
-                    "changed",
-                    change.task_name.clone(),
-                    "",
-                    palette.accent,
-                    palette.active,
-                ),
-            )
-        }));
+        rows.extend(
+            history_change_rows(comparison)
+                .into_iter()
+                .map(|(kind, change)| {
+                    let is_expanded = expanded_task_id == Some(change.task_id.as_str());
+                    KeyedView::new(
+                        format!("{}-{}", kind.label(), change.task_id),
+                        history_change_toggle(
+                            palette,
+                            kind,
+                            change,
+                            trends,
+                            is_expanded,
+                            is_expanded.then_some(task_diff).flatten(),
+                            is_expanded && task_diff_loading,
+                            is_expanded.then_some(task_diff_error).flatten(),
+                            toggle_task_detail.clone(),
+                        ),
+                    )
+                }),
+        );
+        let no_drift: View = if comparison.total_changes == 0 {
+            Border::new()
+                .margin(Thickness::new(0.0, 3.0, 0.0, 0.0))
+                .padding(Thickness::new(10.0, 8.0, 10.0, 8.0))
+                .background(palette.ok_bg)
+                .corner_radius(6.0)
+                .content(
+                    TextBlock::new()
+                        .text("No drift — both scans produced identical results.")
+                        .font_size(12.0)
+                        .foreground(palette.ok)
+                        .text_wrapping(TextWrapping::Wrap),
+                )
+        } else {
+            View::empty()
+        };
         Border::new()
             .padding(Thickness::new(14.0, 13.0, 14.0, 14.0))
             .content(
@@ -12688,6 +22955,7 @@ fn history_live_comparison(
                         .text_wrapping(TextWrapping::Wrap)
                         .font_size(12.0),
                     StackPanel::new().keyed_children(rows),
+                    no_drift,
                 )),
             )
     } else {
@@ -12714,8 +22982,282 @@ fn history_live_comparison(
         .vertical_alignment(VerticalAlignment::Top)
         .content(StackPanel::new().children((
             history_section_header(palette, "Diff vs latest", None),
+            label_editor,
             body,
         )))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn history_label_editor(
+    palette: Palette,
+    selected_scan: Option<&ScanSummary>,
+    label_draft: &str,
+    editing: bool,
+    busy: bool,
+    begin_edit: Callback<()>,
+    cancel_edit: Callback<()>,
+    label_changed: Callback<String>,
+    save_label: Callback<()>,
+) -> View {
+    let Some(scan) = selected_scan else {
+        return View::empty();
+    };
+    let content: View = if editing {
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(7.0)
+            .children((
+                TextBlock::new()
+                    .text("Label:")
+                    .font_size(12.0)
+                    .foreground(palette.muted)
+                    .vertical_alignment(VerticalAlignment::Center),
+                TextBox::new()
+                    .width(190.0)
+                    .height(30.0)
+                    .text(label_draft)
+                    .is_enabled(!busy)
+                    .automation_name("Scan label")
+                    .on_text_changed(label_changed),
+                Button::new()
+                    .height(30.0)
+                    .is_enabled(!busy)
+                    .automation_name("Save scan label")
+                    .on_click(save_label)
+                    .content("Save"),
+                Button::new()
+                    .height(30.0)
+                    .is_enabled(!busy)
+                    .automation_name("Cancel scan label edit")
+                    .on_click(cancel_edit)
+                    .content("Cancel"),
+            ))
+    } else {
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(7.0)
+            .children((
+                TextBlock::new()
+                    .text("Label:")
+                    .font_size(12.0)
+                    .foreground(palette.muted)
+                    .vertical_alignment(VerticalAlignment::Center),
+                TextBlock::new()
+                    .text(history_display_label(scan))
+                    .font_size(12.0)
+                    .font_weight(FontWeight::BOLD)
+                    .vertical_alignment(VerticalAlignment::Center),
+                Button::new()
+                    .width(30.0)
+                    .height(30.0)
+                    .is_enabled(!busy)
+                    .automation_name("Edit scan label")
+                    .on_click(begin_edit)
+                    .content(icons::path(FaIcon::Pen).width(12.0).height(12.0)),
+            ))
+    };
+    Border::new()
+        .padding(Thickness::new(14.0, 10.0, 14.0, 0.0))
+        .content(content)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn history_change_toggle(
+    palette: Palette,
+    kind: HistoryChangeKind,
+    change: &TaskChangeSummary,
+    trends: Option<&[TaskTrend]>,
+    expanded: bool,
+    detail: Option<&HistoryTaskDiffProjection>,
+    detail_loading: bool,
+    detail_error: Option<&str>,
+    toggle: Callback<String>,
+) -> View {
+    let (color, background) = match kind {
+        HistoryChangeKind::Regressed => (palette.err, palette.err_bg),
+        HistoryChangeKind::Recovered => (palette.ok, palette.ok_bg),
+        HistoryChangeKind::Changed => (palette.accent, palette.active),
+    };
+    let trend_badge = history_trend_badge(trends, &change.task_id);
+    let trend_announcement = trend_badge
+        .as_ref()
+        .map(|badge| format!(", {}", badge.description))
+        .unwrap_or_default();
+    let task_id = change.task_id.clone();
+    let button = Button::new()
+        .height(36.0)
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .horizontal_content_alignment(HorizontalAlignment::Stretch)
+        .resource_overrides(
+            ResourceOverrides::new()
+                .set("ButtonBackground", Color::transparent())
+                .set("ButtonBackgroundPointerOver", palette.active)
+                .set("ButtonBackgroundPressed", palette.active)
+                .set("ButtonForeground", palette.text)
+                .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
+                .set("ButtonPadding", Thickness::uniform(0.0)),
+        )
+        .automation_name(format!(
+            "{} {} {} details{}",
+            if expanded { "Collapse" } else { "Expand" },
+            kind.label(),
+            change.task_name,
+            trend_announcement
+        ))
+        .on_click(move || {
+            let _ = toggle.call(task_id.clone());
+        })
+        .content(history_change(
+            palette,
+            kind.label(),
+            change.task_name.clone(),
+            trend_badge.as_ref(),
+            color,
+            background,
+            expanded,
+        ));
+    let detail: View = if expanded {
+        history_task_diff_panel(palette, detail, detail_loading, detail_error)
+    } else {
+        View::empty()
+    };
+    StackPanel::new().children((button, detail))
+}
+
+fn history_task_diff_panel(
+    palette: Palette,
+    detail: Option<&HistoryTaskDiffProjection>,
+    loading: bool,
+    error: Option<&str>,
+) -> View {
+    let body: View = if loading {
+        TextBlock::new()
+            .text("Loading task details…")
+            .font_size(11.5)
+            .foreground(palette.muted)
+            .into()
+    } else if let Some(error) = error {
+        TextBlock::new()
+            .text(format!("Could not load task details: {error}"))
+            .font_size(11.5)
+            .foreground(palette.err)
+            .text_wrapping(TextWrapping::Wrap)
+            .into()
+    } else if let Some(projection) = detail {
+        let raw_outputs: View = Grid::new()
+            .columns([GridLength::Star(1.0), GridLength::Star(1.0)])
+            .column_spacing(8.0)
+            .children((
+                history_task_output(palette, "Previous", &projection.detail.previous_output),
+                placed(
+                    history_task_output(palette, "Current", &projection.detail.current_output),
+                    1,
+                    0,
+                ),
+            ));
+        if let Some((differences, hidden_count)) =
+            history_visible_json_differences(projection.differences.as_deref())
+        {
+            StackPanel::new().spacing(8.0).children((
+                history_json_difference_rows(palette, differences, hidden_count),
+                raw_outputs,
+            ))
+        } else {
+            raw_outputs
+        }
+    } else {
+        TextBlock::new()
+            .text("Task details are unavailable. Collapse and expand the row to retry.")
+            .font_size(11.5)
+            .foreground(palette.muted)
+            .text_wrapping(TextWrapping::Wrap)
+            .into()
+    };
+    Border::new()
+        .margin(Thickness::new(24.0, 2.0, 0.0, 8.0))
+        .padding(Thickness::new(8.0, 7.0, 8.0, 8.0))
+        .background(palette.card_strong)
+        .border_brush(palette.border)
+        .border_thickness(1.0)
+        .corner_radius(6.0)
+        .content(body)
+}
+
+fn history_visible_json_differences(
+    differences: Option<&[JsonDifference]>,
+) -> Option<(&[JsonDifference], usize)> {
+    let differences = differences.filter(|differences| !differences.is_empty())?;
+    Some(visible_differences(differences))
+}
+
+fn history_json_difference_rows(
+    palette: Palette,
+    differences: &[JsonDifference],
+    hidden_count: usize,
+) -> View {
+    let rows = differences
+        .iter()
+        .enumerate()
+        .map(|(index, difference)| {
+            let color = match difference.kind {
+                JsonDifferenceKind::Added => palette.ok,
+                JsonDifferenceKind::Removed => palette.err,
+                JsonDifferenceKind::Modified | JsonDifferenceKind::TypeChanged => palette.text,
+            };
+            let formatted = difference.formatted();
+            KeyedView::new(
+                format!("json-difference-{index}"),
+                TextBlock::new()
+                    .text(formatted.clone())
+                    .font_size(11.0)
+                    .foreground(color)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .automation_name(format!("History JSON difference: {formatted}")),
+            )
+        })
+        .collect::<Vec<_>>();
+    let overflow: View = if hidden_count == 0 {
+        View::empty()
+    } else {
+        let label = format!("…and {hidden_count} more changes");
+        TextBlock::new()
+            .text(label.clone())
+            .font_size(11.0)
+            .foreground(palette.muted)
+            .automation_name(format!("History JSON differences: {label}"))
+            .into()
+    };
+    StackPanel::new()
+        .spacing(2.0)
+        .children((StackPanel::new().keyed_children(rows), overflow))
+}
+
+fn history_task_output(palette: Palette, title: &str, output: &str) -> View {
+    let output = if output.is_empty() { "(empty)" } else { output };
+    StackPanel::new().spacing(4.0).children((
+        TextBlock::new()
+            .text(title.to_string())
+            .font_size(10.0)
+            .font_weight(FontWeight::BOLD)
+            .foreground(palette.muted),
+        Border::new()
+            .min_height(70.0)
+            .padding(Thickness::new(7.0, 6.0, 7.0, 6.0))
+            .background(palette.card)
+            .corner_radius(4.0)
+            .content(
+                ScrollViewer::new()
+                    .max_height(180.0)
+                    .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                    .horizontal_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                    .content(
+                        TextBlock::new()
+                            .text(output.to_string())
+                            .font_size(10.5)
+                            .text_wrapping(TextWrapping::Wrap),
+                    ),
+            ),
+    ))
 }
 
 fn history_comparison_placeholder(
@@ -12879,12 +23421,12 @@ fn history_fixture_page(palette: Palette, narrow: bool, empty: bool) -> View {
                         history_metric(palette, "New collection errors", "0", palette.err),
                         history_metric(palette, "Newly collected", "0", palette.ok),
                         history_metric(palette, "Output changed", "6", palette.text),
-                        history_change(palette, "changed", "System Services", "", palette.accent, palette.active),
-                        history_change(palette, "changed", "Logical Disks", "", palette.accent, palette.active),
-                        history_change(palette, "changed", "Operating System", "", palette.accent, palette.active),
-                        history_change(palette, "changed", "Processor", "", palette.accent, palette.active),
-                        history_change(palette, "changed", "System Information", "", palette.accent, palette.active),
-                        history_change(palette, "changed", "Startup Commands", "", palette.accent, palette.active),
+                        history_change(palette, "changed", "System Services", None, palette.accent, palette.active, false),
+                        history_change(palette, "changed", "Logical Disks", None, palette.accent, palette.active, false),
+                        history_change(palette, "changed", "Operating System", None, palette.accent, palette.active, false),
+                        history_change(palette, "changed", "Processor", None, palette.accent, palette.active, false),
+                        history_change(palette, "changed", "System Information", None, palette.accent, palette.active, false),
+                        history_change(palette, "changed", "Startup Commands", None, palette.accent, palette.active, false),
                     ))),
             )),
         );
@@ -13246,14 +23788,31 @@ fn history_change(
     palette: Palette,
     kind: impl Into<String>,
     label: impl Into<String>,
-    detail: impl Into<String>,
+    trend_badge: Option<&HistoryTrendBadge>,
     color: Color,
     background: Color,
+    expanded: bool,
 ) -> View {
     let kind = kind.into();
     let label = label.into();
-    let detail = detail.into();
-    let detail_is_empty = detail.is_empty();
+    let trend_badge = trend_badge.map_or_else(View::empty, |badge| {
+        Border::new()
+            .height(21.0)
+            .padding(Thickness::xy(7.0, 0.0))
+            .background(palette.warn_bg)
+            .corner_radius(999.0)
+            .vertical_alignment(VerticalAlignment::Center)
+            .automation_name(badge.description.clone())
+            .content(
+                TextBlock::new()
+                    .text(badge.label.clone())
+                    .font_size(10.0)
+                    .font_weight(FontWeight::BOLD)
+                    .foreground(palette.warn)
+                    .vertical_alignment(VerticalAlignment::Center),
+            )
+            .tooltip(badge.description.clone())
+    });
     Grid::new()
         .height(36.0)
         .columns([
@@ -13264,10 +23823,14 @@ fn history_change(
         ])
         .column_spacing(8.0)
         .children((
-            icons::path(FaIcon::ChevronRight)
-                .width(12.0)
-                .height(12.0)
-                .vertical_alignment(VerticalAlignment::Center),
+            icons::path(if expanded {
+                FaIcon::ChevronDown
+            } else {
+                FaIcon::ChevronRight
+            })
+            .width(12.0)
+            .height(12.0)
+            .vertical_alignment(VerticalAlignment::Center),
             Border::new()
                 .grid_column(1)
                 .height(21.0)
@@ -13289,17 +23852,7 @@ fn history_change(
                 .font_size(11.5)
                 .font_weight(FontWeight::SEMI_BOLD)
                 .vertical_alignment(VerticalAlignment::Center),
-            TextBlock::new()
-                .text(detail)
-                .grid_column(3)
-                .font_size(11.0)
-                .font_weight(FontWeight::BOLD)
-                .foreground(if detail_is_empty {
-                    palette.muted
-                } else {
-                    palette.warn
-                })
-                .vertical_alignment(VerticalAlignment::Center),
+            placed(trend_badge, 3, 0),
         ))
 }
 
@@ -13309,7 +23862,15 @@ fn settings_dialog(
     theme: WindowTheme,
     bottom: bool,
     settings: &AppSettings,
+    phi_preference_gate: &PhiPreferenceGate,
     provider_setup_partial: bool,
+    provider_setup_index: usize,
+    provider_catalog_state: Option<&ProviderCatalogUiState>,
+    subscription_auth_state: Option<&SubscriptionAuthUiState>,
+    subscription_auth_runtime_error: Option<&str>,
+    subscription_install_active: bool,
+    subscription_install_progress: Option<&SubscriptionInstallProgress>,
+    subscription_install_error: Option<&str>,
     editable: bool,
     can_save: bool,
     saving: bool,
@@ -13327,10 +23888,21 @@ fn settings_dialog(
     network_grounding_changed: Callback<bool>,
     codex_cli_path_changed: Callback<String>,
     codex_model_changed: Callback<Option<usize>>,
+    provider_setup_changed: Callback<Option<usize>>,
+    provider_model_changed: Callback<Option<usize>>,
+    refresh_provider_models: Callback<()>,
+    cancel_provider_models: Callback<()>,
+    refresh_subscription_auth: Callback<()>,
+    start_subscription_sign_in: Callback<()>,
+    start_subscription_sign_out: Callback<()>,
+    cancel_subscription_auth: Callback<()>,
+    request_subscription_install: Callback<()>,
+    cancel_subscription_install: Callback<()>,
+    provider_text_changed: Callback<(usize, String)>,
     cancel: Callback<()>,
     save: Callback<()>,
-    provider_key_drafts: &[String; 4],
-    provider_keys_set: [bool; 4],
+    provider_key_drafts: &[String; ProviderKeyId::ALL.len()],
+    provider_keys_set: [bool; ProviderKeyId::ALL.len()],
     key_busy: bool,
     key_draft_changed: Callback<(usize, String)>,
     key_store: Callback<usize>,
@@ -13471,7 +24043,15 @@ fn settings_dialog(
                                     theme,
                                     bottom,
                                     settings,
+                                    phi_preference_gate,
                                     provider_setup_partial,
+                                    provider_setup_index,
+                                    provider_catalog_state,
+                                    subscription_auth_state,
+                                    subscription_auth_runtime_error,
+                                    subscription_install_active,
+                                    subscription_install_progress,
+                                    subscription_install_error,
                                     editable,
                                     scan_catalog,
                                     toggle_quick_task,
@@ -13494,6 +24074,17 @@ fn settings_dialog(
                                     network_grounding_changed,
                                     codex_cli_path_changed,
                                     codex_model_changed,
+                                    provider_setup_changed,
+                                    provider_model_changed,
+                                    refresh_provider_models,
+                                    cancel_provider_models,
+                                    refresh_subscription_auth,
+                                    start_subscription_sign_in,
+                                    start_subscription_sign_out,
+                                    cancel_subscription_auth,
+                                    request_subscription_install,
+                                    cancel_subscription_install,
+                                    provider_text_changed,
                                 )),
                             Border::new()
                                 .grid_row(2)
@@ -13506,7 +24097,6 @@ fn settings_dialog(
                 ),
         )
 }
-
 
 /// Quick Scan customization section: pick which catalog tasks a customized
 /// Quick Scan runs. Saved through the normal settings Save path
@@ -13522,7 +24112,12 @@ fn settings_quick_scan_tasks_section(
         .quick_scan_tasks
         .clone()
         .filter(|tasks| !tasks.is_empty())
-        .unwrap_or_else(|| QUICK_SCAN_TASK_IDS.iter().map(|id| (*id).to_string()).collect());
+        .unwrap_or_else(|| {
+            QUICK_SCAN_TASK_IDS
+                .iter()
+                .map(|id| (*id).to_string())
+                .collect()
+        });
     let rows: Vec<KeyedView> = catalog
         .iter()
         .map(|task| {
@@ -13558,16 +24153,10 @@ fn settings_quick_scan_tasks_section(
                             .children((
                                 Border::new()
                                     .vertical_alignment(VerticalAlignment::Center)
-                                    .content(
-                                        StackPanel::new()
-                                            .spacing(2.0)
-                                            .children((
-                                                TextBlock::new()
-                                                    .text(task.name.clone())
-                                                    .font_size(12.5),
-                                                hint,
-                                            )),
-                                    ),
+                                    .content(StackPanel::new().spacing(2.0).children((
+                                        TextBlock::new().text(task.name.clone()).font_size(12.5),
+                                        hint,
+                                    ))),
                                 Border::new()
                                     .grid_column(1)
                                     .width(24.0)
@@ -13616,27 +24205,21 @@ fn settings_quick_scan_tasks_section(
 #[allow(clippy::too_many_arguments)]
 fn settings_provider_keys_section(
     palette: Palette,
-    provider_key_drafts: &[String; 4],
-    provider_keys_set: [bool; 4],
+    provider_key_drafts: &[String; ProviderKeyId::ALL.len()],
+    provider_keys_set: [bool; ProviderKeyId::ALL.len()],
     key_busy: bool,
     editable: bool,
     key_draft_changed: Callback<(usize, String)>,
     key_store: Callback<usize>,
     key_clear: Callback<usize>,
 ) -> View {
-    const KEY_PROVIDERS: [(&str, usize); 4] = [
-        ("OpenAI", 0),
-        ("Anthropic Claude", 1),
-        ("Google Gemini", 2),
-        ("Custom endpoint", 3),
-    ];
-    let rows: Vec<KeyedView> = KEY_PROVIDERS
+    let rows: Vec<KeyedView> = PROVIDER_KEY_LABELS
         .iter()
-        .map(|(label, index)| {
+        .enumerate()
+        .map(|(index, label)| {
             let draft_changed = key_draft_changed.clone();
             let store = key_store.clone();
             let clear = key_clear.clone();
-            let index = *index;
             let set = provider_keys_set[index];
             let draft = &provider_key_drafts[index];
             KeyedView::new(
@@ -13669,15 +24252,15 @@ fn settings_provider_keys_section(
                                 .on_click(move || {
                                     let _ = store.call(index);
                                 })
-                                .content("Save"),
+                                .content("Stage"),
                             Button::new()
                                 .height(32.0)
-                                .width(58.0)
+                                .width(68.0)
                                 .is_enabled(editable && !key_busy && set)
                                 .on_click(move || {
                                     let _ = clear.call(index);
                                 })
-                                .content("Clear"),
+                                .content("Remove"),
                         )),
                     58.0,
                 ),
@@ -13692,7 +24275,7 @@ fn settings_provider_keys_section(
                 .padding(Thickness::new(0.0, 8.0, 0.0, 5.0))
                 .content(
                     TextBlock::new()
-                        .text("Keys are stored with Windows DPAPI per provider — never in settings.json and never in the cloud.")
+                        .text("Credential edits remain in this dialog until you press Save. Cancel discards them; committed keys use Windows DPAPI and never enter settings.json.")
                         .font_size(11.5)
                         .foreground(palette.muted)
                         .text_wrapping(TextWrapping::Wrap),
@@ -13702,16 +24285,572 @@ fn settings_provider_keys_section(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn provider_text_setting_row(
+    palette: Palette,
+    label: &'static str,
+    hint: &'static str,
+    value: Option<&str>,
+    placeholder: &'static str,
+    editable: bool,
+    field: usize,
+    changed: Callback<(usize, String)>,
+) -> View {
+    settings_wrapped_row(
+        palette,
+        label,
+        Some(hint),
+        TextBox::new()
+            .width(260.0)
+            .height(32.0)
+            .text(value.unwrap_or_default())
+            .placeholder_text(placeholder)
+            .is_enabled(editable)
+            .automation_name(label)
+            .on_text_changed(move |value| {
+                let _ = changed.call((field, value));
+            }),
+        92.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn provider_model_catalog_row(
+    palette: Palette,
+    setup_index: usize,
+    current_model: Option<&str>,
+    state: Option<&ProviderCatalogUiState>,
+    editable: bool,
+    selection_changed: Callback<Option<usize>>,
+    refresh: Callback<()>,
+    cancel: Callback<()>,
+) -> View {
+    if provider_setup_provider(setup_index) == Some(AIProvider::PhiSilica) {
+        return View::empty();
+    }
+    let state = state.cloned().unwrap_or_default();
+    let mut items = vec![
+        state
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.default_model.as_deref())
+            .map_or_else(
+                || "Use provider default".to_string(),
+                |model| format!("Default ({model})"),
+            ),
+    ];
+    if let Some(catalog) = state.catalog.as_ref() {
+        items.extend(catalog.models.iter().map(|model| {
+            model
+                .label
+                .as_deref()
+                .filter(|label| *label != model.id.as_str())
+                .map_or_else(
+                    || model.id.clone(),
+                    |label| format!("{label} · {}", model.id),
+                )
+        }));
+    }
+    let selected_index = match current_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        None => Some(0),
+        Some(current) => state.catalog.as_ref().and_then(|catalog| {
+            catalog
+                .models
+                .iter()
+                .position(|model| model.id == current)
+                .map(|index| index + 1)
+        }),
+    };
+    let status = if let Some(error) = state.error.as_deref() {
+        if state.stale {
+            format!("Could not refresh models: {error} · showing the last successful list")
+        } else {
+            format!("Could not load models: {error} · enter a model ID manually")
+        }
+    } else if let Some(blocked) = state.blocked.as_deref() {
+        format!("{blocked} You can still enter a model ID manually.")
+    } else if state.loading {
+        if state.catalog.is_some() {
+            "Refreshing models…".to_string()
+        } else {
+            "Loading models…".to_string()
+        }
+    } else if state.stale {
+        "Showing the last successful model list.".to_string()
+    } else if state
+        .catalog
+        .as_ref()
+        .is_some_and(|catalog| catalog.models.is_empty())
+    {
+        "The provider reported no models; manual entry remains available.".to_string()
+    } else {
+        String::new()
+    };
+    let action = if state.loading {
+        Button::new()
+            .height(32.0)
+            .width(72.0)
+            .on_click(cancel)
+            .content("Cancel")
+    } else {
+        Button::new()
+            .height(32.0)
+            .width(72.0)
+            .is_enabled(editable)
+            .on_click(refresh)
+            .content("Refresh")
+    };
+    settings_wrapped_row(
+        palette,
+        "Available models",
+        Some("Live provider catalog; manual model IDs above always remain available"),
+        StackPanel::new().spacing(5.0).children((
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(6.0)
+                .children((
+                    ComboBox::new()
+                        .width(182.0)
+                        .height(32.0)
+                        .items_source(items)
+                        .selected_index(selected_index)
+                        .is_enabled(editable && state.catalog.is_some())
+                        .automation_name("Available provider models")
+                        .on_selection_changed(selection_changed),
+                    action,
+                )),
+            TextBlock::new()
+                .text(status)
+                .font_size(10.5)
+                .foreground(if state.error.is_some() {
+                    palette.err
+                } else {
+                    palette.muted
+                })
+                .text_wrapping(TextWrapping::Wrap),
+        )),
+        112.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn subscription_auth_row(
+    palette: Palette,
+    setup_index: usize,
+    state: Option<&SubscriptionAuthUiState>,
+    runtime_error: Option<&str>,
+    editable: bool,
+    refresh: Callback<()>,
+    sign_in: Callback<()>,
+    sign_out: Callback<()>,
+    cancel: Callback<()>,
+) -> View {
+    let Some(provider) = subscription_auth_provider_for_setup(setup_index) else {
+        return View::empty();
+    };
+    let state = state.cloned().unwrap_or_default();
+    let (label, hint) = match provider {
+        SubscriptionAuthProvider::Codex => (
+            "ChatGPT account",
+            "Uses the Codex CLI login; this app never stores an OpenAI token",
+        ),
+        SubscriptionAuthProvider::ClaudeCode => (
+            "Claude account",
+            "Uses the Claude Code CLI login; this app never stores an Anthropic token",
+        ),
+    };
+    let effective_error = state.error.as_deref().or(runtime_error);
+    let status = match state.operation {
+        Some(SubscriptionAuthOperation::Status) => "Checking…",
+        Some(SubscriptionAuthOperation::SignIn) => "Waiting for browser…",
+        Some(SubscriptionAuthOperation::SignOut) => "Signing out…",
+        None => match state.status.as_ref().map(|status| status.state) {
+            Some(SubscriptionAuthState::NotInstalled) => "CLI not detected",
+            Some(SubscriptionAuthState::SignedOut) => "Signed out",
+            Some(SubscriptionAuthState::SignedIn) => "Signed in",
+            Some(SubscriptionAuthState::Unknown) => "Status unclear",
+            None => "Not checked",
+        },
+    };
+    let detail = if let Some(error) = effective_error {
+        error.to_string()
+    } else if state.operation == Some(SubscriptionAuthOperation::SignIn) {
+        "Complete sign-in in the browser window opened by the vendor CLI.".to_string()
+    } else {
+        match state.status.as_ref() {
+            Some(status) if status.state == SubscriptionAuthState::NotInstalled => format!(
+                "Install the official {} CLI, then check again. WFDiag never installs command-line tools silently.",
+                status.provider
+            ),
+            Some(status) if status.state == SubscriptionAuthState::Unknown => {
+                "The CLI was found, but its account status could not be confirmed.".to_string()
+            }
+            Some(status) => status.path.as_ref().map_or_else(
+                || "Account status was reported by the vendor CLI.".to_string(),
+                |path| format!("CLI: {}", path.display()),
+            ),
+            None => "Check the locally installed vendor CLI account status.".to_string(),
+        }
+    };
+    let action: View = if state.operation.is_some() {
+        Button::new()
+            .height(32.0)
+            .width(82.0)
+            .is_enabled(editable)
+            .on_click(cancel)
+            .content("Cancel")
+    } else {
+        match state.status.as_ref().map(|status| status.state) {
+            Some(SubscriptionAuthState::SignedIn) => Button::new()
+                .height(32.0)
+                .width(82.0)
+                .is_enabled(editable)
+                .on_click(sign_out)
+                .content("Sign out"),
+            Some(SubscriptionAuthState::SignedOut | SubscriptionAuthState::Unknown) => {
+                Button::new()
+                    .height(32.0)
+                    .width(82.0)
+                    .is_enabled(editable)
+                    .resource_overrides(primary_button_resources())
+                    .on_click(sign_in)
+                    .content("Sign in")
+            }
+            _ => Button::new()
+                .height(32.0)
+                .width(82.0)
+                .is_enabled(editable)
+                .on_click(refresh)
+                .content("Check"),
+        }
+    };
+    settings_wrapped_row(
+        palette,
+        label,
+        Some(hint),
+        StackPanel::new().width(260.0).spacing(5.0).children((
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(8.0)
+                .horizontal_alignment(HorizontalAlignment::Right)
+                .children((status_pill(status, palette.accent, palette.active), action)),
+            TextBlock::new()
+                .text(detail)
+                .font_size(10.5)
+                .foreground(if effective_error.is_some() {
+                    palette.err
+                } else {
+                    palette.muted
+                })
+                .text_wrapping(TextWrapping::Wrap),
+        )),
+        126.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn subscription_install_row(
+    palette: Palette,
+    setup_index: usize,
+    auth_state: Option<&SubscriptionAuthUiState>,
+    active: bool,
+    progress: Option<&SubscriptionInstallProgress>,
+    error: Option<&str>,
+    editable: bool,
+    install: Callback<()>,
+    cancel: Callback<()>,
+) -> View {
+    let Some(provider) = subscription_auth_provider_for_setup(setup_index) else {
+        return View::empty();
+    };
+    let not_installed = auth_state
+        .and_then(|state| state.status.as_ref())
+        .is_some_and(|status| status.state == SubscriptionAuthState::NotInstalled);
+    if !not_installed && !active && error.is_none() {
+        return View::empty();
+    }
+    let provider_label = match provider {
+        SubscriptionAuthProvider::Codex => "Codex CLI",
+        SubscriptionAuthProvider::ClaudeCode => "Claude Code CLI",
+    };
+    let install_label = match provider {
+        SubscriptionAuthProvider::Codex => "Install Codex CLI",
+        SubscriptionAuthProvider::ClaudeCode => "Install Claude Code CLI",
+    };
+    let detail = if active {
+        progress.map_or_else(
+            || "Preparing the approved installer…".to_string(),
+            |progress| subscription_install_progress_label(*progress).to_string(),
+        )
+    } else if let Some(error) = error {
+        error.to_string()
+    } else {
+        "Uses winget first. If winget cannot finish, WFDiag asks again before running the vendor's PowerShell installer. Installation never signs in automatically."
+            .to_string()
+    };
+    let action: View = if active {
+        Button::new()
+            .height(32.0)
+            .width(82.0)
+            .on_click(cancel)
+            .automation_name(format!("Cancel {provider_label} installation"))
+            .content("Cancel")
+    } else {
+        Button::new()
+            .height(32.0)
+            .width(82.0)
+            .is_enabled(editable)
+            .resource_overrides(primary_button_resources())
+            .on_click(install)
+            .automation_name(format!("Install {provider_label}"))
+            .content("Install")
+    };
+    settings_wrapped_row(
+        palette,
+        install_label,
+        Some("Explicit confirmation is required before any installer runs"),
+        StackPanel::new().width(260.0).spacing(6.0).children((
+            action,
+            TextBlock::new()
+                .text(detail)
+                .font_size(10.5)
+                .foreground(if error.is_some() {
+                    palette.err
+                } else {
+                    palette.muted
+                })
+                .text_wrapping(TextWrapping::Wrap),
+        )),
+        130.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn provider_setup_fields(
+    palette: Palette,
+    settings: &AppSettings,
+    provider_setup_index: usize,
+    editable: bool,
+    provider_text_changed: Callback<(usize, String)>,
+    codex_cli_path_changed: Callback<String>,
+    codex_model_changed: Callback<Option<usize>>,
+) -> View {
+    let text_row = |label,
+                    hint,
+                    value: Option<&str>,
+                    placeholder,
+                    field,
+                    callback: &Callback<(usize, String)>| {
+        provider_text_setting_row(
+            palette,
+            label,
+            hint,
+            value,
+            placeholder,
+            editable,
+            field,
+            callback.clone(),
+        )
+    };
+    match provider_setup_index {
+        0 => text_row(
+            "Phi Silica LAF token",
+            "Optional Microsoft-issued token; generation still requires the Store identity on a Copilot+ PC",
+            settings.phi_silica_laf_token.as_deref(),
+            "Leave empty for the built-in token",
+            0,
+            &provider_text_changed,
+        ),
+        1 => StackPanel::new().children((
+            text_row(
+                "Foundry Local endpoint",
+                "Optional. Empty auto-discovers the running Foundry Local service",
+                settings.local_ai_endpoint.as_deref(),
+                "http://127.0.0.1:55769",
+                1,
+                &provider_text_changed,
+            ),
+            text_row(
+                "Foundry Local model",
+                "Empty uses the service default; manual IDs remain available if discovery is unavailable",
+                settings.local_ai_model.as_deref(),
+                "Use service default",
+                2,
+                &provider_text_changed,
+            ),
+        )),
+        2 => StackPanel::new().children((
+            text_row(
+                "Ollama endpoint",
+                "Optional. Empty uses Ollama's default local port",
+                settings.ollama_endpoint.as_deref(),
+                "http://127.0.0.1:11434",
+                3,
+                &provider_text_changed,
+            ),
+            text_row(
+                "Ollama model",
+                "Empty uses the first installed model; manual entry remains available",
+                settings.ollama_model.as_deref(),
+                "Auto (first installed)",
+                4,
+                &provider_text_changed,
+            ),
+        )),
+        3 => {
+            let (model_items, model_index) = codex_model_options(settings);
+            StackPanel::new().children((
+                settings_wrapped_row(
+                    palette,
+                    "Codex CLI path",
+                    Some("Optional. Empty auto-detects codex"),
+                    TextBox::new()
+                        .width(260.0)
+                        .height(32.0)
+                        .text(settings.codex_cli_path.clone().unwrap_or_default())
+                        .placeholder_text("Auto-detected")
+                        .is_enabled(editable)
+                        .on_text_changed(codex_cli_path_changed),
+                    92.0,
+                ),
+                settings_wrapped_row(
+                    palette,
+                    "Codex model",
+                    Some("Optional. Empty uses the CLI default"),
+                    ComboBox::new()
+                        .width(260.0)
+                        .height(32.0)
+                        .items_source(model_items)
+                        .selected_index(model_index)
+                        .is_enabled(editable)
+                        .on_selection_changed(codex_model_changed),
+                    92.0,
+                ),
+            ))
+        }
+        4 => StackPanel::new().children((
+            text_row(
+                "Claude Code CLI path",
+                "Optional. Empty auto-detects claude",
+                settings.claude_cli_path.as_deref(),
+                "Auto-detected",
+                5,
+                &provider_text_changed,
+            ),
+            text_row(
+                "Claude Code model",
+                "Optional. Empty uses the CLI default; Sonnet 5 is the app default for Anthropic API calls",
+                settings.claude_model.as_deref(),
+                "Use Claude Code default",
+                6,
+                &provider_text_changed,
+            ),
+        )),
+        5 => text_row(
+            "OpenAI model",
+            "Empty uses the app default; enter a model ID manually if discovery is unavailable",
+            settings.open_ai_model.as_deref(),
+            "Use app default",
+            7,
+            &provider_text_changed,
+        ),
+        6 => text_row(
+            "Anthropic model",
+            "Empty uses claude-sonnet-5",
+            settings.anthropic_model.as_deref(),
+            "claude-sonnet-5",
+            8,
+            &provider_text_changed,
+        ),
+        7 => text_row(
+            "Gemini model",
+            "Empty discovers the newest supported GA model; manual entry remains available",
+            settings.gemini_model.as_deref(),
+            "gemini-3.6-flash",
+            9,
+            &provider_text_changed,
+        ),
+        8 => text_row(
+            "DeepSeek model",
+            "Empty uses the app default; manual entry remains available",
+            settings.deepseek_model.as_deref(),
+            "deepseek-v4-flash",
+            10,
+            &provider_text_changed,
+        ),
+        _ => StackPanel::new().children((
+            text_row(
+                "Endpoint URL",
+                "OpenRouter, Groq, or any OpenAI-compatible /v1/chat/completions endpoint",
+                settings.custom_endpoint.as_deref(),
+                "https://openrouter.ai/api",
+                11,
+                &provider_text_changed,
+            ),
+            text_row(
+                "Custom model",
+                "Required. Enter the exact model ID documented by the provider",
+                settings.custom_model.as_deref(),
+                "Provider model ID",
+                12,
+                &provider_text_changed,
+            ),
+        )),
+    }
+}
+
+fn settings_phi_preference_status(palette: Palette, gate: &PhiPreferenceGate) -> View {
+    let (message, icon) = match gate {
+        PhiPreferenceGate::Checking => {
+            (gate.blocking_reason().unwrap_or_default(), FaIcon::Refresh)
+        }
+        PhiPreferenceGate::Ready => return View::empty(),
+        PhiPreferenceGate::Blocked(_) => (
+            gate.blocking_reason().unwrap_or_default(),
+            FaIcon::CircleInfo,
+        ),
+    };
+
+    Border::new()
+        .padding(Thickness::new(0.0, 0.0, 0.0, 8.0))
+        .automation_name("Phi Silica availability")
+        .content(
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(7.0)
+                .children((
+                    icons::path(icon).width(13.0).height(13.0),
+                    TextBlock::new()
+                        .text(message)
+                        .font_size(10.5)
+                        .foreground(palette.muted)
+                        .text_wrapping(TextWrapping::Wrap)
+                        .max_width(545.0),
+                )),
+        )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn settings_content(
     theme: WindowTheme,
     bottom: bool,
     settings: &AppSettings,
+    phi_preference_gate: &PhiPreferenceGate,
     provider_setup_partial: bool,
+    provider_setup_index: usize,
+    provider_catalog_state: Option<&ProviderCatalogUiState>,
+    subscription_auth_state: Option<&SubscriptionAuthUiState>,
+    subscription_auth_runtime_error: Option<&str>,
+    subscription_install_active: bool,
+    subscription_install_progress: Option<&SubscriptionInstallProgress>,
+    subscription_install_error: Option<&str>,
     editable: bool,
     scan_catalog: &[DiagnosticTask],
     toggle_quick_task: Callback<String>,
-    provider_key_drafts: &[String; 4],
-    provider_keys_set: [bool; 4],
+    provider_key_drafts: &[String; ProviderKeyId::ALL.len()],
+    provider_keys_set: [bool; ProviderKeyId::ALL.len()],
     key_busy: bool,
     key_draft_changed: Callback<(usize, String)>,
     key_store: Callback<usize>,
@@ -13729,6 +24868,17 @@ fn settings_content(
     network_grounding_changed: Callback<bool>,
     codex_cli_path_changed: Callback<String>,
     codex_model_changed: Callback<Option<usize>>,
+    provider_setup_changed: Callback<Option<usize>>,
+    provider_model_changed: Callback<Option<usize>>,
+    refresh_provider_models: Callback<()>,
+    cancel_provider_models: Callback<()>,
+    refresh_subscription_auth: Callback<()>,
+    start_subscription_sign_in: Callback<()>,
+    start_subscription_sign_out: Callback<()>,
+    cancel_subscription_auth: Callback<()>,
+    request_subscription_install: Callback<()>,
+    cancel_subscription_install: Callback<()>,
+    provider_text_changed: Callback<(usize, String)>,
 ) -> View {
     let palette = Palette::for_theme(theme);
     if bottom {
@@ -13765,12 +24915,17 @@ fn settings_content(
     let export_format_index =
         selected_setting_index(&settings.export_format, &["text", "json", "html"]);
     let provider_index = selected_setting_index(&settings.preferred_ai_provider, &AI_PROVIDER_IDS);
+    let mut provider_labels = AI_PROVIDER_LABELS.map(str::to_string);
+    match phi_preference_gate {
+        PhiPreferenceGate::Checking => provider_labels[1].push_str(" — checking"),
+        PhiPreferenceGate::Blocked(_) => provider_labels[1].push_str(" — unavailable"),
+        PhiPreferenceGate::Ready => {}
+    }
     let cloud_fallback_index = Some(match settings.cloud_fallback_policy {
         CloudFallbackPolicy::Ask => 0,
         CloudFallbackPolicy::Allow => 1,
         CloudFallbackPolicy::Never => 2,
     });
-    let (codex_model_items, codex_model_index) = codex_model_options(settings);
 
     ScrollViewer::new()
         .width(593.0)
@@ -13799,20 +24954,23 @@ fn settings_content(
                         .on_is_checked_changed(ai_enabled_changed),
                     44.0,
                 ),
-                settings_row(
-                    palette,
-                    "AI provider",
-                    Some("Auto picks local first, then configured cloud providers"),
-                    ComboBox::new()
-                        .width(260.0)
-                        .height(32.0)
-                        .items_source(AI_PROVIDER_LABELS)
-                        .selected_index(provider_index)
-                        .is_enabled(editable)
-                        .automation_name("AI provider")
-                        .on_selection_changed(preferred_ai_provider_changed),
-                    59.0,
-                ),
+                StackPanel::new().children((
+                    settings_row(
+                        palette,
+                        "AI provider",
+                        Some("Auto picks local first, then configured cloud providers"),
+                        ComboBox::new()
+                            .width(260.0)
+                            .height(32.0)
+                            .items_source(provider_labels)
+                            .selected_index(provider_index)
+                            .is_enabled(editable)
+                            .automation_name("AI provider")
+                            .on_selection_changed(preferred_ai_provider_changed),
+                        59.0,
+                    ),
+                    settings_phi_preference_status(palette, phi_preference_gate),
+                )),
                 settings_row(
                     palette,
                     "Cloud fallback",
@@ -13859,100 +25017,52 @@ fn settings_content(
                     ComboBox::new()
                         .width(260.0)
                         .height(32.0)
-                        .items_source([
-                            "Phi Silica (on-device NPU)",
-                            "Foundry Local (local server)",
-                            "Ollama (local server)",
-                            "ChatGPT via Codex CLI (subscription)",
-                            "Claude via Claude Code CLI (subscription)",
-                            "OpenAI (cloud)",
-                            "Anthropic Claude",
-                            "Google Gemini",
-                            "OpenRouter",
-                            "Custom OpenAI-compatible endpoint",
-                        ])
-                        .selected_index(Some(3))
-                        .is_enabled(!provider_setup_partial),
-                    100.0,
-                ),
-                settings_row(
-                    palette,
-                    "ChatGPT account",
-                    Some("OpenAI's own login opens in your browser; usage bills to your ChatGPT plan"),
-                    StackPanel::new()
-                        .orientation(Orientation::Horizontal)
-                        .spacing(8.0)
-                        .children((
-                            status_pill(
-                                if provider_setup_partial {
-                                    "Native setup pending"
-                                } else {
-                                    "Signed in"
-                                },
-                                if provider_setup_partial {
-                                    palette.warn
-                                } else {
-                                    palette.accent
-                                },
-                                if provider_setup_partial {
-                                    palette.warn_bg
-                                } else {
-                                    palette.active
-                                },
-                            ),
-                            Button::new()
-                                .height(32.0)
-                                .is_enabled(!provider_setup_partial)
-                                .content("Sign out"),
-                        )),
-                    58.0,
-                ),
-                settings_wrapped_row(
-                    palette,
-                    "CLI path",
-                    Some("Optional. Empty auto-detects codex — use Install CLI above if it is missing"),
-                    TextBox::new()
-                        .width(260.0)
-                        .height(32.0)
-                        .text(settings.codex_cli_path.clone().unwrap_or_default())
-                        .placeholder_text("Auto-detected")
+                        .items_source(PROVIDER_SETUP_LABELS)
+                        .selected_index(Some(provider_setup_index))
                         .is_enabled(editable)
-                        .on_text_changed(codex_cli_path_changed)
-                        .automation_name("Codex CLI path"),
+                        .on_selection_changed(provider_setup_changed),
                     100.0,
                 ),
-                settings_wrapped_row(
+                provider_setup_fields(
                     palette,
-                    "Model",
-                    Some("Optional. Empty uses the CLI's default model"),
-                    StackPanel::new()
-                        .orientation(Orientation::Horizontal)
-                        .spacing(6.0)
-                        .children((
-                            ComboBox::new()
-                                .width(182.0)
-                                .height(32.0)
-                                .items_source(codex_model_items)
-                                .selected_index(codex_model_index)
-                                .is_enabled(editable)
-                                .automation_name("Codex model")
-                                .on_selection_changed(codex_model_changed),
-                            Button::new()
-                                .height(32.0)
-                                .is_enabled(!provider_setup_partial)
-                                .content(fa_icon_label(FaIcon::Refresh, "Refresh")),
-                        )),
-                    100.0,
+                    settings,
+                    provider_setup_index,
+                    editable,
+                    provider_text_changed,
+                    codex_cli_path_changed,
+                    codex_model_changed,
                 ),
-                Border::new()
-                    .padding(Thickness::new(0.0, 10.0, 0.0, 12.0))
-                    .border_brush(palette.border)
-                    .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
-                    .content(
-                        TextBlock::new()
-                            .text("Runs through OpenAI's Codex CLI with your ChatGPT plan — no API key, and this app never stores an OpenAI token.")
-                            .font_size(13.0)
-                            .text_wrapping(TextWrapping::Wrap),
+                subscription_auth_row(
+                    palette,
+                    provider_setup_index,
+                    subscription_auth_state,
+                    subscription_auth_runtime_error,
+                    editable,
+                    refresh_subscription_auth,
+                    start_subscription_sign_in,
+                    start_subscription_sign_out,
+                    cancel_subscription_auth,
+                ),
+                subscription_install_row(
+                    palette,
+                    provider_setup_index,
+                    subscription_auth_state,
+                    subscription_install_active,
+                    subscription_install_progress,
+                    subscription_install_error,
+                    editable,
+                    request_subscription_install,
+                    cancel_subscription_install,
+                ),
+                provider_model_catalog_row(
+                    palette,
+                    provider_setup_index,
+                    provider_setup_model(provider_setup_index, settings),
+                    provider_catalog_state,
+                    editable,
+                    provider_model_changed,
+                    refresh_provider_models,
+                    cancel_provider_models,
                 ),
 
                 StackPanel::new().children((
@@ -14076,8 +25186,8 @@ fn settings_content_bottom(
     editable: bool,
     scan_catalog: &[DiagnosticTask],
     toggle_quick_task: Callback<String>,
-    provider_key_drafts: &[String; 4],
-    provider_keys_set: [bool; 4],
+    provider_key_drafts: &[String; ProviderKeyId::ALL.len()],
+    provider_keys_set: [bool; ProviderKeyId::ALL.len()],
     key_busy: bool,
     key_draft_changed: Callback<(usize, String)>,
     key_store: Callback<usize>,
@@ -14475,7 +25585,10 @@ fn write_version_probe_if_requested() -> bool {
 }
 
 fn version_probe_document() -> String {
-    format!("{{\"schema\":1,\"application_version\":\"{APP_VERSION}\"}}\n")
+    format!(
+        "{{\"schema\":1,\"application_version\":\"{APP_VERSION}\",\"settings_test_path\":{}}}\n",
+        cfg!(feature = "settings-test-path")
+    )
 }
 
 fn main() {
@@ -14484,13 +25597,21 @@ fn main() {
     if write_version_probe_if_requested() {
         return;
     }
-    // Refuse a second instance before any WinUI work; the primary is asked
-    // to come to the foreground via the activation event.
-    if let instance_support::SingleInstanceDecision::Secondary =
+    let elevated_handoff = std::env::args_os()
+        .skip(1)
+        .any(|argument| argument == std::ffi::OsStr::new(ELEVATED_RELAUNCH_FLAG));
+    let instance = if elevated_handoff {
+        instance_support::acquire_for_relaunch(
+            "com.windowsforum.diagnostics",
+            Duration::from_secs(30),
+        )
+    } else {
         instance_support::acquire("com.windowsforum.diagnostics")
-    {
-        return;
-    }
+    };
+    let _instance_watch = match instance {
+        instance_support::SingleInstanceDecision::Primary(watch) => watch,
+        instance_support::SingleInstanceDecision::Secondary => return,
+    };
     App::run_component::<WfdiagSpike>(()).unwrap();
 }
 
@@ -14498,14 +25619,624 @@ fn main() {
 mod diagnostic_selection_tests {
     use super::*;
 
+    fn palette_spec(
+        section: &'static str,
+        label: impl Into<String>,
+        tag: impl Into<String>,
+    ) -> PaletteCommandSpec {
+        PaletteCommandSpec {
+            section,
+            label: Cow::Owned(label.into()),
+            tag: Cow::Owned(tag.into()),
+            keywords: Cow::Borrowed("alpha command"),
+            enabled: true,
+            icon: FaIcon::Diagnostics,
+            shortcut: None,
+        }
+    }
+
+    fn action_proposal(
+        remediation_id: &str,
+        issue_id: Option<&str>,
+        approval_scope: ApprovalScope,
+    ) -> ActionProposal {
+        let spec = remediation::find(remediation_id).expect("test remediation exists");
+        ActionProposal {
+            proposal_id: format!("proposal-{remediation_id}"),
+            approval_scope,
+            actions: vec![action_support::ActionPreview {
+                remediation: spec.summary(),
+                issue_id: issue_id.map(str::to_string),
+                steps: spec.preview_steps(),
+            }],
+            scan_fingerprint: "scan-1".to_string(),
+            catalog_fingerprint: "catalog-1".to_string(),
+            created_at_ms: 10,
+            expires_at_ms: 20,
+        }
+    }
+
+    #[test]
+    fn window_hook_retry_uses_bounded_exponential_backoff() {
+        assert_eq!(window_hook_retry_delay(0), Duration::from_millis(100));
+        assert_eq!(window_hook_retry_delay(1), Duration::from_millis(100));
+        assert_eq!(window_hook_retry_delay(2), Duration::from_millis(200));
+        assert_eq!(window_hook_retry_delay(6), Duration::from_millis(3_200));
+        assert_eq!(
+            window_hook_retry_delay(u8::MAX),
+            Duration::from_millis(3_200)
+        );
+    }
+
+    #[test]
+    fn page_transition_classifies_every_process_exit_and_ignores_noops() {
+        for previous in Page::ALL {
+            for next in Page::ALL {
+                let transition = PageTransition::between(previous, next);
+                if previous == next {
+                    assert_eq!(transition, None);
+                    continue;
+                }
+                let transition = transition.expect("different pages produce a transition");
+                assert_eq!(transition.previous, previous);
+                assert_eq!(transition.next, next);
+                assert_eq!(
+                    transition.leaves_processes(),
+                    previous == Page::Processes && next != Page::Processes,
+                    "{previous:?} -> {next:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn process_request_ids_advance_when_started_or_invalidated() {
+        assert_eq!(next_process_request_id(0), 1);
+        assert_eq!(next_process_request_id(41), 42);
+        assert_eq!(next_process_request_id(u64::MAX), 1);
+    }
+
+    #[test]
+    fn issue_ai_controls_follow_the_committed_enablement_and_mutual_busy_gate() {
+        assert!(issue_ai_action_enabled(true, false));
+        assert!(!issue_ai_action_enabled(false, false));
+        assert!(!issue_ai_action_enabled(true, true));
+        assert!(!issue_ai_action_enabled(false, true));
+    }
+
+    #[test]
+    fn command_palette_defaults_caps_search_and_preserves_section_order() {
+        let defaults = palette_visible_matches(
+            vec![
+                palette_spec("App", "Open Settings", "settings"),
+                palette_spec("Scan", "Run Quick Scan", "quick"),
+                palette_spec("Navigate", "Go to Diagnostics", "diagnostics"),
+                palette_spec("Report", "Export Report", "export"),
+            ],
+            "",
+        );
+        assert_eq!(
+            defaults
+                .iter()
+                .map(|matched| matched.command.tag.as_ref())
+                .collect::<Vec<_>>(),
+            ["diagnostics", "quick"]
+        );
+
+        let matches = palette_visible_matches(
+            (0..20)
+                .map(|index| {
+                    palette_spec(
+                        "Diagnostics",
+                        format!("Alpha command {index:02}"),
+                        format!("run:{index:02}"),
+                    )
+                })
+                .collect(),
+            "alpha",
+        );
+        assert_eq!(matches.len(), PALETTE_MAX_RESULTS);
+        assert_eq!(
+            matches.first().map(|matched| matched.command.tag.as_ref()),
+            Some("run:00")
+        );
+        assert_eq!(
+            matches.last().map(|matched| matched.command.tag.as_ref()),
+            Some("run:13")
+        );
+
+        let grouped = palette_visible_matches(
+            vec![
+                palette_spec("Diagnostics", "Alpha diagnostic", "diagnostic"),
+                palette_spec("App", "Alpha app", "app"),
+                palette_spec("Navigate", "Alpha page", "page"),
+                palette_spec("Report", "Alpha report", "report"),
+                palette_spec("Scan", "Alpha scan", "scan"),
+            ],
+            "alpha",
+        );
+        assert_eq!(
+            grouped
+                .iter()
+                .map(|matched| matched.command.section)
+                .collect::<Vec<_>>(),
+            ["Navigate", "Scan", "Report", "App", "Diagnostics"]
+        );
+    }
+
+    #[test]
+    fn command_palette_matches_titles_before_keywords_and_never_section_names() {
+        let matches = palette_visible_matches(
+            vec![
+                palette_spec("App", "Open Settings", "settings"),
+                palette_spec("Navigate", "Open Processes", "process list"),
+                PaletteCommandSpec {
+                    keywords: Cow::Borrowed("open preferences"),
+                    ..palette_spec("Diagnostics", "Configure providers", "providers")
+                },
+            ],
+            "open",
+        );
+        assert_eq!(
+            matches
+                .iter()
+                .map(|matched| matched.command.tag.as_ref())
+                .collect::<Vec<_>>(),
+            ["process list", "settings", "providers"]
+        );
+        assert!(!matches[0].indices.is_empty());
+        assert!(!matches[1].indices.is_empty());
+        assert!(matches[2].indices.is_empty());
+        assert!(matches[1].score > matches[2].score);
+
+        let section_only = palette_visible_matches(
+            vec![palette_spec("App", "Toggle theme", "theme color")],
+            "app",
+        );
+        assert!(section_only.is_empty());
+    }
+
+    #[test]
+    fn command_palette_fuzzy_match_returns_shipping_highlight_indices() {
+        let result = palette_fuzzy_score("ops", "Open Settings").expect("subsequence matches");
+        assert_eq!(result.indices, [0, 1, 5]);
+        assert!(result.score > 0.0);
+        assert!(palette_fuzzy_score("settings open", "Open Settings").is_none());
+    }
+
+    #[test]
+    fn action_review_labels_and_admin_gate_match_the_shipping_contract() {
+        let restart = action_proposal("restart_system", None, ApprovalScope::Exact);
+        let restart_ui = action_review_presentation(&restart, true);
+        assert_eq!(restart_ui.primary_label, "Schedule restart");
+        assert!(restart_ui.schedules_restart);
+
+        let repair = action_proposal("dism_restorehealth", None, ApprovalScope::Exact);
+        let repair_ui = action_review_presentation(&repair, true);
+        assert_eq!(repair_ui.primary_label, "Run repair once");
+        assert!(!repair_ui.admin_blocked);
+        let blocked_ui = action_review_presentation(&repair, false);
+        assert_eq!(blocked_ui.primary_label, "Restart as Administrator");
+        assert!(blocked_ui.admin_blocked);
+
+        let mut batch = action_proposal("flush_dns", None, ApprovalScope::Batch);
+        batch.actions.push(
+            action_proposal("clear_temp_files", None, ApprovalScope::Exact)
+                .actions
+                .remove(0),
+        );
+        let batch_ui = action_review_presentation(&batch, true);
+        assert_eq!(batch_ui.title, "Review 2 actions");
+        assert_eq!(batch_ui.primary_label, "Run these 2 actions");
+    }
+
+    #[test]
+    fn staged_action_review_rejects_changed_evidence_catalog_and_issue_mapping() {
+        let proposal = action_proposal("flush_dns", Some("dns-issue"), ApprovalScope::Exact);
+        let snapshot = ActionSnapshot {
+            scan_fingerprint: proposal.scan_fingerprint.clone(),
+            catalog_fingerprint: proposal.catalog_fingerprint.clone(),
+            detected_issues: vec![DetectedIssueRemediation {
+                issue_id: "dns-issue".to_string(),
+                remediation_id: Some("flush_dns".to_string()),
+            }],
+            is_admin: true,
+        };
+        assert!(action_proposal_matches_snapshot(&proposal, &snapshot));
+
+        let mut changed_scan = snapshot.clone();
+        changed_scan.scan_fingerprint = "scan-2".to_string();
+        assert!(!action_proposal_matches_snapshot(&proposal, &changed_scan));
+
+        let mut changed_catalog = snapshot.clone();
+        changed_catalog.catalog_fingerprint = "catalog-2".to_string();
+        assert!(!action_proposal_matches_snapshot(
+            &proposal,
+            &changed_catalog
+        ));
+
+        let mut changed_mapping = snapshot;
+        changed_mapping.detected_issues[0].remediation_id = Some("clear_temp_files".to_string());
+        assert!(!action_proposal_matches_snapshot(
+            &proposal,
+            &changed_mapping
+        ));
+    }
+
+    #[test]
+    fn system_theme_follows_observed_window_color_scheme() {
+        assert_eq!(
+            effective_window_theme(WindowTheme::System, ColorScheme::Light),
+            WindowTheme::Light
+        );
+        assert_eq!(
+            effective_window_theme(WindowTheme::System, ColorScheme::Dark),
+            WindowTheme::Dark
+        );
+        assert_eq!(
+            effective_window_theme(WindowTheme::Light, ColorScheme::Dark),
+            WindowTheme::Light
+        );
+        assert_eq!(
+            effective_window_theme(WindowTheme::Dark, ColorScheme::Light),
+            WindowTheme::Dark
+        );
+    }
+
+    #[test]
+    fn diagnostic_grounding_links_allow_only_safe_http_targets() {
+        for rejected in [
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "file:///C:/Windows/System32/calc.exe",
+            r"C:\Windows\System32\drivers\etc\hosts",
+            "local:diagnostic-output",
+            "custom:payload",
+            "mailto:support@example.com",
+            "/relative/path",
+        ] {
+            assert_eq!(
+                safe_diagnostic_grounding_link_target(rejected),
+                None,
+                "{rejected}"
+            );
+        }
+        assert_eq!(
+            safe_diagnostic_grounding_link_target("http://example.com/kb"),
+            Some("http://example.com/kb".to_string())
+        );
+        assert_eq!(
+            safe_diagnostic_grounding_link_target(" HTTPS://example.com/windows?q=1#fix "),
+            Some("HTTPS://example.com/windows?q=1#fix".to_string())
+        );
+
+        let projected = project_diagnostic_grounding_source(&GroundingTraceSource {
+            source: "WindowsForum MCP".to_string(),
+            title: "Relevant KB article".to_string(),
+            url: Some("javascript:alert(1)".to_string()),
+        });
+        assert_eq!(projected.title, "Relevant KB article");
+        assert_eq!(projected.source, "WindowsForum MCP");
+        assert_eq!(projected.target, None);
+    }
+
+    #[test]
+    fn navigation_rail_matches_the_shipping_force_collapse_breakpoint() {
+        assert!(!navigation_rail_forced_collapsed(1100.1));
+        assert!(navigation_rail_forced_collapsed(1100.0));
+        assert!(navigation_rail_forced_collapsed(720.0));
+    }
+
+    #[test]
+    fn diagnostics_compact_layout_is_reserved_for_the_true_minimum_width() {
+        assert!(!diagnostics_uses_compact_layout(900.0));
+        assert!(!diagnostics_uses_compact_layout(840.0));
+        assert!(diagnostics_uses_compact_layout(839.9));
+        assert!(diagnostics_uses_compact_layout(720.0));
+    }
+
+    #[test]
+    fn process_rows_match_the_available_table_width_in_every_shell_mode() {
+        assert_eq!(process_layout_metrics(720.0, false), (true, 584.0));
+        assert_eq!(process_layout_metrics(1_200.0, true), (true, 898.0));
+        assert_eq!(process_layout_metrics(1_200.0, false), (false, 752.0));
+        assert_eq!(process_layout_metrics(1_440.0, true), (false, 826.0));
+    }
+
+    #[test]
+    fn ai_workspace_never_pushes_the_composer_below_the_minimum_window() {
+        assert_eq!(ai_workspace_height(540.0), 297.0);
+        assert_eq!(ai_workspace_height(800.0), 557.0);
+        assert_eq!(ai_workspace_height(200.0), AI_WORKSPACE_MIN_HEIGHT);
+    }
+
+    #[test]
+    fn production_worker_policy_enables_every_lazy_ai_worker() {
+        let default_policy = std::ffi::OsStr::new("");
+        for worker in [
+            AiWorkerKind::Analysis,
+            AiWorkerKind::Chat,
+            AiWorkerKind::FixPlan,
+            AiWorkerKind::Report,
+        ] {
+            assert!(ai_worker_enabled(default_policy, worker));
+        }
+
+        let chat_only = std::ffi::OsStr::new("only-chat");
+        assert!(ai_worker_enabled(chat_only, AiWorkerKind::Chat));
+        assert!(!ai_worker_enabled(chat_only, AiWorkerKind::Report));
+        assert!(!ai_worker_enabled(chat_only, AiWorkerKind::Analysis));
+        assert!(!ai_worker_enabled(chat_only, AiWorkerKind::FixPlan));
+
+        let skip_chat = std::ffi::OsStr::new("chat");
+        assert!(!ai_worker_enabled(skip_chat, AiWorkerKind::Chat));
+        assert!(ai_worker_enabled(skip_chat, AiWorkerKind::Report));
+
+        let no_ai_workers = std::ffi::OsStr::new("none");
+        for worker in [
+            AiWorkerKind::Analysis,
+            AiWorkerKind::Chat,
+            AiWorkerKind::FixPlan,
+            AiWorkerKind::Report,
+        ] {
+            assert!(!ai_worker_enabled(no_ai_workers, worker));
+        }
+    }
+
+    #[test]
+    fn automatic_model_discovery_never_bootstraps_the_claude_adapter() {
+        assert!(provider_models_auto_discovery_allowed(3));
+        assert!(!provider_models_auto_discovery_allowed(4));
+        assert!(!provider_models_auto_discovery_allowed(0));
+        assert!(!provider_models_auto_discovery_allowed(usize::MAX));
+    }
+
+    #[test]
+    fn account_status_checks_do_not_create_a_model_refresh_loop() {
+        assert!(!subscription_auth_completion_refreshes_models(
+            SubscriptionAuthOperation::Status
+        ));
+        assert!(subscription_auth_completion_refreshes_models(
+            SubscriptionAuthOperation::SignIn
+        ));
+        assert!(subscription_auth_completion_refreshes_models(
+            SubscriptionAuthOperation::SignOut
+        ));
+    }
+
+    #[test]
+    fn global_shortcut_policy_matches_shipping_overlay_and_editable_guards() {
+        use window_support::{GlobalShortcutCommand as Command, GlobalShortcutEvent as Event};
+
+        let commands = [
+            Command::TogglePalette,
+            Command::Navigate(1),
+            Command::ShowHelp,
+            Command::QuickScan,
+            Command::FullScan,
+        ];
+        for command in commands {
+            assert!(global_shortcut_is_allowed(
+                Event {
+                    command,
+                    editable_focused: false,
+                },
+                false,
+                false,
+                false,
+            ));
+            assert!(!global_shortcut_is_allowed(
+                Event {
+                    command,
+                    editable_focused: false,
+                },
+                true,
+                false,
+                false,
+            ));
+        }
+
+        assert!(global_shortcut_is_allowed(
+            Event {
+                command: Command::TogglePalette,
+                editable_focused: true,
+            },
+            false,
+            false,
+            false,
+        ));
+        for command in [
+            Command::Navigate(2),
+            Command::ShowHelp,
+            Command::QuickScan,
+            Command::FullScan,
+        ] {
+            assert!(!global_shortcut_is_allowed(
+                Event {
+                    command,
+                    editable_focused: true,
+                },
+                false,
+                false,
+                false,
+            ));
+        }
+
+        for command in [
+            Command::PalettePrevious,
+            Command::PaletteNext,
+            Command::PaletteExecute,
+            Command::PaletteClose,
+        ] {
+            assert!(!global_shortcut_is_allowed(
+                Event {
+                    command,
+                    editable_focused: true,
+                },
+                false,
+                false,
+                false,
+            ));
+            assert!(global_shortcut_is_allowed(
+                Event {
+                    command,
+                    editable_focused: true,
+                },
+                true,
+                true,
+                false,
+            ));
+        }
+        assert!(global_shortcut_is_allowed(
+            Event {
+                command: Command::TogglePalette,
+                editable_focused: true,
+            },
+            true,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn active_scan_blocks_only_scan_shortcuts() {
+        use window_support::{GlobalShortcutCommand as Command, GlobalShortcutEvent as Event};
+
+        for command in [Command::QuickScan, Command::FullScan] {
+            assert!(!global_shortcut_is_allowed(
+                Event {
+                    command,
+                    editable_focused: false,
+                },
+                false,
+                false,
+                true,
+            ));
+        }
+        for command in [
+            Command::TogglePalette,
+            Command::Navigate(6),
+            Command::ShowHelp,
+        ] {
+            assert!(global_shortcut_is_allowed(
+                Event {
+                    command,
+                    editable_focused: false,
+                },
+                false,
+                false,
+                true,
+            ));
+        }
+    }
+
+    #[test]
+    fn provider_catalog_requests_use_unsaved_credentials_without_logging_them() {
+        let settings = AppSettings::default();
+        let mut drafts: [String; ProviderKeyId::ALL.len()] = Default::default();
+        assert!(provider_catalog_request_for_draft(6, &settings, &drafts).is_err());
+
+        drafts[1] = "  test-anthropic-secret  ".to_string();
+        let request = provider_catalog_request_for_draft(6, &settings, &drafts)
+            .expect("request should be valid")
+            .expect("Anthropic has a catalog");
+        assert_eq!(request.provider, AIProvider::Anthropic);
+        assert_eq!(
+            request.draft_api_key.as_deref(),
+            Some("test-anthropic-secret")
+        );
+        assert!(!format!("{request:?}").contains("test-anthropic-secret"));
+    }
+
+    #[test]
+    fn provider_setup_helpers_update_only_the_selected_setting() {
+        let mut settings = AppSettings::default();
+        set_provider_setup_model(6, &mut settings, Some("claude-sonnet-5".to_string()));
+        assert_eq!(settings.anthropic_model.as_deref(), Some("claude-sonnet-5"));
+        assert!(settings.open_ai_model.is_none());
+
+        set_provider_key_configured(&mut settings, ProviderKeyId::Anthropic, true);
+        assert!(settings.anthropic_api_key_set);
+        assert!(!settings.open_ai_api_key_set);
+        set_provider_key_configured(&mut settings, ProviderKeyId::Anthropic, false);
+        assert!(!settings.anthropic_api_key_set);
+    }
+
     #[test]
     fn version_probe_document_uses_the_canonical_build_version() {
         assert_eq!(
             version_probe_document(),
             format!(
-                "{{\"schema\":1,\"application_version\":\"{}\"}}\n",
-                env!("WFDIAG_APP_VERSION")
+                "{{\"schema\":1,\"application_version\":\"{}\",\"settings_test_path\":{}}}\n",
+                env!("WFDIAG_APP_VERSION"),
+                cfg!(feature = "settings-test-path")
             )
+        );
+    }
+
+    #[test]
+    fn live_test_fixture_parser_and_action_allowlist_are_closed() {
+        #[cfg(feature = "settings-test-path")]
+        {
+            assert_eq!(
+                LiveTestFixture::parse("device-manager"),
+                Some(LiveTestFixture::DeviceManager)
+            );
+            assert_eq!(
+                LiveTestFixture::parse("export-fallback"),
+                Some(LiveTestFixture::ExportFallback)
+            );
+            assert_eq!(
+                LiveTestFixture::parse("admin-relaunch"),
+                Some(LiveTestFixture::AdminRelaunch)
+            );
+            for rejected in [
+                "",
+                "Device-Manager",
+                "open_device_manager",
+                "device-manager ",
+                "network-reset",
+            ] {
+                assert_eq!(LiveTestFixture::parse(rejected), None, "{rejected:?}");
+            }
+        }
+
+        let device_manager = ActionRequest {
+            remediation_id: "open_device_manager".to_string(),
+            issue_id: Some("device_manager_errors".to_string()),
+        };
+        let disallowed = ActionRequest {
+            remediation_id: "flush_dns".to_string(),
+            issue_id: None,
+        };
+        assert!(
+            LiveTestFixture::DeviceManager.permits_actions(std::slice::from_ref(&device_manager))
+        );
+        assert!(!LiveTestFixture::DeviceManager.permits_actions(&[]));
+        assert!(!LiveTestFixture::DeviceManager.permits_actions(&[device_manager, disallowed]));
+        assert!(!LiveTestFixture::ExportFallback.permits_actions(&[]));
+        assert!(!LiveTestFixture::AdminRelaunch.permits_actions(&[]));
+    }
+
+    #[test]
+    fn remediation_partial_fixture_is_terminal_and_keeps_failed_step_detail() {
+        let run = remediation_partial_visual_run();
+        assert_eq!(run.status, ActionRunStatus::Partial);
+        assert!(run.status.terminal());
+        assert_eq!(run.actions.len(), 1);
+        assert_eq!(run.actions[0].status, ActionItemStatus::Partial);
+        let result = run.actions[0].result.as_ref().unwrap();
+        assert_eq!(
+            result.completion_status,
+            remediation::FixCompletionStatus::Partial
+        );
+        assert!(result.steps.iter().any(|step| {
+            step.status == remediation::RemediationStepStatus::Failed
+                && step.detail.as_deref() == Some("Access was denied while applying one step.")
+        }));
+        assert!(
+            action_run_status_text(&run)
+                .starts_with("Remediation finished with partial results · 1 action reviewed")
         );
     }
 
@@ -14522,6 +26253,98 @@ mod diagnostic_selection_tests {
             active_provider,
             providers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn pending_ai_provider_gate_preserves_intent_until_readiness_is_terminal() {
+        let ready = provider_status(AIProvider::OpenAI);
+        let unavailable = provider_status(AIProvider::None);
+
+        assert_eq!(
+            pending_ai_provider_gate(false, false, Some(&ready)),
+            PendingAiProviderGate::Disabled
+        );
+        assert_eq!(
+            pending_ai_provider_gate(true, true, None),
+            PendingAiProviderGate::Waiting
+        );
+        assert_eq!(
+            pending_ai_provider_gate(true, false, None),
+            PendingAiProviderGate::Refresh
+        );
+        assert_eq!(
+            pending_ai_provider_gate(true, false, Some(&unavailable)),
+            PendingAiProviderGate::Unavailable
+        );
+        assert_eq!(
+            pending_ai_provider_gate(true, false, Some(&ready)),
+            PendingAiProviderGate::Ready
+        );
+    }
+
+    #[test]
+    fn phi_preference_gate_blocks_unknown_and_unready_status_but_never_other_providers() {
+        let checking = phi_preference_gate(None, true);
+        assert_eq!(checking, PhiPreferenceGate::Checking);
+        assert!(validate_phi_preference("phi_silica", &checking).is_err());
+        assert!(validate_phi_preference("codex_cli", &checking).is_ok());
+
+        let mut unavailable = provider_status(AIProvider::None);
+        unavailable.phi_silica_message = Some("model is still preparing".to_string());
+        let blocked = phi_preference_gate(Some(&unavailable), false);
+        assert_eq!(
+            blocked,
+            PhiPreferenceGate::Blocked("model is still preparing".to_string())
+        );
+        assert_eq!(
+            validate_phi_preference("phi_silica", &blocked),
+            Err("model is still preparing".to_string())
+        );
+
+        let ready = provider_status(AIProvider::PhiSilica);
+        let ready_gate = phi_preference_gate(Some(&ready), false);
+        assert_eq!(ready_gate, PhiPreferenceGate::Ready);
+        assert!(validate_phi_preference("phi_silica", &ready_gate).is_ok());
+    }
+
+    #[test]
+    fn configured_provider_setup_seeding_matches_shipping_precedence() {
+        let mut settings = AppSettings::default();
+        assert_eq!(configured_provider_setup_index(&settings), 5);
+
+        settings.anthropic_api_key_set = true;
+        assert_eq!(configured_provider_setup_index(&settings), 6);
+
+        settings.custom_endpoint = Some("https://example.invalid/v1".to_string());
+        assert_eq!(configured_provider_setup_index(&settings), 9);
+
+        settings.preferred_ai_provider = "deepseek".to_string();
+        assert_eq!(configured_provider_setup_index(&settings), 8);
+    }
+
+    #[test]
+    fn settings_provider_probe_is_independent_of_committed_ai_enablement() {
+        let committed = AppSettings {
+            ai_enabled: false,
+            ..AppSettings::default()
+        };
+        let mut draft = committed.clone();
+        draft.ai_enabled = true;
+
+        assert!(!committed.ai_enabled);
+        assert!(draft.ai_enabled);
+        assert!(settings_ai_status_probe_needed(true, false, false));
+        assert!(!settings_ai_status_probe_needed(false, false, false));
+        assert!(!settings_ai_status_probe_needed(true, true, false));
+        assert!(!settings_ai_status_probe_needed(true, false, true));
+    }
+
+    #[test]
+    fn every_explicit_provider_maps_to_its_setup_pane() {
+        for (index, provider) in PROVIDER_SETUP_PROVIDERS.into_iter().enumerate() {
+            assert_eq!(provider_setup_index_for_provider(provider), Some(index));
+        }
+        assert_eq!(provider_setup_index_for_provider(AIProvider::None), None);
     }
 
     #[test]
@@ -14757,6 +26580,24 @@ mod diagnostic_selection_tests {
         }
     }
 
+    fn diagnostic_result(
+        session_id: &str,
+        task_id: &str,
+        success: bool,
+        output: &str,
+    ) -> DiagnosticTaskResult {
+        DiagnosticTaskResult::new(
+            session_id,
+            task_id,
+            Arc::new(DiagnosticOutput {
+                success,
+                output: output.to_string(),
+                error: (!success).then(|| "failed".to_string()),
+                duration_ms: 10,
+            }),
+        )
+    }
+
     #[test]
     fn quick_scan_is_the_exact_2_5_8_non_admin_union() {
         let mut catalog = QUICK_SCAN_TASK_IDS
@@ -14799,7 +26640,7 @@ mod diagnostic_selection_tests {
             max_concurrent_tasks: 9,
             ..AppSettings::default()
         };
-        let policy = DiagnosticScanPolicy::snapshot(&settings, ScanKind::Full);
+        let policy = DiagnosticScanPolicy::snapshot(&settings, ScanKind::Full, false);
         settings.auto_save = true;
         settings.max_concurrent_tasks = 2;
 
@@ -14808,6 +26649,180 @@ mod diagnostic_selection_tests {
         assert!(!scan_policy_requests_auto_save(Some(&policy)));
         assert!(!scan_policy_requests_auto_save(None));
         assert_eq!(scan_concurrency_from_settings(0), 5);
+
+        let auto_save_settings = AppSettings {
+            auto_save: true,
+            ..AppSettings::default()
+        };
+        let initial_targeted =
+            DiagnosticScanPolicy::snapshot(&auto_save_settings, ScanKind::Targeted, false);
+        assert!(scan_policy_requests_auto_save(Some(&initial_targeted)));
+        let targeted_rerun =
+            DiagnosticScanPolicy::snapshot(&auto_save_settings, ScanKind::Targeted, true);
+        assert!(!scan_policy_requests_auto_save(Some(&targeted_rerun)));
+        assert_eq!(targeted_rerun.history_tag, "Manual Diagnostic");
+    }
+
+    #[test]
+    fn targeted_rerun_commits_only_the_replacement_in_catalog_order() {
+        let catalog = vec![
+            task("first", false),
+            task("second", false),
+            task("third", false),
+        ];
+        let base = DiagnosticSnapshot {
+            // Deliberately out of catalog order. The commit establishes the
+            // canonical ordering while retaining an unknown prior row last.
+            results: vec![
+                diagnostic_result("scan-base", "second", false, "old second"),
+                diagnostic_result("scan-base", "orphan", true, "orphan unchanged"),
+                diagnostic_result("scan-base", "first", true, "first unchanged"),
+            ],
+            scan_kind: Some(ScanKind::Full),
+            task_ids: vec!["second".into(), "orphan".into(), "first".into()],
+            session_id: Some("scan-base".to_string()),
+            duration_ms: 812,
+            total: 3,
+            completed: 3,
+            errors: 1,
+        };
+        let overlay = TargetedDiagnosticOverlay::for_committed_session(
+            ScanKind::Targeted,
+            &["second".to_string()],
+            base,
+        )
+        .expect("an existing result should use an overlay transaction");
+        let committed = overlay
+            .commit(
+                diagnostic_result("scan-rerun", "second", true, "new second"),
+                &catalog,
+            )
+            .expect("the matching replacement should commit");
+
+        assert_eq!(
+            committed
+                .results
+                .iter()
+                .map(|result| result.task_id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "orphan"]
+        );
+        assert_eq!(committed.results[0].output, "first unchanged");
+        assert_eq!(committed.results[1].output, "new second");
+        assert_eq!(committed.results[1].session_id, "scan-base");
+        assert_eq!(committed.results[2].output, "orphan unchanged");
+        assert_eq!(committed.scan_kind, Some(ScanKind::Full));
+        assert_eq!(
+            committed.task_ids,
+            [
+                "second".to_string(),
+                "orphan".to_string(),
+                "first".to_string()
+            ]
+        );
+        assert_eq!(committed.session_id.as_deref(), Some("scan-base"));
+        assert_eq!(committed.duration_ms, 812);
+        assert_eq!(committed.total, 3);
+        assert_eq!(committed.completed, 3);
+        assert_eq!(committed.errors, 0);
+
+        let issue_evidence = diagnostic_output_snapshot(&committed.results);
+        assert_eq!(issue_evidence.len(), 3);
+        assert_eq!(issue_evidence["second"].output, "new second");
+        assert_eq!(issue_evidence["first"].output, "first unchanged");
+    }
+
+    #[test]
+    fn targeted_rerun_rollback_restores_the_exact_committed_snapshot() {
+        let base = DiagnosticSnapshot {
+            results: vec![diagnostic_result("scan-base", "first", true, "old")],
+            scan_kind: Some(ScanKind::Quick),
+            task_ids: vec!["first".to_string()],
+            session_id: Some("scan-base".to_string()),
+            duration_ms: 55,
+            total: 1,
+            completed: 1,
+            errors: 0,
+        };
+        let mut overlay = TargetedDiagnosticOverlay::for_committed_session(
+            ScanKind::Targeted,
+            &["first".to_string()],
+            base.clone(),
+        )
+        .expect("an existing result should use an overlay transaction");
+        overlay.stage(diagnostic_result("scan-rerun", "first", false, "partial"));
+        assert_eq!(overlay.staged_counts(), (1, 1));
+        assert!(
+            overlay
+                .commit(
+                    diagnostic_result("scan-rerun", "wrong", true, "wrong"),
+                    &[task("first", false)],
+                )
+                .is_err()
+        );
+        assert_eq!(overlay.rollback(), base);
+
+        assert!(
+            TargetedDiagnosticOverlay::for_committed_session(
+                ScanKind::Targeted,
+                &["missing".to_string()],
+                DiagnosticSnapshot {
+                    results: Vec::new(),
+                    scan_kind: None,
+                    task_ids: Vec::new(),
+                    session_id: None,
+                    duration_ms: 0,
+                    total: 0,
+                    completed: 0,
+                    errors: 0,
+                },
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn targeted_rerun_adds_a_task_absent_from_the_committed_scan() {
+        let base = DiagnosticSnapshot {
+            results: vec![diagnostic_result("scan-base", "first", true, "first")],
+            scan_kind: Some(ScanKind::Quick),
+            task_ids: vec!["first".to_string()],
+            session_id: Some("scan-base".to_string()),
+            duration_ms: 55,
+            total: 1,
+            completed: 1,
+            errors: 0,
+        };
+        let overlay = TargetedDiagnosticOverlay::for_committed_session(
+            ScanKind::Targeted,
+            &["second".to_string()],
+            base,
+        )
+        .expect("a committed session overlays even when it did not select the target");
+        let committed = overlay
+            .commit(
+                diagnostic_result("scan-rerun", "second", true, "second"),
+                &[task("first", false), task("second", false)],
+            )
+            .expect("the new target should append to the committed task set");
+
+        assert_eq!(
+            committed
+                .results
+                .iter()
+                .map(|result| result.task_id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert_eq!(committed.results[1].session_id, "scan-base");
+        assert_eq!(
+            committed.task_ids,
+            ["first".to_string(), "second".to_string()]
+        );
+        assert_eq!(committed.total, 2);
+        assert_eq!(committed.completed, 2);
+        assert_eq!(committed.errors, 0);
+        assert_eq!(committed.scan_kind, Some(ScanKind::Quick));
     }
 
     #[test]
@@ -14834,22 +26849,26 @@ mod diagnostic_selection_tests {
             is_admin: true,
         };
         let results = vec![
-            DiagnosticTaskResult {
-                session_id: "scan-7".to_string(),
-                task_id: "os_info".to_string(),
-                success: true,
-                output: "ok".to_string(),
-                error: None,
-                duration_ms: 12,
-            },
-            DiagnosticTaskResult {
-                session_id: "scan-7".to_string(),
-                task_id: "logical_disk".to_string(),
-                success: false,
-                output: "partial".to_string(),
-                error: Some("denied".to_string()),
-                duration_ms: 34,
-            },
+            DiagnosticTaskResult::new(
+                "scan-7",
+                "os_info",
+                Arc::new(DiagnosticOutput {
+                    success: true,
+                    output: "ok".to_string(),
+                    error: None,
+                    duration_ms: 12,
+                }),
+            ),
+            DiagnosticTaskResult::new(
+                "scan-7",
+                "logical_disk",
+                Arc::new(DiagnosticOutput {
+                    success: false,
+                    output: "partial".to_string(),
+                    error: Some("denied".to_string()),
+                    duration_ms: 34,
+                }),
+            ),
         ];
 
         let record = build_history_scan_record(
@@ -14882,21 +26901,21 @@ mod diagnostic_selection_tests {
         let snapshot = HashMap::from([
             (
                 "second".to_string(),
-                DiagnosticOutput {
+                Arc::new(DiagnosticOutput {
                     success: false,
                     output: "two".to_string(),
                     error: Some("failed".to_string()),
                     duration_ms: 2,
-                },
+                }),
             ),
             (
                 "first".to_string(),
-                DiagnosticOutput {
+                Arc::new(DiagnosticOutput {
                     success: true,
                     output: "one".to_string(),
                     error: None,
                     duration_ms: 1,
-                },
+                }),
             ),
         ]);
 
@@ -14928,24 +26947,24 @@ mod diagnostic_selection_tests {
             duration_ms: 1,
         };
         let exact = HashMap::from([
-            ("first".to_string(), output()),
-            ("second".to_string(), output()),
+            ("first".to_string(), Arc::new(output())),
+            ("second".to_string(), Arc::new(output())),
         ]);
         assert!(authoritative_result_set_is_complete(&exact, &expected));
 
-        let missing = HashMap::from([("first".to_string(), output())]);
+        let missing = HashMap::from([("first".to_string(), Arc::new(output()))]);
         assert!(!authoritative_result_set_is_complete(&missing, &expected));
 
         let extra = HashMap::from([
-            ("first".to_string(), output()),
-            ("second".to_string(), output()),
-            ("stale".to_string(), output()),
+            ("first".to_string(), Arc::new(output())),
+            ("second".to_string(), Arc::new(output())),
+            ("stale".to_string(), Arc::new(output())),
         ]);
         assert!(!authoritative_result_set_is_complete(&extra, &expected));
 
         let same_size_substitution = HashMap::from([
-            ("first".to_string(), output()),
-            ("stale".to_string(), output()),
+            ("first".to_string(), Arc::new(output())),
+            ("stale".to_string(), Arc::new(output())),
         ]);
         assert!(!authoritative_result_set_is_complete(
             &same_size_substitution,
@@ -14954,7 +26973,7 @@ mod diagnostic_selection_tests {
 
         let duplicate_expected = vec!["first".to_string(), "first".to_string()];
         assert!(!authoritative_result_set_is_complete(
-            &HashMap::from([("first".to_string(), output())]),
+            &HashMap::from([("first".to_string(), Arc::new(output()))]),
             &duplicate_expected,
         ));
     }
@@ -14980,6 +26999,121 @@ mod diagnostic_selection_tests {
     }
 
     #[test]
+    fn persisted_startup_scan_waits_for_both_initializers_and_is_consumed_once() {
+        let mut gate = StartupScanGate::AwaitingSettings;
+        assert!(!take_startup_scan_when_ready(
+            &mut gate, false, false, None, None
+        ));
+
+        apply_startup_scan_preference(&mut gate, true);
+        assert!(!take_startup_scan_when_ready(
+            &mut gate, false, true, None, None
+        ));
+        assert!(!take_startup_scan_when_ready(
+            &mut gate,
+            false,
+            false,
+            Some(1),
+            None
+        ));
+        assert!(!take_startup_scan_when_ready(
+            &mut gate,
+            false,
+            false,
+            None,
+            Some(2)
+        ));
+        assert!(take_startup_scan_when_ready(
+            &mut gate, false, false, None, None
+        ));
+        assert_eq!(gate, StartupScanGate::Consumed);
+        assert!(!take_startup_scan_when_ready(
+            &mut gate, false, false, None, None
+        ));
+    }
+
+    #[test]
+    fn startup_scan_is_suppressed_when_disabled_or_in_visual_mode() {
+        let mut disabled = StartupScanGate::AwaitingSettings;
+        apply_startup_scan_preference(&mut disabled, false);
+        assert!(!take_startup_scan_when_ready(
+            &mut disabled,
+            false,
+            false,
+            None,
+            None
+        ));
+
+        let mut visual = StartupScanGate::Armed;
+        assert!(!take_startup_scan_when_ready(
+            &mut visual,
+            true,
+            false,
+            None,
+            None
+        ));
+        assert_eq!(visual, StartupScanGate::Consumed);
+    }
+
+    #[test]
+    fn export_picker_cancellation_is_silent_but_errors_keep_their_detail() {
+        let cancelled = resolve_export_picker_selection(Ok(SavePickerOutcome::Cancelled)).unwrap();
+        assert!(cancelled.is_none());
+
+        let error = resolve_export_picker_selection(Err(SavePickerError::InvalidUtcDate {
+            year: 2026,
+            month: 2,
+            day: 30,
+        }))
+        .unwrap_err();
+        assert_eq!(error, "invalid UTC export date 2026-02-30");
+    }
+
+    #[test]
+    fn export_action_falls_back_to_text_for_stale_or_unsupported_settings() {
+        assert_eq!(resolved_export_format("text"), ReportFormat::Text);
+        assert_eq!(resolved_export_format("json"), ReportFormat::Json);
+        assert_eq!(resolved_export_format("html"), ReportFormat::Html);
+        assert_eq!(resolved_export_format(""), ReportFormat::Text);
+        assert_eq!(resolved_export_format("pdf"), ReportFormat::Text);
+    }
+
+    #[test]
+    fn export_write_completion_requires_matching_request_and_delivery_kind() {
+        let pending = PendingExport {
+            request_id: 17,
+            action: PendingExportAction::SupportPackage {
+                paths: ValidatedSupportPackagePaths {
+                    json: "case.json".into(),
+                    text: "case.txt".into(),
+                    html: "case.html".into(),
+                },
+            },
+        };
+
+        assert!(pending_export_write_is_current(
+            Some(&pending),
+            17,
+            ExportWriteKind::SupportPackage
+        ));
+        assert!(!pending_export_write_is_current(
+            Some(&pending),
+            16,
+            ExportWriteKind::SupportPackage
+        ));
+        assert!(!pending_export_write_is_current(
+            Some(&pending),
+            17,
+            ExportWriteKind::File
+        ));
+        assert!(!pending_export_write_is_current(
+            None,
+            17,
+            ExportWriteKind::SupportPackage
+        ));
+    }
+
+    #[test]
     fn latest_history_scan_never_reports_a_pending_comparison() {
         assert_eq!(
             history_comparison_placeholder(Some("latest"), Some("latest"), false, None),
@@ -14993,5 +27127,294 @@ mod diagnostic_selection_tests {
             history_comparison_placeholder(Some("older"), Some("latest"), false, None),
             "Comparison is unavailable. Select the scan again to retry."
         );
+    }
+
+    #[test]
+    fn window_lifecycle_pauses_only_when_unusable_and_resumes_only_its_own_pause() {
+        let usable = window_support::WindowLifecycleSnapshot {
+            registered: true,
+            visible: true,
+            focused: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            monitoring_lifecycle_action(usable, false, false),
+            MonitoringLifecycleAction::None
+        );
+
+        for unusable in [
+            window_support::WindowLifecycleSnapshot {
+                visible: false,
+                ..usable
+            },
+            window_support::WindowLifecycleSnapshot {
+                minimized: true,
+                ..usable
+            },
+            window_support::WindowLifecycleSnapshot {
+                focused: false,
+                ..usable
+            },
+        ] {
+            assert_eq!(
+                monitoring_lifecycle_action(unusable, false, false),
+                MonitoringLifecycleAction::Pause
+            );
+        }
+
+        assert_eq!(
+            monitoring_lifecycle_action(usable, true, true),
+            MonitoringLifecycleAction::ResumeAndRefresh
+        );
+        assert_eq!(
+            monitoring_lifecycle_action(usable, true, false),
+            MonitoringLifecycleAction::None
+        );
+    }
+
+    #[test]
+    fn selecting_history_reseeds_the_editable_tag_draft() {
+        let summary = ScanSummary {
+            id: "scan-2".to_string(),
+            timestamp: wfdiag_native_history::Timestamp { secs: 0 },
+            computer_name: "TEST-PC".to_string(),
+            task_count: 2,
+            success_count: 2,
+            failure_count: 0,
+            duration_ms: 42,
+            label: None,
+            tags: vec!["Quick Scan".to_string(), "before-update".to_string()],
+        };
+
+        assert_eq!(
+            history_tag_draft_for_selection(&[summary], "scan-2"),
+            "Quick Scan, before-update"
+        );
+        assert_eq!(history_tag_draft_for_selection(&[], "missing"), "");
+    }
+
+    #[test]
+    fn history_label_display_draft_and_filter_use_the_first_tag_fallback() {
+        let mut summary = ScanSummary {
+            id: "scan-2".to_string(),
+            timestamp: wfdiag_native_history::Timestamp { secs: 0 },
+            computer_name: "TEST-PC".to_string(),
+            task_count: 2,
+            success_count: 2,
+            failure_count: 0,
+            duration_ms: 42,
+            label: None,
+            tags: vec!["Quick Scan".to_string(), "before-update".to_string()],
+        };
+
+        assert_eq!(history_display_label(&summary), "Quick Scan");
+        assert_eq!(
+            history_label_draft_for_selection(&[summary.clone()], "scan-2"),
+            "Quick Scan"
+        );
+        assert!(history_scan_matches_filter(&summary, "before-update"));
+        assert!(history_scan_matches_filter(&summary, "test-pc"));
+        assert!(!history_scan_matches_filter(&summary, "after-update"));
+
+        summary.label = Some("Baseline".to_string());
+        assert_eq!(history_display_label(&summary), "Baseline");
+        assert!(history_scan_matches_filter(&summary, "baseline"));
+        assert!(history_scan_matches_filter(&summary, "quick scan"));
+
+        summary.label = None;
+        summary.tags.clear();
+        assert_eq!(history_display_label(&summary), "Scan");
+        assert_eq!(history_label_draft_for_selection(&[summary], "scan-2"), "");
+    }
+
+    #[test]
+    fn history_comparison_rows_include_regressions_recoveries_and_output_changes() {
+        let summary = |id: &str| ScanSummary {
+            id: id.to_string(),
+            timestamp: wfdiag_native_history::Timestamp { secs: 0 },
+            computer_name: "TEST-PC".to_string(),
+            task_count: 3,
+            success_count: 2,
+            failure_count: 1,
+            duration_ms: 42,
+            label: None,
+            tags: Vec::new(),
+        };
+        let change = |task_id: &str, output_changed: bool| TaskChangeSummary {
+            task_id: task_id.to_string(),
+            task_name: task_id.to_string(),
+            category: "System".to_string(),
+            current_success: true,
+            previous_success: true,
+            output_changed,
+        };
+        let comparison = ComparisonSummary {
+            current_scan: summary("latest"),
+            previous_scan: summary("older"),
+            total_changes: 3,
+            new_failures: vec![change("regressed", true)],
+            new_successes: vec![change("recovered", true)],
+            status_unchanged: vec![change("unchanged", false), change("changed", true)],
+        };
+
+        assert_eq!(
+            history_change_rows(&comparison)
+                .into_iter()
+                .map(|(kind, change)| (kind, change.task_id.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (HistoryChangeKind::Regressed, "regressed"),
+                (HistoryChangeKind::Recovered, "recovered"),
+                (HistoryChangeKind::Changed, "changed"),
+            ]
+        );
+    }
+
+    #[test]
+    fn history_refresh_rebases_only_a_preserved_selection_when_latest_changes() {
+        let summary = |id: &str| ScanSummary {
+            id: id.to_string(),
+            timestamp: wfdiag_native_history::Timestamp { secs: 0 },
+            computer_name: "TEST-PC".to_string(),
+            task_count: 1,
+            success_count: 1,
+            failure_count: 0,
+            duration_ms: 1,
+            label: None,
+            tags: Vec::new(),
+        };
+        let scans = vec![summary("new-latest"), summary("selected")];
+
+        assert_eq!(
+            history_comparison_refresh_target(Some("old-latest"), &scans, Some("selected")),
+            Some("selected".to_string())
+        );
+        assert_eq!(
+            history_comparison_refresh_target(Some("new-latest"), &scans, Some("selected")),
+            None
+        );
+        assert_eq!(
+            history_comparison_refresh_target(Some("old-latest"), &scans, Some("missing")),
+            None
+        );
+    }
+
+    #[test]
+    fn history_trend_refresh_tracks_the_current_baseline_identity() {
+        assert!(!history_trends_baseline_changed(None, None));
+        assert!(history_trends_baseline_changed(None, Some("latest")));
+        assert!(!history_trends_baseline_changed(
+            Some("latest"),
+            Some("latest")
+        ));
+        assert!(history_trends_baseline_changed(
+            Some("old-latest"),
+            Some("new-latest")
+        ));
+        assert!(history_trends_baseline_changed(Some("latest"), None));
+    }
+
+    #[test]
+    fn history_trend_badge_matches_react_threshold_and_task_lookup() {
+        let one_failure = [TaskTrend {
+            task_id: "os_info".to_string(),
+            failed: 1,
+            seen_in: 10,
+            scans_considered: 10,
+        }];
+        assert_eq!(history_trend_badge(Some(&one_failure), "os_info"), None);
+
+        let recurring = [
+            TaskTrend {
+                task_id: "other".to_string(),
+                failed: 9,
+                seen_in: 10,
+                scans_considered: 10,
+            },
+            TaskTrend {
+                task_id: "os_info".to_string(),
+                failed: 2,
+                seen_in: 7,
+                scans_considered: 10,
+            },
+        ];
+        assert_eq!(
+            history_trend_badge(Some(&recurring), "os_info"),
+            Some(HistoryTrendBadge {
+                label: "2/10 errors".to_string(),
+                description: "This diagnostic had a collection error in 2 of the last 10 scans"
+                    .to_string(),
+            })
+        );
+        assert_eq!(history_trend_badge(Some(&recurring), "missing"), None);
+        assert_eq!(history_trend_badge(None, "os_info"), None);
+    }
+
+    #[test]
+    fn history_task_detail_completion_requires_matching_generation_and_expansion() {
+        assert!(history_task_diff_result_is_current(
+            7,
+            7,
+            "os_info",
+            Some("os_info")
+        ));
+        assert!(!history_task_diff_result_is_current(
+            6,
+            7,
+            "os_info",
+            Some("os_info")
+        ));
+        assert!(!history_task_diff_result_is_current(
+            7,
+            7,
+            "os_info",
+            Some("cpu_info")
+        ));
+        assert!(!history_task_diff_result_is_current(7, 7, "os_info", None));
+    }
+
+    #[test]
+    fn history_json_projection_uses_raw_fallback_and_caps_structured_rows() {
+        let malformed = HistoryTaskDiffProjection::from(TaskDiffDetail {
+            task_id: "malformed".to_string(),
+            previous_output: "not json".to_string(),
+            current_output: "still not json".to_string(),
+        });
+        assert!(malformed.differences.is_none());
+        assert!(history_visible_json_differences(malformed.differences.as_deref()).is_none());
+
+        let identical = HistoryTaskDiffProjection::from(TaskDiffDetail {
+            task_id: "identical".to_string(),
+            previous_output: r#"{"value":1}"#.to_string(),
+            current_output: r#"{"value":1}"#.to_string(),
+        });
+        assert_eq!(identical.differences.as_deref(), Some([].as_slice()));
+        assert!(history_visible_json_differences(identical.differences.as_deref()).is_none());
+
+        let previous = format!(
+            "[{}]",
+            std::iter::repeat_n("0", 13).collect::<Vec<_>>().join(",")
+        );
+        let current = format!(
+            "[{}]",
+            std::iter::repeat_n("1", 13).collect::<Vec<_>>().join(",")
+        );
+        let changed = HistoryTaskDiffProjection::from(TaskDiffDetail {
+            task_id: "changed".to_string(),
+            previous_output: previous,
+            current_output: current.clone(),
+        });
+        let (visible, hidden) = history_visible_json_differences(changed.differences.as_deref())
+            .expect("valid changed JSON has a structured projection");
+        assert_eq!(visible.len(), 12);
+        assert_eq!(hidden, 1);
+        assert_eq!(changed.detail.current_output, current);
+    }
+
+    #[test]
+    fn provider_key_rows_cover_the_closed_provider_set_including_deepseek() {
+        assert_eq!(PROVIDER_KEY_LABELS.len(), ProviderKeyId::ALL.len());
+        assert_eq!(ProviderKeyId::ALL[3], ProviderKeyId::DeepSeek);
+        assert_eq!(PROVIDER_KEY_LABELS[3], "DeepSeek");
     }
 }
