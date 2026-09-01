@@ -207,5 +207,31 @@ class ReactorMsixProbeTests(unittest.TestCase):
             probe._reset_owned_directory(self.root, self.root)
 
 
+class SubcommandTests(unittest.TestCase):
+    def test_default_invocation_has_no_handler(self):
+        args = probe.parse_args([])
+        self.assertIsNone(getattr(args, "handler", None))
+        self.assertIsNone(args.command)
+
+    def test_stage_pack_bundle_and_validate_route_to_handlers(self):
+        stage = probe.parse_args(
+            ["stage", "--target", "x64", "--executable", "a.exe", "--bootstrap", "b.dll", "--output", "out"]
+        )
+        self.assertIs(stage.handler, probe.stage_prebuilt)
+        self.assertEqual(stage.target, "x64")
+        pack = probe.parse_args(["pack", "--target", "arm64", "--layout", "l", "--package", "p.msix"])
+        self.assertIs(pack.handler, probe.pack_prebuilt)
+        bundle = probe.parse_args(["bundle", "--packages-dir", "d", "--bundle", "b.msixbundle"])
+        self.assertIs(bundle.handler, probe.bundle_prebuilt)
+        layout = probe.parse_args(["validate-layout", "--target", "x64", "dir"])
+        self.assertIs(layout.handler, probe.validate_layout)
+        msix = probe.parse_args(["validate-msix", "--target", "x64", "pkg.msix"])
+        self.assertIs(msix.handler, probe.validate_msix)
+
+    def test_unknown_target_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            probe.parse_args(["stage", "--target", "ia64", "--executable", "a", "--bootstrap", "b", "--output", "o"])
+
+
 if __name__ == "__main__":
     unittest.main()

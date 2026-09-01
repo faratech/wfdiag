@@ -3,7 +3,13 @@ name: Build and Publish to Microsoft Store
 # Trigger on version tags (e.g., v2.1.6)
 # All version tags will build, create release, AND publish to Microsoft Store
 #
-# Manual dispatch is available for testing without creating tags
+# Manual dispatch is available for testing without creating tags. The
+# `shell` input selects which shell is packaged: the native WinUI 3 shell
+# (apps/wfdiag, wfdiag.exe, framework-dependent on Microsoft.WindowsAppRuntime.2)
+# is the product; the Tauri shell (src-tauri) is kept as a rollback. The native
+# package manifest, layout, and MSIX contract come from
+# scripts/build-reactor-msix-probe.py so the shipped package and the probe can
+# never disagree.
 
 on:
   push:
@@ -22,9 +28,19 @@ on:
         description: 'Create GitHub Release'
         type: boolean
         default: true
+      shell:
+        description: 'Shell to package: reactor (native WinUI 3, the product) or tauri (rollback)'
+        type: choice
+        options:
+          - reactor
+          - tauri
+        default: reactor
 
 env:
   CARGO_TERM_COLOR: always
+  # Tag pushes always package the native shell; workflow_dispatch may select
+  # the Tauri rollback shell. Both keep the same Store identity and version.
+  SHELL_KIND: ${{ github.event.inputs.shell || 'reactor' }}
   PROJECT_NAME: WindowsForum_Diagnostics
   PUBLISHER: CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4
 
@@ -42,6 +58,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       publish_to_store: ${{ steps.version.outputs.publish_to_store }}
       create_release: ${{ steps.version.outputs.create_release }}
+      shell: ${{ env.SHELL_KIND }}
     steps:
       - uses: actions/checkout@v4
 
@@ -89,11 +106,13 @@ jobs:
           Write-Host "Building version: $version"
           Write-Host "Publish to store: $publishToStore"
           Write-Host "Create release: $createRelease"
+          Write-Host "Shell: $env:SHELL_KIND"
 
       - name: Verify source and requested versions match
         run: python scripts/check-version-sync.py --expected "${{ steps.version.outputs.version }}"
 
       - name: Setup Node.js
+        if: env.SHELL_KIND == 'tauri'
         uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -108,16 +127,25 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
-          key: x64
+          key: x64-${{ env.SHELL_KIND }}
 
       - name: Install dependencies
+        if: env.SHELL_KIND == 'tauri'
         shell: pwsh
         run: npm ci
 
       - name: Build frontend
+        if: env.SHELL_KIND == 'tauri'
         run: npm run build
 
-      - name: Build x64 executable
+      - name: Build native shell (x64)
+        if: env.SHELL_KIND == 'reactor'
+        # Framework-dependent: build.rs stages only the matching
+        # Microsoft.WindowsAppRuntime.Bootstrap.dll beside the executable.
+        run: cargo build --locked --release -p wfdiag --target x86_64-pc-windows-msvc
+
+      - name: Build x64 executable (Tauri rollback)
+        if: env.SHELL_KIND == 'tauri'
         working-directory: src-tauri
         run: cargo build --locked --release --target x86_64-pc-windows-msvc
         env:
@@ -125,13 +153,25 @@ jobs:
           # portable exe doesn't need the redistributable on a clean machine.
           RUSTFLAGS: -C target-feature=+crt-static
 
-      - name: Upload x64 executable
+      - name: Upload native payload (x64)
+        if: env.SHELL_KIND == 'reactor'
+        uses: actions/upload-artifact@v4
+        with:
+          name: exe-x64
+          if-no-files-found: error
+          path: |
+            target/x86_64-pc-windows-msvc/release/wfdiag.exe
+            target/x86_64-pc-windows-msvc/release/Microsoft.WindowsAppRuntime.Bootstrap.dll
+
+      - name: Upload x64 executable (Tauri rollback)
+        if: env.SHELL_KIND == 'tauri'
         uses: actions/upload-artifact@v4
         with:
           name: exe-x64
           path: target/x86_64-pc-windows-msvc/release/wfdiag-tauri.exe
 
       - name: Upload frontend dist
+        if: env.SHELL_KIND == 'tauri'
         uses: actions/upload-artifact@v4
         with:
           name: frontend-dist
@@ -146,6 +186,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Node.js
+        if: env.SHELL_KIND == 'tauri'
         uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -160,7 +201,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
-          key: arm64
+          key: arm64-${{ env.SHELL_KIND }}
 
       - name: Check ARM64 build tools
         shell: pwsh
@@ -182,13 +223,20 @@ jobs:
           }
 
       - name: Install dependencies
+        if: env.SHELL_KIND == 'tauri'
         shell: pwsh
         run: npm ci
 
       - name: Build frontend
+        if: env.SHELL_KIND == 'tauri'
         run: npm run build
 
-      - name: Build ARM64 executable
+      - name: Build native shell (ARM64)
+        if: env.SHELL_KIND == 'reactor'
+        run: cargo build --locked --release -p wfdiag --target aarch64-pc-windows-msvc
+
+      - name: Build ARM64 executable (Tauri rollback)
+        if: env.SHELL_KIND == 'tauri'
         working-directory: src-tauri
         shell: pwsh
         run: |
@@ -198,20 +246,32 @@ jobs:
           # Ensure linker can find ARM64 libs
           RUSTFLAGS: -C target-feature=+crt-static
 
-      - name: Upload ARM64 executable
+      - name: Upload native payload (ARM64)
+        if: env.SHELL_KIND == 'reactor'
+        uses: actions/upload-artifact@v4
+        with:
+          name: exe-arm64
+          if-no-files-found: error
+          path: |
+            target/aarch64-pc-windows-msvc/release/wfdiag.exe
+            target/aarch64-pc-windows-msvc/release/Microsoft.WindowsAppRuntime.Bootstrap.dll
+
+      - name: Upload ARM64 executable (Tauri rollback)
+        if: env.SHELL_KIND == 'tauri'
         uses: actions/upload-artifact@v4
         with:
           name: exe-arm64
           path: target/aarch64-pc-windows-msvc/release/wfdiag-tauri.exe
 
   # =============================================================================
-  # Create MSIX Bundle with AI DLLs
+  # Create MSIX Bundle (native shell: probe-rendered manifest + bootstrap DLL;
+  # Tauri rollback: inline manifest + dist + app-local AI DLLs)
   # =============================================================================
   create-msix-bundle:
     needs: [build-x64, build-arm64]
     runs-on: windows-latest
     outputs:
-      bundle_path: ${{ steps.bundle.outputs.bundle_path }}
+      bundle_path: ${{ steps.bundle-native.outputs.bundle_path || steps.bundle.outputs.bundle_path }}
     steps:
       - uses: actions/checkout@v4
 
@@ -228,12 +288,102 @@ jobs:
           path: artifacts/arm64
 
       - name: Download frontend dist
+        if: env.SHELL_KIND == 'tauri'
         uses: actions/download-artifact@v4
         with:
           name: frontend-dist
           path: artifacts/dist
 
-      - name: Prepare MSIX package directories
+      - name: Setup Python
+        if: env.SHELL_KIND == 'reactor'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Stage, pack, and bundle the native Store packages
+        if: env.SHELL_KIND == 'reactor'
+        id: bundle-native
+        shell: pwsh
+        run: |
+          $version = "${{ needs.build-x64.outputs.version }}"
+          $projectName = "${{ env.PROJECT_NAME }}"
+          $probe = "scripts/build-reactor-msix-probe.py"
+          New-Item -ItemType Directory -Force -Path msix-build/bundle | Out-Null
+
+          foreach ($arch in @("x64", "arm64")) {
+            Write-Host "`n=== $arch: stage layout ==="
+            python $probe stage --target $arch `
+              --executable "artifacts/$arch/wfdiag.exe" `
+              --bootstrap "artifacts/$arch/Microsoft.WindowsAppRuntime.Bootstrap.dll" `
+              --output msix-build
+            if ($LASTEXITCODE -ne 0) { throw "staging the $arch layout failed" }
+
+            Write-Host "=== $arch: pack ==="
+            python $probe pack --target $arch `
+              --layout "msix-build/layout-$arch" `
+              --package "msix-build/bundle/${projectName}_${version}_$arch.msix"
+            if ($LASTEXITCODE -ne 0) { throw "packing the $arch MSIX failed" }
+          }
+
+          $bundlePath = "msix-build/${projectName}_${version}.msixbundle"
+          python $probe bundle --packages-dir msix-build/bundle --bundle $bundlePath
+          if ($LASTEXITCODE -ne 0) { throw "bundling failed" }
+          Write-Host "`nBundle created: $bundlePath"
+          echo "bundle_path=$bundlePath" >> $env:GITHUB_OUTPUT
+
+      - name: Validate native Store bundle contents
+        if: env.SHELL_KIND == 'reactor'
+        shell: pwsh
+        run: |
+          $version = "${{ needs.build-x64.outputs.version }}"
+          $bundle = "msix-build/${{ env.PROJECT_NAME }}_${version}.msixbundle"
+          if (-not (Test-Path $bundle)) { throw "Bundle not found: $bundle" }
+
+          $sdkPath = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*" -Directory |
+                     Sort-Object Name -Descending |
+                     Select-Object -First 1
+          $makeAppx = Join-Path $sdkPath.FullName "x64\MakeAppx.exe"
+          $inspectRoot = "msix-build/inspect"
+          Remove-Item $inspectRoot -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "$inspectRoot/bundle" | Out-Null
+
+          & $makeAppx unbundle /p $bundle /d "$inspectRoot/bundle" /o
+          if ($LASTEXITCODE -ne 0) { throw "MakeAppx could not unpack the bundle" }
+
+          $packages = @(Get-ChildItem "$inspectRoot/bundle" -Filter "*.msix")
+          if ($packages.Count -ne 2) {
+            throw "Expected two architecture packages; found $($packages.Count)"
+          }
+
+          $foundArchitectures = @()
+          foreach ($package in $packages) {
+            $arch = if ($package.BaseName -like "*_arm64") { "arm64" } elseif ($package.BaseName -like "*_x64") { "x64" } else { throw "$($package.Name): cannot infer architecture" }
+            # The probe contract checks identity, capabilities (incl. systemAIModels),
+            # the WindowsAppRuntime.2 dependency, the exact payload set (no app-local
+            # runtime or AI DLLs), PE architecture, and the pinned bootstrap hash.
+            python scripts/build-reactor-msix-probe.py validate-msix --target $arch $package.FullName
+            if ($LASTEXITCODE -ne 0) { throw "$($package.Name) failed the MSIX contract" }
+
+            $unpacked = Join-Path $inspectRoot $package.BaseName
+            New-Item -ItemType Directory -Force -Path $unpacked | Out-Null
+            & $makeAppx unpack /p $package.FullName /d $unpacked /o
+            if ($LASTEXITCODE -ne 0) { throw "Could not unpack $($package.Name)" }
+            [xml]$manifest = Get-Content -Raw (Join-Path $unpacked "AppxManifest.xml")
+            $identity = $manifest.SelectSingleNode("/*[local-name()='Package']/*[local-name()='Identity']")
+            if ($identity.GetAttribute("Version") -ne "$version.0") {
+              throw "$($package.Name): version '$($identity.GetAttribute('Version'))' does not match '$version.0'"
+            }
+            $foundArchitectures += $identity.GetAttribute("ProcessorArchitecture")
+          }
+
+          $architectureSet = @($foundArchitectures | Sort-Object -Unique) -join ','
+          if ($architectureSet -ne 'arm64,x64') {
+            throw "Bundle architectures are '$($foundArchitectures -join ',')', expected x64 and arm64"
+          }
+          Write-Host "Validated native Store identity, capabilities, WindowsAppRuntime.2 dependency, payload, and both architectures."
+
+      - name: Prepare MSIX package directories (Tauri rollback)
+        if: env.SHELL_KIND == 'tauri'
         id: bundle
         shell: pwsh
         run: |
@@ -360,7 +510,8 @@ jobs:
           Write-Host "`nBundle created: $bundlePath"
           echo "bundle_path=$bundlePath" >> $env:GITHUB_OUTPUT
 
-      - name: Validate Store bundle contents
+      - name: Validate Store bundle contents (Tauri rollback)
+        if: env.SHELL_KIND == 'tauri'
         shell: pwsh
         run: |
           $version = "${{ needs.build-x64.outputs.version }}"
@@ -495,12 +646,12 @@ jobs:
       - name: Attest x64 executable
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: artifacts/exe-x64/wfdiag-tauri.exe
+          subject-path: artifacts/exe-x64/*.exe
 
       - name: Attest ARM64 executable
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: artifacts/exe-arm64/wfdiag-tauri.exe
+          subject-path: artifacts/exe-arm64/*.exe
 
       - name: Attest MSIX bundle
         uses: actions/attest-build-provenance@v2
@@ -542,16 +693,26 @@ jobs:
           cd release
           VERSION="${{ needs.build-x64.outputs.version }}"
 
-          # Rename executables for clarity
-          if [ -f "exe-x64/wfdiag-tauri.exe" ]; then
-            mv exe-x64/wfdiag-tauri.exe "WindowsForum_Diagnostics_${VERSION}_x64.exe"
-          fi
-          if [ -f "exe-arm64/wfdiag-tauri.exe" ]; then
-            mv exe-arm64/wfdiag-tauri.exe "WindowsForum_Diagnostics_${VERSION}_arm64.exe"
-          fi
+          for ARCH in x64 arm64; do
+            if [ -f "exe-$ARCH/wfdiag.exe" ]; then
+              # Native shell: framework-dependent, so the download is the exe
+              # plus the WindowsAppRuntime bootstrap DLL it must sit beside.
+              cat > "exe-$ARCH/README.txt" <<'NOTE'
+          WindowsForum Diagnostics (native shell, framework-dependent build)
 
-          # Clean up empty directories
-          rmdir exe-x64 exe-arm64 2>/dev/null || true
+          Keep wfdiag.exe and Microsoft.WindowsAppRuntime.Bootstrap.dll in the same
+          folder. The Windows App Runtime 2.x framework must be installed
+          (https://aka.ms/windowsappsdk/2.4/latest/windowsappruntimeinstall-x64.exe
+          or the ARM64 installer). The Microsoft Store package installs it for you.
+          NOTE
+              (cd "exe-$ARCH" && zip -q "../WindowsForum_Diagnostics_${VERSION}_${ARCH}.zip" wfdiag.exe Microsoft.WindowsAppRuntime.Bootstrap.dll README.txt)
+            elif [ -f "exe-$ARCH/wfdiag-tauri.exe" ]; then
+              mv "exe-$ARCH/wfdiag-tauri.exe" "WindowsForum_Diagnostics_${VERSION}_${ARCH}.exe"
+            fi
+          done
+
+          # Clean up staging directories
+          rm -rf exe-x64 exe-arm64
 
           ls -la
 
@@ -581,7 +742,11 @@ jobs:
             echo
             echo "### Alternative Downloads"
             echo "- **MSIX Bundle**: Unsigned Store-submission artifact; it is not directly installable"
-            echo "- **Portable EXE**: Standalone executables for x64 and ARM64, no installation required"
+            if [ "${{ needs.build-x64.outputs.shell }}" = "reactor" ]; then
+              echo "- **Zip (x64 / ARM64)**: wfdiag.exe plus its Windows App Runtime bootstrap DLL; requires the Windows App Runtime 2.x framework (see README.txt inside)"
+            else
+              echo "- **Portable EXE**: Standalone executables for x64 and ARM64, no installation required"
+            fi
           } > release/RELEASE_NOTES.md
 
       - name: Create Release
@@ -594,6 +759,7 @@ jobs:
           files: |
             release/*.msixbundle
             release/*.exe
+            release/*.zip
           body_path: release/RELEASE_NOTES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

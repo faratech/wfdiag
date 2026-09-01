@@ -8,6 +8,12 @@ manifest from the canonical Store manifest, and packages unsigned MSIX files
 for offline inspection.
 
 It never signs, installs, registers, uploads, or publishes a package.
+
+The `stage`, `pack`, `bundle`, `validate-layout`, and `validate-msix`
+subcommands expose the same manifest renderer and contracts to the Store
+release workflow, which builds the shell itself and hands the prebuilt
+executable + bootstrap DLL to this module so the shipped package and the
+probe can never disagree about the manifest or the payload.
 """
 
 from __future__ import annotations
@@ -852,8 +858,97 @@ def build_probe(args: argparse.Namespace) -> Path:
     return bundle
 
 
+def _target_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--target",
+        choices=sorted(TARGETS),
+        required=True,
+        help="package architecture",
+    )
+
+
+def stage_prebuilt(args: argparse.Namespace) -> Path:
+    """Stage one Store layout from a prebuilt executable + bootstrap DLL.
+
+    Used by the Store release workflow, which builds the shell itself and only
+    needs the manifest renderer and the layout contract from this module.
+    """
+    assert_reactor_dependency_contract()
+    output_root = args.output.resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    layout = stage_layout(
+        output_root,
+        TARGETS[args.target],
+        args.executable.resolve(),
+        args.bootstrap.resolve(),
+    )
+    print(layout)
+    return layout
+
+
+def pack_prebuilt(args: argparse.Namespace) -> Path:
+    target = TARGETS[args.target]
+    layout = args.layout.resolve()
+    assert_layout_contract(layout, target)
+    package = args.package.resolve()
+    pack_msix(find_makeappx(args.makeappx), layout, package, target)
+    print(package)
+    return package
+
+
+def bundle_prebuilt(args: argparse.Namespace) -> Path:
+    bundle = args.bundle.resolve()
+    pack_bundle(find_makeappx(args.makeappx), args.packages_dir.resolve(), bundle)
+    print(bundle)
+    return bundle
+
+
+def validate_layout(args: argparse.Namespace) -> None:
+    assert_layout_contract(args.layout.resolve(), TARGETS[args.target])
+    print(f"layout contract OK: {args.layout}")
+
+
+def validate_msix(args: argparse.Namespace) -> None:
+    assert_msix_contract(args.package.resolve(), TARGETS[args.target])
+    print(f"MSIX contract OK: {args.package}")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command")
+
+    stage = subparsers.add_parser(
+        "stage", help="stage a Store layout from a prebuilt executable and bootstrap DLL"
+    )
+    _target_argument(stage)
+    stage.add_argument("--executable", type=Path, required=True)
+    stage.add_argument("--bootstrap", type=Path, required=True)
+    stage.add_argument("--output", type=Path, required=True, help="layout parent directory")
+    stage.set_defaults(handler=stage_prebuilt)
+
+    pack = subparsers.add_parser("pack", help="pack a staged layout into an unsigned MSIX")
+    _target_argument(pack)
+    pack.add_argument("--layout", type=Path, required=True)
+    pack.add_argument("--package", type=Path, required=True)
+    pack.add_argument("--makeappx", type=Path)
+    pack.set_defaults(handler=pack_prebuilt)
+
+    bundle = subparsers.add_parser("bundle", help="bundle packed MSIX files")
+    bundle.add_argument("--packages-dir", type=Path, required=True)
+    bundle.add_argument("--bundle", type=Path, required=True)
+    bundle.add_argument("--makeappx", type=Path)
+    bundle.set_defaults(handler=bundle_prebuilt)
+
+    check_layout = subparsers.add_parser("validate-layout", help="check a staged layout")
+    _target_argument(check_layout)
+    check_layout.add_argument("layout", type=Path)
+    check_layout.set_defaults(handler=validate_layout)
+
+    check_msix = subparsers.add_parser("validate-msix", help="check an unsigned MSIX")
+    _target_argument(check_msix)
+    check_msix.add_argument("package", type=Path)
+    check_msix.set_defaults(handler=validate_msix)
+
     parser.add_argument(
         "--output",
         type=Path,
@@ -881,7 +976,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     try:
-        build_probe(parse_args(argv))
+        args = parse_args(argv)
+        handler = getattr(args, "handler", None)
+        if handler is None:
+            build_probe(args)
+        else:
+            handler(args)
     except ProbeBuildError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

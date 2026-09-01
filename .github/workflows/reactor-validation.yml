@@ -1,14 +1,15 @@
-# Reactor validation lane: clean x64 Windows runner.
+# Reactor validation lane: clean x64 and ARM64 Windows runners.
 #
-# Manual dispatch (plus an optional weekly schedule) builds the native
-# WinUI candidate for x64 on a clean windows-latest runner and runs the
-# live-system + flow validation scripts against it. The hermetic AI suite is
-# release-gating: it owns its provider and settings and must complete chat,
-# cancel, exact-ten tool-contract, native-catalog, report, and
-# forced-regeneration flows. Shared chat tests pin the closed parser; shared
-# report tests separately pin cache hits and full-body rehydration.
-# Hardware/live-provider suites remain informational while hosted-runner UIA
-# stability is still being proven.
+# Manual dispatch builds the native WinUI candidate (release, self-contained)
+# for each architecture on a clean hosted runner and runs the live-system +
+# flow validation scripts against it. The hermetic AI suite is release-gating:
+# it owns its provider and settings and must complete chat, cancel,
+# exact-ten tool-contract, native-catalog, report, and forced-regeneration
+# flows. Shared chat tests pin the closed parser; shared report tests
+# separately pin cache hits and full-body rehydration. Hardware/live-provider
+# suites remain informational while hosted-runner UIA stability is still
+# being proven. The ARM64 leg is best-effort until the hosted ARM64 runner
+# image has been validated for WinUI (continue-on-error).
 #
 # Evidence (logs + captures) is uploaded as workflow artifacts.
 
@@ -30,15 +31,31 @@ permissions:
   contents: read
 
 jobs:
-  validate-x64:
-    runs-on: windows-latest
-    timeout-minutes: 60
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+            triple: x86_64-pc-windows-msvc
+            best-effort: false
+          - arch: arm64
+            runner: windows-11-arm
+            triple: aarch64-pc-windows-msvc
+            best-effort: true
+    name: validate-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.best-effort }}
+    timeout-minutes: 90
+    env:
+      EXE: target\${{ matrix.triple }}\release\wfdiag.exe
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.triple }}
 
       - uses: actions/setup-python@v5
         with:
@@ -46,18 +63,17 @@ jobs:
 
       - name: Test hermetic AI engine and report cache
         run: |
-          cargo test --locked --manifest-path crates/wfdiag-native-ai-chat/Cargo.toml --all-targets
-          cargo test --locked --manifest-path crates/wfdiag-native-ai-report/Cargo.toml --all-targets
+          cargo test --locked -p wfdiag-native-ai-chat --all-targets
+          cargo test --locked -p wfdiag-native-ai-report --all-targets
 
-      - name: Build self-contained validation candidate
-        run: cargo build --locked --target x86_64-pc-windows-msvc --features self-contained,settings-test-path --manifest-path apps/wfdiag/Cargo.toml
+      - name: Build self-contained validation candidate (release)
+        run: cargo build --locked --release -p wfdiag --target ${{ matrix.triple }} --features self-contained,settings-test-path
 
       - name: Version probe
         shell: pwsh
         run: |
-          $exe = "target\x86_64-pc-windows-msvc\debug\wfdiag.exe"
           $env:WFDIAG_REACTOR_VERSION_PROBE_FILE = "${{ runner.temp }}\version.json"
-          & $exe --wfdiag-version-probe
+          & $env:EXE --wfdiag-version-probe
           if ($LASTEXITCODE -ne 0) { throw "version probe failed" }
           Get-Content $env:WFDIAG_REACTOR_VERSION_PROBE_FILE
 
@@ -66,7 +82,7 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-ai-flows.ps1 `
-            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag.exe" `
+            -Executable $env:EXE `
             -OutputDirectory "validation-reports\ai-flows"
 
       - name: Live-system validation
@@ -75,7 +91,7 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-live-system.ps1 `
-            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag.exe" `
+            -Executable $env:EXE `
             -OutputDirectory "validation-reports\live-system" `
             -HoldSeconds 2
 
@@ -86,7 +102,7 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-chat.ps1 `
-            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag.exe" `
+            -Executable $env:EXE `
             -OutputDirectory "validation-reports\chat"
 
       - name: Report flow validation
@@ -96,7 +112,7 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-report.ps1 `
-            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag.exe" `
+            -Executable $env:EXE `
             -OutputDirectory "validation-reports\report" `
             -ScanWaitSeconds 300
 
@@ -107,12 +123,12 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts/test-reactor-remediation.ps1 `
-            -Executable "target\x86_64-pc-windows-msvc\debug\wfdiag.exe" `
+            -Executable $env:EXE `
             -OutputDirectory "validation-reports\remediation" `
             -ScanWaitSeconds 300
 
       - name: External gates watcher
-        if: ${{ inputs.run-external-gates }}
+        if: ${{ inputs.run-external-gates && matrix.arch == 'x64' }}
         shell: pwsh
         run: |
           python scripts/check-external-gates.py --json
@@ -122,7 +138,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: reactor-validation-evidence
+          name: reactor-validation-evidence-${{ matrix.arch }}
           path: |
             validation-reports/
             apps/wfdiag/captures-2.5.8/validation-*/
