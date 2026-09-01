@@ -1,0 +1,13 @@
+[package]
+name = "wfdiag-native-projection"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Pure, UI-neutral projections for WFDiag shells: JSON diffing, the markdown-lite parser and link policy, process-identity reconciliation, and monitor graph geometry"
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -5621,6 +5621,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wfdiag-app"
+version = "0.1.0"
+
+[[package]]
+name = "wfdiag-native-ai-analysis"
+version = "0.1.0"
+
+[[package]]
 name = "wfdiag-native-ai-chat"
 version = "0.1.0"
 dependencies = [
@@ -5667,6 +5675,10 @@ dependencies = [
  "wfdiag-native-history",
  "wfdiag-native-issues",
 ]
+
+[[package]]
+name = "wfdiag-native-core"
+version = "0.1.0"
 
 [[package]]
 name = "wfdiag-native-diagnostics"
@@ -5751,6 +5763,10 @@ dependencies = [
  "windows-future 0.3.2",
  "winreg 0.56.0",
 ]
+
+[[package]]
+name = "wfdiag-native-projection"
+version = "0.1.0"
 
 [[package]]
 name = "wfdiag-native-remediation"

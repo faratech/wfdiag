@@ -1,0 +1,13 @@
+[package]
+name = "wfdiag-app"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Application service facade for WFDiag: owns every engine runtime and exposes one command/event API that any shell — or a headless test — can drive"
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

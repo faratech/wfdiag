@@ -35,15 +35,19 @@ uuid = "1.20.0"
 winreg = "0.56"
 
 # Workspace crates.
+wfdiag-app = { path = "crates/wfdiag-app" }
+wfdiag-native-ai-analysis = { path = "crates/wfdiag-native-ai-analysis" }
 wfdiag-native-ai-chat = { path = "crates/wfdiag-native-ai-chat" }
 wfdiag-native-ai-provider = { path = "crates/wfdiag-native-ai-provider" }
 wfdiag-native-ai-report = { path = "crates/wfdiag-native-ai-report" }
+wfdiag-native-core = { path = "crates/wfdiag-native-core" }
 wfdiag-native-diagnostics = { path = "crates/wfdiag-native-diagnostics" }
 wfdiag-native-export = { path = "crates/wfdiag-native-export" }
 wfdiag-native-history = { path = "crates/wfdiag-native-history" }
 wfdiag-native-issues = { path = "crates/wfdiag-native-issues" }
 wfdiag-native-monitor = { path = "crates/wfdiag-native-monitor" }
 wfdiag-native-phi = { path = "crates/wfdiag-native-phi" }
+wfdiag-native-projection = { path = "crates/wfdiag-native-projection" }
 wfdiag-native-remediation = { path = "crates/wfdiag-native-remediation" }
 wfdiag-native-settings = { path = "crates/wfdiag-native-settings" }
 wfdiag-native-system = { path = "crates/wfdiag-native-system" }

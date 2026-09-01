@@ -1,0 +1,13 @@
+[package]
+name = "wfdiag-native-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Shared engine primitives for WFDiag: error type, timestamps, atomic file writes, the trusted-program command executor, and the native WMI wrapper"
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

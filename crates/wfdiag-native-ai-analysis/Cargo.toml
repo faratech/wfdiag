@@ -1,0 +1,13 @@
+[package]
+name = "wfdiag-native-ai-analysis"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "UI-framework-neutral one-shot AI analysis, issue prioritization, fix-plan generation, and their prompt/budget policy for WFDiag"
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
