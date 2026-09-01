@@ -24,8 +24,8 @@ use wfdiag_native_ai_report::{
 use wfdiag_native_phi::PhiChatProvider;
 use wfdiag_native_settings::SettingsService;
 
-use crate::chat_support::ShellChatSource;
-use crate::ui_wake_support;
+use super::chat_tools::ShellChatSource;
+use crate::platform::ui_wake;
 
 /// One report's routing inputs. The active provider and complete availability
 /// snapshot come from the same provider-status response, so the report core's
@@ -124,7 +124,7 @@ pub fn start_report_runtime(
             source: ShellChatSource::new(settings, foundry, ollama),
         }),
         cache,
-        Arc::new(ui_wake_support::notify),
+        Arc::new(ui_wake::notify),
     )
 }
 

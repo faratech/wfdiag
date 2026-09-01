@@ -500,7 +500,7 @@
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
         "apps/wfdiag/src/main.rs",
-        "apps/wfdiag/src/window_support.rs"
+        "apps/wfdiag/src/platform/window.rs"
       ]
     },
     {
@@ -677,9 +677,9 @@
         "crates/wfdiag-native-remediation/src/elevation.rs",
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "apps/wfdiag/src/instance_support.rs",
+        "apps/wfdiag/src/platform/instance.rs",
         "apps/wfdiag/src/main.rs",
-        "apps/wfdiag/src/window_support.rs"
+        "apps/wfdiag/src/platform/window.rs"
       ]
     },
     {
@@ -689,9 +689,9 @@
       "evidence": [
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "apps/wfdiag/src/instance_support.rs",
+        "apps/wfdiag/src/platform/instance.rs",
         "apps/wfdiag/src/main.rs",
-        "apps/wfdiag/src/window_support.rs"
+        "apps/wfdiag/src/platform/window.rs"
       ]
     },
     {
@@ -708,11 +708,11 @@
     {
       "id": "window_lifecycle",
       "status": "passed",
-      "summary": "Owner decision 2026-09-01: the isolated Win32 interop in apps/wfdiag/src/window_support.rs and instance_support.rs (cached exact HWND, revisioned lifecycle snapshots, close-to-tray, show/hide/minimize/restore, tray menu) is the accepted implementation for this release; an official Reactor window-lifecycle API remains a tracked follow-up.",
+      "summary": "Owner decision 2026-09-01: the isolated Win32 interop in apps/wfdiag/src/platform/window.rs and instance_support.rs (cached exact HWND, revisioned lifecycle snapshots, close-to-tray, show/hide/minimize/restore, tray menu) is the accepted implementation for this release; an official Reactor window-lifecycle API remains a tracked follow-up.",
       "evidence": [
         "docs/REACTOR_MIGRATION.md#cutover-decision-2026-09-01",
-        "apps/wfdiag/src/window_support.rs",
-        "apps/wfdiag/src/instance_support.rs",
+        "apps/wfdiag/src/platform/window.rs",
+        "apps/wfdiag/src/platform/instance.rs",
         "scripts/test-reactor-startup.ps1",
         "scripts/test-reactor-ui-regressions.ps1"
       ]
@@ -720,10 +720,10 @@
     {
       "id": "global_accelerators",
       "status": "passed",
-      "summary": "Owner decision 2026-09-01: Ctrl+K, Ctrl+1..6, Ctrl+/, Ctrl+Shift+Q and Ctrl+Shift+F are delivered by the isolated Win32 keyboard hook in apps/wfdiag/src/window_support.rs with pure policy tests; Ctrl+R and Ctrl+Numpad1..6 use Reactor accelerators. Accepted for this release; an official Reactor accelerator API that can express the full chord set remains a tracked follow-up.",
+      "summary": "Owner decision 2026-09-01: Ctrl+K, Ctrl+1..6, Ctrl+/, Ctrl+Shift+Q and Ctrl+Shift+F are delivered by the isolated Win32 keyboard hook in apps/wfdiag/src/platform/window.rs with pure policy tests; Ctrl+R and Ctrl+Numpad1..6 use Reactor accelerators. Accepted for this release; an official Reactor accelerator API that can express the full chord set remains a tracked follow-up.",
       "evidence": [
         "docs/REACTOR_MIGRATION.md#cutover-decision-2026-09-01",
-        "apps/wfdiag/src/window_support.rs",
+        "apps/wfdiag/src/platform/window.rs",
         "scripts/test-reactor-ui-regressions.ps1"
       ]
     }

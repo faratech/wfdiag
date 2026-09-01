@@ -8,7 +8,7 @@ use std::cell::RefCell;
 
 use windows_core::{IInspectable, Interface};
 
-use crate::winui_focus_bindings::{
+use super::winui_focus_bindings::{
     ComboBox, FocusManager, FocusState, NumberBox, PasswordBox, TextBox, UIElement,
 };
 

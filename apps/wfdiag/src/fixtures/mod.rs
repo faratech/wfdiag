@@ -5,5 +5,7 @@
 //! gated behind a cargo feature by cfg-ing this one module declaration.
 
 pub(crate) mod issues;
+pub(crate) mod knobs;
+pub(crate) mod visual;
 
 pub(crate) use issues::fixture_258_issues;

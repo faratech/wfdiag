@@ -11,7 +11,7 @@ use std::ffi::c_void;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
-use crate::window_support;
+use super::window;
 
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, HANDLE, HLOCAL, HWND, LPARAM, LocalFree, WAIT_OBJECT_0,
@@ -219,7 +219,7 @@ unsafe extern "system" fn on_activation_event(_context: *mut c_void, timed_out: 
     // SAFETY: event is a valid process-owned handle.
     let _ = unsafe { ResetEvent(*event) };
     ACTIVATION_PENDING.store(true, Ordering::Release);
-    let _ = window_support::post_ui_wake();
+    let _ = window::post_ui_wake();
 }
 
 fn signal_primary(identifier: &str) {
@@ -373,7 +373,7 @@ impl Drop for InstanceWatch {
 
 /// Register the exact Reactor-owned top-level window.
 ///
-/// `window_support::install` calls this as soon as Reactor exposes the HWND.
+/// `window::install` calls this as soon as Reactor exposes the HWND.
 /// Keeping the handle independent of visibility is essential: a window hidden
 /// by close-to-tray is absent from a visible-window enumeration but remains the
 /// same valid window that tray and single-instance activation must restore.

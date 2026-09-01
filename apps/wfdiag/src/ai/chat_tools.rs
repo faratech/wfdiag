@@ -37,7 +37,7 @@ use wfdiag_native_phi::PhiChatProvider;
 use wfdiag_native_settings::SettingsService;
 use wfdiag_ui_core::{DiagnosticTaskResult, SystemStats};
 
-use crate::ui_wake_support;
+use crate::platform::ui_wake;
 
 /// The chat runtime as this shell configures it.
 pub type NativeChatRuntime = wfdiag_native_ai_chat::NativeChatRuntime<ReactorChatTools>;
@@ -258,7 +258,7 @@ pub fn start_chat_runtime(
             source: ShellChatSource::new(settings, foundry, ollama),
         },
         ReactorChatTools { ports: tools },
-        Arc::new(ui_wake_support::notify),
+        Arc::new(ui_wake::notify),
     )
 }
 

@@ -21,7 +21,7 @@ use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
-use crate::instance_support;
+use super::instance;
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -238,7 +238,7 @@ pub fn install_without_tray(window: HWND) -> Result<(), WindowHookInstallError> 
 }
 
 fn install_core(window: HWND, tooltip: Option<&str>) -> Result<(), WindowHookInstallError> {
-    if !instance_support::register_main_window(window) {
+    if !instance::register_main_window(window) {
         return Err(WindowHookInstallError::core(
             "The Reactor main window handle is stale or does not belong to this process"
                 .to_string(),
@@ -252,7 +252,7 @@ fn install_core(window: HWND, tooltip: Option<&str>) -> Result<(), WindowHookIns
         // Do not let worker threads post wake messages to a window that has no
         // matching subclass; Windows would accept those messages, but nobody
         // would clear the coalescing flag after consuming them.
-        instance_support::unregister_main_window(window);
+        instance::unregister_main_window(window);
         // A worker can race the tiny interval between HWND registration and
         // SetWindowSubclass. Its PostMessage succeeds but the unhooked window
         // cannot clear the coalescing bit, so explicitly make a later retry
@@ -269,7 +269,7 @@ fn install_core(window: HWND, tooltip: Option<&str>) -> Result<(), WindowHookIns
         unsafe {
             let _ = RemoveWindowSubclass(window, Some(tray_subclass_proc), SUBCLASS_ID);
         }
-        instance_support::unregister_main_window(window);
+        instance::unregister_main_window(window);
         UI_WAKE_PENDING.store(false, Ordering::Release);
         return Err(WindowHookInstallError::core(error));
     }
@@ -328,7 +328,7 @@ pub fn post_ui_wake() -> bool {
     // thread discovers and registers the exact Reactor window during hook
     // installation; its initial lifecycle transition then drains anything
     // queued before registration.
-    let Some(window) = instance_support::registered_main_window_hwnd() else {
+    let Some(window) = instance::registered_main_window_hwnd() else {
         if !pending {
             UI_WAKE_PENDING.store(false, Ordering::Release);
         }
@@ -857,10 +857,10 @@ unsafe extern "system" fn tray_subclass_proc(
             // A replaced top-level HWND can finish destroying after its
             // successor is registered. Only the current generation owns the
             // shared hook, tray, wake handler, shortcut queue, and lifecycle.
-            if instance_support::is_registered_main_window(window) {
+            if instance::is_registered_main_window(window) {
                 remove_keyboard_hook(window);
                 remove_tray_icon(window);
-                instance_support::unregister_main_window(window);
+                instance::unregister_main_window(window);
                 clear_global_shortcuts();
                 clear_ui_wake_handler();
                 update_lifecycle_flags(0, WINDOW_STATE_FLAGS);
