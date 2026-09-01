@@ -4869,6 +4869,13 @@ impl WfdiagSpike {
             self.system_wait = None;
             return;
         }
+        // One consumer per receiver: a live wait already owns the shared
+        // `Arc<Mutex<Receiver>>` (see the single-consumer note on
+        // `spawn_system_wait`), so re-arming would park a second thread that
+        // nothing ever cancels (#210).
+        if self.system_wait.is_some() {
+            return;
+        }
         let Some(receiver) = self.system_receiver.as_ref().map(Arc::clone) else {
             self.system_wait = None;
             return;
@@ -5393,7 +5400,9 @@ impl WfdiagSpike {
         let Some(provider) = ProviderKeyId::ALL.get(index).copied() else {
             return;
         };
-        let key = self.provider_key_drafts[index].clone();
+        let Some(key) = self.provider_key_drafts.get(index).cloned() else {
+            return;
+        };
         if store && key.trim().is_empty() {
             self.status = "Enter an API key first".to_string();
             return;
@@ -7985,11 +7994,15 @@ impl WfdiagSpike {
         let mut submitted = self.settings_draft.clone();
         for (index, provider) in ProviderKeyId::ALL.into_iter().enumerate() {
             match self.provider_credential_transaction.staged_action(provider) {
-                Some(ProviderCredentialAction::Store) => set_provider_key_value(
-                    &mut submitted,
-                    provider,
-                    Some(self.provider_key_drafts[index].trim().to_string()),
-                ),
+                Some(ProviderCredentialAction::Store) => {
+                    if let Some(draft) = self.provider_key_drafts.get(index) {
+                        set_provider_key_value(
+                            &mut submitted,
+                            provider,
+                            Some(draft.trim().to_string()),
+                        );
+                    }
+                }
                 Some(ProviderCredentialAction::Clear) => {
                     set_provider_key_value(&mut submitted, provider, Some(String::new()));
                 }
@@ -8145,7 +8158,9 @@ impl WfdiagSpike {
                         true,
                     );
                     set_provider_key_configured(&mut self.settings_draft, pending.provider, true);
-                    self.provider_key_drafts[pending.index].clear();
+                    if let Some(draft) = self.provider_key_drafts.get_mut(pending.index) {
+                        draft.clear();
+                    }
                     self.schedule_provider_model_refresh(context);
                 }
             }
@@ -8171,7 +8186,9 @@ impl WfdiagSpike {
                         false,
                     );
                     set_provider_key_configured(&mut self.settings_draft, pending.provider, false);
-                    self.provider_key_drafts[pending.index].clear();
+                    if let Some(draft) = self.provider_key_drafts.get_mut(pending.index) {
+                        draft.clear();
+                    }
                     self.schedule_provider_model_refresh(context);
                 }
             }
@@ -8562,7 +8579,8 @@ impl WfdiagSpike {
             history_tag,
         );
         if let Some(history) = self.history_runtime.as_ref()
-            && let Ok(reply) = history.request_compare_current_to_latest(std::sync::Arc::new(current_record))
+            && let Ok(reply) =
+                history.request_compare_current_to_latest(std::sync::Arc::new(current_record))
         {
             self.report_prepare_task = Some(spawn_report_generation_preparation(
                 context, request_id, generation, reply,
@@ -8658,194 +8676,196 @@ impl WfdiagSpike {
     /// Apply one chat worker event. Events are delivered batched (see
     /// `drain_chat_events`); this per-event body is order-sensitive and may
     /// re-arm fallback attempts, so `chat_pending` is resolved per event.
-    fn apply_chat_worker_event(&mut self, event: ChatWorkerEvent, context: &ComponentContext<Self>) {
-            let Some(pending) = self.chat_pending else {
-                return;
-            };
-            if pending != event.request_id() {
+    fn apply_chat_worker_event(
+        &mut self,
+        event: ChatWorkerEvent,
+        context: &ComponentContext<Self>,
+    ) {
+        let Some(pending) = self.chat_pending else {
+            return;
+        };
+        if pending != event.request_id() {
+            self.resume_chat_wait(context);
+            return;
+        }
+        let logical_request_id = self
+            .chat_attempt
+            .as_ref()
+            .map_or(pending, |attempt| attempt.logical_request_id);
+        match event {
+            ChatWorkerEvent::Delta { text, .. } => {
+                self.chat_answer
+                    .get_or_insert_with(String::new)
+                    .push_str(&text);
+                if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
+                    message.text.push_str(&text);
+                }
                 self.resume_chat_wait(context);
-                return;
             }
-            let logical_request_id = self
-                .chat_attempt
-                .as_ref()
-                .map_or(pending, |attempt| attempt.logical_request_id);
-            match event {
-                ChatWorkerEvent::Delta { text, .. } => {
-                    self.chat_answer
-                        .get_or_insert_with(String::new)
-                        .push_str(&text);
-                    if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
-                        message.text.push_str(&text);
-                    }
-                    self.resume_chat_wait(context);
+            ChatWorkerEvent::ToolActivity {
+                history, summary, ..
+            } => {
+                if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
+                    message.tools = history;
                 }
-                ChatWorkerEvent::ToolActivity {
-                    history, summary, ..
-                } => {
-                    if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
-                        message.tools = history;
-                    }
-                    self.status = summary;
-                    self.resume_chat_wait(context);
+                self.status = summary;
+                self.resume_chat_wait(context);
+            }
+            ChatWorkerEvent::Proposal {
+                remediation_id,
+                issue_id,
+                ..
+            } => {
+                if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
+                    message.proposals.push(format!(
+                        "{}{}",
+                        remediation_id,
+                        issue_id
+                            .as_deref()
+                            .map_or_else(String::new, |issue| format!(" for {issue}"))
+                    ));
                 }
-                ChatWorkerEvent::Proposal {
-                    remediation_id,
-                    issue_id,
-                    ..
-                } => {
-                    if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
-                        message.proposals.push(format!(
-                            "{}{}",
-                            remediation_id,
-                            issue_id
-                                .as_deref()
-                                .map_or_else(String::new, |issue| format!(" for {issue}"))
-                        ));
-                    }
-                    self.prepare_remediation(remediation_id, issue_id, context);
-                    self.resume_chat_wait(context);
-                }
-                ChatWorkerEvent::FullScanRequested {
-                    source_scan_id,
-                    reason,
-                    ..
-                } => {
-                    let source_is_current = self
-                        .diagnostic_results
-                        .first()
-                        .is_some_and(|result| result.session_id == source_scan_id);
-                    if source_is_current && self.diagnostic_scan_kind != Some(ScanKind::Full) {
-                        self.full_scan_consent = Some(FullScanConsent {
-                            source_scan_id,
-                            reason,
-                            original_prompt: self.chat_last_prompt.clone().unwrap_or_default(),
-                        });
-                        self.status =
-                            "The AI assistant requested a Full Scan for more evidence"
-                                .to_string();
-                    }
-                    self.resume_chat_wait(context);
-                }
-                ChatWorkerEvent::Done {
-                    provider,
-                    provider_use,
-                    finish_reason,
-                    tool_history,
-                    ..
-                } => {
-                    self.chat_pending = None;
-                    self.chat_attempt = None;
-                    let completion_notice = chat_completion_notice(&finish_reason);
-                    if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
-                        message.provider_use = Some(provider_use);
-                        message.finish_reason = Some(finish_reason);
-                        message.terminal_message = completion_notice.map(str::to_string);
-                        message.tools = tool_history;
-                    }
-                    self.status = completion_notice.map_or_else(
-                        || format!("AI response complete · {provider}"),
-                        |notice| format!("AI response complete · {provider} · {notice}"),
-                    );
-                    self.resume_pending_ai_intent(context);
-                }
-                ChatWorkerEvent::RetryableFailure {
-                    message,
-                    tool_history,
-                    ..
-                } => {
-                    self.chat_pending = None;
-                    if let Some(display) = self.chat_assistant_message_mut(logical_request_id) {
-                        display.tools = tool_history;
-                    }
-                    let Some(mut attempt) = self.chat_attempt.take() else {
-                        self.finish_chat_attempt_failure(logical_request_id, message);
-                        self.resume_pending_ai_intent(context);
-                        return;
-                    };
-                    if attempt.first_failure.is_none() {
-                        attempt.first_failure = Some(message);
-                    }
-                    let Some(candidate) = next_fallback_candidate(
-                        attempt.preference,
-                        Some(attempt.current_provider),
-                        &attempt.tried,
-                        attempt.availability,
-                    ) else {
-                        let first_failure = attempt
-                            .first_failure
-                            .unwrap_or_else(|| "No fallback provider is available".to_string());
-                        self.finish_chat_attempt_failure(logical_request_id, first_failure);
-                        self.resume_pending_ai_intent(context);
-                        return;
-                    };
-                    let reason = attempt.first_failure.clone().unwrap_or_default();
-                    let consent = CloudFallbackConsent {
-                        previous_request_id: pending,
-                        attempt,
-                        candidate: candidate.provider,
+                self.prepare_remediation(remediation_id, issue_id, context);
+                self.resume_chat_wait(context);
+            }
+            ChatWorkerEvent::FullScanRequested {
+                source_scan_id,
+                reason,
+                ..
+            } => {
+                let source_is_current = self
+                    .diagnostic_results
+                    .first()
+                    .is_some_and(|result| result.session_id == source_scan_id);
+                if source_is_current && self.diagnostic_scan_kind != Some(ScanKind::Full) {
+                    self.full_scan_consent = Some(FullScanConsent {
+                        source_scan_id,
                         reason,
-                    };
-                    if candidate.crosses_local_to_cloud {
-                        match self.settings_snapshot.cloud_fallback_policy {
-                            CloudFallbackPolicy::Allow => {
-                                self.continue_chat_fallback(consent, context);
-                            }
-                            CloudFallbackPolicy::Never => {
-                                self.finish_chat_attempt_failure(
-                                    logical_request_id,
-                                    format!(
-                                        "{} Cloud fallback is disabled in Settings.",
-                                        consent.reason
-                                    ),
-                                );
-                                self.resume_pending_ai_intent(context);
-                            }
-                            CloudFallbackPolicy::Ask => {
-                                self.chat_attempt = Some(consent.attempt.clone());
-                                self.cloud_fallback_consent = Some(consent);
-                                self.status =
-                                    "Local AI was unavailable · cloud permission required"
-                                        .to_string();
-                                self.resume_chat_wait(context);
-                            }
+                        original_prompt: self.chat_last_prompt.clone().unwrap_or_default(),
+                    });
+                    self.status =
+                        "The AI assistant requested a Full Scan for more evidence".to_string();
+                }
+                self.resume_chat_wait(context);
+            }
+            ChatWorkerEvent::Done {
+                provider,
+                provider_use,
+                finish_reason,
+                tool_history,
+                ..
+            } => {
+                self.chat_pending = None;
+                self.chat_attempt = None;
+                let completion_notice = chat_completion_notice(&finish_reason);
+                if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
+                    message.provider_use = Some(provider_use);
+                    message.finish_reason = Some(finish_reason);
+                    message.terminal_message = completion_notice.map(str::to_string);
+                    message.tools = tool_history;
+                }
+                self.status = completion_notice.map_or_else(
+                    || format!("AI response complete · {provider}"),
+                    |notice| format!("AI response complete · {provider} · {notice}"),
+                );
+                self.resume_pending_ai_intent(context);
+            }
+            ChatWorkerEvent::RetryableFailure {
+                message,
+                tool_history,
+                ..
+            } => {
+                self.chat_pending = None;
+                if let Some(display) = self.chat_assistant_message_mut(logical_request_id) {
+                    display.tools = tool_history;
+                }
+                let Some(mut attempt) = self.chat_attempt.take() else {
+                    self.finish_chat_attempt_failure(logical_request_id, message);
+                    self.resume_pending_ai_intent(context);
+                    return;
+                };
+                if attempt.first_failure.is_none() {
+                    attempt.first_failure = Some(message);
+                }
+                let Some(candidate) = next_fallback_candidate(
+                    attempt.preference,
+                    Some(attempt.current_provider),
+                    &attempt.tried,
+                    attempt.availability,
+                ) else {
+                    let first_failure = attempt
+                        .first_failure
+                        .unwrap_or_else(|| "No fallback provider is available".to_string());
+                    self.finish_chat_attempt_failure(logical_request_id, first_failure);
+                    self.resume_pending_ai_intent(context);
+                    return;
+                };
+                let reason = attempt.first_failure.clone().unwrap_or_default();
+                let consent = CloudFallbackConsent {
+                    previous_request_id: pending,
+                    attempt,
+                    candidate: candidate.provider,
+                    reason,
+                };
+                if candidate.crosses_local_to_cloud {
+                    match self.settings_snapshot.cloud_fallback_policy {
+                        CloudFallbackPolicy::Allow => {
+                            self.continue_chat_fallback(consent, context);
                         }
-                    } else {
-                        self.continue_chat_fallback(consent, context);
+                        CloudFallbackPolicy::Never => {
+                            self.finish_chat_attempt_failure(
+                                logical_request_id,
+                                format!(
+                                    "{} Cloud fallback is disabled in Settings.",
+                                    consent.reason
+                                ),
+                            );
+                            self.resume_pending_ai_intent(context);
+                        }
+                        CloudFallbackPolicy::Ask => {
+                            self.chat_attempt = Some(consent.attempt.clone());
+                            self.cloud_fallback_consent = Some(consent);
+                            self.status =
+                                "Local AI was unavailable · cloud permission required".to_string();
+                            self.resume_chat_wait(context);
+                        }
                     }
-                }
-                ChatWorkerEvent::Failed {
-                    message,
-                    finish_reason,
-                    tool_history,
-                    ..
-                } => {
-                    self.chat_pending = None;
-                    self.chat_attempt = None;
-                    if let Some(display) = self.chat_assistant_message_mut(logical_request_id) {
-                        display.finish_reason = Some(finish_reason);
-                        display.terminal_message = Some(message.clone());
-                        display.tools = tool_history;
-                    }
-                    self.status = message;
-                    self.resume_pending_ai_intent(context);
-                }
-                ChatWorkerEvent::Cancelled {
-                    finish_reason,
-                    tool_history,
-                    ..
-                } => {
-                    self.chat_pending = None;
-                    self.chat_attempt = None;
-                    if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
-                        message.finish_reason = Some(finish_reason);
-                        message.terminal_message = Some("Response cancelled".to_string());
-                        message.tools = tool_history;
-                    }
-                    self.status = "AI response cancelled".to_string();
-                    self.resume_pending_ai_intent(context);
+                } else {
+                    self.continue_chat_fallback(consent, context);
                 }
             }
+            ChatWorkerEvent::Failed {
+                message,
+                finish_reason,
+                tool_history,
+                ..
+            } => {
+                self.chat_pending = None;
+                self.chat_attempt = None;
+                if let Some(display) = self.chat_assistant_message_mut(logical_request_id) {
+                    display.finish_reason = Some(finish_reason);
+                    display.terminal_message = Some(message.clone());
+                    display.tools = tool_history;
+                }
+                self.status = message;
+                self.resume_pending_ai_intent(context);
+            }
+            ChatWorkerEvent::Cancelled {
+                finish_reason,
+                tool_history,
+                ..
+            } => {
+                self.chat_pending = None;
+                self.chat_attempt = None;
+                if let Some(message) = self.chat_assistant_message_mut(logical_request_id) {
+                    message.finish_reason = Some(finish_reason);
+                    message.terminal_message = Some("Response cancelled".to_string());
+                    message.tools = tool_history;
+                }
+                self.status = "AI response cancelled".to_string();
+                self.resume_pending_ai_intent(context);
+            }
+        }
     }
 
     fn begin_chat_send(&mut self, prompt: String, context: &ComponentContext<Self>) {
@@ -9001,7 +9021,10 @@ impl WfdiagSpike {
     /// turn pair without disturbing the streaming tail.
     fn bound_chat_messages(&mut self) {
         const MAX_CHAT_DISPLAY_MESSAGES: usize = 200;
-        let excess = self.chat_messages.len().saturating_sub(MAX_CHAT_DISPLAY_MESSAGES);
+        let excess = self
+            .chat_messages
+            .len()
+            .saturating_sub(MAX_CHAT_DISPLAY_MESSAGES);
         if excess > 0 {
             self.chat_messages.drain(0..excess);
         }
@@ -10953,11 +10976,12 @@ impl Component for WfdiagSpike {
                     move |_cancellation| {
                         // Reuse the shared scan executor instead of building a
                         // fresh current-thread runtime per click.
-                        let result = match shared_diagnostic_executor() {
-                            Ok(runtime) => Ok(runtime
-                                .block_on(wfdiag_native_monitor::get_network_connections())),
-                            Err(error) => Err(error),
-                        };
+                        let result =
+                            match shared_diagnostic_executor() {
+                                Ok(runtime) => Ok(runtime
+                                    .block_on(wfdiag_native_monitor::get_network_connections())),
+                                Err(error) => Err(error),
+                            };
                         Message::NetworkConnectionsFinished(Box::new(result))
                     },
                     Message::NetworkConnectionsFinished(Box::new(Err(
@@ -10989,7 +11013,9 @@ impl Component for WfdiagSpike {
                 );
             }
             Message::ClearProviderKey(index) => {
-                self.provider_key_drafts[index] = String::new();
+                if let Some(draft) = self.provider_key_drafts.get_mut(index) {
+                    draft.clear();
+                }
                 self.submit_provider_key(index, false);
                 self.schedule_provider_model_refresh(context);
             }
@@ -12516,7 +12542,10 @@ impl Component for WfdiagSpike {
                         window_support::request_forced_close();
                         if !context.window().request_close() {
                             // Reactor declined the close (never seen in
-                            // practice); at least drop the tray icon.
+                            // practice). Disarm the forced close so the next
+                            // ordinary title-bar close still honours
+                            // close-to-tray (#197), and drop the tray icon.
+                            window_support::cancel_forced_close();
                             if let Some(window) = instance_support::main_window_hwnd() {
                                 window_support::remove_tray_icon(window);
                             }

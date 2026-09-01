@@ -968,12 +968,52 @@ impl SettingsRuntime {
     }
 }
 
+impl SettingsRuntime {
+    /// Ask the worker to stop and wait at most `budget` for it to exit.
+    ///
+    /// Returns `true` when the worker exited within the budget. The worker
+    /// loop is strict FIFO, so `Stop` queues behind any in-flight save or
+    /// credential commit (DPAPI + write-through file I/O); a worker that is
+    /// still busy when the budget elapses is reaped on a detached thread
+    /// rather than stalling the caller. Hosts that need ordered teardown call
+    /// this explicitly; `Drop` performs the same stop without waiting.
+    pub fn stop_and_join(&mut self, budget: std::time::Duration) -> bool {
+        let _ = self.commands.send(SettingsCommand::Stop);
+        let Some(worker) = self.worker.take() else {
+            return true;
+        };
+        let (done, finished) = mpsc::channel();
+        reap_worker(worker, Some(done));
+        finished.recv_timeout(budget).is_ok()
+    }
+}
+
 impl Drop for SettingsRuntime {
     fn drop(&mut self) {
+        // Never join on the dropping thread: the runtime is owned by the UI
+        // shell, and joining behind a queued DPAPI/file save froze the window
+        // at close (#184). Mirror the detached reaper the other workers use.
         let _ = self.commands.send(SettingsCommand::Stop);
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            reap_worker(worker, None);
         }
+    }
+}
+
+/// Join a stopped worker on a detached thread so the caller never blocks.
+/// `done` (when supplied) receives one message once the join completes.
+fn reap_worker(worker: thread::JoinHandle<()>, done: Option<mpsc::Sender<()>>) {
+    let spawned = thread::Builder::new()
+        .name("wfdiag-settings-reaper".to_string())
+        .spawn(move || {
+            let _ = worker.join();
+            if let Some(done) = done {
+                let _ = done.send(());
+            }
+        });
+    if spawned.is_err() {
+        // Thread creation failed: the worker still exits on its own after
+        // `Stop`; leaking the handle is the only non-blocking option left.
     }
 }
 
@@ -1744,5 +1784,95 @@ mod tests {
             .expect("accepted settings event wakes the native dispatcher");
         assert!(wake_rx.try_recv().is_err());
         drop(runtime);
+    }
+
+    /// Settings storage whose `save` parks until the test releases it, so a
+    /// runtime can be torn down while its worker is genuinely busy (#184).
+    struct StalledSettings {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl SettingsStorage for StalledSettings {
+        fn load(&self) -> Result<Option<Vec<u8>>, SettingsError> {
+            Ok(None)
+        }
+
+        fn save(&self, _serialized: &[u8]) -> Result<(), SettingsError> {
+            let _ = self.entered.send(());
+            let _ = self.release.lock().unwrap().recv();
+            Ok(())
+        }
+    }
+
+    /// Starts a runtime whose worker is parked inside a `Save`; the returned
+    /// sender releases it.
+    fn stalled_runtime() -> (
+        SettingsRuntime,
+        mpsc::Receiver<SettingsEvent>,
+        mpsc::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let storage = Arc::new(StalledSettings {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        });
+        let service = SettingsService::new(
+            storage,
+            Arc::new(MemoryCredentials::default()),
+            Arc::new(AllowAllSettings),
+        );
+        let (runtime, events) = SettingsRuntime::start(service).unwrap();
+        runtime
+            .send(SettingsCommand::Save {
+                request_id: 1,
+                settings: Box::new(AppSettings::default()),
+            })
+            .unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker entered the stalled save");
+        (runtime, events, release_tx)
+    }
+
+    #[test]
+    fn runtime_stop_and_join_reports_an_idle_worker_within_budget() {
+        let (service, _, _) = service();
+        let (mut runtime, _events) = SettingsRuntime::start(service).unwrap();
+        assert!(runtime.stop_and_join(Duration::from_secs(2)));
+        // Once the worker handle is gone a second call is a no-op.
+        assert!(runtime.stop_and_join(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn runtime_drop_never_blocks_behind_a_stalled_save() {
+        let (runtime, events, release) = stalled_runtime();
+        let started = std::time::Instant::now();
+        drop(runtime);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "drop joined the stalled worker inline: {:?}",
+            started.elapsed()
+        );
+        // Releasing the save lets the worker finish its queued work and stop
+        // on its own; the completion still reaches the event channel.
+        release.send(()).unwrap();
+        let event = events.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            format!("{event:?}").contains("request_id: 1"),
+            "unexpected event: {event:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_stop_and_join_times_out_on_a_stalled_worker_then_reaps_it() {
+        let (mut runtime, _events, release) = stalled_runtime();
+        let started = std::time::Instant::now();
+        assert!(!runtime.stop_and_join(Duration::from_millis(100)));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        release.send(()).unwrap();
+        // The worker handle has already been handed to the detached reaper.
+        assert!(runtime.stop_and_join(Duration::from_millis(1)));
     }
 }

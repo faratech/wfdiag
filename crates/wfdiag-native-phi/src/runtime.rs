@@ -894,6 +894,16 @@ fn create_language_model_direct() -> Result<crate::windows_ai_bindings::Language
             )
             .into());
         }
+        // S_OK with a null out-parameter would become a null vtable
+        // dereference on the first cast (#190).
+        if result.is_null() {
+            log_phi_silica("CreateAsync returned S_OK with a null async operation");
+            return Err(PhiError::ai_unavailable(
+                "phi_silica",
+                "CreateAsync returned a null async operation".to_string(),
+            )
+            .into());
+        }
         windows_future::IAsyncOperation::<LanguageModel>::from_raw(result)
     };
 
@@ -1606,9 +1616,7 @@ pub async fn generate_response(
         prepare_phi_runtime()?;
         ensure_cached_model_locked(&mut cached)?;
         let Some(model) = cached.as_ref() else {
-            return Err(
-                "Phi Silica model was unavailable after preparation".to_string()
-            );
+            return Err("Phi Silica model was unavailable after preparation".to_string());
         };
         let result = generate_with_model(model, &prompt_owned, &is_cancelled);
         if result
