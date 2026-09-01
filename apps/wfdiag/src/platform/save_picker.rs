@@ -31,7 +31,7 @@
 //! only the Windows half: resolving the current user's known folders, driving
 //! `IFileSaveDialog`, and reading the system clock.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use std::error::Error;
@@ -521,22 +521,29 @@ pub struct SavePickerCompletion {
     pub reply: SavePickerReply,
 }
 
-/// The completed answer, published by the picker thread and taken by the UI
-/// thread on the next coalesced wake.
+/// The completed answers, published by picker threads and taken by the UI
+/// thread on the next coalesced wake. A queue, not a slot: two dialogs can
+/// overlap (one answer not yet drained when a second dialog closes), and a
+/// slot would silently drop the first answer.
 ///
 /// Reactor's component sender is `!Send`, so the picker thread cannot enqueue
 /// a `Message` directly. It parks the answer here and posts the same
 /// process-wide wake every other producer uses; the shell drains it beside the
 /// engine's own event queue.
-static COMPLETED: Mutex<Option<SavePickerCompletion>> = Mutex::new(None);
+/// How long a picker thread keeps re-posting its wake before giving up and
+/// leaving the answer for the next natural wake.
+const WAKE_RETRY_ATTEMPTS: usize = 100;
+const WAKE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Take the finished picker answer, if one is waiting.
+static COMPLETED: Mutex<VecDeque<SavePickerCompletion>> = Mutex::new(VecDeque::new());
+
+/// Take the oldest finished picker answer, if one is waiting.
 #[must_use]
 pub fn take_completed_picker() -> Option<SavePickerCompletion> {
     COMPLETED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
+        .pop_front()
 }
 
 /// Runs Common Item Dialogs off the UI thread (#140).
@@ -551,13 +558,19 @@ pub struct SavePickerHost;
 
 impl SavePickerHost {
     /// Start one picker. `wake` runs on the picker thread once the dialog
-    /// closes and must only signal, never touch UI state.
+    /// closes and must only signal, never touch UI state; it reports whether
+    /// the signal could be posted so a lost wake is retried instead of
+    /// stranding the answer.
     ///
     /// # Errors
     ///
     /// Returns a message when the thread could not be spawned, or when no
     /// registered shell window is available to own the dialog (#196).
-    pub fn request(request: SavePickerRequest, epoch: u64, wake: fn()) -> Result<(), String> {
+    pub fn request(
+        request: SavePickerRequest,
+        epoch: u64,
+        wake: fn() -> bool,
+    ) -> Result<(), String> {
         let owner = crate::platform::instance::registered_main_window_hwnd()
             .ok_or_else(|| SavePickerError::NoActiveOwner.to_string())?;
         // HWND is not Send. The numeric handle is, and it is revalidated on
@@ -571,15 +584,24 @@ impl SavePickerHost {
                     let _apartment = SingleThreadedApartment::enter();
                     run_picker(owner, request)
                 };
-                *COMPLETED
+                COMPLETED
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(SavePickerCompletion {
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push_back(SavePickerCompletion {
                         epoch,
                         request,
                         reply,
                     });
-                wake();
+                // The answer must not strand in the queue if the window is
+                // still materializing: retry the post briefly, then leave the
+                // answer for the next natural wake (wakes coalesce, so the
+                // retries are free once one lands).
+                for _ in 0..WAKE_RETRY_ATTEMPTS {
+                    if wake() {
+                        break;
+                    }
+                    std::thread::sleep(WAKE_RETRY_INTERVAL);
+                }
             })
             .map(|_| ())
             .map_err(|error| format!("the export dialog thread could not start: {error}"))
@@ -635,5 +657,48 @@ impl Drop for SingleThreadedApartment {
             // same thread.
             unsafe { windows::Win32::System::Com::CoUninitialize() };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn completion(epoch: u64) -> SavePickerCompletion {
+        SavePickerCompletion {
+            epoch,
+            request: SavePickerRequest::Export(ReportFormat::Text),
+            reply: SavePickerReply::Cancelled,
+        }
+    }
+
+    #[test]
+    fn completed_answers_queue_and_drain_exactly_once() {
+        COMPLETED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        COMPLETED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(completion(1));
+        COMPLETED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(completion(2));
+        assert_eq!(take_completed_picker().map(|c| c.epoch), Some(1));
+        assert_eq!(take_completed_picker().map(|c| c.epoch), Some(2));
+        assert_eq!(take_completed_picker(), None);
+    }
+
+    #[test]
+    fn request_without_a_registered_window_is_rejected_not_blocked() {
+        // Unit tests register no shell window, so the host must refuse the
+        // request instead of spawning a dialog that could never be shown.
+        let outcome =
+            SavePickerHost::request(SavePickerRequest::Export(ReportFormat::Text), 7, || true);
+        assert!(outcome.is_err());
+        // A spurious wake must not be left behind either.
+        assert_eq!(take_completed_picker(), None);
     }
 }

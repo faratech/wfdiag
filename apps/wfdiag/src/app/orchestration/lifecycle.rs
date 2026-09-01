@@ -53,8 +53,9 @@ impl WfdiagShell {
             messages.push(Message::Native(NativeMsg::TrayCommand(tray_command)));
         }
         // The save picker runs on its own STA thread (#140) and answers
-        // through the same coalesced wake every other producer uses.
-        if let Some(completion) = crate::platform::save_picker::take_completed_picker() {
+        // through the same coalesced wake every other producer uses. Drain
+        // the whole queue: one wake may carry more than one closed dialog.
+        while let Some(completion) = crate::platform::save_picker::take_completed_picker() {
             messages.push(Message::Export(ExportMsg::PickerFinished {
                 epoch: completion.epoch,
                 kind: match completion.request {

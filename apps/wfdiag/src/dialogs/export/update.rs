@@ -30,7 +30,7 @@ use crate::platform::external::{
     write_text_to_clipboard,
 };
 use crate::platform::save_picker::{SavePickerHost, SavePickerReply, SavePickerRequest};
-use crate::platform::ui_wake;
+use crate::platform::window;
 use wfdiag_app::{AppCommand, DispatchOutcome};
 use wfdiag_native_export::{
     ExportExternalAction, ExportMetadata, ExportPayload, ExportRequestKind,
@@ -194,7 +194,7 @@ impl WfdiagShell {
     /// remember which picker is open — only which generation it is.
     fn open_save_picker(&mut self, request: SavePickerRequest) {
         self.export.picker_epoch = self.export.picker_epoch.wrapping_add(1);
-        match SavePickerHost::request(request, self.export.picker_epoch, ui_wake::notify) {
+        match SavePickerHost::request(request, self.export.picker_epoch, window::post_ui_wake) {
             Ok(()) => self.export.picker_busy = true,
             Err(error) => {
                 self.export.error = Some(error.clone());
