@@ -30,10 +30,11 @@ pub mod remediation;
 pub mod elevation;
 
 /// Adapter shim: the trusted-program allowlist and console-output decoding
-/// the real runner uses.
-#[allow(unsafe_code, clippy::unused_self, clippy::unnecessary_wraps)]
-#[path = "../../../src-tauri/src/security.rs"]
-pub mod security;
+/// the real runner uses. `remediation.rs` reaches it as `crate::security`; the
+/// implementation compiles once in `wfdiag-native-core`.
+pub mod security {
+    pub use wfdiag_native_core::security::*;
+}
 
 /// Test-only shim: one regression test asserts the catalog's remediation
 /// mapping stays exhaustive against the canonical issue catalog.

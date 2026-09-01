@@ -59,6 +59,7 @@ uuid = { workspace = true, features = ["v4"] }
 url = { workspace = true }
 dirs = { workspace = true }
 wfdiag-ui-core = { workspace = true }
+wfdiag-native-core = { workspace = true }
 wfdiag-native-export = { workspace = true }
 wfdiag-native-history = { workspace = true }
 wfdiag-native-issues = { workspace = true }

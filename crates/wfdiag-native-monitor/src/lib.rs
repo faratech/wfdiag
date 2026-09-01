@@ -14,12 +14,13 @@ mod adapter_monitor;
 #[allow(unsafe_code)]
 #[path = "../../../src-tauri/src/native_monitor.rs"]
 mod monitor;
-#[allow(dead_code, unsafe_code, clippy::unused_self, clippy::unnecessary_wraps)]
-#[path = "../../../src-tauri/src/security.rs"]
-mod security;
-#[allow(unsafe_code)]
-#[path = "../../../src-tauri/src/wmi_native.rs"]
-mod wmi_native;
+
+// `native_monitor.rs` still says `crate::wmi_native::…`; the implementation
+// compiles once in `wfdiag-native-core`.
+#[allow(unused_imports)]
+mod wmi_native {
+    pub use wfdiag_native_core::wmi::*;
+}
 
 mod runtime;
 

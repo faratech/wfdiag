@@ -5609,6 +5609,7 @@ dependencies = [
  "wfdiag-native-issues",
  "wfdiag-native-monitor",
  "wfdiag-native-phi",
+ "wfdiag-native-projection",
  "wfdiag-native-remediation",
  "wfdiag-native-settings",
  "wfdiag-native-system",
@@ -5679,6 +5680,14 @@ dependencies = [
 [[package]]
 name = "wfdiag-native-core"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "encoding_rs",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "windows 0.62.2",
+]
 
 [[package]]
 name = "wfdiag-native-diagnostics"
@@ -5693,6 +5702,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "uuid",
+ "wfdiag-native-core",
  "wfdiag-native-issues",
  "wfdiag-native-monitor",
  "wfdiag-ui-core",
@@ -5718,6 +5728,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "wfdiag-native-core",
  "wfdiag-native-issues",
  "windows 0.62.2",
 ]
@@ -5729,6 +5740,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "wfdiag-native-core",
  "wfdiag-remediation-catalog",
 ]
 
@@ -5742,6 +5754,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "wfdiag-native-core",
  "wfdiag-ui-core",
  "windows 0.62.2",
  "winreg 0.56.0",
@@ -5751,6 +5764,7 @@ dependencies = [
 name = "wfdiag-native-phi"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "serde",
  "serde_json",
  "tokio",
@@ -5767,6 +5781,9 @@ dependencies = [
 [[package]]
 name = "wfdiag-native-projection"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "wfdiag-native-remediation"
@@ -5777,6 +5794,7 @@ dependencies = [
  "serde",
  "tokio",
  "tokio-util",
+ "wfdiag-native-core",
  "wfdiag-native-issues",
  "wfdiag-remediation-catalog",
  "windows 0.62.2",
@@ -5790,6 +5808,7 @@ dependencies = [
  "serde",
  "serde_json",
  "windows 0.62.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -5812,6 +5831,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "wfdiag-native-settings",
  "windows 0.62.2",
 ]
 
@@ -5854,6 +5874,7 @@ dependencies = [
  "wfdiag-native-ai-chat",
  "wfdiag-native-ai-provider",
  "wfdiag-native-ai-report",
+ "wfdiag-native-core",
  "wfdiag-native-export",
  "wfdiag-native-history",
  "wfdiag-native-issues",

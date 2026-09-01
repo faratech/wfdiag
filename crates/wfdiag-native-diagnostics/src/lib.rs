@@ -11,25 +11,29 @@ mod runtime;
 pub use runtime::*;
 
 #[cfg(windows)]
-#[allow(dead_code, unsafe_code)]
-#[path = "../../../src-tauri/src/error.rs"]
-mod error;
-#[cfg(windows)]
 #[allow(unsafe_code)]
 #[path = "../../../src-tauri/src/native_diagnostics.rs"]
 mod native_diagnostics;
+
+// The shared primitives compile once in `wfdiag-native-core`. The
+// `#[path]`-included shipping modules above and below still spell them
+// `crate::security` / `crate::timestamp` / `crate::wmi_native`, so those names
+// stay, pointing at the one implementation.
 #[cfg(windows)]
-#[allow(unsafe_code, clippy::unused_self, clippy::unnecessary_wraps)]
-#[path = "../../../src-tauri/src/security.rs"]
-mod security;
+#[allow(unused_imports)]
+mod security {
+    pub use wfdiag_native_core::security::*;
+}
 #[cfg(windows)]
-#[allow(dead_code, unsafe_code)]
-#[path = "../../../src-tauri/src/timestamp.rs"]
-mod timestamp;
+#[allow(unused_imports)]
+mod timestamp {
+    pub use wfdiag_native_core::timestamp::*;
+}
 #[cfg(windows)]
-#[allow(unsafe_code)]
-#[path = "../../../src-tauri/src/wmi_native.rs"]
-mod wmi_native;
+#[allow(unused_imports)]
+mod wmi_native {
+    pub use wfdiag_native_core::wmi::*;
+}
 
 #[cfg(windows)]
 pub use wfdiag_native_monitor as native_monitor;

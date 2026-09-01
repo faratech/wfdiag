@@ -14,8 +14,7 @@ pub struct Timestamp {
 /// Timestamp. The trailing signed value is the LOCAL-to-UTC offset in
 /// MINUTES; `+***` (offset unspecified) is treated as UTC. Returns None on
 /// anything malformed.
-#[allow(dead_code)]
-pub(crate) fn parse_wmi_datetime(s: &str) -> Option<Timestamp> {
+pub fn parse_wmi_datetime(s: &str) -> Option<Timestamp> {
     let s = s.trim();
     if s.len() < 14 || !s.as_bytes()[..14].iter().all(u8::is_ascii_digit) {
         return None;
@@ -45,38 +44,43 @@ pub(crate) fn parse_wmi_datetime(s: &str) -> Option<Timestamp> {
 
 impl Timestamp {
     /// Create a timestamp for the current time
+    #[must_use]
     pub fn now() -> Self {
         let duration = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
         Self {
-            secs: duration.as_secs() as i64,
+            secs: duration.as_secs().cast_signed(),
         }
     }
 
     /// Create a timestamp from Unix epoch seconds
     #[allow(dead_code)]
+    #[must_use]
     pub fn from_secs(secs: i64) -> Self {
         Self { secs }
     }
 
     /// Get the Unix timestamp in seconds
     #[allow(dead_code)]
+    #[must_use]
     pub fn timestamp(&self) -> i64 {
         self.secs
     }
 
     /// Check if this timestamp is before another by a given duration
+    #[must_use]
     pub fn is_before(&self, other: &Timestamp, duration: Duration) -> bool {
-        self.secs + duration.as_secs() as i64 <= other.secs
+        self.secs + duration.as_secs().cast_signed() <= other.secs
     }
 
     /// Format timestamp with a format string (simplified implementation)
     /// Supported: %Y (year), %m (month), %d (day), %H (hour), %M (minute), %S (second)
+    #[must_use]
     pub fn format(&self, fmt: &str) -> String {
         let secs = self.secs;
-        let days = secs / 86400;
-        let remaining = secs % 86400;
+        let days = secs / 86_400;
+        let remaining = secs % 86_400;
 
         let hours = (remaining / 3600) % 24;
         let minutes = (remaining % 3600) / 60;
@@ -84,24 +88,25 @@ impl Timestamp {
 
         let (year, month, day) = days_to_ymd(days);
 
-        fmt.replace("%Y", &format!("{:04}", year))
-            .replace("%m", &format!("{:02}", month))
-            .replace("%d", &format!("{:02}", day))
-            .replace("%H", &format!("{:02}", hours))
-            .replace("%M", &format!("{:02}", minutes))
-            .replace("%S", &format!("{:02}", seconds))
+        fmt.replace("%Y", &format!("{year:04}"))
+            .replace("%m", &format!("{month:02}"))
+            .replace("%d", &format!("{day:02}"))
+            .replace("%H", &format!("{hours:02}"))
+            .replace("%M", &format!("{minutes:02}"))
+            .replace("%S", &format!("{seconds:02}"))
     }
 
     /// Format as ISO 8601 string (YYYY-MM-DDTHH:MM:SSZ)
     #[allow(clippy::wrong_self_convention)]
+    #[must_use]
     pub fn to_iso_string(&self) -> String {
         // Convert to components
         let secs = self.secs;
 
         // Calculate date/time components from Unix timestamp
         // Days since Unix epoch
-        let days = secs / 86400;
-        let remaining = secs % 86400;
+        let days = secs / 86_400;
+        let remaining = secs % 86_400;
 
         let hours = (remaining / 3600) % 24;
         let minutes = (remaining % 3600) / 60;
@@ -110,13 +115,14 @@ impl Timestamp {
         // Calculate year, month, day from days since epoch (1970-01-01)
         let (year, month, day) = days_to_ymd(days);
 
-        format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-            year, month, day, hours, minutes, seconds
-        )
+        format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
     }
 
     /// Parse from ISO 8601 string
+    ///
+    /// # Errors
+    /// Returns a JSON-serialized [`DiagError::Internal`] when the string is
+    /// shorter than `YYYY-MM-DDTHH:MM:SS` or any field fails to parse.
     pub fn from_iso_string(s: &str) -> Result<Self, String> {
         // Parse format: YYYY-MM-DDTHH:MM:SS or YYYY-MM-DDTHH:MM:SSZ or with timezone
         let s = s.trim();
@@ -134,7 +140,7 @@ impl Timestamp {
 
         // Parse components
         if s.len() < 19 {
-            return Err(DiagError::internal(format!("Invalid ISO 8601 format: {}", s)).into());
+            return Err(DiagError::internal(format!("Invalid ISO 8601 format: {s}")).into());
         }
 
         let year: i32 = s[0..4]
@@ -158,31 +164,39 @@ impl Timestamp {
 
         // Convert to Unix timestamp
         let days = ymd_to_days(year, month, day);
-        let secs = days * 86400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64;
+        let secs =
+            days * 86_400 + i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second);
 
         Ok(Self { secs })
     }
 }
 
 /// Convert year/month/day to days since Unix epoch
+// The algorithm's own invariants bound the narrowing casts: `y - era * 400`
+// ("year of era") is 0..=399 by construction, so it never loses a sign or
+// truncates.
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 fn ymd_to_days(year: i32, month: u32, day: u32) -> i64 {
     // Algorithm from https://howardhinnant.github.io/date_algorithms.html
-    let y = if month <= 2 { year - 1 } else { year } as i64;
+    let y = i64::from(if month <= 2 { year - 1 } else { year });
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = (y - era * 400) as u32;
     let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe as i64 - 719468
+    era * 146_097 + i64::from(doe) - 719_468
 }
 
 /// Convert days since Unix epoch to year/month/day
+// As above: "day of era" is 0..=146_096, and the reconstructed year fits i32
+// for every timestamp an i64 second count can represent.
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 fn days_to_ymd(days: i64) -> (i32, u32, u32) {
     // Algorithm from https://howardhinnant.github.io/date_algorithms.html
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u32;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = i64::from(yoe) + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
@@ -216,15 +230,16 @@ impl<'de> Deserialize<'de> for Timestamp {
     }
 }
 
-/// Format a SystemTime as a local date-time string (for display)
+/// Format a `SystemTime` as a local date-time string (for display)
+#[must_use]
 pub fn format_local_datetime(time: SystemTime) -> String {
     let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = duration.as_secs() as i64;
+    let secs = duration.as_secs().cast_signed();
 
     // Note: This is UTC, not local time. For proper local time we'd need
     // platform-specific code, but for log timestamps UTC is fine.
-    let days = secs / 86400;
-    let remaining = secs % 86400;
+    let days = secs / 86_400;
+    let remaining = secs % 86_400;
 
     let hours = (remaining / 3600) % 24;
     let minutes = (remaining % 3600) / 60;
@@ -232,13 +247,11 @@ pub fn format_local_datetime(time: SystemTime) -> String {
 
     let (year, month, day) = days_to_ymd(days);
 
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        year, month, day, hours, minutes, seconds
-    )
+    format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}:{seconds:02}")
 }
 
 /// Format just the time portion (HH:MM:SS)
+#[must_use]
 pub fn format_time(time: SystemTime) -> String {
     let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = duration.as_secs();
@@ -247,7 +260,7 @@ pub fn format_time(time: SystemTime) -> String {
     let minutes = (secs % 3600) / 60;
     let seconds = secs % 60;
 
-    format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
 #[cfg(test)]

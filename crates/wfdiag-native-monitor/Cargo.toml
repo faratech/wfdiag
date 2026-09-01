@@ -18,6 +18,7 @@ wfdiag-ui-core = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 winreg = { workspace = true }
+wfdiag-native-core = { workspace = true }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",

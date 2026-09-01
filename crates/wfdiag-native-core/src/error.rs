@@ -157,7 +157,7 @@ impl DiagError {
     }
 }
 
-/// Convert DiagError to String for Tauri command return types.
+/// Convert `DiagError` to String for Tauri command return types.
 ///
 /// This provides JSON-serialized error information that the frontend
 /// can parse for structured error handling.
@@ -167,8 +167,12 @@ impl From<DiagError> for String {
     }
 }
 
-/// Convenience trait for converting anyhow errors to DiagError
+/// Convenience trait for converting anyhow errors to `DiagError`
 pub trait IntoDiagError<T> {
+    /// Replace any error with the `DiagError` `f` builds.
+    ///
+    /// # Errors
+    /// Returns `f()` whenever `self` is `Err`.
     fn with_context(self, f: impl FnOnce() -> DiagError) -> Result<T, DiagError>;
 }
 

@@ -1,7 +1,7 @@
 #[cfg(windows)]
 use std::error::Error;
 #[cfg(windows)]
-use wfdiag_native_monitor::{NativeMonitorRuntime, ProcessQuery};
+use wfdiag_native_monitor::{NativeMonitorRuntime, ProcessQuery, ProcessQueryOutcome};
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn Error>> {

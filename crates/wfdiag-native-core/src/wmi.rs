@@ -4,6 +4,7 @@
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
     CoSetProxyBlanket, EOAC_NONE, RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE,
@@ -26,26 +27,42 @@ thread_local! {
     static COM_INITIALIZED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Initialize COM for the current thread if not already done
+/// Initialize COM for the current thread if not already done.
+///
+/// # Apartment choice, and why there is no `CoUninitialize` (issue #224)
+///
+/// The thread joins the **multi-threaded** apartment (`COINIT_MULTITHREADED`).
+/// A stale comment here used to claim `COINIT_APARTMENTTHREADED` "for better
+/// compatibility with GUI apps like Tauri"; the code has always passed
+/// `COINIT_MULTITHREADED` and must keep doing so — WMI queries run on Tokio
+/// blocking-pool threads, which have no message pump, and an STA there would
+/// deadlock the first cross-apartment call.
+///
+/// The matching `CoUninitialize` is deliberately omitted: initialization is
+/// once per thread and scoped to that thread's whole lifetime. A
+/// [`WmiConnection`] holds live `IWbemServices` proxies that may outlast any
+/// single call on the thread, so uninitializing at the end of a query would
+/// invalidate them. The threads involved live until process exit, at which
+/// point the apartment is torn down with the process anyway.
 fn ensure_com_initialized() -> Result<()> {
     COM_INITIALIZED.with(|initialized| {
         if !initialized.get() {
             unsafe {
-                // Initialize COM - use COINIT_APARTMENTTHREADED for better compatibility
-                // with GUI apps like Tauri. The result can be S_OK, S_FALSE (already initialized),
-                // or RPC_E_CHANGED_MODE (different mode) - all are acceptable.
+                // The result can be S_OK, S_FALSE (already initialized), or
+                // RPC_E_CHANGED_MODE (this thread is already in an STA) - all
+                // are acceptable, WMI still works.
                 let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
 
                 // S_OK = success, S_FALSE = already initialized (fine)
                 // RPC_E_CHANGED_MODE = already in STA (also fine, we can still use WMI)
                 if hr.is_err() {
-                    let code = hr.0 as u32;
-                    // 0x80010106 = RPC_E_CHANGED_MODE - COM already initialized in different mode
+                    let code = hr.0.cast_unsigned();
+                    // 0x8001_0106 = RPC_E_CHANGED_MODE - COM already initialized in different mode
                     // This is OK - we can still use WMI
-                    if code != 0x80010106 && code != 1 {
+                    if code != 0x8001_0106 && code != 1 {
                         // 1 = S_FALSE
                         // Only log, don't fail - COM might still work
-                        eprintln!("CoInitializeEx returned: 0x{:08X}", code);
+                        eprintln!("CoInitializeEx returned: 0x{code:08X}");
                     }
                 }
 
@@ -70,18 +87,26 @@ pub struct WmiConnection {
 
 impl WmiConnection {
     /// Create a new WMI connection to the default namespace (root\cimv2)
+    ///
+    /// # Errors
+    /// Returns an error when COM cannot be initialized, `WbemLocator` cannot
+    /// be created, or the namespace connection is refused.
     pub fn new() -> Result<Self> {
         Self::with_namespace("root\\cimv2")
     }
 
     /// Create a WMI connection to a specific namespace
+    ///
+    /// # Errors
+    /// Returns an error when COM cannot be initialized, `WbemLocator` cannot
+    /// be created, or `namespace` cannot be connected to.
     pub fn with_namespace(namespace: &str) -> Result<Self> {
         ensure_com_initialized()?;
 
         unsafe {
             // Create WbemLocator instance
             let locator: IWbemLocator = CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER)
-                .map_err(|e| anyhow!("Failed to create WbemLocator: {}", e))?;
+                .map_err(|e| anyhow!("Failed to create WbemLocator: {e}"))?;
 
             // Connect to the namespace
             let namespace_bstr = BSTR::from(namespace);
@@ -95,9 +120,7 @@ impl WmiConnection {
                     &BSTR::new(),
                     None,
                 )
-                .map_err(|e| {
-                    anyhow!("Failed to connect to WMI namespace '{}': {}", namespace, e)
-                })?;
+                .map_err(|e| anyhow!("Failed to connect to WMI namespace '{namespace}': {e}"))?;
 
             // Set security on the proxy
             // CoSetProxyBlanket(proxy, authn_svc, authz_svc, server_princ_name, authn_level, imp_level, auth_info, capabilities)
@@ -121,6 +144,10 @@ impl WmiConnection {
     }
 
     /// Execute a WQL query and return results as JSON
+    ///
+    /// # Errors
+    /// Returns an error when the provider rejects the query, enumeration
+    /// fails or times out, or the query panics inside the COM layer.
     pub fn query(&self, wql: &str) -> Result<Vec<HashMap<String, Value>>> {
         // Wrap entire query in catch_unwind for safety
         let result =
@@ -145,7 +172,7 @@ impl WmiConnection {
                     WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
                     None,
                 )
-                .map_err(|e| anyhow!("WMI query failed for '{}': {}", wql, e))?;
+                .map_err(|e| anyhow!("WMI query failed for '{wql}': {e}"))?;
 
             let mut results = Vec::new();
 
@@ -153,27 +180,27 @@ impl WmiConnection {
                 let mut objects: [Option<IWbemClassObject>; 1] = [None];
                 let mut returned: u32 = 0;
 
-                let hr = enumerator.Next(WMI_NEXT_TIMEOUT_MS, &mut objects, &mut returned);
+                let hr = enumerator.Next(WMI_NEXT_TIMEOUT_MS, &mut objects, &raw mut returned);
 
                 if hr.0 == WBEM_S_TIMEDOUT {
-                    return Err(anyhow!("WMI query timed out for '{}'", wql));
+                    return Err(anyhow!("WMI query timed out for '{wql}'"));
                 }
                 if hr.is_err() {
-                    return Err(anyhow!("WMI enumeration failed for '{}': {:?}", wql, hr));
+                    return Err(anyhow!("WMI enumeration failed for '{wql}': {hr:?}"));
                 }
                 if returned == 0 {
                     break;
                 }
 
                 if let Some(obj) = objects[0].take() {
-                    // Use catch_unwind to prevent panics from crashing the app
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        self.extract_properties(&obj)
-                    })) {
-                        Ok(Ok(props)) => results.push(props),
-                        Ok(Err(_)) | Err(_) => {
-                            // Skip objects that fail to extract
-                        }
+                    // Use catch_unwind to prevent panics from crashing the app;
+                    // an object that panics while extracting is skipped, not fatal.
+                    if let Ok(props) =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            self.extract_properties(&obj)
+                        }))
+                    {
+                        results.push(props);
                     }
                 }
             }
@@ -183,12 +210,16 @@ impl WmiConnection {
     }
 
     /// Execute a simple SELECT * query on a WMI class
+    ///
+    /// # Errors
+    /// Same failures as [`WmiConnection::query`].
     pub fn query_class(&self, class_name: &str) -> Result<Vec<HashMap<String, Value>>> {
-        self.query(&format!("SELECT * FROM {}", class_name))
+        self.query(&format!("SELECT * FROM {class_name}"))
     }
 
-    /// Extract all properties from a WMI object
-    fn extract_properties(&self, obj: &IWbemClassObject) -> Result<HashMap<String, Value>> {
+    /// Extract all properties from a WMI object. Properties that fail to read
+    /// are skipped rather than failing the object, so this cannot fail.
+    fn extract_properties(&self, obj: &IWbemClassObject) -> HashMap<String, Value> {
         let mut props = HashMap::new();
 
         unsafe {
@@ -200,7 +231,13 @@ impl WmiConnection {
                 let mut cim_type: i32 = 0;
                 let mut flavor: i32 = 0;
 
-                let hr = obj.Next(0, &mut name, &mut value, &mut cim_type, &mut flavor);
+                let hr = obj.Next(
+                    0,
+                    &raw mut name,
+                    &raw mut value,
+                    &raw mut cim_type,
+                    &raw mut flavor,
+                );
 
                 if hr.is_err() {
                     break;
@@ -218,13 +255,13 @@ impl WmiConnection {
                 // 0.62's VARIANT has no Drop, so without this every string/array-valued
                 // WMI property leaks for the life of the process. `value` is re-zeroed by
                 // VARIANT::default() at the top of the next iteration.
-                let _ = VariantClear(&mut value);
+                let _ = VariantClear(&raw mut value);
             }
 
             obj.EndEnumeration().ok();
         }
 
-        Ok(props)
+        props
     }
 
     /// Convert a VARIANT to JSON Value
@@ -319,7 +356,16 @@ impl WmiConnection {
         }
     }
 
-    /// Convert a SafeArray VARIANT to JSON array
+    /// Convert a `SafeArray` VARIANT to JSON array
+    // One arm per SAFEARRAY element type, so the length is inherent; the
+    // element count is non-negative by the `ubound < lbound` guard above it,
+    // and `self` is kept for symmetry with the other converters.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::unused_self,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation
+    )]
     fn safearray_to_json(&self, variant: &VARIANT) -> Value {
         unsafe {
             use windows::Win32::System::Ole::{
@@ -331,13 +377,11 @@ impl WmiConnection {
                 return json!([]);
             }
 
-            let lbound = match SafeArrayGetLBound(psa, 1) {
-                Ok(lb) => lb,
-                Err(_) => return json!([]),
+            let Ok(lbound) = SafeArrayGetLBound(psa, 1) else {
+                return json!([]);
             };
-            let ubound = match SafeArrayGetUBound(psa, 1) {
-                Ok(ub) => ub,
-                Err(_) => return json!([]),
+            let Ok(ubound) = SafeArrayGetUBound(psa, 1) else {
+                return json!([]);
             };
 
             if ubound < lbound {
@@ -358,8 +402,12 @@ impl WmiConnection {
                 if base_vt == VT_BSTR.0 {
                     // SafeArrayGetElement for BSTR returns a copy that we own
                     let mut bstr: BSTR = BSTR::new();
-                    if SafeArrayGetElement(psa, &idx, &mut bstr as *mut _ as *mut std::ffi::c_void)
-                        .is_ok()
+                    if SafeArrayGetElement(
+                        psa,
+                        &raw const idx,
+                        (&raw mut bstr).cast::<std::ffi::c_void>(),
+                    )
+                    .is_ok()
                     {
                         // BSTR::to_string() handles null and empty cases
                         let s = bstr.to_string();
@@ -368,71 +416,111 @@ impl WmiConnection {
                     }
                 } else if base_vt == VT_I4.0 {
                     let mut val: i32 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
-                        .is_ok()
+                    if SafeArrayGetElement(
+                        psa,
+                        &raw const idx,
+                        (&raw mut val).cast::<std::ffi::c_void>(),
+                    )
+                    .is_ok()
                     {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_UI1.0 {
                     let mut val: u8 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
-                        .is_ok()
+                    if SafeArrayGetElement(
+                        psa,
+                        &raw const idx,
+                        (&raw mut val).cast::<std::ffi::c_void>(),
+                    )
+                    .is_ok()
                     {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_UI2.0 {
                     let mut val: u16 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
-                        .is_ok()
+                    if SafeArrayGetElement(
+                        psa,
+                        &raw const idx,
+                        (&raw mut val).cast::<std::ffi::c_void>(),
+                    )
+                    .is_ok()
                     {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_UI4.0 {
                     let mut val: u32 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
-                        .is_ok()
+                    if SafeArrayGetElement(
+                        psa,
+                        &raw const idx,
+                        (&raw mut val).cast::<std::ffi::c_void>(),
+                    )
+                    .is_ok()
                     {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_I2.0 {
                     let mut val: i16 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
-                        .is_ok()
+                    if SafeArrayGetElement(
+                        psa,
+                        &raw const idx,
+                        (&raw mut val).cast::<std::ffi::c_void>(),
+                    )
+                    .is_ok()
                     {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_I8.0 {
                     let mut val: i64 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
-                        .is_ok()
+                    if SafeArrayGetElement(
+                        psa,
+                        &raw const idx,
+                        (&raw mut val).cast::<std::ffi::c_void>(),
+                    )
+                    .is_ok()
                     {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_UI8.0 {
                     let mut val: u64 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
-                        .is_ok()
+                    if SafeArrayGetElement(
+                        psa,
+                        &raw const idx,
+                        (&raw mut val).cast::<std::ffi::c_void>(),
+                    )
+                    .is_ok()
                     {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_R4.0 {
                     let mut val: f32 = 0.0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
-                        .is_ok()
+                    if SafeArrayGetElement(
+                        psa,
+                        &raw const idx,
+                        (&raw mut val).cast::<std::ffi::c_void>(),
+                    )
+                    .is_ok()
                     {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_R8.0 {
                     let mut val: f64 = 0.0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
-                        .is_ok()
+                    if SafeArrayGetElement(
+                        psa,
+                        &raw const idx,
+                        (&raw mut val).cast::<std::ffi::c_void>(),
+                    )
+                    .is_ok()
                     {
                         arr.push(json!(val));
                     }
                 } else if base_vt == VT_BOOL.0 {
                     let mut val: i16 = 0;
-                    if SafeArrayGetElement(psa, &idx, &mut val as *mut _ as *mut std::ffi::c_void)
-                        .is_ok()
+                    if SafeArrayGetElement(
+                        psa,
+                        &raw const idx,
+                        (&raw mut val).cast::<std::ffi::c_void>(),
+                    )
+                    .is_ok()
                     {
                         arr.push(json!(val != 0));
                     }
@@ -453,18 +541,31 @@ impl WmiConnection {
 }
 
 // Convenience functions (currently unused but available for future use)
+/// Run one WQL query against `root\cimv2` on a fresh connection.
+///
+/// # Errors
+/// Same failures as [`WmiConnection::new`] and [`WmiConnection::query`].
 #[allow(dead_code)]
 pub fn wmi_query(wql: &str) -> Result<Vec<HashMap<String, Value>>> {
     let conn = WmiConnection::new()?;
     conn.query(wql)
 }
 
+/// Run one WQL query against `namespace` on a fresh connection.
+///
+/// # Errors
+/// Same failures as [`WmiConnection::with_namespace`] and
+/// [`WmiConnection::query`].
 #[allow(dead_code)]
 pub fn wmi_query_ns(namespace: &str, wql: &str) -> Result<Vec<HashMap<String, Value>>> {
     let conn = WmiConnection::with_namespace(namespace)?;
     conn.query(wql)
 }
 
+/// `SELECT * FROM <class_name>` against `root\cimv2` on a fresh connection.
+///
+/// # Errors
+/// Same failures as [`WmiConnection::new`] and [`WmiConnection::query_class`].
 #[allow(dead_code)]
 pub fn wmi_query_class(class_name: &str) -> Result<Vec<HashMap<String, Value>>> {
     let conn = WmiConnection::new()?;
@@ -472,31 +573,42 @@ pub fn wmi_query_class(class_name: &str) -> Result<Vec<HashMap<String, Value>>> 
 }
 
 #[allow(dead_code)]
-pub fn get_string(props: &HashMap<String, Value>, key: &str) -> Option<String> {
+#[must_use]
+pub fn get_string<S: BuildHasher>(props: &HashMap<String, Value, S>, key: &str) -> Option<String> {
     props
         .get(key)
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 #[allow(dead_code)]
-pub fn get_u64(props: &HashMap<String, Value>, key: &str) -> Option<u64> {
-    props.get(key).and_then(|v| v.as_u64())
+#[must_use]
+pub fn get_u64<S: BuildHasher>(props: &HashMap<String, Value, S>, key: &str) -> Option<u64> {
+    props.get(key).and_then(serde_json::Value::as_u64)
 }
 
 #[allow(dead_code)]
-pub fn get_i64(props: &HashMap<String, Value>, key: &str) -> Option<i64> {
-    props.get(key).and_then(|v| v.as_i64())
+#[must_use]
+pub fn get_i64<S: BuildHasher>(props: &HashMap<String, Value, S>, key: &str) -> Option<i64> {
+    props.get(key).and_then(serde_json::Value::as_i64)
 }
 
 #[allow(dead_code)]
-pub fn get_u32(props: &HashMap<String, Value>, key: &str) -> Option<u32> {
-    props.get(key).and_then(|v| v.as_u64()).map(|u| u as u32)
+#[must_use]
+// Historical behaviour: WMI u32 properties round-trip through JSON as u64,
+// and an oversized value truncates rather than disappearing.
+#[allow(clippy::cast_possible_truncation)]
+pub fn get_u32<S: BuildHasher>(props: &HashMap<String, Value, S>, key: &str) -> Option<u32> {
+    props
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .map(|u| u as u32)
 }
 
 #[allow(dead_code)]
-pub fn get_bool(props: &HashMap<String, Value>, key: &str) -> Option<bool> {
-    props.get(key).and_then(|v| v.as_bool())
+#[must_use]
+pub fn get_bool<S: BuildHasher>(props: &HashMap<String, Value, S>, key: &str) -> Option<bool> {
+    props.get(key).and_then(serde_json::Value::as_bool)
 }
 
 #[cfg(test)]

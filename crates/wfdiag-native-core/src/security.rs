@@ -15,6 +15,7 @@ const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 /// 1. First tries to decode as UTF-8 (for modern commands)
 /// 2. Falls back to Windows-1252 for OEM code page output
 #[cfg(windows)]
+#[must_use]
 pub fn decode_windows_output(bytes: &[u8]) -> String {
     // UTF-16LE first: sfc.exe (and some other system tools) emit UTF-16,
     // which the UTF-8/1252 paths would garble into interleaved NULs.
@@ -174,6 +175,11 @@ impl SecureCommandExecutor {
     }
 
     /// Validate and execute a command with strict security checks
+    ///
+    /// # Errors
+    /// Returns an error when `cmd` is not whitelisted, when `args` exceed the
+    /// entry's budget or fail its per-command validation, when the trusted
+    /// executable cannot be resolved, or when the child fails or times out.
     pub fn execute_command(&self, cmd: &str, args: &[&str]) -> Result<std::process::Output> {
         // Check if command is allowed
         let config = self
@@ -284,6 +290,7 @@ impl SecureCommandExecutor {
         }
     }
 
+    #[allow(clippy::unused_self)]
     fn validate_temp_path(&self, path: &str) -> Result<()> {
         // Ensure path is in temp directory and has safe filename
         let temp_dir = std::env::temp_dir();
@@ -321,6 +328,7 @@ impl SecureCommandExecutor {
         Ok(())
     }
 
+    #[allow(clippy::unused_self)]
     fn validate_drive_letter(&self, drive: &str) -> Result<()> {
         // Validate drive letter format (A: through Z:)
         if drive.len() != 2 {
@@ -340,11 +348,21 @@ impl SecureCommandExecutor {
         Ok(())
     }
 
+    #[allow(clippy::unused_self)]
     fn is_safe_argument(&self, arg: &str) -> bool {
         // Allow drive letters and basic switches
         matches!(arg, "C:" | "/status" | "/querysettings" | "-an" | "/all")
     }
 
+    /// Build a [`Command`] for a trusted, fully-resolved Windows executable.
+    ///
+    /// # Errors
+    /// Returns an error when `executable` contains a path separator or cannot
+    /// be found in the trusted OS location.
+    // The allowlist lives on the type, not in per-call state; keeping these
+    // helpers as methods preserves the shipping call sites (and the public
+    // API) unchanged.
+    #[allow(clippy::unused_self)]
     pub fn create_secure_command(&self, executable: &str) -> Result<Command> {
         let program = trusted_system_program(executable)?;
         #[cfg(windows)]
@@ -355,13 +373,14 @@ impl SecureCommandExecutor {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
 
         Ok(cmd)
     }
 
+    #[allow(clippy::unused_self)]
     fn output_with_timeout(
         &self,
         mut command: Command,
@@ -369,8 +388,8 @@ impl SecureCommandExecutor {
         label: &str,
     ) -> Result<std::process::Output> {
         let temp_files = TempOutputFiles {
-            stdout_path: unique_output_path(label, "stdout")?,
-            stderr_path: unique_output_path(label, "stderr")?,
+            stdout_path: unique_output_path(label, "stdout"),
+            stderr_path: unique_output_path(label, "stderr"),
         };
         let stdout_file = OpenOptions::new()
             .write(true)
@@ -430,7 +449,7 @@ impl Drop for TempOutputFiles {
     }
 }
 
-fn unique_output_path(label: &str, stream: &str) -> Result<PathBuf> {
+fn unique_output_path(label: &str, stream: &str) -> PathBuf {
     let safe_label: String = label
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -439,13 +458,10 @@ fn unique_output_path(label: &str, stream: &str) -> Result<PathBuf> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    Ok(std::env::temp_dir().join(format!(
-        "wfdiag_{}_{}_{}_{}.tmp",
+    std::env::temp_dir().join(format!(
+        "wfdiag_{}_{nonce}_{safe_label}_{stream}.tmp",
         std::process::id(),
-        nonce,
-        safe_label,
-        stream
-    )))
+    ))
 }
 
 #[cfg(windows)]
@@ -462,14 +478,22 @@ fn with_exe_extension(program: &str) -> String {
     if program.to_ascii_lowercase().ends_with(".exe") {
         program.to_string()
     } else {
-        format!("{}.exe", program)
+        format!("{program}.exe")
     }
 }
 
 /// Resolve a fixed Windows executable to a trusted OS location. This avoids
 /// launching elevated diagnostics or remediations through the current directory
 /// or PATH search order.
-pub(crate) fn trusted_system_program(program: &str) -> Result<PathBuf> {
+///
+/// # Errors
+/// Returns an error when `program` carries a path separator or is absolute,
+/// or (on Windows) when the resolved trusted path does not exist.
+// The non-Windows build resolves every name to itself, so `Result` looks
+// redundant there; the Windows build — the only one that ships — really can
+// fail, and callers are shared.
+#[cfg_attr(not(windows), allow(clippy::unnecessary_wraps))]
+pub fn trusted_system_program(program: &str) -> Result<PathBuf> {
     if program.contains('\\') || program.contains('/') || Path::new(program).is_absolute() {
         return Err(anyhow::anyhow!(
             "Trusted command names must not include paths: {program}"
@@ -507,7 +531,7 @@ mod tests {
     fn decode_handles_utf16le_sfc_output() {
         use super::decode_windows_output;
         let text = "Windows Resource Protection did not find any integrity violations.";
-        let utf16: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
         assert_eq!(decode_windows_output(&utf16), text);
         // Plain UTF-8 still passes through unchanged
         assert_eq!(decode_windows_output(b"plain ascii"), "plain ascii");
@@ -586,8 +610,8 @@ mod tests {
     #[test]
     fn temp_output_files_remove_existing_paths_on_drop() {
         let paths = TempOutputFiles {
-            stdout_path: unique_output_path("cleanup_test", "stdout").unwrap(),
-            stderr_path: unique_output_path("cleanup_test", "stderr").unwrap(),
+            stdout_path: unique_output_path("cleanup_test", "stdout"),
+            stderr_path: unique_output_path("cleanup_test", "stderr"),
         };
         std::fs::write(&paths.stdout_path, b"stdout").unwrap();
         std::fs::write(&paths.stderr_path, b"stderr").unwrap();

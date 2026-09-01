@@ -7,9 +7,6 @@
 #![deny(unsafe_code)]
 
 mod diagnostics;
-#[allow(dead_code, clippy::all, clippy::pedantic)]
-#[path = "../../../src-tauri/src/error.rs"]
-mod error;
 mod fix_plan;
 #[allow(clippy::all, clippy::pedantic)]
 pub mod issue_catalog;
@@ -17,9 +14,12 @@ pub mod issue_catalog;
 pub mod issue_detector;
 mod remediation;
 mod runtime;
-#[allow(dead_code, clippy::all, clippy::pedantic)]
-#[path = "../../../src-tauri/src/timestamp.rs"]
-pub mod timestamp;
+/// UTC timestamps, re-exported from `wfdiag-native-core` where the
+/// implementation now lives. Kept as a module because `issue_catalog.rs`,
+/// `issue_detector.rs` and both shells spell it `…::timestamp::Timestamp`.
+pub mod timestamp {
+    pub use wfdiag_native_core::timestamp::*;
+}
 
 pub use diagnostics::{
     DiagnosticTask, ScanEvidence, SharedScanEvidence, SharedTaskResult, TaskResult,

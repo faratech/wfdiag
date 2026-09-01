@@ -12,15 +12,21 @@ mod runtime;
 #[allow(unsafe_code)]
 mod encrypted_storage;
 
-#[allow(dead_code, clippy::all, clippy::pedantic)]
-#[path = "../../../src-tauri/src/error.rs"]
-mod error;
-#[allow(dead_code, unsafe_code, clippy::all, clippy::pedantic)]
-#[path = "../../../src-tauri/src/fs_atomic.rs"]
-mod fs_atomic;
-#[allow(dead_code, clippy::all, clippy::pedantic)]
-#[path = "../../../src-tauri/src/timestamp.rs"]
-mod timestamp;
+// Shared primitives compile once in `wfdiag-native-core`. `results_storage.rs`
+// and `encrypted_storage.rs` still spell them `crate::error`,
+// `crate::timestamp` and `crate::fs_atomic`.
+#[allow(unused_imports)]
+mod error {
+    pub use wfdiag_native_core::error::*;
+}
+#[allow(unused_imports)]
+mod fs_atomic {
+    pub use wfdiag_native_core::fs_atomic::*;
+}
+#[allow(unused_imports)]
+mod timestamp {
+    pub use wfdiag_native_core::timestamp::*;
+}
 
 /// Minimal diagnostic contracts needed by the history format and comparison
 /// engine. They intentionally serialize identically to the shipping backend's

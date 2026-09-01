@@ -21,6 +21,7 @@ dirs = { workspace = true }
 encoding_rs = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+wfdiag-native-core = { workspace = true }
 wfdiag-native-monitor = { workspace = true }
 winreg = { workspace = true }
 windows = { version = "0.62", features = [
