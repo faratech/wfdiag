@@ -22,7 +22,6 @@ thin entry points that delegate to it.
 python3 scripts/bump-version.py 2.5.9            # apply
 python3 scripts/bump-version.py 2.5.9 --dry-run  # preview
 node scripts/update-version.js 2.5.9             # equivalent
-.\scripts\update-version.ps1 -NewVersion "2.5.9" [-DryRun]
 ```
 
 ### Files updated (11)
