@@ -1,6 +1,6 @@
 //! Pure projections used by the native Reactor renderer.
 //!
-//! Keeping these calculations free of WinUI types makes the fixed-size
+//! Keeping these calculations free of `WinUI` types makes the fixed-size
 //! virtualization and compact monitor geometry contracts cheap to test on
 //! every host.
 
@@ -26,6 +26,9 @@ pub struct MonitorGraphGeometry {
     pub ribbon: String,
 }
 
+// Every index cast below is bounded by MONITOR_GRAPH_SAMPLES (60), far inside
+// the f64 mantissa, so the precision-loss lint cannot fire in practice.
+#[allow(clippy::cast_precision_loss)]
 fn monitor_graph_points(series: &[f64], max: f64) -> Vec<(f64, f64)> {
     let max = if max.is_finite() && max > 0.0 {
         max
@@ -64,6 +67,7 @@ fn push_line_to(path: &mut String, x: f64, y: f64) {
 
 /// Build two filled XAML geometries: the translucent area and a thin closed
 /// ribbon that visually matches the former stroked polyline.
+#[must_use]
 pub fn monitor_graph_geometry(series: &[f64], max: f64) -> MonitorGraphGeometry {
     let points = monitor_graph_points(series, max);
 
@@ -71,7 +75,7 @@ pub fn monitor_graph_geometry(series: &[f64], max: f64) -> MonitorGraphGeometry 
     // skip the repeated growth reallocations (~16 bytes per path segment).
     let mut area = String::with_capacity(points.len() * 16 + 32);
     area.push_str("F1 M0.000 ");
-    write!(area, "{MONITOR_GRAPH_HEIGHT:.3}",).expect("writing to a String cannot fail");
+    write!(area, "{MONITOR_GRAPH_HEIGHT:.3}").expect("writing to a String cannot fail");
     for &(x, y) in &points {
         push_line_to(&mut area, x, y);
     }
@@ -80,6 +84,10 @@ pub fn monitor_graph_geometry(series: &[f64], max: f64) -> MonitorGraphGeometry 
 
     let mut ribbon = String::with_capacity(points.len() * 32 + 16);
     let (first_x, first_y) = points[0];
+    // The XAML path mini-language requires the optional fill rule followed by
+    // a move command before any segment; without this prefix the ribbon
+    // geometry never parses and the line half of the graph silently vanishes.
+    ribbon.push_str("F1 M");
     write!(
         ribbon,
         "{first_x:.3} {:.3}",

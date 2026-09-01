@@ -1,9 +1,11 @@
 //! Windows-native delivery helpers for Reactor export payloads.
 //!
-//! Report rendering remains in `wfdiag-native-export`. This module owns only
-//! shell concerns that should not live in that deterministic crate: resolving
-//! the current user's date/time presentation, putting already-rendered text on
-//! the clipboard, and launching closed WindowsForum/email compose targets.
+//! Report rendering, the closed set of external targets, and the
+//! [`ExportDateStrings`] carrier all live in `wfdiag-native-export`. This
+//! module owns only shell concerns that cannot live in that portable crate:
+//! asking Windows for the current user's date/time presentation, putting
+//! already-rendered text on the clipboard, and handing a resolved target to
+//! `ShellExecuteW`.
 //!
 //! Clipboard calls must be made from Reactor's focused UI dispatcher. WinUI
 //! has already initialized WinRT on that thread; this helper deliberately does
@@ -12,7 +14,10 @@
 use std::error::Error;
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use wfdiag_native_export::{EmailPayload, render_email_compose_uri};
+use wfdiag_native_export::{
+    EmailPayload, ExportDateStrings, ExportExternalAction, render_email_compose_uri,
+    resolve_export_external_url,
+};
 use windows::ApplicationModel::DataTransfer::{
     Clipboard, ClipboardContentOptions, DataPackage, DataPackageOperation,
 };
@@ -27,29 +32,6 @@ use windows::core::HSTRING;
 const WINDOWS_EPOCH_OFFSET_TICKS: u128 = 116_444_736_000_000_000;
 const HUNDRED_NANOSECONDS_PER_SECOND: u128 = 10_000_000;
 const NANOSECONDS_PER_HUNDRED_NANOSECONDS: u128 = 100;
-
-const WINDOWSFORUM_NEW_THREAD_URL: &str =
-    "https://windowsforum.com/forums/windows-help-and-support.302/post-thread";
-
-/// The two locale-sensitive values consumed by `ExportMetadata`.
-///
-/// `generated` corresponds to JavaScript's parameterless
-/// `Date.prototype.toLocaleString()`. `local_date` corresponds to
-/// `Date.prototype.toLocaleDateString()`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExportDateStrings {
-    pub generated: String,
-    pub local_date: String,
-}
-
-/// Closed external actions exposed by Reactor's export/share surface.
-///
-/// Keeping this typed prevents a rendered payload or component message from
-/// turning the shell helper into an arbitrary URL launcher.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExportExternalAction {
-    WindowsForumNewThread,
-}
 
 #[derive(Debug)]
 pub enum ExportDeliveryError {
@@ -251,14 +233,6 @@ pub fn write_text_to_clipboard(text: &str) -> Result<(), ExportDeliveryError> {
     Clipboard::Flush().map_err(windows_error("flushing the Windows clipboard"))
 }
 
-/// Resolve a typed export action to its single trusted HTTPS destination.
-#[must_use]
-pub const fn resolve_export_external_url(action: ExportExternalAction) -> &'static str {
-    match action {
-        ExportExternalAction::WindowsForumNewThread => WINDOWSFORUM_NEW_THREAD_URL,
-    }
-}
-
 /// Open one typed export action through the Windows shell.
 ///
 /// No caller-controlled URL reaches `ShellExecuteW`; the action must already
@@ -341,14 +315,6 @@ mod tests {
             winrt_datetime_from_unix_duration(too_large),
             Err(ExportDeliveryError::TimeOutOfRange)
         ));
-    }
-
-    #[test]
-    fn only_the_exact_windowsforum_compose_target_is_resolvable() {
-        assert_eq!(
-            resolve_export_external_url(ExportExternalAction::WindowsForumNewThread),
-            "https://windowsforum.com/forums/windows-help-and-support.302/post-thread"
-        );
     }
 
     #[test]

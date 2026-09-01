@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Duration;
 
 /// Read-only query queued by a native shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,27 +158,65 @@ impl SystemRuntime {
             .map_err(|_| SystemError::Disconnected)
     }
 
-    /// Stop and join from a non-UI shutdown path.
+    /// Bounded, ordered teardown from a non-UI shutdown path.
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::WorkerPanicked`] if the worker panicked.
-    pub fn shutdown(mut self) -> Result<(), SystemError> {
-        let _ = self.commands.send(WorkerCommand::Stop);
-        if self
-            .worker
-            .take()
-            .is_some_and(|worker| worker.join().is_err())
-        {
-            return Err(SystemError::WorkerPanicked);
+    /// Returns [`SystemError::ShutdownTimedOut`] when the worker had not exited
+    /// within `budget`. The worker is still reaped on a detached thread.
+    pub fn shutdown(mut self, budget: Duration) -> Result<(), SystemError> {
+        if self.stop_and_join(budget) {
+            Ok(())
+        } else {
+            Err(SystemError::ShutdownTimedOut)
         }
-        Ok(())
+    }
+
+    /// Stop the worker and wait up to `budget` for it to exit.
+    ///
+    /// Returns `false` when the worker was still running when the budget
+    /// expired. Either way the handle has already been handed to a detached
+    /// reaper, so the thread is joined eventually and the caller never blocks
+    /// past `budget`. A second call after the handle is gone is a no-op that
+    /// reports success.
+    pub fn stop_and_join(&mut self, budget: Duration) -> bool {
+        let _ = self.commands.send(WorkerCommand::Stop);
+        let Some(worker) = self.worker.take() else {
+            return true;
+        };
+        let (done, finished) = mpsc::channel();
+        reap_worker(worker, Some(done));
+        finished.recv_timeout(budget).is_ok()
     }
 }
 
 impl Drop for SystemRuntime {
     fn drop(&mut self) {
+        // Never join inline: this runtime is owned by the UI shell, and a
+        // queued unit of work would otherwise freeze the window at close.
+        // Hand the handle to a detached reaper so the thread is still joined
+        // instead of leaked (#203).
         let _ = self.commands.send(WorkerCommand::Stop);
+        if let Some(worker) = self.worker.take() {
+            reap_worker(worker, None);
+        }
+    }
+}
+
+/// Join a stopped worker on a detached thread so the caller never blocks.
+/// `done` (when supplied) receives one message once the join completes.
+fn reap_worker(worker: thread::JoinHandle<()>, done: Option<mpsc::Sender<()>>) {
+    let spawned = thread::Builder::new()
+        .name("wfdiag-system-reaper".to_string())
+        .spawn(move || {
+            let _ = worker.join();
+            if let Some(done) = done {
+                let _ = done.send(());
+            }
+        });
+    if spawned.is_err() {
+        // Thread creation failed: the worker still exits on its own after
+        // `Stop`, so leaking the handle is the only non-blocking option left.
     }
 }
 
@@ -185,7 +224,8 @@ impl Drop for SystemRuntime {
 mod tests {
     use super::*;
     use crate::ProcessorArchitecture;
-    use std::time::Duration;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     struct FakeProvider;
 
@@ -210,6 +250,72 @@ mod tests {
                 is_admin: false,
             })
         }
+    }
+
+    /// Blocks inside collection until released, standing in for a slow WMI
+    /// or registry read on the real host.
+    struct StallingProvider {
+        release: Mutex<Option<mpsc::Receiver<()>>>,
+    }
+
+    impl SystemProvider for StallingProvider {
+        fn architecture(&self) -> Result<ArchitectureSnapshot, SystemError> {
+            if let Some(release) = self.release.lock().unwrap().take() {
+                let _ = release.recv();
+            }
+            FakeProvider.architecture()
+        }
+
+        fn system_info(&self) -> Result<SystemInfo, SystemError> {
+            FakeProvider.system_info()
+        }
+    }
+
+    fn stalled_runtime() -> (
+        SystemRuntime,
+        mpsc::Receiver<SystemCompleted>,
+        mpsc::Sender<()>,
+    ) {
+        let (release, receiver) = mpsc::channel();
+        let (runtime, replies) = SystemRuntime::start_with_provider(Arc::new(StallingProvider {
+            release: Mutex::new(Some(receiver)),
+        }))
+        .unwrap();
+        runtime
+            .enqueue(SystemRequest {
+                request_id: 1,
+                kind: SystemRequestKind::Architecture,
+            })
+            .unwrap();
+        (runtime, replies, release)
+    }
+
+    #[test]
+    fn drop_returns_promptly_behind_a_stalled_collection() {
+        let (runtime, replies, release) = stalled_runtime();
+        let started = Instant::now();
+        drop(runtime);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "drop joined the stalled worker inline: {:?}",
+            started.elapsed()
+        );
+        // The worker still finishes its queued request and exits on its own.
+        release.send(()).unwrap();
+        let completed = replies.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(completed.request_id, 1);
+    }
+
+    #[test]
+    fn stop_and_join_is_bounded_and_idempotent() {
+        let (mut runtime, _replies, release) = stalled_runtime();
+        let started = Instant::now();
+        assert!(!runtime.stop_and_join(Duration::from_millis(100)));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        release.send(()).unwrap();
+        // The handle now belongs to the detached reaper, so a second call is
+        // a no-op that reports success.
+        assert!(runtime.stop_and_join(Duration::from_millis(1)));
     }
 
     #[test]
@@ -250,6 +356,6 @@ mod tests {
                 is_admin: false,
             }))
         );
-        runtime.shutdown().unwrap();
+        runtime.shutdown(Duration::from_secs(2)).unwrap();
     }
 }

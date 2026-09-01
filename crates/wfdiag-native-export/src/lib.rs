@@ -6,9 +6,12 @@
 
 #![deny(unsafe_code)]
 
+mod external;
+pub mod path_policy;
 mod renderer;
 mod runtime;
 
+pub use external::{ExportDateStrings, ExportExternalAction, resolve_export_external_url};
 pub use renderer::{
     EmailPayload, ExportMetadata, ExportPayload, ExportRequestKind, ExportTask, ReportFormat,
     SupportPackagePayload, format_json_value, render_email, render_email_compose_uri,

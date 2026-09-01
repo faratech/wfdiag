@@ -132,8 +132,8 @@ fn debug_build_short_circuits_every_provider() {
     let signature = Arc::new(FakeSignature::unpackaged());
     let version = Arc::new(FakeVersion::current());
     assert_eq!(
-        service(http.clone(), signature.clone(), version.clone(), true).check(),
-        None
+        service(http.clone(), signature.clone(), version.clone(), true).check_outcome(),
+        UpdateOutcome::Silent
     );
     assert_eq!(signature.identity_calls.load(Ordering::Relaxed), 0);
     assert_eq!(signature.signature_calls.load(Ordering::Relaxed), 0);
@@ -152,8 +152,8 @@ fn store_install_is_silent_and_never_reads_version_or_network() {
     });
     let version = Arc::new(FakeVersion::current());
     assert_eq!(
-        service(http.clone(), signature.clone(), version.clone(), false).check(),
-        None
+        service(http.clone(), signature.clone(), version.clone(), false).check_outcome(),
+        UpdateOutcome::Silent
     );
     assert_eq!(signature.identity_calls.load(Ordering::Relaxed), 1);
     assert_eq!(signature.signature_calls.load(Ordering::Relaxed), 1);
@@ -196,7 +196,8 @@ fn developer_identity_stays_on_github_channel() {
         Arc::new(FakeVersion::current()),
         false,
     )
-    .check()
+    .check_outcome()
+    .into_available()
     .unwrap();
     assert_eq!(update.version, "2.6.0");
     assert_eq!(http.calls.load(Ordering::Relaxed), 1);
@@ -211,7 +212,8 @@ fn request_contract_matches_shipping_endpoint_headers_and_timeout() {
         Arc::new(FakeVersion::current()),
         false,
     )
-    .check()
+    .check_outcome()
+    .into_available()
     .unwrap();
     assert_eq!(update.version, "2.6.0");
     let requests = http.requests.lock().unwrap();
@@ -239,7 +241,8 @@ fn newer_release_maps_the_complete_contract() {
         Arc::new(FakeVersion::current()),
         false,
     )
-    .check()
+    .check_outcome()
+    .into_available()
     .unwrap();
     assert_eq!(update.version, "2.6.0");
     assert_eq!(update.html_url, RELEASE_URL);
@@ -269,38 +272,69 @@ fn same_older_malformed_draft_and_prerelease_are_silent() {
                 Arc::new(FakeVersion::current()),
                 false,
             )
-            .check(),
-            None,
+            .check_outcome(),
+            UpdateOutcome::UpToDate,
             "case {tag} draft={draft} prerelease={prerelease}"
         );
     }
 }
 
 #[test]
-fn transport_http_and_json_failures_are_silent() {
+fn transport_http_and_json_failures_are_distinguishable_from_up_to_date() {
     let cases = [
-        FakeHttp::with_response(Err("offline".to_string())),
-        FakeHttp::with_response(Ok(ReleaseResponse {
-            status: 403,
-            body: b"rate limited".to_vec(),
-        })),
-        FakeHttp::with_response(Ok(ReleaseResponse {
+        (
+            FakeHttp::with_response(Err("offline".to_string())),
+            UpdateFailure::Transport("offline".to_string()),
+        ),
+        (
+            FakeHttp::with_response(Ok(ReleaseResponse {
+                status: 403,
+                body: b"rate limited".to_vec(),
+            })),
+            UpdateFailure::Status(403),
+        ),
+    ];
+    for (http, expected) in cases {
+        let outcome = service(
+            Arc::new(http),
+            Arc::new(FakeSignature::unpackaged()),
+            Arc::new(FakeVersion::current()),
+            false,
+        )
+        .check_outcome();
+        assert_eq!(outcome, UpdateOutcome::Failed(expected));
+        assert!(outcome.available().is_none());
+    }
+
+    // The parse diagnostic is serde's, so match the variant rather than text.
+    let outcome = service(
+        Arc::new(FakeHttp::with_response(Ok(ReleaseResponse {
             status: 200,
             body: b"not json".to_vec(),
-        })),
-    ];
-    for http in cases {
-        assert_eq!(
-            service(
-                Arc::new(http),
-                Arc::new(FakeSignature::unpackaged()),
-                Arc::new(FakeVersion::current()),
-                false,
-            )
-            .check(),
-            None
-        );
-    }
+        }))),
+        Arc::new(FakeSignature::unpackaged()),
+        Arc::new(FakeVersion::current()),
+        false,
+    )
+    .check_outcome();
+    assert!(
+        matches!(outcome.failure(), Some(UpdateFailure::Parse(_))),
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn a_failed_check_is_never_confused_with_an_available_release() {
+    let failed = UpdateOutcome::Failed(UpdateFailure::Status(403));
+    assert!(failed.available().is_none());
+    assert!(failed.clone().into_available().is_none());
+    assert!(failed.failure().is_some());
+    assert!(UpdateOutcome::UpToDate.failure().is_none());
+    assert!(UpdateOutcome::Silent.failure().is_none());
+    assert_eq!(
+        UpdateFailure::Status(403).to_string(),
+        "update request returned HTTP status 403"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -317,6 +351,7 @@ async fn runtime_is_nonblocking_and_returns_typed_result() {
         .await
         .unwrap()
         .unwrap()
+        .into_available()
         .unwrap();
     assert_eq!(update.version, "2.6.0");
 }

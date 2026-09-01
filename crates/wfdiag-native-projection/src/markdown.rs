@@ -1,4 +1,4 @@
-//! Safe Markdown-lite parsing for WFDiag shells.
+//! Safe Markdown-lite parsing for `WFDiag` shells.
 //!
 //! The parser intentionally mirrors the small surface used by the shipping
 //! React UI. It never interprets HTML, and it is deliberately free of any
@@ -63,7 +63,7 @@ pub enum MarkdownInline {
     Bold(String),
     Code(String),
     /// `target == None` means the label remains visible but the untrusted URL
-    /// was rejected and will never be materialized as a WinUI Hyperlink.
+    /// was rejected and will never be materialized as a `WinUI` `Hyperlink`.
     Link {
         label: String,
         target: Option<String>,
@@ -91,7 +91,7 @@ pub fn parse_markdown_lite(text: &str) -> MarkdownDocument {
     MarkdownDocument { blocks }
 }
 
-/// Return an absolute link only when WinUI navigation cannot dispatch an
+/// Return an absolute link only when `WinUI` navigation cannot dispatch an
 /// executable or local-file scheme. Relative, protocol-relative, file, data,
 /// JavaScript, and custom-protocol targets stay visible as inert label text.
 #[must_use]

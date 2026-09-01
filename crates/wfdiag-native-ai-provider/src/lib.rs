@@ -33,8 +33,8 @@ pub use catalog_service::{
     parse_model_catalog_provider,
 };
 pub use compat::{
-    CompatConfigPorts, ProviderKeySource, SubscriptionConfigPorts, compat_caps,
-    provider_config_fingerprint, resolve_compat_config, resolve_subscription_config,
+    CompatConfigPorts, ProviderKeySource, SettingsProviderKeySource, SubscriptionConfigPorts,
+    compat_caps, provider_config_fingerprint, resolve_compat_config, resolve_subscription_config,
     sanitize_subscription_model,
 };
 pub use composition::{

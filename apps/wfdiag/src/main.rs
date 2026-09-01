@@ -9,12 +9,9 @@ mod focus_support;
 mod icons;
 mod instance_support;
 mod issue_support;
-mod json_diff;
-mod markdown_support;
+mod markdown_render;
 mod notification_support;
-mod process_identity;
 mod provider_setup_support;
-mod render_support;
 mod report_support;
 mod save_picker;
 mod subscription_auth_support;
@@ -41,8 +38,8 @@ use chat_support::{
     ChatToolSnapshot, ChatWorkerEvent, NativeChatRuntime,
 };
 use export_support::{
-    ExportExternalAction, current_export_date_strings, launch_email_compose_draft,
-    launch_export_external_action, write_text_to_clipboard,
+    current_export_date_strings, launch_email_compose_draft, launch_export_external_action,
+    write_text_to_clipboard,
 };
 use fix_plan_support::{
     FixPlanGeneration, FixPlanRoute, FixPlanWorkerEvent, NativeFixPlanRuntime, ValidatedFixPlan,
@@ -55,13 +52,8 @@ use issue_support::{
     pending_issue_preparation_is_current, prepare_issue_detection, project_issues,
     take_current_issue_completion,
 };
-use markdown_support::{MarkdownStyle, render_markdown_lite, safe_markdown_link_target};
-use process_identity::{ProcessIdentity, reconcile_process_selection};
+use markdown_render::{MarkdownStyle, render_markdown_lite};
 use provider_setup_support::{ModelCatalog, ProviderSetupRuntime, ProviderSetupWorkerEvent};
-use render_support::{
-    MONITOR_GRAPH_HEIGHT, MONITOR_GRAPH_PATH_COUNT, MONITOR_GRAPH_WIDTH, fixed_process_slots,
-    monitor_graph_geometry,
-};
 use report_support::{NativeReportRuntime, ReportGeneration, ReportScan, ReportWorkerEvent};
 use save_picker::{
     SavePickerError, SavePickerOutcome, SupportPackagePickerOutcome, ValidatedExportPath,
@@ -96,8 +88,8 @@ use wfdiag_native_diagnostics::{
     ScanKind, SharedScanEvidence,
 };
 use wfdiag_native_export::{
-    ExportCompleted, ExportMetadata, ExportPayload, ExportRequest, ExportRequestKind,
-    ExportRuntime, ExportTask, ReportFormat, SupportPackagePayload,
+    ExportCompleted, ExportExternalAction, ExportMetadata, ExportPayload, ExportRequest,
+    ExportRequestKind, ExportRuntime, ExportTask, ReportFormat, SupportPackagePayload,
 };
 use wfdiag_native_history::{
     ComparisonResult, ComparisonSummary, DiagnosticTask as HistoryDiagnosticTask, HistoryReply,
@@ -113,6 +105,15 @@ use wfdiag_native_monitor::{
     ProcessSortDirection, ProcessSortKey,
 };
 use wfdiag_native_phi::WindowsPhiStatusSource;
+use wfdiag_native_projection::json_diff::{
+    JsonDifference, JsonDifferenceKind, find_json_differences, visible_differences,
+};
+use wfdiag_native_projection::markdown::safe_markdown_link_target;
+use wfdiag_native_projection::process_identity::{ProcessIdentity, reconcile_process_selection_by};
+use wfdiag_native_projection::render::{
+    MONITOR_GRAPH_HEIGHT, MONITOR_GRAPH_PATH_COUNT, MONITOR_GRAPH_WIDTH, fixed_process_slots,
+    monitor_graph_geometry,
+};
 use wfdiag_native_remediation::remediation;
 #[cfg(feature = "settings-test-path")]
 use wfdiag_native_settings::{
@@ -127,12 +128,13 @@ use wfdiag_native_system::{
     ArchitectureSnapshot, SystemCompleted, SystemInfo, SystemPayload, SystemRequest,
     SystemRequestKind, SystemRuntime,
 };
-use wfdiag_native_update::{
-    NativeUpdateRuntime, SignatureProvider, UpdateInfo, UpdateReply, UpdateService,
-    WindowsPackageSignatureProvider,
+use wfdiag_native_update::policy::{
+    AboutExternalAction, NOTICE_DURATION, START_DELAY, UpdateThrottle, trusted_release_url,
+    unix_time_millis,
 };
-use json_diff::{
-    JsonDifference, JsonDifferenceKind, find_json_differences, visible_differences,
+use wfdiag_native_update::{
+    NativeUpdateRuntime, SignatureProvider, UpdateInfo, UpdateOutcome, UpdateReply, UpdateService,
+    WindowsPackageSignatureProvider,
 };
 use wfdiag_ui_core::{
     ChatEvent, DiagnosticTaskResult, SystemStats, TaskProgressStatus, UiEvent, UiEventReceiver,
@@ -140,10 +142,7 @@ use wfdiag_ui_core::{
 };
 use windows_reactor::*;
 
-use update_support::{
-    AboutExternalAction, NOTICE_DURATION, START_DELAY, UpdateThrottle, launch_external_action,
-    trusted_release_url, unix_time_millis,
-};
+use update_support::launch_external_action;
 
 const APP_VERSION: &str = env!("WFDIAG_APP_VERSION");
 const HISTORY_TREND_SCAN_LIMIT: usize = 10;
@@ -221,7 +220,7 @@ const QUICK_DETECTION_SOURCE_TASK_IDS: [&str; 11] = [
     "firewall_status",
 ];
 
-const PROCESS_PAGE_SIZE: usize = render_support::PROCESS_REPEATER_SLOTS;
+const PROCESS_PAGE_SIZE: usize = wfdiag_native_projection::render::PROCESS_REPEATER_SLOTS;
 const PROCESS_FILTER_DEBOUNCE: Duration = Duration::from_millis(180);
 const PROCESS_LIVE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const DIAGNOSTICS_COMPACT_BREAKPOINT: f64 = 840.0;
@@ -4117,7 +4116,7 @@ fn spawn_export_file_write(
                 // Match Tauri's `save_results_to_file`: the picker preflights
                 // the destination, then the write path is policy-validated
                 // again immediately before filesystem mutation.
-                path.revalidate()
+                save_picker::revalidate_export_path(&path)
                     .map_err(|error| error.to_string())
                     .and_then(|path| {
                         std::fs::write(path.as_path(), content)
@@ -4146,21 +4145,24 @@ fn spawn_support_package_write(
                 if cancellation.is_cancelled() {
                     return Err("Support-package generation was cancelled".to_string());
                 }
-                let validated = paths.revalidate().map_err(|error| error.to_string())?;
+                let validated = save_picker::revalidate_support_package_paths(&paths)
+                    .map_err(|error| error.to_string())?;
                 std::fs::write(&validated.json, payload.json.as_bytes()).map_err(|error| {
                     format!("could not write {}: {error}", validated.json.display())
                 })?;
                 if cancellation.is_cancelled() {
                     return Err("Support-package generation was cancelled".to_string());
                 }
-                let validated = paths.revalidate().map_err(|error| error.to_string())?;
+                let validated = save_picker::revalidate_support_package_paths(&paths)
+                    .map_err(|error| error.to_string())?;
                 std::fs::write(&validated.text, payload.text.as_bytes()).map_err(|error| {
                     format!("could not write {}: {error}", validated.text.display())
                 })?;
                 if cancellation.is_cancelled() {
                     return Err("Support-package generation was cancelled".to_string());
                 }
-                let validated = paths.revalidate().map_err(|error| error.to_string())?;
+                let validated = save_picker::revalidate_support_package_paths(&paths)
+                    .map_err(|error| error.to_string())?;
                 std::fs::write(&validated.html, payload.html.as_bytes()).map_err(|error| {
                     format!("could not write {}: {error}", validated.html.display())
                 })?;
@@ -4252,14 +4254,21 @@ fn spawn_update_wait(
                 return Message::UpdateCheckCancelled;
             }
             match reply.try_recv() {
-                Ok(update) => {
+                Ok(outcome) => {
                     // Match the Store hook: a completed backend check consumes
                     // the daily attempt even when its deliberately silent
-                    // result is `None`. Persistence failure remains fail-open.
+                    // result offers nothing. Persistence failure remains
+                    // fail-open.
                     if let Some(throttle) = throttle.as_ref() {
                         let _ = throttle.record_at(unix_time_millis());
                     }
-                    return Message::UpdateCheckFinished(Ok(update));
+                    // A check that could not complete (offline, rate limited,
+                    // unparseable) is reported as an error rather than folded
+                    // into "no update"; the UI still shows nothing for it.
+                    return Message::UpdateCheckFinished(match outcome {
+                        UpdateOutcome::Failed(failure) => Err(failure.to_string()),
+                        completed => Ok(completed.into_available()),
+                    });
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
                     std::thread::sleep(Duration::from_millis(50));
@@ -12854,8 +12863,11 @@ impl Component for WfdiagSpike {
                 match result {
                     Ok(page) => {
                         self.process_offset = page.offset;
-                        self.selected_process =
-                            reconcile_process_selection(self.selected_process, &page.items);
+                        self.selected_process = reconcile_process_selection_by(
+                            self.selected_process,
+                            &page.items,
+                            |row| ProcessIdentity::new(row.pid, row.start_time),
+                        );
                         self.status = format!(
                             "Process inventory · {} of {} shown",
                             page.items.len(),

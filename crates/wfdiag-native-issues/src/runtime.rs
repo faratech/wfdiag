@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Duration;
 
 /// One immutable issue-detection request.
 ///
@@ -37,6 +38,7 @@ pub enum IssueRuntimeError {
     Spawn(String),
     Disconnected,
     WorkerPanicked,
+    ShutdownTimedOut,
     DuplicateRemediationSummary(String),
     MissingRemediationSummary {
         issue_id: &'static str,
@@ -50,6 +52,9 @@ impl fmt::Display for IssueRuntimeError {
             Self::Spawn(reason) => write!(formatter, "failed to start issue worker: {reason}"),
             Self::Disconnected => formatter.write_str("issue worker is disconnected"),
             Self::WorkerPanicked => formatter.write_str("issue worker panicked"),
+            Self::ShutdownTimedOut => {
+                formatter.write_str("issue worker did not stop within the shutdown budget")
+            }
             Self::DuplicateRemediationSummary(id) => {
                 write!(formatter, "duplicate remediation summary '{id}'")
             }
@@ -202,27 +207,65 @@ impl IssueRuntime {
         summaries
     }
 
-    /// Stop and join the worker from a non-UI shutdown path.
+    /// Bounded, ordered teardown from a non-UI shutdown path.
     ///
     /// # Errors
     ///
-    /// Returns [`IssueRuntimeError::WorkerPanicked`] if the worker panicked.
-    pub fn shutdown(mut self) -> Result<(), IssueRuntimeError> {
-        let _ = self.commands.send(WorkerCommand::Stop);
-        if self
-            .worker
-            .take()
-            .is_some_and(|worker| worker.join().is_err())
-        {
-            return Err(IssueRuntimeError::WorkerPanicked);
+    /// Returns [`IssueRuntimeError::ShutdownTimedOut`] when the worker had not exited
+    /// within `budget`. The worker is still reaped on a detached thread.
+    pub fn shutdown(mut self, budget: Duration) -> Result<(), IssueRuntimeError> {
+        if self.stop_and_join(budget) {
+            Ok(())
+        } else {
+            Err(IssueRuntimeError::ShutdownTimedOut)
         }
-        Ok(())
+    }
+
+    /// Stop the worker and wait up to `budget` for it to exit.
+    ///
+    /// Returns `false` when the worker was still running when the budget
+    /// expired. Either way the handle has already been handed to a detached
+    /// reaper, so the thread is joined eventually and the caller never blocks
+    /// past `budget`. A second call after the handle is gone is a no-op that
+    /// reports success.
+    pub fn stop_and_join(&mut self, budget: Duration) -> bool {
+        let _ = self.commands.send(WorkerCommand::Stop);
+        let Some(worker) = self.worker.take() else {
+            return true;
+        };
+        let (done, finished) = mpsc::channel();
+        reap_worker(worker, Some(done));
+        finished.recv_timeout(budget).is_ok()
     }
 }
 
 impl Drop for IssueRuntime {
     fn drop(&mut self) {
+        // Never join inline: this runtime is owned by the UI shell, and a
+        // queued unit of work would otherwise freeze the window at close.
+        // Hand the handle to a detached reaper so the thread is still joined
+        // instead of leaked (#203).
         let _ = self.commands.send(WorkerCommand::Stop);
+        if let Some(worker) = self.worker.take() {
+            reap_worker(worker, None);
+        }
+    }
+}
+
+/// Join a stopped worker on a detached thread so the caller never blocks.
+/// `done` (when supplied) receives one message once the join completes.
+fn reap_worker(worker: thread::JoinHandle<()>, done: Option<mpsc::Sender<()>>) {
+    let spawned = thread::Builder::new()
+        .name("wfdiag-issues-reaper".to_string())
+        .spawn(move || {
+            let _ = worker.join();
+            if let Some(done) = done {
+                let _ = done.send(());
+            }
+        });
+    if spawned.is_err() {
+        // Thread creation failed: the worker still exits on its own after
+        // `Stop`, so leaking the handle is the only non-blocking option left.
     }
 }
 
@@ -230,7 +273,7 @@ impl Drop for IssueRuntime {
 mod tests {
     use super::*;
     use crate::{IssueStatus, TaskResult};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn complete_remediation_catalog() -> Vec<RemediationSummary> {
         crate::remediation_summaries()
@@ -251,6 +294,34 @@ mod tests {
             now: Timestamp::from_secs(1_781_264_000),
             temp_file_count: Some(1),
         }
+    }
+
+    #[test]
+    fn stop_and_join_reaps_the_worker_and_drop_returns_promptly() {
+        let (mut runtime, _events) = IssueRuntime::start_canonical().unwrap();
+        assert!(runtime.stop_and_join(Duration::from_secs(2)));
+        // The worker thread really exited: its command receiver is gone, so
+        // the next enqueue cannot be delivered.
+        assert_eq!(
+            runtime.enqueue(IssueDetectionRequest {
+                request_id: 1,
+                results: Arc::new(std::collections::HashMap::new()),
+                now: Timestamp::from_secs(0),
+                temp_file_count: None,
+            }),
+            Err(IssueRuntimeError::Disconnected)
+        );
+        // The handle has already been taken, so a second call is a no-op.
+        assert!(runtime.stop_and_join(Duration::from_millis(1)));
+
+        let (fresh, _events) = IssueRuntime::start_canonical().unwrap();
+        let started = Instant::now();
+        drop(fresh);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "drop blocked the caller: {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -291,7 +362,7 @@ mod tests {
             low_disk.remediation.as_ref().map(|value| value.id.as_str()),
             Some("open_disk_cleanup")
         );
-        runtime.shutdown().unwrap();
+        runtime.shutdown(Duration::from_secs(2)).unwrap();
     }
 
     #[test]
@@ -345,6 +416,6 @@ mod tests {
                 }
             })
         );
-        runtime.shutdown().unwrap();
+        runtime.shutdown(Duration::from_secs(2)).unwrap();
     }
 }

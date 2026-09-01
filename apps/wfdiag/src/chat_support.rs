@@ -27,7 +27,7 @@ use wfdiag_native_ai_chat::{
 };
 use wfdiag_native_ai_provider::{
     AIProvider, CompatConfigPorts, FoundryEndpointSource, OllamaSource,
-    ProcessSubscriptionCliStatusSource, ProviderKeySource, SubscriptionCliStatusSource,
+    ProcessSubscriptionCliStatusSource, SettingsProviderKeySource, SubscriptionCliStatusSource,
     SubscriptionConfigPorts, compat_caps, resolve_compat_config, resolve_subscription_config,
 };
 use wfdiag_native_diagnostics::{
@@ -36,7 +36,7 @@ use wfdiag_native_diagnostics::{
 use wfdiag_native_history::{NativeHistoryRuntime, ScanRecord, ScanSummary};
 use wfdiag_native_issues::{Issue, IssueSeverity, IssueStatus, RemediationSummary};
 use wfdiag_native_phi::PhiChatProvider;
-use wfdiag_native_settings::{ProviderKeyId, SettingsService};
+use wfdiag_native_settings::SettingsService;
 use wfdiag_ui_core::{DiagnosticTaskResult, SystemStats};
 
 use serde_json::json;
@@ -124,7 +124,7 @@ impl ShellChatSource {
     pub(crate) fn ports(&self) -> CompatConfigPorts {
         CompatConfigPorts {
             settings: self.settings.load().unwrap_or_default(),
-            keys: Arc::new(SettingsKeySource(self.settings.clone())),
+            keys: Arc::new(SettingsProviderKeySource(self.settings.clone())),
             foundry: Arc::clone(&self.foundry),
             ollama: Arc::clone(&self.ollama),
         }
@@ -135,14 +135,6 @@ impl ShellChatSource {
             settings: self.settings.load().unwrap_or_default(),
             status: Arc::clone(&self.subscription),
         }
-    }
-}
-
-struct SettingsKeySource(SettingsService);
-
-impl ProviderKeySource for SettingsKeySource {
-    fn load(&self, key: ProviderKeyId) -> Option<String> {
-        self.0.load_provider_key(key).ok().flatten()
     }
 }
 

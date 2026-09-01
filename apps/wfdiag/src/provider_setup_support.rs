@@ -16,9 +16,9 @@ use tokio_util::sync::CancellationToken;
 use wfdiag_native_ai_chat::ProcessSubscriptionModelCatalogSource;
 use wfdiag_native_ai_provider::{
     AIProvider, FoundryEndpointSource, ModelCatalogRequest, ModelCatalogService, OllamaSource,
-    ProviderKeySource, SubscriptionModelCatalogSource,
+    SettingsProviderKeySource, SubscriptionModelCatalogSource,
 };
-use wfdiag_native_settings::{ProviderKeyId, SettingsService};
+use wfdiag_native_settings::SettingsService;
 
 use crate::ui_wake_support::NotifySenderExt;
 
@@ -133,14 +133,6 @@ fn cancel_any(active: &ActiveSlot) {
     }
 }
 
-struct SettingsKeySource(SettingsService);
-
-impl ProviderKeySource for SettingsKeySource {
-    fn load(&self, key: ProviderKeyId) -> Option<String> {
-        self.0.load_provider_key(key).ok().flatten()
-    }
-}
-
 #[derive(Clone)]
 struct ProviderSetupPorts {
     settings: SettingsService,
@@ -153,7 +145,7 @@ impl ProviderSetupPorts {
     fn service(&self) -> ModelCatalogService {
         ModelCatalogService::new(
             self.settings.load_nonsecret_settings().unwrap_or_default(),
-            Arc::new(SettingsKeySource(self.settings.clone())),
+            Arc::new(SettingsProviderKeySource(self.settings.clone())),
             Arc::clone(&self.foundry),
             Arc::clone(&self.ollama),
             Arc::clone(&self.subscriptions),
@@ -340,7 +332,7 @@ mod tests {
     use std::collections::HashMap;
     use wfdiag_native_ai_provider::{BackendFuture, SubscriptionCli};
     use wfdiag_native_settings::{
-        AllowAllSettings, CredentialStorage, SettingsError, SettingsStorage,
+        AllowAllSettings, CredentialStorage, ProviderKeyId, SettingsError, SettingsStorage,
     };
 
     #[derive(Default)]

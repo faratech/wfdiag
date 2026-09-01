@@ -217,6 +217,10 @@ fn javascript_strict_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Null, Value::Null) => true,
         (Value::Bool(left), Value::Bool(right)) => left == right,
+        // Exact bit-equality is the contract here: JavaScript `===` on two
+        // numbers is an exact comparison, so an epsilon would report equal
+        // values that the shipping hook reports as changed.
+        #[allow(clippy::float_cmp)]
         (Value::Number(left), Value::Number(right)) => left
             .as_f64()
             .zip(right.as_f64())
@@ -315,7 +319,7 @@ fn stringify_optional(value: Option<&Value>) -> String {
 /// JSON.stringify-compatible rendering for parsed JSON values.
 ///
 /// In particular, numbers are compared and rendered as JavaScript `Number`
-/// values rather than preserving serde_json's wider integer representation.
+/// values rather than preserving `serde_json`'s wider integer representation.
 fn javascript_stringify(value: &Value) -> String {
     match value {
         Value::Null => "null".to_string(),
@@ -528,7 +532,7 @@ mod tests {
 
     #[test]
     fn array_to_object_uses_the_shipping_object_key_walk() {
-        let differences = parsed_differences(r#"[1]"#, r#"{"0":2,"extra":true}"#);
+        let differences = parsed_differences(r"[1]", r#"{"0":2,"extra":true}"#);
         assert_eq!(
             differences
                 .iter()

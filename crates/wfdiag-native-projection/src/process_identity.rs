@@ -83,17 +83,6 @@ pub trait ProcessIdentitySource {
     }
 }
 
-#[cfg(windows)]
-impl ProcessIdentitySource for wfdiag_native_monitor::ProcessRow {
-    fn process_pid(&self) -> u32 {
-        self.pid
-    }
-
-    fn process_start_time(&self) -> i64 {
-        self.start_time
-    }
-}
-
 /// Build the stable identity stored by the process-selection state.
 // Retained for library consumers and fixtures that do not own a native
 // ProcessRow. The executable currently constructs its local row projection
@@ -118,41 +107,66 @@ fn match_quality(selection: ProcessIdentity, observation: ProcessIdentity) -> Op
             // Prefer upgrading a fixture/unknown selection when the refresh has a
             // trustworthy creation time.
             (false, true) => 2,
-            (true, false) | (false, false) => 1,
+            (true | false, false) => 1,
         },
     )
 }
 
-/// Locate the selected row in a refreshed page.
+/// Locate the selected row in a refreshed page, projecting each row's identity
+/// with `identity`.
+///
+/// The closure form exists because the native process rows live in the monitor
+/// crate: this crate stays free of that dependency, and the orphan rule stops a
+/// shell from supplying the [`ProcessIdentitySource`] impl itself.
 ///
 /// The quality ordering only matters for malformed/fixture pages containing
 /// duplicate PIDs: an exact known lifetime wins over an unknown fallback.
+#[must_use]
+pub fn selected_process_row_by<Row>(
+    selection: Option<ProcessIdentity>,
+    rows: &[Row],
+    identity: impl Fn(&Row) -> ProcessIdentity,
+) -> Option<&Row> {
+    let selection = selection?;
+    rows.iter()
+        .filter_map(|row| match_quality(selection, identity(row)).map(|quality| (quality, row)))
+        .max_by_key(|(quality, _)| *quality)
+        .map(|(_, row)| row)
+}
+
+/// Keep, upgrade, or clear selection after a refreshed process page, projecting
+/// each row's identity with `identity`.
+///
+/// Returning `None` means the selected process disappeared from the current
+/// page or its PID was reused by a process with a different known start time.
+#[must_use]
+pub fn reconcile_process_selection_by<Row>(
+    selection: Option<ProcessIdentity>,
+    rows: &[Row],
+    identity: impl Fn(&Row) -> ProcessIdentity,
+) -> Option<ProcessIdentity> {
+    let selection = selection?;
+    let observation = identity(selected_process_row_by(Some(selection), rows, &identity)?);
+    selection.reconcile(observation)
+}
+
+/// [`selected_process_row_by`] for rows that implement [`ProcessIdentitySource`].
 #[must_use]
 pub fn selected_process_row<Row: ProcessIdentitySource>(
     selection: Option<ProcessIdentity>,
     rows: &[Row],
 ) -> Option<&Row> {
-    let selection = selection?;
-    rows.iter()
-        .filter_map(|row| {
-            match_quality(selection, row.process_identity()).map(|quality| (quality, row))
-        })
-        .max_by_key(|(quality, _)| *quality)
-        .map(|(_, row)| row)
+    selected_process_row_by(selection, rows, ProcessIdentitySource::process_identity)
 }
 
-/// Keep, upgrade, or clear selection after a refreshed `ProcessRow` page.
-///
-/// Returning `None` means the selected process disappeared from the current
-/// page or its PID was reused by a process with a different known start time.
+/// [`reconcile_process_selection_by`] for rows that implement
+/// [`ProcessIdentitySource`].
 #[must_use]
 pub fn reconcile_process_selection<Row: ProcessIdentitySource>(
     selection: Option<ProcessIdentity>,
     rows: &[Row],
 ) -> Option<ProcessIdentity> {
-    let selection = selection?;
-    let observation = selected_process_row(Some(selection), rows)?.process_identity();
-    selection.reconcile(observation)
+    reconcile_process_selection_by(selection, rows, ProcessIdentitySource::process_identity)
 }
 
 #[cfg(test)]

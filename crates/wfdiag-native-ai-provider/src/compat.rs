@@ -8,12 +8,33 @@ use crate::composition::{
 use crate::network::normalize_base_url;
 use crate::provider_config::ResolvedProviderConfig;
 use crate::{AIProvider, ProviderCaps, capabilities};
-use wfdiag_native_settings::{AppSettings, ProviderKeyId};
+use wfdiag_native_settings::{AppSettings, ProviderKeyId, SettingsService};
 
 /// Synchronous credential lookup. The shipping implementation wraps the
 /// DPAPI/keyring-backed settings service.
 pub trait ProviderKeySource: Send + Sync + 'static {
     fn load(&self, key: ProviderKeyId) -> Option<String>;
+}
+
+/// The shipping [`ProviderKeySource`]: read one provider's stored key through
+/// the settings service, treating any storage error as "no key configured".
+///
+/// Every shell surface that resolves a provider config needs exactly this, so
+/// it lives beside the trait rather than being re-declared per call site.
+#[derive(Clone)]
+pub struct SettingsProviderKeySource(pub SettingsService);
+
+impl SettingsProviderKeySource {
+    #[must_use]
+    pub const fn new(settings: SettingsService) -> Self {
+        Self(settings)
+    }
+}
+
+impl ProviderKeySource for SettingsProviderKeySource {
+    fn load(&self, key: ProviderKeyId) -> Option<String> {
+        self.0.load_provider_key(key).ok().flatten()
+    }
 }
 
 /// Everything needed to resolve one chat turn's concrete provider call.

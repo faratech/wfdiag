@@ -32,6 +32,7 @@ wfdiag-native-history = { workspace = true }
 wfdiag-native-issues = { workspace = true }
 wfdiag-native-monitor = { workspace = true }
 wfdiag-native-phi = { workspace = true }
+wfdiag-native-projection = { workspace = true }
 wfdiag-native-settings = { workspace = true }
 wfdiag-native-system = { workspace = true }
 wfdiag-native-update = { workspace = true }

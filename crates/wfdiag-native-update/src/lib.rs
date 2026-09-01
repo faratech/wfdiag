@@ -5,6 +5,8 @@
 //! deliberately silent: an update check may return an available release or no
 //! release, but it never creates a user-facing error surface.
 
+pub mod policy;
+
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -268,6 +270,87 @@ fn evaluate_release(release: GithubRelease, current: &Version) -> Option<UpdateI
     })
 }
 
+/// Why a check could not complete.
+///
+/// The passive update path still presents nothing to the user, but the
+/// distinction is preserved so callers and logs can tell "GitHub was
+/// unreachable" apart from "you are on the latest release".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateFailure {
+    /// The transport itself failed (offline, DNS, TLS, timeout).
+    Transport(String),
+    /// GitHub answered with a non-success status, `403` rate limiting
+    /// included. No error body is read.
+    Status(u16),
+    /// The response was not the release JSON this checker understands.
+    Parse(String),
+}
+
+impl fmt::Display for UpdateFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(reason) => write!(formatter, "update request failed: {reason}"),
+            Self::Status(status) => {
+                write!(formatter, "update request returned HTTP status {status}")
+            }
+            Self::Parse(reason) => {
+                write!(formatter, "update response could not be parsed: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for UpdateFailure {}
+
+/// The complete result of one update check.
+///
+/// Collapsing every one of these to "no update" is what made a rate-limited or
+/// offline check indistinguishable from a current install (#223). Shells still
+/// choose to display nothing for anything but [`Self::Available`]; they can now
+/// make that choice knowingly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateOutcome {
+    /// This channel does not check at all: a Store install or a debug build.
+    /// No request was made and none should be reported.
+    Silent,
+    /// The check completed and the running build is current.
+    UpToDate,
+    /// A newer public release is available.
+    Available(UpdateInfo),
+    /// The check could not complete.
+    Failed(UpdateFailure),
+}
+
+impl UpdateOutcome {
+    /// The newer release, if this check found one.
+    #[must_use]
+    pub const fn available(&self) -> Option<&UpdateInfo> {
+        match self {
+            Self::Available(update) => Some(update),
+            _ => None,
+        }
+    }
+
+    /// Consume the outcome, keeping only a newer release.
+    #[must_use]
+    pub fn into_available(self) -> Option<UpdateInfo> {
+        match self {
+            Self::Available(update) => Some(update),
+            _ => None,
+        }
+    }
+
+    /// Did the check fail to complete, as opposed to completing with nothing
+    /// to offer?
+    #[must_use]
+    pub const fn failure(&self) -> Option<&UpdateFailure> {
+        match self {
+            Self::Failed(failure) => Some(failure),
+            _ => None,
+        }
+    }
+}
+
 /// Complete update-check policy with injectable environmental boundaries.
 #[derive(Clone)]
 pub struct UpdateService {
@@ -330,16 +413,17 @@ impl UpdateService {
         ))
     }
 
-    /// Check once, returning only a newer public release.
+    /// Check once, classifying the result.
     ///
-    /// Every failure is intentionally converted to `None`, matching the
-    /// shipping command contract. This method may block for up to the request
-    /// timeout and therefore belongs on [`NativeUpdateRuntime`] or another
-    /// background executor.
+    /// Deliberately not public: this blocks for up to [`REQUEST_TIMEOUT`] and
+    /// performs Windows package calls, so every caller goes through
+    /// [`NativeUpdateRuntime::request_check`], which owns the dedicated worker
+    /// thread. Making it callable directly is what let a blocking check reach
+    /// an async executor (#211).
     #[must_use]
-    pub fn check(&self) -> Option<UpdateInfo> {
+    pub(crate) fn check_outcome(&self) -> UpdateOutcome {
         if self.debug_build || is_store_install(self.signature.as_ref()) {
-            return None;
+            return UpdateOutcome::Silent;
         }
         let current = self.current_version.current_version();
         let request = ReleaseRequest {
@@ -348,24 +432,30 @@ impl UpdateService {
             accept: GITHUB_JSON_ACCEPT,
             timeout: REQUEST_TIMEOUT,
         };
-        let response = self.http.fetch_latest(&request).ok()?;
+        let response = match self.http.fetch_latest(&request) {
+            Ok(response) => response,
+            Err(reason) => return UpdateOutcome::Failed(UpdateFailure::Transport(reason)),
+        };
         if !response.is_success() {
-            return None;
+            return UpdateOutcome::Failed(UpdateFailure::Status(response.status));
         }
-        let release = serde_json::from_slice::<GithubRelease>(&response.body).ok()?;
-        evaluate_release(release, &current)
+        match serde_json::from_slice::<GithubRelease>(&response.body) {
+            Ok(release) => evaluate_release(release, &current)
+                .map_or(UpdateOutcome::UpToDate, UpdateOutcome::Available),
+            Err(error) => UpdateOutcome::Failed(UpdateFailure::Parse(error.to_string())),
+        }
     }
 }
 
 enum UpdateCommand {
     Check {
-        reply: oneshot::Sender<Option<UpdateInfo>>,
+        reply: oneshot::Sender<UpdateOutcome>,
     },
     Shutdown,
 }
 
 /// Reply handle returned immediately to a native UI thread.
-pub type UpdateReply = oneshot::Receiver<Option<UpdateInfo>>;
+pub type UpdateReply = oneshot::Receiver<UpdateOutcome>;
 
 /// Queue/runtime errors are separate from deliberately silent check results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,7 +507,7 @@ impl NativeUpdateRuntime {
                 while let Some(command) = receiver.blocking_recv() {
                     match command {
                         UpdateCommand::Check { reply } => {
-                            let _ = reply.send(service.check());
+                            let _ = reply.send(service.check_outcome());
                         }
                         UpdateCommand::Shutdown => break,
                     }

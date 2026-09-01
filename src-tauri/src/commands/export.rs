@@ -2,98 +2,55 @@
 //!
 //! This module handles exporting diagnostic results in various formats
 //! (JSON, text, HTML) and saving them to disk.
+//!
+//! The destination policy — allowed roots, report extensions, the Temp
+//! filename restriction, and the canonicalize-then-check ordering — is shared
+//! with the native shell and lives in `wfdiag_native_export::path_policy`.
+//! Only the shell-folder resolution (`dirs`) and the `DiagError` wire mapping
+//! stay here.
 
 use crate::diagnostics;
 use crate::error::DiagError;
 use crate::state::AppState;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tauri::State;
+use wfdiag_native_export::path_policy::{
+    ExportExtensionRule, ExportPathError, ExportPathErrorKind, ExportPathPolicy, process_temp_dir,
+    safe_report_filename, validate_report_path_with_policy,
+};
 
-/// Get list of allowed directories for file saves (matching Tauri capabilities)
-fn get_allowed_save_paths() -> Vec<std::path::PathBuf> {
-    let mut paths = Vec::new();
-
-    // $APPDATA/wfdiag-tauri/ (config dir)
-    if let Some(appdata) = dirs::config_dir() {
-        paths.push(appdata.join("wfdiag-tauri"));
-        paths.push(appdata.join("com.windowsforum.diagnostics"));
-    }
-
-    // $HOME/Documents/
-    if let Some(docs) = dirs::document_dir() {
-        paths.push(docs);
-    }
-
-    // $HOME/Desktop/
-    if let Some(desktop) = dirs::desktop_dir() {
-        paths.push(desktop);
-    }
-
-    // $HOME/Downloads/
-    if let Some(downloads) = dirs::download_dir() {
-        paths.push(downloads);
-    }
-
-    // $TEMP directory (with pattern restriction enforced in validate_save_path)
-    if let Ok(temp) = std::env::var("TEMP") {
-        paths.push(std::path::PathBuf::from(temp));
-    } else if let Ok(tmp) = std::env::var("TMP") {
-        paths.push(std::path::PathBuf::from(tmp));
-    }
-
-    paths
+/// Resolve the shared policy from this user's shell folders.
+///
+/// `dirs::config_dir()` is Roaming AppData on Windows, which is where both the
+/// legacy `wfdiag-tauri` and current `com.windowsforum.diagnostics` data
+/// directories live; the crate appends both.
+fn current_user_export_policy() -> ExportPathPolicy {
+    ExportPathPolicy::for_user_folders(
+        dirs::document_dir(),
+        dirs::desktop_dir(),
+        dirs::download_dir(),
+        dirs::config_dir(),
+        process_temp_dir(),
+    )
 }
 
-fn temp_filename_allowed(filename: &str) -> bool {
-    let lower = filename.to_ascii_lowercase();
-    let has_text_or_html = lower.ends_with(".txt") || lower.ends_with(".html");
-    let has_report_extension = has_text_or_html || lower.ends_with(".json");
-
-    (lower.starts_with("wfdiag_") && has_text_or_html)
-        || (lower.starts_with("wf-diagnostics-") && has_report_extension)
-        || (lower.starts_with("support-package-") && has_report_extension)
-}
-
-/// Every allowed save directory — not just Temp — is restricted to the
-/// app's own report extensions. Without this, Documents/Desktop/Downloads/
-/// AppData would accept any filename and extension a caller supplied.
-fn has_report_extension(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|f| f.to_str())
-        .map(str::to_ascii_lowercase)
-        .is_some_and(|lower| {
-            lower.ends_with(".txt") || lower.ends_with(".html") || lower.ends_with(".json")
-        })
-}
-
-fn safe_report_filename(filename: &str) -> Result<&str, String> {
-    let path = Path::new(filename);
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            DiagError::path_validation(filename.to_string(), "filename is required").to_string()
-        })?;
-
-    if name != filename || name.contains(['/', '\\']) {
-        return Err(DiagError::path_validation(
-            filename.to_string(),
-            "filename must not contain a path",
-        )
-        .into());
+/// Map a shared policy refusal onto this command surface's error wire format.
+fn path_error(error: &ExportPathError) -> String {
+    match error.kind() {
+        ExportPathErrorKind::ParentMissing => DiagError::ParentNotExists {
+            path: error
+                .path()
+                .parent()
+                .unwrap_or_else(|| error.path())
+                .display()
+                .to_string(),
+        }
+        .into(),
+        _ => {
+            DiagError::path_validation(error.path().display().to_string(), error.to_string()).into()
+        }
     }
-
-    let lower = name.to_ascii_lowercase();
-    if !(lower.ends_with(".txt") || lower.ends_with(".html") || lower.ends_with(".json")) {
-        return Err(DiagError::path_validation(
-            filename.to_string(),
-            "filename must end in .txt, .html, or .json",
-        )
-        .into());
-    }
-
-    Ok(name)
 }
 
 fn default_export_dir() -> Result<PathBuf, String> {
@@ -108,80 +65,12 @@ fn default_export_dir() -> Result<PathBuf, String> {
 /// the canonicalized path that was actually checked, so callers can write to
 /// exactly what was validated instead of re-resolving the original string.
 fn validate_save_path(path: &str) -> Result<PathBuf, String> {
-    let path = Path::new(path);
-
-    // Get the path to validate (canonicalize parent for new files)
-    let path_to_check = if path.exists() {
-        path.canonicalize()
-            .map_err(|e| DiagError::path_validation(path.display().to_string(), e.to_string()))?
-    } else {
-        // For new files, check the parent directory exists and is allowed
-        let parent = path.parent().ok_or_else(|| {
-            DiagError::path_validation(path.display().to_string(), "no parent directory")
-        })?;
-        if !parent.exists() {
-            return Err(DiagError::ParentNotExists {
-                path: parent.display().to_string(),
-            }
-            .into());
-        }
-        let canonical_parent = parent
-            .canonicalize()
-            .map_err(|e| DiagError::path_validation(parent.display().to_string(), e.to_string()))?;
-        canonical_parent.join(path.file_name().unwrap_or_default())
-    };
-
-    if !has_report_extension(&path_to_check) {
-        return Err(DiagError::path_validation(
-            path_to_check.display().to_string(),
-            "filename must end in .txt, .html, or .json",
-        )
-        .into());
-    }
-
-    let allowed_paths = get_allowed_save_paths();
-
-    // Check if path falls within any allowed scope
-    for allowed in &allowed_paths {
-        // Canonicalize allowed path for comparison (skip if it doesn't exist)
-        let canonical_allowed = match allowed.canonicalize() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-
-        if path_to_check.starts_with(&canonical_allowed) {
-            // Additional check for TEMP directory: filename must match wfdiag_* pattern
-            if let Ok(temp) = std::env::var("TEMP").or_else(|_| std::env::var("TMP")) {
-                let temp_path = std::path::PathBuf::from(&temp);
-                if let Ok(canonical_temp) = temp_path.canonicalize() {
-                    if path_to_check.starts_with(&canonical_temp)
-                        && !path_to_check.starts_with(canonical_allowed.clone())
-                    {
-                        // This is in TEMP but matched a different allowed path, continue checking
-                        continue;
-                    }
-                    if path_to_check.starts_with(&canonical_temp)
-                        && let Some(filename) = path_to_check.file_name().and_then(|f| f.to_str())
-                        && !temp_filename_allowed(filename)
-                    {
-                        // Restrict Temp saves to filenames generated by this app.
-                        return Err(DiagError::path_validation(
-                            path_to_check.display().to_string(),
-                            "Temp files must use a WindowsForum Diagnostics report filename",
-                        )
-                        .into());
-                    }
-                }
-            }
-            return Ok(path_to_check);
-        }
-    }
-
-    Err(DiagError::path_validation(
-        path.display().to_string(),
-        "Path not in allowed scope. Allowed: Documents, Desktop, Downloads, AppData, or Temp (app report filenames only)",
+    validate_report_path_with_policy(
+        std::path::Path::new(path),
+        ExportExtensionRule::AnyReport,
+        &current_user_export_policy(),
     )
-    .into())
+    .map_err(|error| path_error(&error))
 }
 
 #[tauri::command]
@@ -191,7 +80,7 @@ pub async fn validate_export_path(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn suggest_export_path(filename: String) -> Result<String, String> {
-    let filename = safe_report_filename(&filename)?;
+    let filename = safe_report_filename(&filename).map_err(|error| path_error(&error))?;
     Ok(default_export_dir()?
         .join(filename)
         .to_string_lossy()
@@ -303,63 +192,5 @@ mod tests {
     fn include_raw_true_keeps_success_payload() {
         let text = export_results_content("text".to_string(), true, &sample_results()).unwrap();
         assert!(text.contains("Secret Value : raw diagnostic payload"));
-    }
-
-    #[test]
-    fn temp_filename_rules_allow_app_reports_only() {
-        for filename in [
-            "wfdiag_report.txt",
-            "wfdiag_report.html",
-            "wf-diagnostics-2026-06-22.txt",
-            "wf-diagnostics-2026-06-22.html",
-            "wf-diagnostics-2026-06-22.json",
-            "support-package-2026-06-22T12-00-00.json",
-            "support-package-2026-06-22T12-00-00.txt",
-            "support-package-2026-06-22T12-00-00.html",
-        ] {
-            assert!(temp_filename_allowed(filename), "{filename}");
-        }
-
-        for filename in [
-            "wfdiag_report.json",
-            "support-package-2026-06-22.exe",
-            "other-report.txt",
-            "wf-diagnostics-2026-06-22.exe",
-        ] {
-            assert!(!temp_filename_allowed(filename), "{filename}");
-        }
-    }
-
-    #[test]
-    fn has_report_extension_applies_outside_temp_too() {
-        assert!(has_report_extension(Path::new(
-            r"C:\Users\me\Documents\wf-diagnostics.txt"
-        )));
-        assert!(has_report_extension(Path::new(
-            r"C:\Users\me\Desktop\report.html"
-        )));
-        assert!(has_report_extension(Path::new(
-            r"C:\Users\me\Downloads\report.JSON"
-        )));
-        assert!(!has_report_extension(Path::new(
-            r"C:\Users\me\Desktop\run.bat"
-        )));
-        assert!(!has_report_extension(Path::new(
-            r"C:\Users\me\Documents\startup.vbs"
-        )));
-        assert!(!has_report_extension(Path::new(
-            r"C:\Users\me\Documents\noext"
-        )));
-    }
-
-    #[test]
-    fn safe_report_filename_rejects_paths_and_non_report_extensions() {
-        assert_eq!(
-            safe_report_filename("wf-diagnostics-2026-06-22.txt").unwrap(),
-            "wf-diagnostics-2026-06-22.txt"
-        );
-        assert!(safe_report_filename("../report.txt").is_err());
-        assert!(safe_report_filename("nested/report.txt").is_err());
-        assert!(safe_report_filename("report.exe").is_err());
     }
 }
