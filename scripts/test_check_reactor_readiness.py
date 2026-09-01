@@ -136,6 +136,27 @@ windows-reactor-setup = {{ git = "{readiness.EXPECTED_REACTOR_REPOSITORY}", rev 
             "apps/wfdiag/src/main.rs",
             "use windows_reactor::*;\nfn main() {}\n",
         )
+        self.write_text(
+            "Cargo.lock",
+            "\n".join(
+                [
+                    "version = 4",
+                    "",
+                    "[[package]]",
+                    'name = "windows-core"',
+                    'version = "0.61.2"',
+                    "",
+                    "[[package]]",
+                    'name = "windows-core"',
+                    'version = "0.62.2"',
+                    "",
+                    "[[package]]",
+                    'name = "windows-core"',
+                    'version = "0.100.0"',
+                    "",
+                ]
+            ),
+        )
         self.manifest = {
             "schema_version": readiness.EXPECTED_SCHEMA_VERSION,
             "store_manifest": "AppxManifest.xml",
@@ -328,6 +349,79 @@ class ReactorReadinessTests(unittest.TestCase):
 
         finding = next(f for f in report.findings if f.code == "ui.native")
         self.assertEqual(finding.severity, "pass")
+
+    def test_windows_core_0_100_outside_its_files_is_a_blocker(self):
+        self.fixture.write_text(
+            "apps/wfdiag/src/screens/borrowed_type.rs",
+            "use windows_core::IInspectable;\n",
+        )
+
+        report = self.fixture.report()
+
+        self.assertIn("types.boundary", codes(report, "blocker"))
+        finding = next(f for f in report.findings if f.code == "types.boundary")
+        self.assertIn(
+            "windows_core_0_100_outside_allowed_files",
+            finding.details["problems"],
+        )
+
+    def test_win32_0_62_outside_platform_is_a_blocker(self):
+        self.fixture.write_text(
+            "apps/wfdiag/src/app/win.rs",
+            "use windows::Win32::Foundation::HANDLE;\n",
+        )
+
+        report = self.fixture.report()
+
+        self.assertIn("types.boundary", codes(report, "blocker"))
+        finding = next(f for f in report.findings if f.code == "types.boundary")
+        self.assertIn(
+            "windows_0_62_win32_outside_platform",
+            finding.details["problems"],
+        )
+
+    def test_boundary_markers_in_their_allowed_homes_pass(self):
+        self.fixture.write_text(
+            "apps/wfdiag/src/platform/focus.rs",
+            "use windows_core::IInspectable;\n",
+        )
+        self.fixture.write_text(
+            "apps/wfdiag/src/platform/window.rs",
+            "use windows::Win32::UI::WindowsAndMessaging::PostMessageW;\n",
+        )
+
+        report = self.fixture.report()
+
+        finding = next(f for f in report.findings if f.code == "types.boundary")
+        self.assertEqual(finding.severity, "pass")
+
+    def test_unexpected_windows_core_lock_family_is_a_blocker(self):
+        self.fixture.write_text(
+            "Cargo.lock",
+            "\n".join(
+                [
+                    "version = 4",
+                    "",
+                    "[[package]]",
+                    'name = "windows-core"',
+                    'version = "0.61.2"',
+                    "",
+                    "[[package]]",
+                    'name = "windows-core"',
+                    'version = "0.63.0"',
+                    "",
+                ]
+            ),
+        )
+
+        report = self.fixture.report()
+
+        self.assertIn("types.boundary", codes(report, "blocker"))
+        finding = next(f for f in report.findings if f.code == "types.boundary")
+        self.assertIn(
+            "unexpected_windows_core_lock_families",
+            finding.details["problems"],
+        )
 
     def test_webview_permission_cannot_be_enabled_in_contract(self):
         self.fixture.manifest["ui_architecture"]["webview_ui_allowed"] = True

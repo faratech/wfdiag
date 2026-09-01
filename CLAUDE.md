@@ -225,6 +225,17 @@ updating, in one reviewed change: both Cargo dependencies, `reactor-baselines/ma
 (`reactor_pin`), and `scripts/build-reactor-msix-probe.py`. `check-external-gates.py` watches
 crates.io so the eventual move to an official release happens as a normal dependency update.
 
+**Type-system boundary (#213).** The workspace therefore links two distinct windows-rs type
+systems: crates.io `windows`/`windows-core` 0.62 (engine crates, `src-tauri`, and the shell's
+Win32 edges) and the pinned 0.100.0 revision (`windows-reactor`, its companion crates, and the
+shell's `windows_core`). Their types are disjoint and no typed value may cross between them —
+crossing is raw ABI only (`*mut c_void`, vtable pointers, as in `wfdiag-native-phi`'s deliberate
+`DllGetActivationFactory` bridge); never `?`, never `impl Interface`, never a shared struct. In
+`apps/wfdiag/src`, 0.100 `windows_core` may appear only in `platform/focus.rs` and the generated
+`platform/winui_focus_bindings.rs`, and `windows::Win32` only under `platform/`.
+`check-reactor-readiness.py` (`types.boundary`) enforces both halves and surveys `Cargo.lock`
+so a third windows-core type system fails a gate instead of a review.
+
 ## Readiness and validation gates
 
 `python3 scripts/check-reactor-readiness.py` reports **NOT READY** (exit 1) on purpose. The

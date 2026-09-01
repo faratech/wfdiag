@@ -53,6 +53,28 @@ FORBIDDEN_UI_SOURCE_MARKERS = (
 ALLOWED_UI_SOURCE_DATA_LITERALS = (
     '"msedgewebview2.exe"',
 )
+# The workspace links two windows-rs type systems: crates.io windows /
+# windows-core 0.62 (engine crates and the Win32 edges) and the pinned
+# 0.100.0 revision (Reactor and its companions). Their types are distinct,
+# so no typed value may cross between them — raw ABI only. In the native
+# shell these markers may appear only in the files/directories below; see
+# the pin policy in CLAUDE.md and the type-boundary note in
+# docs/REACTOR_MIGRATION.md (#213).
+WINDOWS_CORE_0100_SHELL_FILES = {
+    "apps/wfdiag/src/platform/focus.rs",
+    "apps/wfdiag/src/platform/winui_focus_bindings.rs",
+}
+WINDOWS_062_SHELL_DIRECTORIES = (
+    "apps/wfdiag/src/platform/",
+)
+# Cargo.lock may carry one windows-core per linked type system. A version
+# outside these major.minor families means a third type system (or an
+# unexpected crates.io windows-core edge in the shell) has appeared.
+ALLOWED_WINDOWS_CORE_LOCK_FAMILIES = {
+    "0.61",
+    "0.62",
+    "0.100",
+}
 FORBIDDEN_WEB_ASSET_SUFFIXES = {
     ".css",
     ".htm",
@@ -520,6 +542,83 @@ def _check_native_ui(
             "Reactor candidate uses native Rust/WinUI controls with no WebView UI dependency",
             source_root=EXPECTED_UI_SOURCE_ROOT,
             rust_source_count=len(rust_sources),
+        )
+
+
+def _check_windows_type_boundary(root: Path, report: ReadinessReport) -> None:
+    """Keep the crates.io 0.62 and pinned 0.100 windows-rs type systems disjoint (#213)."""
+
+    source_root = _safe_repo_path(root, EXPECTED_UI_SOURCE_ROOT)
+    if not source_root.is_dir():
+        report.add(
+            "types.boundary",
+            "error",
+            "Native Reactor source root is missing",
+            path=EXPECTED_UI_SOURCE_ROOT,
+        )
+        return
+
+    core_hits: list[str] = []
+    win32_hits: list[str] = []
+    for path in sorted(source_root.rglob("*.rs")):
+        relative = str(path.relative_to(root)).replace("\\", "/")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            report.add(
+                "types.boundary",
+                "error",
+                "Could not read shell source for the type-boundary survey",
+                path=relative,
+                error=str(error),
+            )
+            return
+        # `windows_core` names the pinned 0.100.0 revision's crate; `windows`
+        # names the crates.io 0.62 crate. Their identifiers must stay in
+        # their own files so no typed value can cross the boundary.
+        if "windows_core" in text and relative not in WINDOWS_CORE_0100_SHELL_FILES:
+            core_hits.append(relative)
+        if "windows::Win32" in text and not relative.startswith(
+            WINDOWS_062_SHELL_DIRECTORIES
+        ):
+            win32_hits.append(relative)
+
+    problems: dict[str, Any] = {}
+    if core_hits:
+        problems["windows_core_0_100_outside_allowed_files"] = core_hits
+    if win32_hits:
+        problems["windows_0_62_win32_outside_platform"] = win32_hits
+
+    lock_path = root / "Cargo.lock"
+    try:
+        lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        problems["cargo_lock_survey"] = f"could not read Cargo.lock: {error}"
+    else:
+        families = {
+            str(package["version"]).rsplit(".", 1)[0]
+            for package in lock.get("package", [])
+            if package.get("name") == "windows-core"
+            and isinstance(package.get("version"), str)
+        }
+        unexpected = sorted(families - ALLOWED_WINDOWS_CORE_LOCK_FAMILIES)
+        if unexpected:
+            problems["unexpected_windows_core_lock_families"] = unexpected
+
+    if problems:
+        report.add(
+            "types.boundary",
+            "blocker",
+            "windows-rs type systems are not disjoint; a typed value would cross the boundary",
+            source_root=EXPECTED_UI_SOURCE_ROOT,
+            problems=problems,
+        )
+    else:
+        report.add(
+            "types.boundary",
+            "pass",
+            "crates.io 0.62 and pinned 0.100 windows-rs types stay disjoint in the shell",
+            source_root=EXPECTED_UI_SOURCE_ROOT,
         )
 
 
@@ -1177,6 +1276,7 @@ def evaluate_readiness(root: Path, manifest_path: Path | None = None) -> Readine
     _check_manifest_contract(report, manifest)
     _check_reactor_prototype(root, report, manifest)
     _check_native_ui(root, report, manifest)
+    _check_windows_type_boundary(root, report)
     _check_baselines(root, report, manifest)
     _check_store_manifest(root, report, manifest)
     _check_backend_parity(report, manifest)

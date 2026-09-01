@@ -116,6 +116,34 @@ release that contains the APIs WFDiag validated. Update the expected version,
 revision, both Cargo dependencies, and the readiness contract together in one
 reviewed change when that release exists.
 
+### Type-system boundary (#213)
+
+Because the shell is pinned to the 0.100.0 windows-rs source while every other
+workspace member uses crates.io windows/windows-core 0.62, the workspace links
+two distinct and mutually incompatible type systems: `HSTRING`, `IInspectable`,
+`IUnknown`, `HRESULT`, and `IAsyncOperation` exist twice and their Rust types
+are not interchangeable. The accepted risk (recorded in the cutover decision)
+is formalized as follows:
+
+* No typed value crosses between the two systems. The only legal crossing is
+  raw ABI — `*mut c_void` and vtable pointers, whose layout is stable across
+  both versions — which is exactly what `wfdiag-native-phi`'s
+  `DllGetActivationFactory` bridge does, deliberately and exclusively.
+* Never use `?` on a `Result` from the other system, never `impl
+  windows_core::Interface` for a 0.62 type (or vice versa), and never define a
+  shared struct with fields from both.
+* In `apps/wfdiag/src`, 0.100 `windows_core` identifiers may appear only in
+  `platform/focus.rs` and the generated `platform/winui_focus_bindings.rs`,
+  and `windows::Win32` (0.62) only under `platform/`. The engine crates are
+  uniformly 0.62 and out of scope.
+* `scripts/check-reactor-readiness.py` (`types.boundary`) enforces both halves
+  and surveys `Cargo.lock` so a third windows-core family — or a crates.io
+  windows-core edge in the shell — fails a gate instead of a review.
+
+Unification awaits the official crates.io release of the windows-rs crates
+(watched by `scripts/check-external-gates.py`); the ~14 duplicated `windows-*`
+lockfile entries are the cost of that wait and change nothing at runtime.
+
 On a Windows developer machine with the MSVC Rust target installed:
 
 ```powershell

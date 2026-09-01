@@ -953,7 +953,13 @@ fn create_language_model_direct(
     // Create HSTRING for the class name
     let class_name = HSTRING::from("Microsoft.Windows.AI.Text.LanguageModel");
 
-    // Get the raw HSTRING handle - HSTRING is repr(transparent) over a pointer
+    // Get the raw HSTRING handle - HSTRING is repr(transparent) over a pointer.
+    // This is the workspace's one deliberate crossing between the crates.io
+    // windows 0.62 type system and the pinned 0.100.0 windows-rs revision the
+    // Reactor shell uses (#213): only raw ABI (`*mut c_void`, vtable pointers)
+    // crosses, whose layout is stable across both versions. Never pass a
+    // typed HSTRING/IInspectable from one system into the other; see the
+    // type-system boundary note in docs/REACTOR_MIGRATION.md.
     let hstring_raw: *mut std::ffi::c_void = unsafe { std::mem::transmute_copy(&class_name) };
 
     let mut factory_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
