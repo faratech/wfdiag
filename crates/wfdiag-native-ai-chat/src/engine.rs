@@ -1062,10 +1062,18 @@ pub fn project_session(session: &ChatSession) -> Vec<ChatMessageView> {
         if turn.tool_activities.is_empty() {
             continue;
         }
-        for record in &turn.tool_activities {
-            for view in &mut views {
-                view.tools.retain(|tool| tool.call_id != record.call_id);
-            }
+        // Purge this turn's call ids from every view in ONE pass per turn.
+        // The former per-record × per-view retain loop was
+        // O(views × records) with a full Vec rewrite per record, which
+        // showed up as jank when rehydrating long sessions.
+        let call_ids: std::collections::HashSet<&str> = turn
+            .tool_activities
+            .iter()
+            .map(|record| record.call_id.as_str())
+            .collect();
+        for view in &mut views {
+            view.tools
+                .retain(|tool| !call_ids.contains(tool.call_id.as_str()));
         }
         if let Some(target) = views
             .iter_mut()

@@ -1377,6 +1377,10 @@ impl NativeChatRuntime {
                             // The Tokio runtime exists only while a turn runs; an
                             // idle runtime's IO/time drivers were observed to keep
                             // the WinUI dispatcher from finishing window teardown.
+                            // Deliberately rebuilt per turn (2026-08-31 audit): a
+                            // worker-owned persistent runtime would reintroduce
+                            // that teardown hang, and the build cost is noise
+                            // next to a multi-second network turn.
                             let runtime = tokio::runtime::Builder::new_current_thread()
                                 .enable_all()
                                 .build();
