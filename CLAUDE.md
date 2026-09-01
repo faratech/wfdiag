@@ -410,7 +410,7 @@ several conclusions there are explicitly marked "do not re-litigate".
 | `docs/REACTOR_STORE_PROBE.md` | the non-publishing Store/MSIX alignment probe |
 | `docs/validation/clean-machine-protocol.md` | manual clean-machine + Store certification protocol with sign-off table |
 | `docs/BUGS.md` | pointer to the GitHub audit tracking issue and the bug convention |
-| `docs/{STORE-PUBLISHING,VERSION-BUMP,CERTIFICATE_SETUP,GITHUB_SECRETS_SETUP}.md` | release plumbing |
+| `docs/STORE-PUBLISHING.md` | release plumbing (Store delivery; Microsoft signs the shipped package) |
 | `scripts/README.md` | version-bump file list, MSIX/probe subcommands, capture and validation lanes |
 | `reactor-baselines/README.md` | the visual-oracle + pin contract, and what may not be weakened |
 | `apps/wfdiag/README.md` | the native shell: layout, build/run, evidence, open gates |
