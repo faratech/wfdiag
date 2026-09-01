@@ -245,18 +245,62 @@ fn finish_streamed_turn(
     })
 }
 
-fn friendly_error(provider: AIProvider, error: impl std::fmt::Display) -> String {
+fn friendly_error(
+    provider: AIProvider,
+    cfg: &ResolvedProviderConfig,
+    error: impl std::fmt::Display,
+) -> String {
     let detail = error.to_string();
-    let hint = if detail.contains("401") || detail.contains("Unauthorized") {
-        " Check the API key in Settings."
+    let hint = if mid_stream_close(&detail) {
+        local_server_closed_hint(provider, cfg.model.as_deref().unwrap_or_default())
+    } else if detail.contains("401") || detail.contains("Unauthorized") {
+        " Check the API key in Settings.".to_string()
     } else if detail.contains("404") || detail.contains("model_not_found") {
-        " Check that the configured model name exists on this endpoint."
+        " Check that the configured model name exists on this endpoint.".to_string()
     } else if detail.contains("429") {
-        " Rate limit exceeded — wait a moment and retry."
+        " Rate limit exceeded — wait a moment and retry.".to_string()
     } else {
-        ""
+        String::new()
     };
     format!("{provider} error: {detail}.{hint}")
+}
+
+/// A transport failure while the response body was already streaming.
+///
+/// Foundry Local is the known offender: its streaming endpoint commits
+/// `200 text/event-stream` and *then* throws an unhandled server-side
+/// exception when the requested model is not loaded, so Kestrel closes the
+/// chunked body and the client sees a bare decode error with no status to
+/// react to.
+fn mid_stream_close(detail: &str) -> bool {
+    detail.contains("error decoding response body") || detail.contains("connection closed")
+}
+
+/// What the user can actually do when a local server dies mid-stream.
+fn local_server_closed_hint(provider: AIProvider, model: &str) -> String {
+    match provider {
+        AIProvider::FoundryLocal if model.is_empty() => {
+            " The Foundry Local service closed the connection before responding — the \
+             requested model is probably not downloaded yet; 'foundry model list' shows what \
+             is downloaded."
+                .to_string()
+        }
+        AIProvider::FoundryLocal => format!(
+            " The Foundry Local service closed the connection before responding — model \
+             '{model}' is probably not downloaded yet. Run 'foundry model download {model}' \
+             or pick a downloaded model in Settings."
+        ),
+        AIProvider::Ollama if model.is_empty() => {
+            " The Ollama server closed the connection before responding — the requested \
+             model is probably not pulled yet."
+                .to_string()
+        }
+        AIProvider::Ollama => format!(
+            " The Ollama server closed the connection before responding — model '{model}' is \
+             probably not pulled yet ('ollama pull {model}')."
+        ),
+        _ => " The server closed the connection before completing the response.".to_string(),
+    }
 }
 
 /// One-shot analysis through chat completions (system + single user message).
@@ -286,7 +330,7 @@ pub async fn one_shot(
         .chat()
         .create(chat_request)
         .await
-        .map_err(|e| friendly_error(provider, e))?;
+        .map_err(|e| friendly_error(provider, cfg, e))?;
 
     let choice = response
         .choices
@@ -334,7 +378,7 @@ pub async fn chat_stream(
         .chat()
         .create_stream(chat_request)
         .await
-        .map_err(|e| friendly_error(provider, e))?;
+        .map_err(|e| friendly_error(provider, cfg, e))?;
 
     let mut text = String::new();
     let mut finish: Option<OpenAIFinishReason> = None;
@@ -344,7 +388,7 @@ pub async fn chat_stream(
     let mut pending: BTreeMap<u32, (Option<String>, String, String)> = BTreeMap::new();
 
     while let Some(item) = stream.next().await {
-        let chunk = item.map_err(|e| friendly_error(provider, e))?;
+        let chunk = item.map_err(|e| friendly_error(provider, cfg, e))?;
         if !chunk.model.trim().is_empty()
             && !actual_models.iter().any(|model| model == &chunk.model)
         {
@@ -546,5 +590,61 @@ mod tests {
         assert_eq!(turn.finished, FinishReason::Refusal);
         assert_eq!(turn.text, "I cannot help with that.");
         assert_eq!(turn.actual_models, vec!["gpt-5.6-sol"]);
+    }
+
+    fn config_with(model: &str) -> ResolvedProviderConfig {
+        ResolvedProviderConfig {
+            endpoint: Some("http://127.0.0.1:61341".into()),
+            model: Some(model.into()),
+            ..Default::default()
+        }
+    }
+
+    const FOUNDRY_MID_STREAM_CLOSE: &str =
+        "stream failed: EventStream error: Transport error: error decoding response body";
+
+    #[test]
+    fn foundry_mid_stream_close_points_at_the_model_download() {
+        let message = friendly_error(
+            AIProvider::FoundryLocal,
+            &config_with("phi-4-mini"),
+            FOUNDRY_MID_STREAM_CLOSE,
+        );
+        assert!(message.contains("closed the connection"));
+        assert!(message.contains("foundry model download phi-4-mini"));
+        // The raw chain stays in the message for support diagnostics.
+        assert!(message.contains("error decoding response body"));
+    }
+
+    #[test]
+    fn ollama_mid_stream_close_suggests_a_pull() {
+        let message = friendly_error(
+            AIProvider::Ollama,
+            &config_with("qwen3:8b"),
+            FOUNDRY_MID_STREAM_CLOSE,
+        );
+        assert!(message.contains("closed the connection"));
+        assert!(message.contains("ollama pull qwen3:8b"));
+    }
+
+    #[test]
+    fn cloud_mid_stream_close_stays_generic_and_other_hints_survive() {
+        let cfg = config_with("gpt-5.6-sol");
+        let generic = friendly_error(AIProvider::OpenAI, &cfg, FOUNDRY_MID_STREAM_CLOSE);
+        assert!(generic.contains("closed the connection"));
+        assert!(!generic.contains("download") && !generic.contains("pull"));
+        let auth = friendly_error(AIProvider::OpenAI, &cfg, "401 Unauthorized");
+        assert!(auth.contains("Check the API key in Settings."));
+    }
+
+    #[test]
+    fn mid_stream_close_hints_survive_an_unresolved_model_name() {
+        let message = friendly_error(
+            AIProvider::FoundryLocal,
+            &ResolvedProviderConfig::default(),
+            FOUNDRY_MID_STREAM_CLOSE,
+        );
+        assert!(message.contains("foundry model list"));
+        assert!(!message.contains("download ''"));
     }
 }
