@@ -17,7 +17,14 @@ wfdiag-native-settings = { workspace = true }
 wfdiag-native-system = { workspace = true }
 wfdiag-native-update = { workspace = true }
 wfdiag-native-ai-provider = { workspace = true }
+wfdiag-native-ai-analysis = { workspace = true }
+wfdiag-native-ai-chat = { workspace = true }
+wfdiag-native-ai-report = { workspace = true }
+wfdiag-native-remediation = { workspace = true }
+wfdiag-native-phi = { workspace = true }
 wfdiag-ui-core = { workspace = true }
+tokio-util = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 wfdiag-native-monitor = { workspace = true }

@@ -5638,6 +5638,7 @@ dependencies = [
  "wfdiag-native-history",
  "wfdiag-native-issues",
  "wfdiag-native-monitor",
+ "wfdiag-native-phi",
  "wfdiag-native-remediation",
  "wfdiag-native-settings",
  "wfdiag-native-system",

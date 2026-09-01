@@ -17,12 +17,15 @@ use wfdiag_native_update::{
     ReqwestReleaseHttp, StaticCurrentVersion, WindowsPackageSignatureProvider,
 };
 
+use super::ai::AiPorts;
 use super::monitor::{
     MonitorHandle, MonitorPort, MonitorProfileKind, MonitorSession, NetworkConnection,
     NetworkConnectionsReply, ProcessPage, ProcessPageReply, ProcessQuery, ProcessQueryOutcome,
     ProcessRow, ProcessSortDirection, ProcessSortKey,
 };
 use super::{AppPorts, ElevationPort, SystemEnvironment, UnsupportedElevation, UpdateThrottlePort};
+use wfdiag_native_ai_provider::{FoundryCliEndpointSource, ReqwestOllamaSource, SharedAiCache};
+use wfdiag_native_settings::SettingsService;
 
 impl From<ProcessSortKey> for wfdiag_native_monitor::ProcessSortKey {
     fn from(value: ProcessSortKey) -> Self {
@@ -247,12 +250,30 @@ pub fn windows_ports(
     elevation: Option<Arc<dyn ElevationPort>>,
     current_version: &str,
 ) -> AppPorts {
+    let settings_storage: Arc<dyn wfdiag_native_settings::SettingsStorage> =
+        Arc::new(ShippingSettingsStorage::new());
+    let credentials: Arc<dyn wfdiag_native_settings::CredentialStorage> =
+        Arc::new(WindowsDpapiCredentialStorage::new());
+    let settings_validator: Arc<dyn wfdiag_native_settings::SettingsValidator> =
+        Arc::new(AllowAllSettings);
+    // The AI resolvers read live settings and DPAPI keys per request, so they
+    // are built from the same storages the service's own settings service uses.
+    let ai = AiPorts::shipping(
+        SettingsService::new(
+            Arc::clone(&settings_storage),
+            Arc::clone(&credentials),
+            Arc::clone(&settings_validator),
+        ),
+        Arc::new(FoundryCliEndpointSource::new()),
+        Arc::new(ReqwestOllamaSource),
+        SharedAiCache::new(32),
+    );
     AppPorts {
         diagnostics: Arc::new(wfdiag_native_diagnostics::NativeDiagnosticExecutor),
         system: Arc::new(wfdiag_native_system::NativeSystemProvider),
-        settings_storage: Arc::new(ShippingSettingsStorage::new()),
-        credentials: Arc::new(WindowsDpapiCredentialStorage::new()),
-        settings_validator: Arc::new(AllowAllSettings),
+        settings_storage,
+        credentials,
+        settings_validator,
         release_http: Arc::new(ReqwestReleaseHttp),
         signature: Arc::new(WindowsPackageSignatureProvider::new()),
         current_version: Arc::new(
@@ -267,5 +288,6 @@ pub fn windows_ports(
             |_| Arc::new(super::AlwaysCheckThrottle) as Arc<dyn UpdateThrottlePort>,
             |throttle| Arc::new(throttle) as Arc<dyn UpdateThrottlePort>,
         ),
+        ai,
     }
 }

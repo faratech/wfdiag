@@ -43,10 +43,6 @@
 //!
 //! # Deviations worth knowing
 //!
-//! * The host wake callback is [`AppWakeHandler`], not `wfdiag_ui_core::UiWakeHandler`:
-//!   the latter's invoke method is private to that crate, so it can only be
-//!   handed *to* `ui-core`, never called by this one. The service installs a
-//!   `UiWakeHandler` on the event buses that forwards into the same queue.
 //! * The shell's 500 ms cosmetic pause between "scan complete" and "history
 //!   saved" is not reproduced: it is presentation, and a headless host should
 //!   not wait for it.
@@ -63,16 +59,18 @@ pub mod ports;
 mod replies;
 pub mod service;
 pub mod snapshot;
+pub mod snapshot_ai;
 mod workers;
 
 pub use command::{
-    AppCommand, DispatchOutcome, ProviderCredentialCommand, RejectReason, UpdateCheckReason,
-    WorkerKind,
+    AppCommand, DispatchOutcome, ProviderCredentialCommand, RejectReason, SubscriptionOperation,
+    UpdateCheckReason, WorkerKind,
 };
 pub use config::AppConfig;
 pub use event::{
-    AppEvent, AppEventReceiver, AppWakeHandler, ExportEvent, ExtensionEvent, HistoryEvent,
-    HistoryRequest, IssuesEvent, MonitorEvent, ProviderEvent, ScanEvent, SettingsEvent,
+    ActionEvent, AnalysisEvent, AppEvent, AppEventReceiver, ChatEvent, ExportEvent, FixPlanEvent,
+    HistoryEvent, HistoryRequest, IssuesEvent, ModelCatalogEvent, MonitorEvent,
+    PrioritizationEvent, ProviderEvent, ReportEvent, ScanEvent, SettingsEvent, SubscriptionEvent,
     SystemEvent, UpdateEvent,
 };
 pub use ids::{Epoch, Generation, RequestId};
@@ -81,4 +79,12 @@ pub use service::{AppService, AppStartError, ShutdownReport};
 pub use snapshot::{
     AppSnapshot, HistorySnapshot, MonitorSnapshot, UpdateSnapshot, WorkerUnavailable,
 };
+pub use snapshot_ai::{
+    ActionsSnapshot, AiSnapshot, AnalysisSnapshot, ChatSnapshot, CloudFallbackPrompt,
+    FixPlanSnapshot, FullScanRequest, PrioritizationSnapshot, ProviderSetupSnapshot,
+    ReportSnapshot, StagedProposalRequest,
+};
+/// The host wake callback. This is `ui-core`'s handler, not a mirror of it, so
+/// one callback serves the event buses and this facade alike.
+pub use wfdiag_ui_core::UiWakeHandler;
 pub use workers::WorkerStopRecord;

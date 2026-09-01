@@ -6,7 +6,8 @@ use std::time::Duration;
 use support::{TempDir, boot, start_with};
 use wfdiag_app::ports::mock::MockPorts;
 use wfdiag_app::{
-    AppCommand, AppConfig, AppEvent, AppService, DispatchOutcome, RejectReason, WorkerKind,
+    AppCommand, AppConfig, AppEvent, AppService, DispatchOutcome, RejectReason,
+    SubscriptionOperation, WorkerKind,
 };
 
 /// Issue #200: a shell must be able to paint its first frame with the user's
@@ -79,60 +80,104 @@ fn a_second_start_is_ignored_and_commands_after_shutdown_are_refused() {
     harness.shutdown(Duration::from_secs(2));
 }
 
+/// Step 11 wired every declared extension point. The contract that replaced
+/// the blanket `NotWired` refusal is that each command now reaches its own
+/// domain and answers with that domain's real precondition — never a generic
+/// refusal, and never a silent no-op.
 #[test]
-fn every_declared_extension_point_is_rejected_as_not_wired() {
-    let mut harness = boot("not_wired");
-    let unwired = [
-        AppCommand::ChatSend {
-            prompt: "hello".to_string(),
-        },
+fn every_ai_command_is_routed_to_its_own_domain() {
+    let mut harness = boot("ai_routing");
+
+    // Cancelling something that is not running is a no-op, not a failure.
+    for command in [
         AppCommand::ChatCancel,
-        AppCommand::ChatReset,
-        AppCommand::CloudFallbackDecision { allow: true },
-        AppCommand::GenerateReport {
-            force_refresh: false,
-        },
         AppCommand::CancelReport,
-        AppCommand::AnalyzeDiagnostic {
-            task_id: "os_info".to_string(),
-        },
         AppCommand::CancelAnalysis,
-        AppCommand::PrioritizeIssues,
-        AppCommand::GenerateFixPlan,
         AppCommand::CancelFixPlan,
-        AppCommand::PrepareRemediation {
-            remediation_id: "open_disk_cleanup".to_string(),
-        },
-        AppCommand::ApproveAction {
-            proposal_id: "proposal".to_string(),
-        },
-        AppCommand::DiscardProposal {
-            proposal_id: "proposal".to_string(),
-        },
-        AppCommand::CancelAction {
-            run_id: "run".to_string(),
-        },
-        AppCommand::RefreshModelCatalog {
-            provider: "openai".to_string(),
-        },
         AppCommand::CancelModelCatalog,
-        AppCommand::SubscriptionAuth {
-            provider: "codex_cli".to_string(),
-            sign_in: true,
-        },
         AppCommand::CancelSubscriptionAuth,
-        AppCommand::InstallSubscriptionCli {
-            provider: "codex_cli".to_string(),
-        },
         AppCommand::CancelSubscriptionInstall,
-    ];
-    for command in unwired {
-        assert_eq!(
-            harness.service.dispatch(command.clone()).rejection(),
-            Some(&RejectReason::NotWired),
-            "{command:?} must refuse loudly, never silently no-op"
+        AppCommand::CloudFallbackDecision { allow: true },
+        AppCommand::ConfirmSubscriptionInstall { accepted: true },
+    ] {
+        assert!(
+            matches!(
+                harness.service.dispatch(command.clone()),
+                DispatchOutcome::Ignored { .. }
+            ),
+            "{command:?} must be a no-op, not a refusal"
         );
     }
+
+    // Work that needs evidence is refused with the evidence's reason.
+    assert!(matches!(
+        harness
+            .service
+            .dispatch(AppCommand::PrioritizeIssues {
+                force_refresh: false
+            })
+            .rejection(),
+        Some(RejectReason::NotReady { .. })
+    ));
+    assert!(matches!(
+        harness
+            .service
+            .dispatch(AppCommand::AnalyzeDiagnostic {
+                task_id: "os_info".to_string(),
+                force_refresh: false,
+            })
+            .rejection(),
+        Some(RejectReason::NotReady { .. })
+    ));
+    assert!(
+        matches!(
+            harness.service.dispatch(AppCommand::GenerateFixPlan),
+            DispatchOutcome::Ignored { .. }
+        ),
+        "there are no detected issues to plan for"
+    );
+
+    // An id the engine does not recognise is invalid, never ignored.
+    assert!(matches!(
+        harness
+            .service
+            .dispatch(AppCommand::RefreshModelCatalog {
+                provider: "not_a_provider".to_string(),
+                draft_api_key: None,
+                draft_endpoint: None,
+                draft_cli_path: None,
+                forced: true,
+            })
+            .rejection(),
+        Some(RejectReason::Invalid { .. })
+    ));
+    assert!(
+        matches!(
+            harness
+                .service
+                .dispatch(AppCommand::SubscriptionAuth {
+                    provider: "openai".to_string(),
+                    operation: SubscriptionOperation::Status,
+                })
+                .rejection(),
+            Some(RejectReason::Invalid { .. })
+        ),
+        "OpenAI is not a subscription CLI"
+    );
+    assert!(
+        matches!(
+            harness
+                .service
+                .dispatch(AppCommand::ApproveAction {
+                    proposal_id: "never-staged".to_string(),
+                    confirm_repair: false,
+                })
+                .rejection(),
+            Some(RejectReason::Invalid { .. })
+        ),
+        "a preview that was never staged cannot be approved"
+    );
+
     harness.shutdown(Duration::from_secs(2));
 }
 

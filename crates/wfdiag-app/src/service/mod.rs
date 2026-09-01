@@ -19,11 +19,17 @@
 //!   place [`AppSnapshot`] is mutated, and the only place staleness is judged.
 //!   A host that receives an event never has to ask whether it is current.
 
+mod ai;
+
 use crate::command::{
     AppCommand, DispatchOutcome, ProviderCredentialCommand, RejectReason, UpdateCheckReason,
     WorkerKind,
 };
 use crate::config::AppConfig;
+use crate::domain::actions::StagedReview;
+use crate::domain::ai_intent::PendingAiIntent;
+use crate::domain::catalog::RefreshThrottle;
+use crate::domain::consent::{ChatAttempt, PendingConsent, PendingPolicyWrite};
 use crate::domain::history::{
     RetentionPolicy, auto_save_allowed, build_scan_record, scan_concurrency, scan_kind_history_tag,
 };
@@ -38,12 +44,13 @@ use crate::event::{
     MonitorEvent, ProviderEvent, ScanEvent, SettingsEvent as SettingsFact, SystemEvent,
     UpdateEvent,
 };
-use crate::ids::{RequestId, RequestIds};
+use crate::ids::{Generation, Generations, RequestId, RequestIds};
 use crate::ports::AppPorts;
 use crate::ports::monitor::{NetworkConnection, ProcessQuery, ProcessQueryOutcome};
 use crate::replies::{PendingReplies, ReplyFailure, ReplyWatcher};
 use crate::snapshot::AppSnapshot;
 use crate::workers::{AppWorkers, WorkerStopRecord};
+use ai::{CatalogDraft, PendingAnalysis, PendingSubscriptionAuth, PendingSubscriptionInstall};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -173,6 +180,12 @@ enum Internal {
         request: RequestId,
         models: Result<Vec<String>, String>,
     },
+    /// The report's optional history baseline finished resolving.
+    ReportBaseline {
+        request: RequestId,
+        generation: Box<wfdiag_native_ai_report::ReportGeneration>,
+        comparison: Option<Box<ComparisonResult>>,
+    },
     ProcessPage {
         request: RequestId,
         outcome: Result<ProcessQueryOutcome, String>,
@@ -229,6 +242,29 @@ pub struct AppService {
     update_startup_due: Option<Instant>,
     started: bool,
     terminating: bool,
+
+    // ---- AI, remediation, and provider setup ---------------------------
+    /// Versions the committed evidence a proposal or a ranking is bound to.
+    evidence_generations: Generations,
+    evidence_generation: Generation,
+    chat_turns: RequestIds,
+    chat_turn: Option<RequestId>,
+    chat_pending: Option<RequestId>,
+    chat_attempt: Option<ChatAttempt>,
+    chat_consent: Option<PendingConsent>,
+    chat_policy_write: Option<(RequestId, PendingPolicyWrite)>,
+    pending_intent: Option<PendingAiIntent>,
+    report_pending: Option<RequestId>,
+    analysis_pending: Option<PendingAnalysis>,
+    prioritization_pending: Option<(RequestId, Generation)>,
+    fix_plan_pending: Option<RequestId>,
+    action_pending: Option<RequestId>,
+    action_pending_review: Option<StagedReview>,
+    catalog_pending: Option<(RequestId, String)>,
+    catalog_throttle: RefreshThrottle,
+    catalog_retry: Option<(String, CatalogDraft)>,
+    subscription_auth_pending: Option<PendingSubscriptionAuth>,
+    subscription_install_pending: Option<PendingSubscriptionInstall>,
 }
 
 impl std::fmt::Debug for AppService {
@@ -323,7 +359,29 @@ impl AppService {
             update_startup_due: None,
             started: false,
             terminating: false,
+            evidence_generations: Generations::new(),
+            evidence_generation: Generation::from_raw(0),
+            chat_turns: RequestIds::new(),
+            chat_turn: None,
+            chat_pending: None,
+            chat_attempt: None,
+            chat_consent: None,
+            chat_policy_write: None,
+            pending_intent: None,
+            report_pending: None,
+            analysis_pending: None,
+            prioritization_pending: None,
+            fix_plan_pending: None,
+            action_pending: None,
+            action_pending_review: None,
+            catalog_pending: None,
+            catalog_throttle: RefreshThrottle::new(),
+            catalog_retry: None,
+            subscription_auth_pending: None,
+            subscription_install_pending: None,
         };
+        service.adopt_rehydrated_actions();
+        service.record_ai_worker_errors();
         service.request_system_identity();
         Ok((service, receiver))
     }
@@ -400,31 +458,59 @@ impl AppService {
             AppCommand::RequestArchitecture => self.request_system(SystemRequestKind::Architecture),
             AppCommand::RestartAsAdmin => self.restart_as_admin(),
 
-            // Declared extension points. A typed rejection, never a silent
-            // no-op, so a shell that migrates early gets a loud answer.
-            AppCommand::ChatSend { .. }
-            | AppCommand::ChatCancel
-            | AppCommand::ChatReset
-            | AppCommand::CloudFallbackDecision { .. }
-            | AppCommand::GenerateReport { .. }
-            | AppCommand::CancelReport
-            | AppCommand::AnalyzeDiagnostic { .. }
-            | AppCommand::CancelAnalysis
-            | AppCommand::PrioritizeIssues
-            | AppCommand::GenerateFixPlan
-            | AppCommand::CancelFixPlan
-            | AppCommand::PrepareRemediation { .. }
-            | AppCommand::ApproveAction { .. }
-            | AppCommand::DiscardProposal { .. }
-            | AppCommand::CancelAction { .. }
-            | AppCommand::RefreshModelCatalog { .. }
-            | AppCommand::CancelModelCatalog
-            | AppCommand::SubscriptionAuth { .. }
-            | AppCommand::CancelSubscriptionAuth
-            | AppCommand::InstallSubscriptionCli { .. }
-            | AppCommand::CancelSubscriptionInstall => {
-                DispatchOutcome::Rejected(RejectReason::NotWired)
+            // ---- AI, remediation, and provider setup ----------------------
+            AppCommand::ChatSend { prompt } => self.chat_send(&prompt),
+            AppCommand::ChatCancel => self.chat_cancel(),
+            AppCommand::ChatReset => self.chat_reset(),
+            AppCommand::CloudFallbackDecision { allow } => self.cloud_fallback_decision(allow),
+            AppCommand::GenerateReport { force_refresh } => self.generate_report(force_refresh),
+            AppCommand::CancelReport => self.cancel_report(),
+            AppCommand::AnalyzeDiagnostic {
+                task_id,
+                force_refresh,
+            } => self.analyze_diagnostic(task_id, force_refresh),
+            AppCommand::CancelAnalysis => self.cancel_analysis(),
+            AppCommand::PrioritizeIssues { force_refresh } => self.prioritize_issues(force_refresh),
+            AppCommand::GenerateFixPlan => self.generate_fix_plan(),
+            AppCommand::CancelFixPlan => self.cancel_fix_plan(),
+            AppCommand::PrepareRemediation {
+                remediation_id,
+                issue_id,
+            } => self.prepare_remediation(remediation_id, issue_id),
+            AppCommand::ApproveAction {
+                proposal_id,
+                confirm_repair,
+            } => self.approve_action(&proposal_id, confirm_repair),
+            AppCommand::DiscardProposal { proposal_id } => self.discard_proposal(&proposal_id),
+            AppCommand::CancelAction { run_id } => self.cancel_action(&run_id),
+            AppCommand::RefreshModelCatalog {
+                provider,
+                draft_api_key,
+                draft_endpoint,
+                draft_cli_path,
+                forced,
+            } => self.refresh_model_catalog(
+                &provider,
+                CatalogDraft {
+                    api_key: draft_api_key,
+                    endpoint: draft_endpoint,
+                    cli_path: draft_cli_path,
+                },
+                forced,
+            ),
+            AppCommand::CancelModelCatalog => self.cancel_model_catalog(),
+            AppCommand::SubscriptionAuth {
+                provider,
+                operation,
+            } => self.subscription_auth(&provider, operation),
+            AppCommand::CancelSubscriptionAuth => self.cancel_subscription_auth(),
+            AppCommand::InstallSubscriptionCli { provider } => {
+                self.install_subscription_cli(&provider)
             }
+            AppCommand::ConfirmSubscriptionInstall { accepted } => {
+                self.confirm_subscription_install(accepted)
+            }
+            AppCommand::CancelSubscriptionInstall => self.cancel_subscription_install(),
         };
         self.publish_pending_work();
         outcome
@@ -440,6 +526,7 @@ impl AppService {
         self.drain_issue_replies();
         self.drain_export_replies();
         self.drain_system_replies();
+        self.drain_ai_events();
         self.poll_replies();
         // A reply handled above can queue more internal work (a finished scan
         // starts its history save); take that in the same batch.
@@ -448,6 +535,7 @@ impl AppService {
         self.maybe_start_startup_scan();
         self.snapshot.scan_phase = self.scan.phase();
         self.snapshot.scan = self.scan.snapshot().clone();
+        self.resume_pending_intent();
         self.publish_pending_work();
         self.queue.take()
     }
@@ -457,6 +545,7 @@ impl AppService {
     pub fn shutdown(mut self, budget: Duration) -> ShutdownReport {
         let started = Instant::now();
         self.terminating = true;
+        self.workers.stop_ai();
         for message in self.replies.drain_as_stopped() {
             self.apply_internal(message);
         }
@@ -590,7 +679,13 @@ impl AppService {
             history_tag: scan_kind_history_tag(kind).to_string(),
         };
         let invalidates = self.scan.begin(kind, task_ids.clone(), policy);
-        self.snapshot.derived_invalidated = Invalidation::on_scan_start(!invalidates);
+        let invalidation = Invalidation::on_scan_start(!invalidates);
+        self.snapshot.derived_invalidated = invalidation;
+        // A replacement scan invalidates every derived projection the moment
+        // its transaction opens; a targeted rerun defers until it commits, so
+        // every failure path leaves the previous evidence and everything
+        // derived from it intact.
+        self.apply_derived_invalidation(invalidation);
 
         let total = task_ids.len();
         let sender = self.internal_tx.clone();
@@ -688,6 +783,8 @@ impl AppService {
 
     fn commit_scan_evidence(&mut self, session_id: String, evidence: SharedScanEvidence) {
         self.snapshot.derived_invalidated = Invalidation::on_targeted_commit();
+        self.apply_derived_invalidation(Invalidation::on_targeted_commit());
+        self.advance_evidence_generation();
         if self.issues.commit_evidence(session_id, evidence).is_err() {
             self.stop_issue_delivery("native issue evidence identity was exhausted");
             return;
@@ -1839,6 +1936,11 @@ impl AppService {
                         .push(AppEvent::Provider(ProviderEvent::Failed { error })),
                 }
             }
+            Internal::ReportBaseline {
+                request,
+                generation,
+                comparison,
+            } => self.start_report_generation(request, *generation, comparison.map(|value| *value)),
             Internal::ProcessPage { request, outcome } => {
                 if self.process_page_request != Some(request) {
                     return;
@@ -2189,9 +2291,11 @@ impl AppService {
                 }
             }
             Ok(SettingsOutcome::Updated(settings)) => {
+                let policy = settings.cloud_fallback_policy;
                 self.apply_loaded_settings((*settings).clone());
                 self.queue
                     .push(AppEvent::Settings(SettingsFact::Updated { settings }));
+                self.resolve_cloud_fallback_write(RequestId::from_raw(request_id), Ok(policy));
             }
             Ok(SettingsOutcome::Credential) => {
                 self.queue
@@ -2202,6 +2306,7 @@ impl AppService {
                 self.snapshot.settings_error = Some(error.clone());
                 self.queue
                     .push(AppEvent::Settings(SettingsFact::Failed { error }));
+                self.resolve_cloud_fallback_write(RequestId::from_raw(request_id), Err(()));
             }
         }
     }
@@ -2231,6 +2336,9 @@ impl AppService {
             self.snapshot.issues.clone_from(&completion.issues);
             self.snapshot.issue_error = None;
             self.snapshot.derived_invalidated = Invalidation::on_issue_projection();
+            self.apply_derived_invalidation(Invalidation::on_issue_projection());
+            self.advance_evidence_generation();
+            self.reconcile_staged_reviews();
             self.queue.push(AppEvent::Issues(IssuesEvent::Updated {
                 session_id: pending.session_id,
                 issues: completion.issues,
@@ -2389,7 +2497,8 @@ impl AppService {
     }
 
     fn publish_pending_work(&self) {
-        let outstanding = self.replies.len()
+        let outstanding = self.ai_outstanding()
+            + self.replies.len()
             + usize::from(self.issue_outstanding)
             + self.export_requests.len()
             + usize::from(self.system_info_request.is_some())

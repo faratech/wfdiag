@@ -10,11 +10,22 @@ use crate::config::AppConfig;
 use crate::domain::history::RetentionPolicy;
 use crate::event::EventQueue;
 use crate::ports::AppPorts;
+use crate::ports::ai::{
+    AI_STOP_BUDGET, ActionHandle, AnalysisHandle, FixPlanHandle, ModelCatalogHandle,
+    SharedChatResolver, SubscriptionAuthHandle, SubscriptionInstallHandle, start_report_runtime,
+};
+use crate::ports::chat_tools::{AppChatTools, ChatToolPorts};
 use crate::ports::monitor::MonitorHandle;
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use wfdiag_native_ai_analysis::{AnalysisWorkerEvent, FixPlanWorkerEvent};
+use wfdiag_native_ai_chat::workers::provider_setup::ProviderSetupWorkerEvent;
+use wfdiag_native_ai_chat::workers::subscription_auth::SubscriptionAuthWorkerEvent;
+use wfdiag_native_ai_chat::workers::subscription_install::SubscriptionInstallWorkerEvent;
+use wfdiag_native_ai_chat::{ChatWorkerEvent, NativeChatRuntime};
 use wfdiag_native_ai_provider::NativeAiProviderRuntime;
+use wfdiag_native_ai_report::{NativeReportRuntime, ReportWorkerEvent};
 use wfdiag_native_diagnostics::{DiagnosticRuntime, DiagnosticTask};
 use wfdiag_native_export::{ExportCompleted, ExportRuntime, ExportTask};
 use wfdiag_native_history::{
@@ -23,6 +34,8 @@ use wfdiag_native_history::{
 use wfdiag_native_issues::{
     IssueDetectionCompleted, IssueRuntime, RemediationSummary, remediation_summaries,
 };
+use wfdiag_native_remediation::broker::ActionProposal;
+use wfdiag_native_remediation::runtime::{ActionRunEvent, ActionRunSummary, ActionWorkerEvent};
 use wfdiag_native_settings::{SettingsEvent, SettingsRuntime, SettingsService};
 use wfdiag_native_system::{SystemCompleted, SystemRuntime};
 use wfdiag_native_update::{NativeUpdateRuntime, UpdateService};
@@ -55,6 +68,30 @@ pub(crate) struct AppWorkers {
     pub(crate) retention: Arc<RwLock<RetentionPolicy>>,
     pub(crate) catalog: Vec<DiagnosticTask>,
     pub(crate) remediations: Vec<RemediationSummary>,
+
+    // ---- AI, remediation, and provider setup ---------------------------
+    pub(crate) chat: Option<NativeChatRuntime<AppChatTools>>,
+    pub(crate) chat_events: Option<mpsc::Receiver<ChatWorkerEvent>>,
+    pub(crate) report: Option<NativeReportRuntime>,
+    pub(crate) report_events: Option<mpsc::Receiver<ReportWorkerEvent>>,
+    pub(crate) analysis: Option<Box<dyn AnalysisHandle>>,
+    pub(crate) analysis_events: Option<mpsc::Receiver<AnalysisWorkerEvent>>,
+    pub(crate) fix_plan: Option<Box<dyn FixPlanHandle>>,
+    pub(crate) fix_plan_events: Option<mpsc::Receiver<FixPlanWorkerEvent>>,
+    pub(crate) actions: Option<Box<dyn ActionHandle>>,
+    pub(crate) action_events: Option<mpsc::Receiver<ActionWorkerEvent>>,
+    pub(crate) action_runs: Option<mpsc::Receiver<ActionRunEvent>>,
+    pub(crate) rehydrated_proposals: Vec<ActionProposal>,
+    pub(crate) rehydrated_runs: Vec<ActionRunSummary>,
+    pub(crate) rehydrated_active_run: Option<ActionRunSummary>,
+    pub(crate) model_catalog: Option<Box<dyn ModelCatalogHandle>>,
+    pub(crate) model_catalog_events: Option<mpsc::Receiver<ProviderSetupWorkerEvent>>,
+    pub(crate) subscription_auth: Option<Box<dyn SubscriptionAuthHandle>>,
+    pub(crate) subscription_auth_events: Option<mpsc::Receiver<SubscriptionAuthWorkerEvent>>,
+    pub(crate) subscription_install: Option<Box<dyn SubscriptionInstallHandle>>,
+    pub(crate) subscription_install_events: Option<mpsc::Receiver<SubscriptionInstallWorkerEvent>>,
+    /// Why one AI runtime is unavailable, keyed by its user-facing domain.
+    pub(crate) ai_errors: Vec<(&'static str, String)>,
 }
 
 impl std::fmt::Debug for AppWorkers {
@@ -257,6 +294,111 @@ impl AppWorkers {
             }
         };
 
+        // 10. The AI, remediation, and provider-setup runtimes. Each one is
+        //     optional in exactly the same way as the workers above: a runtime
+        //     that will not start records why, and its commands are refused
+        //     with that reason instead of failing the whole application.
+        let wake_queue = Arc::clone(queue);
+        let wake: crate::ports::ai::AiWake = Arc::new(move || wake_queue.wake());
+        let mut ai_errors = Vec::new();
+        let chat_tools = ChatToolPorts::new(
+            Arc::clone(&ports.diagnostics),
+            history.as_ref().map(Arc::clone),
+        );
+        let (chat, chat_events) = match NativeChatRuntime::start(
+            SharedChatResolver(Arc::clone(&ports.ai.chat_resolver)),
+            AppChatTools::new(chat_tools),
+            Arc::clone(&wake),
+        ) {
+            Ok((runtime, events)) => (Some(runtime), Some(events)),
+            Err(error) => {
+                ai_errors.push(("chat", format!("Native AI chat could not start: {error}")));
+                (None, None)
+            }
+        };
+        let (report, report_events) = match start_report_runtime(
+            Arc::clone(&ports.ai.report_resolvers),
+            ports.ai.cache.clone(),
+            Arc::clone(&wake),
+        ) {
+            Ok(session) => (Some(session.runtime), Some(session.events)),
+            Err(error) => {
+                ai_errors.push(("report", error));
+                (None, None)
+            }
+        };
+        let (analysis, analysis_events) = match ports.ai.analysis.start(
+            settings_service.clone(),
+            ports.ai.cache.clone(),
+            Arc::clone(&wake),
+        ) {
+            Ok(session) => (Some(session.handle), Some(session.events)),
+            Err(error) => {
+                ai_errors.push(("analysis", error));
+                (None, None)
+            }
+        };
+        let (fix_plan, fix_plan_events) = match ports
+            .ai
+            .fix_plan
+            .start(settings_service.clone(), Arc::clone(&wake))
+        {
+            Ok(session) => (Some(session.handle), Some(session.events)),
+            Err(error) => {
+                ai_errors.push(("fix plan", error));
+                (None, None)
+            }
+        };
+        let (
+            actions,
+            action_events,
+            action_runs,
+            rehydrated_proposals,
+            rehydrated_runs,
+            rehydrated_active_run,
+        ) = match ports.ai.actions.start(Arc::clone(&wake)) {
+            Ok(session) => (
+                Some(session.handle),
+                Some(session.events),
+                Some(session.runs),
+                session.pending_proposals,
+                session.history,
+                session.active_run,
+            ),
+            Err(error) => {
+                ai_errors.push(("remediation", error));
+                (None, None, None, Vec::new(), Vec::new(), None)
+            }
+        };
+        let (model_catalog, model_catalog_events) = match ports
+            .ai
+            .model_catalog
+            .start(settings_service.clone(), Arc::clone(&wake))
+        {
+            Ok(session) => (Some(session.handle), Some(session.events)),
+            Err(error) => {
+                ai_errors.push(("model discovery", error));
+                (None, None)
+            }
+        };
+        let (
+            subscription_auth,
+            subscription_auth_events,
+            subscription_install,
+            subscription_install_events,
+        ) = match ports.ai.subscriptions.start(settings_service.clone(), wake) {
+            Ok(session) => (
+                Some(session.auth),
+                Some(session.auth_events),
+                Some(session.install),
+                Some(session.install_events),
+            ),
+            Err(error) => {
+                ai_errors.push(("subscription CLI", error));
+                (None, None, None, None)
+            }
+        };
+
         (
             Self {
                 diagnostics: Some(diagnostics),
@@ -277,9 +419,38 @@ impl AppWorkers {
                 retention,
                 catalog,
                 remediations,
+                chat,
+                chat_events,
+                report,
+                report_events,
+                analysis,
+                analysis_events,
+                fix_plan,
+                fix_plan_events,
+                actions,
+                action_events,
+                action_runs,
+                rehydrated_proposals,
+                rehydrated_runs,
+                rehydrated_active_run,
+                model_catalog,
+                model_catalog_events,
+                subscription_auth,
+                subscription_auth_events,
+                subscription_install,
+                subscription_install_events,
+                ai_errors,
             },
             failures,
         )
+    }
+
+    /// The recorded failure for one AI domain, if any.
+    pub(crate) fn ai_error(&self, domain: &str) -> Option<&str> {
+        self.ai_errors
+            .iter()
+            .find(|(name, _)| *name == domain)
+            .map(|(_, detail)| detail.as_str())
     }
 
     /// Publish a new retention policy for the next history save.
@@ -296,6 +467,7 @@ impl AppWorkers {
     /// settings last so an in-flight save is not cut short.
     pub(crate) fn stop(&mut self, budget: Duration) -> Vec<WorkerStopRecord> {
         let mut records = Vec::new();
+        self.stop_ai();
 
         // Live producers first: their event buses are closed so no further
         // events can be published into a queue nobody will drain.
@@ -353,6 +525,36 @@ impl AppWorkers {
         self.settings_events = None;
 
         records
+    }
+
+    /// Stop every AI, remediation, and provider-setup runtime.
+    ///
+    /// These are torn down before the workers above: a streaming turn or a
+    /// running remediation may still be reading diagnostics or history, and a
+    /// bounded `stop_and_join` on each keeps a hung vendor CLI off the
+    /// caller's thread.
+    pub(crate) fn stop_ai(&mut self) {
+        if let Some(mut chat) = self.chat.take() {
+            let _ = chat.stop_and_join(AI_STOP_BUDGET);
+        }
+        self.chat_events = None;
+        if let Some(mut report) = self.report.take() {
+            let _ = report.stop_and_join(AI_STOP_BUDGET);
+        }
+        self.report_events = None;
+        drop(self.analysis.take());
+        self.analysis_events = None;
+        drop(self.fix_plan.take());
+        self.fix_plan_events = None;
+        drop(self.actions.take());
+        self.action_events = None;
+        self.action_runs = None;
+        drop(self.model_catalog.take());
+        self.model_catalog_events = None;
+        drop(self.subscription_auth.take());
+        self.subscription_auth_events = None;
+        drop(self.subscription_install.take());
+        self.subscription_install_events = None;
     }
 }
 

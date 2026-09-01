@@ -169,3 +169,68 @@ impl Harness {
         report
     }
 }
+
+/// Mocks whose provider probes make Ollama (local) and `OpenAI` (cloud)
+/// available, which is the exact shape an `Auto` local-to-cloud fallback
+/// needs.
+#[must_use]
+pub fn ai_mocks() -> MockPorts {
+    let mocks = MockPorts::new();
+    mocks
+        .provider_backend
+        .set_probes(wfdiag_native_ai_provider::ProviderProbeSnapshot {
+            ollama_endpoint: Some("http://127.0.0.1:11434".to_string()),
+            openai_available: true,
+            ..wfdiag_native_ai_provider::ProviderProbeSnapshot::default()
+        });
+    mocks
+}
+
+/// Boot with [`ai_mocks`] and refresh the provider status, so every AI
+/// command's readiness gate is satisfied before the test starts.
+pub fn boot_ai(label: &str) -> Harness {
+    boot_ai_with(label, ai_mocks())
+}
+
+/// As [`boot_ai`], with caller-supplied mocks.
+pub fn boot_ai_with(label: &str, mocks: MockPorts) -> Harness {
+    let mut harness = boot_with(label, mocks);
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::RequestProviderStatus)
+            .is_accepted()
+    );
+    harness.pump_until(
+        |harness, _| harness.service.snapshot().provider_status.is_some(),
+        "the AI provider status",
+    );
+    harness
+}
+
+impl Harness {
+    /// Run a quick scan and wait for the committed issue projection, which is
+    /// the state every evidence-dependent AI command needs.
+    pub fn commit_scan(&mut self) {
+        assert!(
+            self.service
+                .dispatch(AppCommand::StartScan {
+                    kind: wfdiag_native_diagnostics::ScanKind::Quick,
+                })
+                .is_accepted()
+        );
+        self.pump_until(
+            |harness, events| {
+                !harness.service.snapshot().scan.results.is_empty()
+                    && !harness.service.snapshot().scan_busy()
+                    && events.iter().any(|event| {
+                        matches!(
+                            event,
+                            AppEvent::Issues(wfdiag_app::IssuesEvent::Updated { .. })
+                        )
+                    })
+            },
+            "the scan to commit, finalize, and project issues",
+        );
+    }
+}

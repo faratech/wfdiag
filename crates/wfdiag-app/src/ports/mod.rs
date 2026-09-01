@@ -5,7 +5,10 @@
 //! service itself never names a platform API, which is what lets its
 //! integration tests run on Linux with no GUI.
 
+pub mod ai;
+pub mod chat_tools;
 pub mod mock;
+pub mod mock_ai;
 pub mod monitor;
 #[cfg(windows)]
 pub mod native;
@@ -135,6 +138,8 @@ pub struct AppPorts {
     pub environment: Arc<dyn EnvironmentPort>,
     /// Persists the update-check throttle.
     pub update_throttle: Arc<dyn UpdateThrottlePort>,
+    /// Every AI, remediation, and provider-setup seam.
+    pub ai: ai::AiPorts,
 }
 
 impl fmt::Debug for AppPorts {

@@ -28,6 +28,7 @@ use wfdiag_native_update::{
 };
 use wfdiag_ui_core::{UiEventPublisher, ui_event_bus};
 
+use super::mock_ai::MockAiPorts;
 use super::monitor::{
     MonitorHandle, MonitorPort, MonitorProfileKind, MonitorSession, NetworkConnection,
     NetworkConnectionsReply, ProcessPage, ProcessPageReply, ProcessQuery, ProcessQueryOutcome,
@@ -768,6 +769,8 @@ pub struct MockPorts {
     pub update_throttle: MemoryUpdateThrottle,
     /// Elevation requests.
     pub elevation: MockElevation,
+    /// Scripted AI, remediation, and provider-setup doubles.
+    pub ai: MockAiPorts,
     /// The version the update check compares against.
     pub current_version: String,
 }
@@ -794,6 +797,7 @@ impl MockPorts {
             environment: MockEnvironment::default(),
             update_throttle: MemoryUpdateThrottle::default(),
             elevation: MockElevation::default(),
+            ai: MockAiPorts::new(),
             current_version: "2.5.8".to_string(),
         }
     }
@@ -824,6 +828,7 @@ impl MockPorts {
             elevation: Arc::new(self.elevation.clone()),
             environment: Arc::new(self.environment.clone()),
             update_throttle: Arc::new(self.update_throttle.clone()),
+            ai: self.ai.to_ports(),
         }
     }
 

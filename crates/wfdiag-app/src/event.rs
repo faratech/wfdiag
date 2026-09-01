@@ -12,17 +12,25 @@ use crate::snapshot::AppSnapshot;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
-use wfdiag_native_ai_provider::AIProviderStatus;
+use wfdiag_native_ai_analysis::ValidatedFixPlan;
+use wfdiag_native_ai_chat::{
+    ChatToolActivity, ChatToolHistory, ProviderUse, SubscriptionAuthOperation,
+    SubscriptionAuthProvider, SubscriptionAuthStatus, SubscriptionInstallFallbackReason,
+    SubscriptionInstallMethod, SubscriptionInstallProgress, SubscriptionInstallStatus,
+};
+use wfdiag_native_ai_provider::{AIProviderStatus, ModelCatalog};
 use wfdiag_native_diagnostics::ScanKind;
 use wfdiag_native_export::ExportPayload;
 use wfdiag_native_history::{
     ComparisonResult, ComparisonSummary, ScanRecord, ScanSummary, TaskDiffDetail, TaskTrend,
 };
 use wfdiag_native_issues::Issue;
+use wfdiag_native_remediation::broker::ActionProposal;
+use wfdiag_native_remediation::runtime::ActionRunSummary;
 use wfdiag_native_settings::AppSettings;
 use wfdiag_native_system::{ArchitectureSnapshot, SystemInfo};
 use wfdiag_native_update::UpdateOutcome;
-use wfdiag_ui_core::{SystemStats, TaskProgressStatus};
+use wfdiag_ui_core::{SystemStats, TaskProgressStatus, UiWakeHandler};
 
 /// Diagnostic-scan facts.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -274,6 +282,10 @@ pub enum ProviderEvent {
     CacheCleared,
     /// The local Ollama model list.
     OllamaModels(Vec<String>),
+    /// A live model-catalog fact.
+    ModelCatalog(ModelCatalogEvent),
+    /// A subscription-CLI account or installation fact.
+    Subscription(Box<SubscriptionEvent>),
     /// A provider request failed.
     Failed {
         /// The diagnostic.
@@ -356,15 +368,395 @@ pub enum SystemEvent {
     },
 }
 
-/// A placeholder for a declared but unwired domain.
+/// Agentic-chat facts.
 ///
-/// The variant exists so a host can write an exhaustive `match` today and keep
-/// compiling when the domain is wired. Nothing ever constructs it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Text arrives as [`ChatEvent::Delta`], **coalesced per drain**: however many
+/// fragments a provider streamed between two [`crate::AppService::drain`]
+/// calls, a host receives one delta. Exactly one terminal event
+/// ([`ChatEvent::Done`], [`ChatEvent::Failed`], [`ChatEvent::Cancelled`]) ends
+/// a turn, and an `Auto` fallback retry is invisible: the retried attempt is
+/// the same logical turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum ExtensionEvent {
-    /// Reserved.
-    Reserved,
+pub enum ChatEvent {
+    /// A turn was accepted and is streaming from `provider`.
+    Started {
+        /// The provider handling this attempt, as a wire id.
+        provider: String,
+    },
+    /// The turn is queued behind a prerequisite (provider probe, scan).
+    Deferred {
+        /// What the turn is waiting for.
+        reason: String,
+    },
+    /// Coalesced assistant text produced since the previous drain.
+    Delta {
+        /// The text to append.
+        text: String,
+    },
+    /// A model-requested tool changed state.
+    ToolActivity {
+        /// The activity that changed.
+        activity: Box<ChatToolActivity>,
+        /// The ordered history as of this update.
+        history: Box<ChatToolHistory>,
+    },
+    /// The model staged a remediation. Nothing was executed: the host must
+    /// still run the normal prepare/approve flow.
+    ProposalStaged {
+        /// The catalog id the model named.
+        remediation_id: String,
+        /// The detected issue it was staged against.
+        issue_id: Option<String>,
+    },
+    /// The model asked for a Full Scan. No scan was started.
+    FullScanRequested {
+        /// The scan the request was attributed to.
+        source_scan_id: String,
+        /// Why the model wants more evidence.
+        reason: String,
+    },
+    /// A local provider failed cleanly and continuing would cross into cloud
+    /// execution. Answer with [`crate::AppCommand::CloudFallbackDecision`].
+    CloudFallbackRequired {
+        /// The cloud provider that would run next, as a wire id.
+        candidate: String,
+        /// The local provider's failure.
+        reason: String,
+    },
+    /// The turn finished.
+    Done {
+        /// The provider that answered, as a wire id.
+        provider: String,
+        /// Trust and model attribution, including any fallback.
+        provider_use: Box<ProviderUse>,
+        /// The engine's finish reason.
+        finish_reason: String,
+        /// The reconciled tool history.
+        tool_history: Box<ChatToolHistory>,
+    },
+    /// The turn failed. No further events follow for it.
+    Failed {
+        /// The diagnostic.
+        message: String,
+    },
+    /// The turn was cancelled.
+    Cancelled,
+    /// The conversation was cleared.
+    SessionReset,
+}
+
+/// AI scan-report facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReportEvent {
+    /// Generation began on `provider`.
+    Started {
+        /// The provider, as a wire id.
+        provider: String,
+    },
+    /// The turn is queued behind a prerequisite.
+    Deferred {
+        /// What the report is waiting for.
+        reason: String,
+    },
+    /// Coalesced report text produced since the previous drain.
+    Delta {
+        /// The text to append.
+        text: String,
+    },
+    /// The cached report for this evidence, returned inline without streaming.
+    Cached {
+        /// The provider that originally produced it, as a wire id.
+        provider: String,
+        /// The complete report body.
+        report: String,
+    },
+    /// Generation finished.
+    Done {
+        /// The provider, as a wire id.
+        provider: String,
+        /// The engine's finish reason.
+        finish_reason: String,
+        /// Trust and model attribution.
+        provider_use: Box<ProviderUse>,
+    },
+    /// Generation failed.
+    Failed {
+        /// The diagnostic.
+        message: String,
+    },
+    /// Generation was cancelled.
+    Cancelled,
+    /// A new scan replaced the evidence this report described.
+    Invalidated,
+}
+
+/// Per-task AI analysis facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AnalysisEvent {
+    /// Analysis began.
+    Started {
+        /// The task being explained.
+        task_id: String,
+        /// The provider, as a wire id.
+        provider: String,
+        /// Whether the answer came from the response cache.
+        cached: bool,
+    },
+    /// An interpretation arrived.
+    Completed {
+        /// The task.
+        task_id: String,
+        /// The interpretation.
+        interpretation: String,
+        /// Whether it came from the response cache.
+        cached: bool,
+        /// Trust and model attribution.
+        provider_use: Box<ProviderUse>,
+    },
+    /// Analysis failed.
+    Failed {
+        /// The task.
+        task_id: String,
+        /// The diagnostic.
+        message: String,
+        /// Whether retrying could succeed.
+        retryable: bool,
+    },
+    /// Analysis was cancelled.
+    Cancelled {
+        /// The task.
+        task_id: String,
+    },
+    /// A new scan replaced the evidence the analyses described.
+    Invalidated,
+}
+
+/// AI issue-prioritisation facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PrioritizationEvent {
+    /// Prioritisation began.
+    Started {
+        /// The provider, as a wire id.
+        provider: String,
+    },
+    /// A ranking arrived.
+    Completed {
+        /// The model's ranking text.
+        ranking: String,
+        /// Whether it came from the response cache.
+        cached: bool,
+    },
+    /// Prioritisation failed.
+    Failed {
+        /// The diagnostic.
+        message: String,
+        /// Whether retrying could succeed.
+        retryable: bool,
+    },
+    /// Prioritisation was cancelled.
+    Cancelled,
+    /// New issues replaced the projection the ranking described.
+    Invalidated,
+}
+
+/// AI fix-plan facts. Every plan is validated against the remediation catalog
+/// before it reaches a host: a plan can only ever name catalog ids.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FixPlanEvent {
+    /// Generation began.
+    Started {
+        /// The provider, as a wire id.
+        provider: String,
+    },
+    /// A validated plan arrived.
+    Completed {
+        /// The plan, reduced to current catalog references.
+        plan: Box<ValidatedFixPlan>,
+    },
+    /// Generation failed.
+    Failed {
+        /// The diagnostic.
+        message: String,
+        /// Whether retrying could succeed.
+        retryable: bool,
+    },
+    /// Generation was cancelled.
+    Cancelled,
+    /// New evidence or new issues replaced what the plan described.
+    Invalidated,
+}
+
+/// Remediation-execution facts.
+///
+/// The Repair gate lives inside the broker, not here: approving a proposal
+/// that contains a `Repair`-tier action with mere review produces
+/// [`ActionEvent::RepairConfirmationRequired`] and runs nothing.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum ActionEvent {
+    /// An immutable preview was staged for review.
+    Proposal {
+        /// The preview.
+        proposal: Box<ActionProposal>,
+    },
+    /// The preview contains a Repair-tier action and was **not** consumed.
+    /// Show it again and approve with `confirm_repair`.
+    RepairConfirmationRequired {
+        /// The still-reviewable preview.
+        proposal: Box<ActionProposal>,
+    },
+    /// A grant was minted and a run started.
+    Approved {
+        /// The run.
+        run_id: String,
+        /// The initial run projection.
+        summary: Box<ActionRunSummary>,
+    },
+    /// A live run transition.
+    Run {
+        /// The current run projection.
+        summary: Box<ActionRunSummary>,
+    },
+    /// A run reached a terminal state.
+    Summary {
+        /// The terminal run projection.
+        summary: Box<ActionRunSummary>,
+    },
+    /// A prepare or approve was refused.
+    Rejected {
+        /// The user-facing reason.
+        message: String,
+    },
+    /// An unused preview was dismissed.
+    Discarded {
+        /// The preview that is gone.
+        proposal_id: String,
+    },
+}
+
+/// Live model-catalog facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ModelCatalogEvent {
+    /// A refresh began.
+    Started {
+        /// The provider, as a wire id.
+        provider: String,
+    },
+    /// A refresh was skipped because one ran recently.
+    Throttled {
+        /// The provider, as a wire id.
+        provider: String,
+        /// The catalog still on record, when there is one.
+        last: Option<Box<ModelCatalog>>,
+    },
+    /// A fresh catalog arrived.
+    Loaded {
+        /// The provider, as a wire id.
+        provider: String,
+        /// The catalog.
+        catalog: Box<ModelCatalog>,
+    },
+    /// A refresh failed. `last` is the catalog a host should keep showing.
+    Failed {
+        /// The provider, as a wire id.
+        provider: String,
+        /// The diagnostic.
+        error: String,
+        /// The previous catalog, when one is on record.
+        last: Option<Box<ModelCatalog>>,
+    },
+    /// A refresh was cancelled.
+    Cancelled {
+        /// The provider, as a wire id.
+        provider: String,
+    },
+}
+
+/// Subscription-CLI account and installation facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SubscriptionEvent {
+    /// An account operation began.
+    Started {
+        /// Which CLI.
+        provider: SubscriptionAuthProvider,
+        /// Which operation.
+        operation: SubscriptionAuthOperation,
+    },
+    /// An account status arrived.
+    Status {
+        /// The status.
+        status: Box<SubscriptionAuthStatus>,
+    },
+    /// A sign-in or sign-out completed.
+    Completed {
+        /// Which operation.
+        operation: SubscriptionAuthOperation,
+        /// The status afterwards.
+        status: Box<SubscriptionAuthStatus>,
+    },
+    /// An account operation failed.
+    Failed {
+        /// Which CLI.
+        provider: SubscriptionAuthProvider,
+        /// Which operation.
+        operation: SubscriptionAuthOperation,
+        /// The sanitized diagnostic.
+        error: String,
+    },
+    /// An account operation was cancelled.
+    Cancelled {
+        /// Which CLI.
+        provider: SubscriptionAuthProvider,
+        /// Which operation.
+        operation: SubscriptionAuthOperation,
+    },
+    /// An installation began.
+    InstallStarted {
+        /// Which CLI.
+        provider: SubscriptionAuthProvider,
+        /// Which method.
+        method: SubscriptionInstallMethod,
+    },
+    /// An installation reached a new stage.
+    InstallProgress {
+        /// The stage.
+        progress: Box<SubscriptionInstallProgress>,
+    },
+    /// The vendor bootstrap needs its own second confirmation.
+    InstallFallbackRequired {
+        /// Which CLI.
+        provider: SubscriptionAuthProvider,
+        /// Why the winget path is unusable.
+        reason: SubscriptionInstallFallbackReason,
+    },
+    /// An installation finished and was verified.
+    Installed {
+        /// The verified post-install state.
+        status: Box<SubscriptionInstallStatus>,
+    },
+    /// An installation failed.
+    InstallFailed {
+        /// Which CLI.
+        provider: SubscriptionAuthProvider,
+        /// Which method.
+        method: SubscriptionInstallMethod,
+        /// The sanitized diagnostic.
+        error: String,
+    },
+    /// An installation was cancelled; its process tree was killed.
+    InstallCancelled {
+        /// Which CLI.
+        provider: SubscriptionAuthProvider,
+        /// Which method.
+        method: SubscriptionInstallMethod,
+    },
 }
 
 /// Everything the engine reports.
@@ -395,18 +787,18 @@ pub enum AppEvent {
     Update(UpdateEvent),
     /// A host-identity fact.
     System(SystemEvent),
-    /// Reserved for agentic chat.
-    Chat(ExtensionEvent),
-    /// Reserved for the AI scan report.
-    Report(ExtensionEvent),
-    /// Reserved for per-task AI analysis.
-    Analysis(ExtensionEvent),
-    /// Reserved for AI fix plans.
-    FixPlan(ExtensionEvent),
-    /// Reserved for AI issue prioritisation.
-    Prioritization(ExtensionEvent),
-    /// Reserved for remediation execution.
-    Action(ExtensionEvent),
+    /// An agentic-chat fact.
+    Chat(ChatEvent),
+    /// An AI scan-report fact.
+    Report(ReportEvent),
+    /// A per-task AI analysis fact.
+    Analysis(AnalysisEvent),
+    /// An AI fix-plan fact.
+    FixPlan(FixPlanEvent),
+    /// An AI issue-prioritisation fact.
+    Prioritization(PrioritizationEvent),
+    /// A remediation-execution fact.
+    Action(ActionEvent),
     /// A worker stopped. `panicked` is true when it stopped without being
     /// asked to, which is the only signal the worker crates expose.
     WorkerStopped {
@@ -427,32 +819,6 @@ pub enum AppEvent {
     Terminated,
 }
 
-/// The callback the engine invokes after queueing an event.
-///
-/// This mirrors `wfdiag_ui_core::UiWakeHandler`, which cannot be used here
-/// because its invoke method is private to that crate (see the crate docs).
-#[derive(Clone)]
-pub struct AppWakeHandler(Arc<dyn Fn() + Send + Sync>);
-
-impl AppWakeHandler {
-    /// Wrap a thread-safe callback.
-    #[must_use]
-    pub fn new(handler: impl Fn() + Send + Sync + 'static) -> Self {
-        Self(Arc::new(handler))
-    }
-
-    /// Invoke the callback.
-    pub fn call(&self) {
-        (self.0)();
-    }
-}
-
-impl fmt::Debug for AppWakeHandler {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("AppWakeHandler(..)")
-    }
-}
-
 #[derive(Debug)]
 struct EventQueueState {
     queue: VecDeque<AppEvent>,
@@ -465,7 +831,7 @@ struct EventQueueState {
 pub(crate) struct EventQueue {
     capacity: usize,
     state: Mutex<EventQueueState>,
-    wake: Mutex<Option<AppWakeHandler>>,
+    wake: Mutex<Option<UiWakeHandler>>,
 }
 
 impl EventQueue {
@@ -547,9 +913,12 @@ impl AppEventReceiver {
 
     /// Install the callback workers use to wake the host.
     ///
+    /// This is `wfdiag_ui_core::UiWakeHandler`, the same type the diagnostic
+    /// and monitor event buses take, so a host writes one callback.
+    ///
     /// Registering immediately wakes once if events are already queued, so a
     /// host that installs its handler late cannot miss a batch.
-    pub fn set_wake_handler(&self, handler: AppWakeHandler) {
+    pub fn set_wake_handler(&self, handler: UiWakeHandler) {
         *self
             .queue
             .wake
@@ -596,7 +965,7 @@ impl AppEventReceiver {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppEvent, AppEventReceiver, AppWakeHandler, EventQueue, ExtensionEvent};
+    use super::{AppEvent, AppEventReceiver, ChatEvent, EventQueue, UiWakeHandler};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -605,7 +974,7 @@ mod tests {
         let queue = EventQueue::new(2);
         let receiver = AppEventReceiver::new(Arc::clone(&queue));
         for _ in 0..4 {
-            queue.push(AppEvent::Chat(ExtensionEvent::Reserved));
+            queue.push(AppEvent::Chat(ChatEvent::Cancelled));
         }
         assert_eq!(receiver.pending_len(), 2);
         assert_eq!(receiver.dropped(), 2);
@@ -617,10 +986,10 @@ mod tests {
     fn installing_a_wake_handler_late_still_wakes_for_queued_events() {
         let queue = EventQueue::new(8);
         let receiver = AppEventReceiver::new(Arc::clone(&queue));
-        queue.push(AppEvent::Chat(ExtensionEvent::Reserved));
+        queue.push(AppEvent::Chat(ChatEvent::Cancelled));
         let wakes = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&wakes);
-        receiver.set_wake_handler(AppWakeHandler::new(move || {
+        receiver.set_wake_handler(UiWakeHandler::new(move || {
             counter.fetch_add(1, Ordering::Relaxed);
         }));
         assert_eq!(wakes.load(Ordering::Relaxed), 1);

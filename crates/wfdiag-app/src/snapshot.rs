@@ -12,6 +12,7 @@ use crate::command::WorkerKind;
 use crate::domain::invalidation::Invalidation;
 use crate::domain::scan::{ScanPhase, ScanSnapshot};
 use crate::ports::monitor::{NetworkConnection, ProcessPage};
+use crate::snapshot_ai::{ActionsSnapshot, AiSnapshot, ProviderSetupSnapshot};
 use wfdiag_native_ai_provider::AIProviderStatus;
 use wfdiag_native_diagnostics::DiagnosticTask;
 use wfdiag_native_history::{ComparisonResult, ComparisonSummary, ScanSummary, TaskTrend};
@@ -113,6 +114,12 @@ pub struct AppSnapshot {
     pub history: HistorySnapshot,
     /// Live monitoring.
     pub monitor: MonitorSnapshot,
+    /// Every AI-derived projection.
+    pub ai: AiSnapshot,
+    /// Staged and executed remediations.
+    pub actions: ActionsSnapshot,
+    /// Model catalogs and subscription accounts.
+    pub provider_setup: ProviderSetupSnapshot,
     /// The last AI provider status.
     pub provider_status: Option<AIProviderStatus>,
     /// A provider probe is in flight.

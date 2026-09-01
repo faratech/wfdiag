@@ -4,13 +4,12 @@
 //! never holds a request id, and never compares one: it dispatches a command
 //! and reads [`crate::AppEvent`]s.
 //!
-//! Variants are grouped by domain. The final group is the set of **declared
-//! extension points**: commands whose domain (agentic chat, AI report, per-task
-//! analysis, fix plans, remediation execution, model catalogs, subscription CLI
-//! management) has a worker in the workspace but is not yet routed through this
-//! facade. Dispatching one returns
-//! [`DispatchOutcome::Rejected`]`(`[`RejectReason::NotWired`]`)` — never a
-//! silent no-op — so a shell that migrates early gets a loud, typed answer.
+//! Variants are grouped by domain. Every domain the workspace has a runtime
+//! for is routed through this facade: scanning, history, monitoring, providers,
+//! settings, export, updates, agentic chat, the AI report, per-task analysis,
+//! issue prioritisation, fix plans, remediation execution, model catalogs, and
+//! subscription CLI management. A command that cannot run right now is refused
+//! with a typed [`RejectReason`], never a silent no-op.
 
 use crate::ids::RequestId;
 use crate::ports::monitor::ProcessQuery;
@@ -62,6 +61,17 @@ impl WorkerKind {
 
 /// Why an update check is being requested.
 pub use crate::domain::update::UpdateCheckReason;
+
+/// Which subscription-CLI account operation to run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscriptionOperation {
+    /// Read the account state without changing it.
+    Status,
+    /// Begin an interactive sign-in.
+    SignIn,
+    /// Sign out.
+    SignOut,
+}
 
 /// A provider-credential mutation.
 #[derive(Clone, Debug)]
@@ -228,7 +238,7 @@ pub enum AppCommand {
     /// Ask the host to relaunch with administrator rights.
     RestartAsAdmin,
 
-    // ---- declared extension points (not yet wired) ---------------------
+    // ---- agentic chat ---------------------------------------------------
     /// Send a chat message to the AI assistant.
     ChatSend {
         /// The user's prompt.
@@ -254,11 +264,16 @@ pub enum AppCommand {
     AnalyzeDiagnostic {
         /// The task to explain.
         task_id: String,
+        /// Bypass the response cache and ask the provider again.
+        force_refresh: bool,
     },
     /// Cancel the running analysis.
     CancelAnalysis,
     /// Rank the detected issues with the AI provider.
-    PrioritizeIssues,
+    PrioritizeIssues {
+        /// Bypass the response cache and ask the provider again.
+        force_refresh: bool,
+    },
     /// Ask the AI provider for a catalog-only fix plan.
     GenerateFixPlan,
     /// Cancel fix-plan generation.
@@ -267,11 +282,21 @@ pub enum AppCommand {
     PrepareRemediation {
         /// The remediation catalog id.
         remediation_id: String,
+        /// The detected issue authorising it. `None` is only valid for a
+        /// maintenance action.
+        issue_id: Option<String>,
     },
     /// Approve a prepared action proposal.
+    ///
+    /// `confirm_repair` carries the **second**, repair-specific confirmation.
+    /// The gate itself lives in the remediation broker: approving a Repair
+    /// preview without it produces
+    /// [`crate::ActionEvent::RepairConfirmationRequired`] and runs nothing.
     ApproveAction {
         /// The proposal to run.
         proposal_id: String,
+        /// Whether the user gave the repair-specific confirmation.
+        confirm_repair: bool,
     },
     /// Discard a prepared action proposal.
     DiscardProposal {
@@ -287,22 +312,39 @@ pub enum AppCommand {
     RefreshModelCatalog {
         /// The provider wire id.
         provider: String,
+        /// The unsaved API key to discover with, when the user is typing one.
+        draft_api_key: Option<String>,
+        /// The unsaved endpoint to discover with.
+        draft_endpoint: Option<String>,
+        /// The unsaved CLI path to discover with.
+        draft_cli_path: Option<String>,
+        /// Whether this is an explicit Refresh, which is never debounced.
+        forced: bool,
     },
     /// Cancel a model-catalog refresh.
     CancelModelCatalog,
-    /// Sign in or out of a subscription CLI.
+    /// Probe, sign in to, or sign out of a subscription CLI.
     SubscriptionAuth {
         /// The provider wire id.
         provider: String,
-        /// Whether to sign in (`true`) or out.
-        sign_in: bool,
+        /// Which operation to run.
+        operation: SubscriptionOperation,
     },
     /// Cancel subscription authentication.
     CancelSubscriptionAuth,
-    /// Install a subscription CLI.
+    /// Ask to install a subscription CLI. This only raises the confirmation:
+    /// nothing is installed until [`AppCommand::ConfirmSubscriptionInstall`].
     InstallSubscriptionCli {
         /// The provider wire id.
         provider: String,
+    },
+    /// Answer the pending installation confirmation.
+    ///
+    /// The vendor PowerShell bootstrap raises a **second** confirmation of its
+    /// own; accepting the first never implies the second.
+    ConfirmSubscriptionInstall {
+        /// Whether the user accepted.
+        accepted: bool,
     },
     /// Cancel a subscription CLI installation.
     CancelSubscriptionInstall,
@@ -311,8 +353,6 @@ pub enum AppCommand {
 /// Why a dispatched command was refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RejectReason {
-    /// The command's domain is a declared extension point with no wiring yet.
-    NotWired,
     /// The service is shutting down.
     Terminating,
     /// The owning worker never started, or has stopped.
@@ -345,7 +385,6 @@ pub enum RejectReason {
 impl std::fmt::Display for RejectReason {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotWired => formatter.write_str("this command is not wired yet"),
             Self::Terminating => formatter.write_str("the application service is shutting down"),
             Self::WorkerUnavailable { worker, detail } => {
                 write!(
@@ -433,12 +472,14 @@ mod tests {
     }
 
     #[test]
-    fn an_unwired_command_is_a_typed_rejection_not_a_silent_noop() {
-        let outcome = DispatchOutcome::Rejected(RejectReason::NotWired);
-        assert_eq!(outcome.rejection(), Some(&RejectReason::NotWired));
+    fn a_refused_command_is_a_typed_rejection_not_a_silent_noop() {
+        let outcome = DispatchOutcome::Rejected(RejectReason::Busy {
+            detail: "a chat turn is already streaming".to_string(),
+        });
+        assert!(!outcome.is_accepted());
         assert_eq!(
-            RejectReason::NotWired.to_string(),
-            "this command is not wired yet"
+            outcome.rejection().map(ToString::to_string).as_deref(),
+            Some("busy: a chat turn is already streaming")
         );
     }
 }
