@@ -368,6 +368,26 @@ Gotchas encoded in the clients — do not relearn these:
   `providers/{codex,claude_cli,acp_bridge}.rs`): we implement NO OAuth and store NO tokens —
   the installed CLI owns sign-in and usage bills to the user's plan. Never extract
   subscription OAuth tokens for direct API use.
+  * The CLI description (binary, vendor status / sign-in / sign-out verbs, signed-out phrases,
+    winget package, vendor bootstrap, credential-store location) is single-sourced in
+    `wfdiag-native-ai-provider::subscription_spec`; nothing else carries a copy.
+  * The status probe (`local_probes.rs`) answers "installed but no stored login" without
+    spawning the CLI: `credential_store.rs` checks the vendor's cache
+    (`%USERPROFILE%\.codex\auth.json`, `%USERPROFILE%\.claude\.credentials.json`) by
+    `symlink_metadata` existence and size only — the file is never opened. A present or unknown
+    cache runs the vendor status command; `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
+    `CLAUDE_CODE_USE_*` (presence only), Codex's keyring store, Claude's `apiKeyHelper` and the
+    macOS Keychain all make the answer unknown, so the shortcut can only save a spawn, never
+    invent a state. An npm `.cmd`/`.bat` shim resolves but is `BatchShimOnly` — unusable; the
+    native install is the fix. `CliObstacle` travels on the provider rows and account statuses.
+  * Sign-in is the one deliberately visible child: `codex login` / `claude auth login` run in
+    their own console window (`CREATE_NEW_CONSOLE`, inherited standard handles) inside a Job
+    Object with `KillOnDrop`, capped at 10 minutes; WFDiag only learns whether the child ended
+    well and then re-probes. Sign-out stays hidden and output-capturing.
+  * The facade projects both accounts from every provider status refresh, runs a CLI-only
+    check at startup (`RequestSubscriptionAccounts`; Phi probing stays lazy), and raises
+    `SubscriptionEvent::SignInRequired` / `SignInOffered` instead of a bare "set up a provider";
+    installation still never signs in.
   * Claude speaks ACP over stdio to `npx -y @agentclientprotocol/claude-agent-acp` (pinned
     adapter version; the `agent-client-protocol` crate is pinned at 1.x — 2.0 rewrites the
     transport layer). Permission requests are rejected (Q&A only) and `CLAUDECODE` is
