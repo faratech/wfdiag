@@ -5594,7 +5594,7 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "wfdiag"
-version = "2.5.8"
+version = "2.5.9"
 dependencies = [
  "serde_json",
  "wfdiag-app",
@@ -5869,7 +5869,7 @@ dependencies = [
 
 [[package]]
 name = "wfdiag-tauri"
-version = "2.5.8"
+version = "2.5.9"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
