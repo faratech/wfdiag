@@ -208,7 +208,10 @@ impl AppSettings {
     pub fn normalize_persisted_values(&mut self) {
         self.export_format = match self.export_format.trim().to_ascii_lowercase().as_str() {
             "json" => "json",
-            "html" => "html",
+            // A legacy "pdf" choice meant "something printable": HTML prints
+            // and saves as PDF from any browser, so that intent is kept
+            // instead of silently degrading to plain text.
+            "html" | "pdf" => "html",
             _ => "text",
         }
         .to_string();
@@ -1323,6 +1326,16 @@ mod tests {
                 "input: {raw:?}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_pdf_export_format_becomes_printable_html() {
+        let mut settings = AppSettings {
+            export_format: " PDF ".to_string(),
+            ..AppSettings::default()
+        };
+        settings.normalize_persisted_values();
+        assert_eq!(settings.export_format, "html");
     }
 
     #[test]

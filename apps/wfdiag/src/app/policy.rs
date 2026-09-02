@@ -1254,6 +1254,10 @@ pub(crate) const fn export_format_label(format: ReportFormat) -> &'static str {
 /// stale in-memory snapshot from turning an otherwise valid export click into
 /// the old "selected export format is not available" dead end.
 pub(crate) fn resolved_export_format(value: &str) -> ReportFormat {
+    if value.trim().eq_ignore_ascii_case("pdf") {
+        // Legacy value: the printable format, never silently plain text.
+        return ReportFormat::Html;
+    }
     ReportFormat::try_from(value).unwrap_or(ReportFormat::Text)
 }
 
@@ -1815,7 +1819,7 @@ pub(crate) mod tests {
         assert_eq!(resolved_export_format("json"), ReportFormat::Json);
         assert_eq!(resolved_export_format("html"), ReportFormat::Html);
         assert_eq!(resolved_export_format(""), ReportFormat::Text);
-        assert_eq!(resolved_export_format("pdf"), ReportFormat::Text);
+        assert_eq!(resolved_export_format("pdf"), ReportFormat::Html);
     }
 
     #[test]
