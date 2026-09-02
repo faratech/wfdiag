@@ -5,6 +5,7 @@
 use crate::app::state::{FixPlanActionSelection, IssuePrioritizationDisplay};
 use std::collections::HashSet;
 use wfdiag_native_ai_analysis::ValidatedFixPlan;
+use wfdiag_native_issues::next_steps::InAppAction;
 use wfdiag_native_issues::{Issue, RemediationSummary};
 use wfdiag_native_remediation::runtime::ActionRunSummary;
 
@@ -44,6 +45,8 @@ impl IssuesScreen {
 #[derive(Clone)]
 pub(crate) enum IssuesMsg {
     RunRemediation(String),
+    /// Jump to the Processes page sorted for this rule's culprits.
+    ShowProcesses(InAppAction),
     AskAiAboutIssue(String),
     Prioritize,
     CancelPrioritization,
@@ -51,7 +54,10 @@ pub(crate) enum IssuesMsg {
     CancelFixPlan,
     ReviewFixPlanActions(FixPlanActionSelection),
     CancelActionRun,
-    RunExpandedChanged { run_id: String, expanded: bool },
+    RunExpandedChanged {
+        run_id: String,
+        expanded: bool,
+    },
 }
 
 #[cfg(test)]

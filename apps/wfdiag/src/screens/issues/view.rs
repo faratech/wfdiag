@@ -22,9 +22,8 @@ use crate::widgets::markdown_render::{MarkdownStyle, render_markdown_lite};
 use crate::widgets::palette_colors::Palette;
 use std::collections::HashSet;
 use wfdiag_native_ai_analysis::ValidatedFixPlan;
-use wfdiag_native_issues::health::{
-    DO_THIS_FIRST_LIMIT, HealthBand, HealthConfidence, HealthScore, NextStep, do_this_first,
-    health_score,
+use wfdiag_native_issues::next_steps::{
+    DO_THIS_FIRST_LIMIT, InAppAction, NextStep, do_this_first, in_app_action,
 };
 use wfdiag_native_issues::projection::{project_issues, unknown_check_hint};
 use wfdiag_native_issues::{Issue, IssueSeverity, RemediationSummary, RemediationTier};
@@ -68,6 +67,7 @@ impl IssuesScreen {
             env.settings.network_tests_enabled,
             vc.message(Message::Diagnostics(DiagnosticsMsg::RequestQuickScan)),
             vc.callback(|value| Message::Issues(IssuesMsg::RunRemediation(value))),
+            vc.callback(|value| Message::Issues(IssuesMsg::ShowProcesses(value))),
             vc.callback(|value| Message::Issues(IssuesMsg::AskAiAboutIssue(value))),
             vc.message(Message::Issues(IssuesMsg::Prioritize)),
             vc.message(Message::Issues(IssuesMsg::CancelPrioritization)),
@@ -106,6 +106,7 @@ pub(crate) fn issues_page(
     network_tests_enabled: bool,
     quick_scan: Callback<()>,
     run_remediation: Callback<String>,
+    show_processes: Callback<InAppAction>,
     ask_ai: Callback<String>,
     prioritize_issues: Callback<()>,
     cancel_issue_prioritization: Callback<()>,
@@ -161,14 +162,14 @@ pub(crate) fn issues_page(
                 }),
         ),
         KeyedView::new(
-            "health",
-            health_card(
+            "do-this-first",
+            next_steps_card(
                 palette,
                 theme,
-                health_score(&projection).as_ref(),
                 &do_this_first(&projection, DO_THIS_FIRST_LIMIT),
                 is_admin,
                 run_remediation.clone(),
+                show_processes.clone(),
             ),
         ),
     ];
@@ -282,15 +283,33 @@ pub(crate) fn issues_page(
     for issue in &projection.detected {
         let (tint, accent, icon_data, severity_label) =
             issue_severity_visual(palette, theme, issue.severity);
-        let primary_action = issue.remediation.as_ref().map(|remediation| {
-            (remediation.label.as_str(), remediation_icon(remediation), {
-                let run = run_remediation.clone();
-                let remediation_id = remediation.id.clone();
-                move || {
-                    let _ = run.call(remediation_id.clone());
+        // One button: the catalog remediation, else the in-app destination
+        // (the rules guarantee at most one of the two exists).
+        let primary_action: Option<IssueAction<'_>> =
+            match (issue.remediation.as_ref(), in_app_action(&issue.id)) {
+                (Some(remediation), _) => {
+                    let run = run_remediation.clone();
+                    let remediation_id = remediation.id.clone();
+                    Some((
+                        remediation.label.as_str(),
+                        remediation_icon(remediation),
+                        Box::new(move || {
+                            let _ = run.call(remediation_id.clone());
+                        }),
+                    ))
                 }
-            })
-        });
+                (None, Some(action)) => {
+                    let show = show_processes.clone();
+                    Some((
+                        action.label(),
+                        FaIcon::Processes,
+                        Box::new(move || {
+                            let _ = show.call(action);
+                        }),
+                    ))
+                }
+                (None, None) => None,
+            };
         let ask_ai_callback = {
             let ask_ai = ask_ai.clone();
             let issue_id = issue.id.clone();
@@ -1313,6 +1332,9 @@ pub(crate) fn issue_primary_button_resources() -> ResourceOverrides {
         .set("ControlCornerRadius", CornerRadius::uniform(7.0))
 }
 
+/// A card's one primary button: label, icon, and what it does.
+type IssueAction<'a> = (&'a str, FaIcon, Box<dyn Fn()>);
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn issue_card(
     palette: Palette,
@@ -1572,100 +1594,27 @@ pub(crate) fn issue_check_group(
         )
 }
 
-/// The hero verdict: one score, its band, and the three things to do first.
-/// Deterministic — the same projection always yields the same card — and
-/// every row runs its vetted remediation through the normal broker path.
-pub(crate) fn health_card(
+/// "Do this first": the three most actionable detected issues, each with its
+/// vetted remediation running through the normal broker path. Empty when
+/// nothing is detected.
+pub(crate) fn next_steps_card(
     palette: Palette,
     theme: WindowTheme,
-    health: Option<&HealthScore>,
     steps: &[NextStep],
     is_admin: bool,
     run_remediation: Callback<String>,
+    show_processes: Callback<InAppAction>,
 ) -> View {
-    let Some(health) = health else {
+    if steps.is_empty() {
         return View::empty();
-    };
-    let (score_color, score_background) = match health.band {
-        HealthBand::Good => (palette.ok, palette.ok_bg),
-        HealthBand::Fair => (palette.accent, palette.active),
-        HealthBand::NeedsAttention => (palette.warn, palette.warn_bg),
-        HealthBand::Poor => (palette.err, palette.err_bg),
-    };
-    let confidence_note = match health.confidence {
-        HealthConfidence::Full => None,
-        HealthConfidence::Partial => Some(if is_admin {
-            "Partial: most checks couldn't be verified on this scan."
-        } else {
-            "Partial: most checks need administrator access to verify."
-        }),
-    };
-    let verdict = StackPanel::new()
-        .spacing(4.0)
-        .min_width(150.0)
-        .vertical_alignment(VerticalAlignment::Center)
-        .children((
-            TextBlock::new()
-                .text("HEALTH")
-                .font_size(10.5)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .foreground(palette.muted),
-            StackPanel::new()
-                .orientation(Orientation::Horizontal)
-                .spacing(8.0)
-                .children((
-                    TextBlock::new()
-                        .text(health.score.to_string())
-                        .font_size(34.0)
-                        .font_weight(FontWeight::BOLD)
-                        .foreground(score_color)
-                        .automation_name(format!("Health score {}", health.score)),
-                    Border::new()
-                        .height(24.0)
-                        .padding(Thickness::xy(10.0, 0.0))
-                        .background(score_background)
-                        .corner_radius(999.0)
-                        .vertical_alignment(VerticalAlignment::Center)
-                        .content(
-                            TextBlock::new()
-                                .text(health.band.label())
-                                .font_size(11.5)
-                                .font_weight(FontWeight::SEMI_BOLD)
-                                .foreground(score_color)
-                                .vertical_alignment(VerticalAlignment::Center),
-                        ),
-                )),
-            TextBlock::new()
-                .text(if health.unknown > 0 {
-                    format!(
-                        "{} checks verified · {} couldn't be verified",
-                        health.verified, health.unknown
-                    )
-                } else {
-                    format!("{} checks verified", health.verified)
-                })
-                .font_size(11.5)
-                .foreground(palette.muted)
-                .text_wrapping(TextWrapping::Wrap),
-            confidence_note.map_or_else(View::empty, |note| {
-                TextBlock::new()
-                    .text(note)
-                    .font_size(11.0)
-                    .foreground(palette.warn)
-                    .text_wrapping(TextWrapping::Wrap)
-                    .into()
-            }),
-        ));
-
+    }
     let rows: Vec<KeyedView> = steps
         .iter()
         .map(|step| {
             let (_, accent, _, _) = issue_severity_visual(palette, theme, step.severity);
             let blocked_by_admin = step.needs_admin && !is_admin;
-            let action: View = step
-                .remediation
-                .as_ref()
-                .map_or_else(View::empty, |remediation| {
+            let action: View = match (step.remediation.as_ref(), step.in_app) {
+                (Some(remediation), _) => {
                     let run = run_remediation.clone();
                     let remediation_id = remediation.id.clone();
                     let button = Button::new()
@@ -1685,7 +1634,20 @@ pub(crate) fn health_card(
                     } else {
                         button
                     }
-                });
+                }
+                (None, Some(in_app)) => {
+                    let show = show_processes.clone();
+                    Button::new()
+                        .grid_column(2)
+                        .height(30.0)
+                        .on_click(move || {
+                            let _ = show.call(in_app);
+                        })
+                        .automation_name(format!("{} for {}", in_app.label(), step.title))
+                        .content(fa_icon_label(FaIcon::Processes, in_app.label()))
+                }
+                (None, None) => View::empty(),
+            };
             KeyedView::new(
                 step.issue_id.clone(),
                 Grid::new()
@@ -1724,16 +1686,6 @@ pub(crate) fn health_card(
             )
         })
         .collect();
-    let next_steps: View = if rows.is_empty() {
-        TextBlock::new()
-            .text("Nothing needs your attention right now.")
-            .font_size(12.5)
-            .foreground(palette.muted)
-            .vertical_alignment(VerticalAlignment::Center)
-            .into()
-    } else {
-        StackPanel::new().spacing(8.0).keyed_children(rows)
-    };
 
     Border::new()
         .background(palette.card)
@@ -1741,22 +1693,16 @@ pub(crate) fn health_card(
         .border_thickness(1.0)
         .corner_radius(9.0)
         .padding(Thickness::new(18.0, 16.0, 18.0, 16.0))
-        .automation_name(format!("Health {}", health.summary_text()))
+        .automation_name("Do this first")
         .content(
-            Grid::new()
-                .columns([GridLength::Auto, GridLength::Star(1.0)])
-                .column_spacing(24.0)
-                .children((
-                    verdict,
-                    StackPanel::new().grid_column(1).spacing(10.0).children((
-                        TextBlock::new()
-                            .text("DO THIS FIRST")
-                            .font_size(10.5)
-                            .font_weight(FontWeight::SEMI_BOLD)
-                            .foreground(palette.muted),
-                        next_steps,
-                    )),
-                )),
+            StackPanel::new().spacing(10.0).children((
+                TextBlock::new()
+                    .text("DO THIS FIRST")
+                    .font_size(10.5)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .foreground(palette.muted),
+                StackPanel::new().spacing(8.0).keyed_children(rows),
+            )),
         )
 }
 

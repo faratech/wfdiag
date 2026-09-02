@@ -12,7 +12,6 @@ use wfdiag_app::{
     ActionEvent, AppCommand, AppEvent, DispatchOutcome, FixPlanEvent, IssuesEvent,
     PrioritizationEvent, ScanEvent,
 };
-use wfdiag_native_issues::health::{health_score, health_tray_tooltip};
 use wfdiag_native_issues::projection::project_issues;
 use wfdiag_native_remediation::broker::ActionRequest;
 use wfdiag_native_remediation::remediation;
@@ -22,6 +21,7 @@ impl IssuesScreen {
     pub(crate) fn update(&mut self, message: IssuesMsg, cx: &mut ScreenCx<'_>) {
         match message {
             IssuesMsg::RunRemediation(remediation_id) => self.run_remediation(remediation_id, cx),
+            IssuesMsg::ShowProcesses(action) => cx.effect(Effect::ShowProcesses(action)),
             IssuesMsg::AskAiAboutIssue(issue_id) => self.ask_ai_about_issue(&issue_id, cx),
             IssuesMsg::Prioritize => {
                 self.begin_prioritization(self.prioritization.text.is_some(), cx);
@@ -236,13 +236,8 @@ impl IssuesScreen {
             IssuesEvent::Updated { session_id, .. } => {
                 self.refreshing = false;
                 self.projected_session_id = Some(session_id.clone());
-                let projection = project_issues(&self.issues);
-                cx.tray_tooltip(health_tray_tooltip(
-                    health_score(&projection).as_ref(),
-                    projection.counts,
-                ));
                 if cx.shell.page == Page::Issues && !cx.scan.busy {
-                    cx.status(projection.counts.summary_text());
+                    cx.status(project_issues(&self.issues).counts.summary_text());
                 }
             }
             IssuesEvent::Failed { error } => {

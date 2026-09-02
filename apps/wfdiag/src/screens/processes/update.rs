@@ -77,6 +77,16 @@ impl ProcessesScreen {
         }
     }
 
+    /// Sort the heaviest consumers first without asking for a page: the
+    /// caller navigates here next, and navigation requests the first page.
+    pub(crate) fn focus(&mut self, sort_key: ProcessSortKey) {
+        self.sort_key = sort_key;
+        self.sort_direction = ProcessSortDirection::Desc;
+        self.offset = 0;
+        self.selected = None;
+        self.detail = None;
+    }
+
     fn set_sort(&mut self, sort_key: ProcessSortKey, cx: &mut ScreenCx<'_>) {
         if self.sort_key == sort_key {
             self.sort_direction = match self.sort_direction {

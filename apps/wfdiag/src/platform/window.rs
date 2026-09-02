@@ -29,7 +29,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState};
 use windows::Win32::UI::Shell::{
-    DefSubclassProc, ExtractIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    DefSubclassProc, ExtractIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
     NOTIFYICONDATAW, RemoveWindowSubclass, SetWindowSubclass, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::TrackPopupMenu;
@@ -756,8 +756,8 @@ pub fn hide(window: HWND) {
 
 fn add_tray_icon(window: HWND, tooltip: &str) -> Result<(), String> {
     // Remember the tooltip so a shell restart can re-add the icon (see
-    // `tray_subclass_proc`); `update_tray_tooltip` replaces it later.
-    set_remembered_tray_tooltip(tooltip);
+    // `tray_subclass_proc`). First tooltip wins; the app uses one constant.
+    let _ = TRAY_TOOLTIP.set(tooltip.to_string());
     let mut data = NOTIFYICONDATAW {
         cbSize: u32::try_from(std::mem::size_of::<NOTIFYICONDATAW>()).unwrap_or(u32::MAX),
         hWnd: window,
@@ -815,43 +815,7 @@ fn tray_icon() -> windows::Win32::UI::WindowsAndMessaging::HICON {
     windows::Win32::UI::WindowsAndMessaging::HICON(handle as *mut core::ffi::c_void)
 }
 
-/// The tooltip currently on the tray icon, replayed after a shell restart.
-static TRAY_TOOLTIP: Mutex<String> = Mutex::new(String::new());
-
-fn set_remembered_tray_tooltip(tooltip: &str) {
-    let mut remembered = TRAY_TOOLTIP
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *remembered = tooltip.to_string();
-}
-
-fn remembered_tray_tooltip() -> String {
-    TRAY_TOOLTIP
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-}
-
-/// Replace the tray icon's hover text (the health verdict). Remembered even
-/// while the icon is absent, so it shows once the icon is (re)added.
-pub fn update_tray_tooltip(window: HWND, tooltip: &str) {
-    set_remembered_tray_tooltip(tooltip);
-    if !lifecycle_flag_is_set(FLAG_TRAY_PRESENT) {
-        return;
-    }
-    let mut data = NOTIFYICONDATAW {
-        cbSize: u32::try_from(std::mem::size_of::<NOTIFYICONDATAW>()).unwrap_or(u32::MAX),
-        hWnd: window,
-        uID: 1,
-        uFlags: NIF_TIP,
-        szTip: [0; 128],
-        ..Default::default()
-    };
-    let tip = encode_tray_tooltip(tooltip, data.szTip.len());
-    data.szTip[..tip.len()].copy_from_slice(&tip);
-    // SAFETY: data is fully initialized for NIM_MODIFY with NIF_TIP.
-    let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
-}
+static TRAY_TOOLTIP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// `TaskbarCreated` is broadcast whenever the shell restarts (Explorer crash,
 /// shell relaunch, some DPI changes). Without re-adding the icon,
@@ -873,9 +837,8 @@ fn restore_tray_icon_after_shell_restart(window: HWND) {
         return;
     }
     remove_tray_icon(window);
-    let tooltip = remembered_tray_tooltip();
-    if !tooltip.is_empty() {
-        let _ = add_tray_icon(window, &tooltip);
+    if let Some(tooltip) = TRAY_TOOLTIP.get() {
+        let _ = add_tray_icon(window, tooltip);
     }
 }
 

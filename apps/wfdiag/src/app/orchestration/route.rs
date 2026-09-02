@@ -14,7 +14,6 @@ use crate::dialogs::action_review::state::ActionReviewMsg;
 use crate::dialogs::notice::state::{NoticeKind, NoticeRequest};
 use crate::platform::external::{reveal_in_explorer, write_text_to_clipboard};
 use crate::platform::notifications;
-use crate::platform::{instance, window};
 use crate::screens::ai::state::AiMsg;
 use crate::screens::diagnostics::state::DiagnosticsMsg;
 use crate::screens::history::state::HistoryMsg;
@@ -22,6 +21,8 @@ use crate::screens::issues::state::IssuesMsg;
 use crate::screens::monitor::state::MonitorMsg;
 use crate::screens::processes::state::{ProcessQueryOrigin, ProcessesMsg};
 use wfdiag_app::AppEvent;
+use wfdiag_app::ports::monitor::ProcessSortKey;
+use wfdiag_native_issues::next_steps::InAppAction;
 use windows_reactor::*;
 
 impl WfdiagShell {
@@ -43,11 +44,6 @@ impl WfdiagShell {
                 }
                 Effect::Status(text) => self.shell.status = text,
                 Effect::Notice(request) => self.show_notice(request),
-                Effect::TrayTooltip(text) => {
-                    if let Some(window) = instance::main_window_hwnd() {
-                        window::update_tray_tooltip(window, &text);
-                    }
-                }
                 Effect::RevealInExplorer(path) => {
                     if let Err(error) = reveal_in_explorer(&path) {
                         self.shell.status = format!("Could not open the file location · {error}");
@@ -63,6 +59,13 @@ impl WfdiagShell {
                 }
                 Effect::Transition(page) => {
                     self.transition_to_page(page);
+                }
+                Effect::ShowProcesses(action) => {
+                    self.processes.focus(match action {
+                        InAppAction::ProcessesByCpu => ProcessSortKey::CpuPercent,
+                        InAppAction::ProcessesByMemory => ProcessSortKey::MemoryMb,
+                    });
+                    self.navigate_to_page(Page::Processes, context);
                 }
                 Effect::BeginScan(kind) => self.begin_diagnostic_scan(kind),
                 Effect::AskAi { prompt } => {
