@@ -50,7 +50,7 @@ use crate::app::message::Message;
 use crate::app::policy::{
     configured_provider_setup_index, diagnostics_uses_compact_layout, effective_window_theme,
     load_live_test_settings, navigation_rail_forced_collapsed, page_host_scrolls,
-    pending_system_info, window_theme_from_setting,
+    pending_system_info, shell_uses_narrow_layout, window_theme_from_setting,
 };
 use crate::app::screen::{ScanEnv, ShellEnv};
 use crate::app::shell::ShellState;
@@ -60,6 +60,7 @@ use crate::app::tasks::spawn_instance_watch;
 use crate::dialogs::about::state::AboutDialog;
 use crate::dialogs::action_review::state::ActionReviewDialog;
 use crate::dialogs::export::state::ExportState;
+use crate::dialogs::notice::state::NoticeDialog;
 use crate::dialogs::palette::state::PaletteDialog;
 use crate::dialogs::settings::state::SettingsDialog;
 use crate::dialogs::shortcuts_help::state::ShortcutHelpDialog;
@@ -108,6 +109,8 @@ pub(crate) struct WfdiagShell {
     // ---- About and the update notice ----------------------------------
     pub(crate) about: AboutDialog,
     pub(crate) update_notice: UpdateNoticeDialog,
+    /// The transient outcome notice (export saved, fix applied, …).
+    pub(crate) notice: NoticeDialog,
 
     // ---- Settings dialog ----------------------------------------------
     pub(crate) settings: SettingsDialog,
@@ -361,6 +364,7 @@ impl Component for WfdiagShell {
             },
             about: AboutDialog::default(),
             update_notice: UpdateNoticeDialog::default(),
+            notice: NoticeDialog::default(),
             settings: {
                 let mut dialog = SettingsDialog::new(
                     settings_defaults,
@@ -451,6 +455,7 @@ impl Component for WfdiagShell {
             Message::Settings(message) => self.route_settings(message, context),
             Message::About(message) => self.route_about(message, context),
             Message::UpdateNotice(message) => self.route_update_notice(message, context),
+            Message::Notice(message) => self.route_notice(message),
             Message::Export(message) => self.route_export(message),
             Message::Ai(message) => self.route_ai(message, context),
             Message::Diagnostics(message) => self.route_diagnostics(message, context),
@@ -465,6 +470,11 @@ impl Component for WfdiagShell {
         // instant it is accepted), so the frame this message produces must be
         // rendered from the snapshot as it is now, not as it was last wake.
         self.sync_from_snapshot();
+        // Outcome notices raised anywhere above get their dismissal timer
+        // here, where a context is at hand; the keyboard hook learns whether
+        // a bare Enter now belongs to the chat composer.
+        self.arm_pending_notice(context);
+        self.sync_composer_send_arming();
     }
 
     fn view(&self, _input: &(), context: &mut ViewContext<Self>) -> View {
@@ -512,7 +522,7 @@ impl Component for WfdiagShell {
         let effective_theme =
             effective_window_theme(self.shell.theme, self.shell.effective_color_scheme);
         let palette = Palette::for_theme(effective_theme);
-        let narrow = self.shell.window_size.width < 940.0;
+        let narrow = shell_uses_narrow_layout(self.shell.window_size.width);
         let diagnostics_compact = diagnostics_uses_compact_layout(self.shell.window_size.width);
         let rail_forced_collapsed = navigation_rail_forced_collapsed(self.shell.window_size.width);
         // Keep content-specific compact layouts independent from the shipping
@@ -659,6 +669,10 @@ impl Component for WfdiagShell {
             context,
         );
         let update_notice = self.update_notice.view(context);
+        let notice = self.notice.view(self.update_notice.visible, context);
+        let notices = Grid::new()
+            .grid_row_span(2)
+            .children((update_notice, notice));
         let (about_scrim, about) =
             self.about
                 .overlay(&env, self.update_notice.info.as_ref(), context);
@@ -723,7 +737,7 @@ impl Component for WfdiagShell {
                 title_bar,
                 title_actions,
                 body,
-                update_notice,
+                notices,
                 settings,
                 about_scrim,
                 about,

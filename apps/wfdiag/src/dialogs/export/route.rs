@@ -4,6 +4,7 @@
 
 use crate::app::WfdiagShell;
 use crate::dialogs::export::msg::ExportMsg;
+use crate::dialogs::notice::state::{NoticeKind, NoticeRequest};
 
 impl WfdiagShell {
     /// One export message: a finished picker, or a finished write.
@@ -24,11 +25,21 @@ impl WfdiagShell {
                     Ok(path) => {
                         self.export.error = None;
                         self.shell.status = format!("Results saved to {}", path.display());
+                        self.show_notice(NoticeRequest::new(
+                            NoticeKind::Success,
+                            "Export complete",
+                            format!("Results saved to {}", path.display()),
+                        ));
                     }
                     Err(error) => {
                         self.export.error = Some(error);
                         self.shell.status =
                             "Failed to save the file. Please try a different location.".to_string();
+                        self.show_notice(NoticeRequest::new(
+                            NoticeKind::Error,
+                            "Export failed",
+                            "Failed to save the file. Please try a different location.",
+                        ));
                     }
                 }
             }
@@ -47,11 +58,26 @@ impl WfdiagShell {
                             paths.text.display(),
                             paths.html.display()
                         );
+                        self.show_notice(NoticeRequest::new(
+                            NoticeKind::Success,
+                            "Support package saved",
+                            format!(
+                                "{} · {} · {}",
+                                paths.json.display(),
+                                paths.text.display(),
+                                paths.html.display()
+                            ),
+                        ));
                     }
                     Err(error) => {
                         self.shell.status = format!(
                             "Support package could not be written completely · {error} · Try exporting individual files"
                         );
+                        self.show_notice(NoticeRequest::new(
+                            NoticeKind::Error,
+                            "Support package incomplete",
+                            format!("{error} · try exporting individual files"),
+                        ));
                         self.export.error = Some(error);
                     }
                 }

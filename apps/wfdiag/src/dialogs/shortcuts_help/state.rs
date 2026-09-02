@@ -16,6 +16,7 @@ pub(crate) const SHORTCUT_ROWS: &[(&str, &str)] = &[
     ("Ctrl+Shift+Q", "Run a Quick Scan"),
     ("Ctrl+Shift+F", "Run a Full Scan"),
     ("Ctrl+R", "Refresh"),
+    ("Enter", "Send the chat message (Shift+Enter adds a line)"),
     ("Ctrl+/", "Show this shortcut list"),
     ("Esc", "Close dialogs and overlays"),
 ];

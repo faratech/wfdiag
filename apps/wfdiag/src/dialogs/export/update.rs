@@ -24,6 +24,7 @@ use crate::app::policy::{export_format_label, rejection_text, resolved_export_fo
 use crate::app::state::PendingExportAction;
 use crate::app::tasks::{spawn_export_file_write, spawn_support_package_write};
 use crate::dialogs::export::msg::ExportPickerKind;
+use crate::dialogs::notice::state::{NoticeKind, NoticeRequest};
 use crate::fixtures::visual::LiveTestFixture;
 use crate::platform::external::{
     current_export_date_strings, launch_email_compose_draft, launch_export_external_action,
@@ -122,6 +123,11 @@ impl WfdiagShell {
         let Some(metadata) = self.export_metadata() else {
             self.shell.status =
                 "Failed to prepare email. Please try exporting the report instead.".to_string();
+            self.show_notice(NoticeRequest::new(
+                NoticeKind::Error,
+                "Email failed",
+                "Please try exporting the report instead",
+            ));
             return;
         };
         if self.begin_export(
@@ -199,6 +205,11 @@ impl WfdiagShell {
             Err(error) => {
                 self.export.error = Some(error.clone());
                 self.shell.status = format!("Export failed · {error}");
+                self.show_notice(NoticeRequest::new(
+                    NoticeKind::Error,
+                    "Export failed",
+                    error,
+                ));
             }
         }
     }
@@ -310,11 +321,21 @@ impl WfdiagShell {
                             self.shell.status =
                                 "Email ready · report copied to clipboard · paste with Ctrl+V"
                                     .to_string();
+                            self.show_notice(NoticeRequest::new(
+                                NoticeKind::Success,
+                                "Email ready",
+                                "The report is on the clipboard · paste it with Ctrl+V",
+                            ));
                         }
                         Err(error) => {
                             self.export.error = Some(error.to_string());
                             self.shell.status = "Report copied to clipboard, but Windows could not open a new email"
                                 .to_string();
+                            self.show_notice(NoticeRequest::new(
+                                NoticeKind::Warning,
+                                "Email not opened",
+                                "The report is on the clipboard · paste it into a new email",
+                            ));
                         }
                     },
                     Err(error) => {
@@ -330,6 +351,11 @@ impl WfdiagShell {
                     Ok(()) => {
                         self.export.error = None;
                         self.shell.status = "Diagnostic report copied to the clipboard".to_string();
+                        self.show_notice(NoticeRequest::new(
+                            NoticeKind::Success,
+                            "Copied",
+                            "The diagnostic report is on the clipboard",
+                        ));
                     }
                     Err(error) => {
                         self.export.error = Some(error.to_string());

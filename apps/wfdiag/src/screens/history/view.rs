@@ -246,6 +246,7 @@ pub(crate) fn history_live_page(
                         &format_diagnostic_duration(scan.duration_ms),
                         selected_id == Some(scan.id.as_str()),
                         summaries.first().is_some_and(|latest| latest.id == scan.id),
+                        narrow,
                     )),
             )
         })
@@ -278,7 +279,7 @@ pub(crate) fn history_live_page(
         .corner_radius(9.0)
         .content(StackPanel::new().children((
             history_section_header(palette, "Scan Sessions", Some("Click to compare vs latest")),
-            history_header(palette),
+            history_header(palette, narrow),
             list_body,
         )));
 
@@ -349,43 +350,66 @@ pub(crate) fn history_live_page(
 
     StackPanel::new().spacing(16.0).children((
         page_header(palette, Page::History, View::empty()),
-        Grid::new()
-            .margin(Thickness::new(0.0, 7.0, 0.0, 0.0))
-            .columns([GridLength::Star(1.0), GridLength::Auto])
-            .children((
+        {
+            let actions = StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(12.0)
+                .children((
+                    Button::new()
+                        .width(110.0)
+                        .is_enabled(!loading)
+                        .on_click(refresh)
+                        .content(fa_icon_label(FaIcon::Refresh, "Refresh")),
+                    Button::new()
+                        .width(147.0)
+                        .is_enabled(!loading && !ack_busy && !summaries.is_empty())
+                        .on_click(clear_request)
+                        .automation_name("Clear history")
+                        .content(fa_icon_label(FaIcon::Trash, "Clear history")),
+                ));
+            let count = TextBlock::new()
+                .text(count_label)
+                .font_size(12.0)
+                .vertical_alignment(VerticalAlignment::Center);
+            // Narrow: the filter takes the full row (as the Store shell's
+            // `flex-basis: 100%` toolbar does) and the count shares a row
+            // with the actions; wide: one row, as before.
+            let toolbar: View = if narrow {
                 StackPanel::new()
-                    .orientation(Orientation::Horizontal)
-                    .spacing(12.0)
+                    .margin(Thickness::new(0.0, 7.0, 0.0, 0.0))
+                    .spacing(8.0)
                     .children((
-                        TextBlock::new()
-                            .text(count_label)
-                            .font_size(12.0)
-                            .vertical_alignment(VerticalAlignment::Center),
                         TextBox::new()
-                            .width(260.0)
                             .height(32.0)
                             .text(filter)
                             .placeholder_text("Filter by label, date, machine…")
                             .on_text_changed(filter_changed),
-                    )),
-                StackPanel::new()
-                    .grid_column(1)
-                    .orientation(Orientation::Horizontal)
-                    .spacing(12.0)
+                        Grid::new()
+                            .columns([GridLength::Star(1.0), GridLength::Auto])
+                            .children((count, Border::new().grid_column(1).content(actions))),
+                    ))
+            } else {
+                Grid::new()
+                    .margin(Thickness::new(0.0, 7.0, 0.0, 0.0))
+                    .columns([GridLength::Star(1.0), GridLength::Auto])
                     .children((
-                        Button::new()
-                            .width(110.0)
-                            .is_enabled(!loading)
-                            .on_click(refresh)
-                            .content(fa_icon_label(FaIcon::Refresh, "Refresh")),
-                        Button::new()
-                            .width(147.0)
-                            .is_enabled(!loading && !ack_busy && !summaries.is_empty())
-                            .on_click(clear_request)
-                            .automation_name("Clear history")
-                            .content(fa_icon_label(FaIcon::Trash, "Clear history")),
-                    )),
-            )),
+                        StackPanel::new()
+                            .orientation(Orientation::Horizontal)
+                            .spacing(12.0)
+                            .children((
+                                count,
+                                TextBox::new()
+                                    .width(260.0)
+                                    .height(32.0)
+                                    .text(filter)
+                                    .placeholder_text("Filter by label, date, machine…")
+                                    .on_text_changed(filter_changed),
+                            )),
+                        Border::new().grid_column(1).content(actions),
+                    ))
+            };
+            toolbar
+        },
         list_error_notice,
         body,
         {
@@ -1069,6 +1093,7 @@ pub(crate) fn history_fixture_page(palette: Palette, narrow: bool, empty: bool) 
                 time,
                 selected,
                 latest,
+                narrow,
             ),
         )
     })
@@ -1115,7 +1140,7 @@ pub(crate) fn history_fixture_page(palette: Palette, narrow: bool, empty: bool) 
                                     .vertical_alignment(VerticalAlignment::Center),
                             )),
                     ),
-                history_header(palette),
+                history_header(palette, narrow),
                 StackPanel::new().keyed_children(session_rows),
             )),
         );
@@ -1284,7 +1309,7 @@ pub(crate) fn history_empty_page(palette: Palette, narrow: bool) -> View {
                                     .vertical_alignment(VerticalAlignment::Center),
                             )),
                     ),
-                history_header(palette),
+                history_header(palette, narrow),
                 Border::new().height(246.0).content(
                     StackPanel::new()
                         .spacing(10.0)
@@ -1404,29 +1429,47 @@ pub(crate) fn history_empty_page(palette: Palette, narrow: bool) -> View {
     ))
 }
 
-pub(crate) fn history_columns() -> [GridLength; 6] {
-    [
-        GridLength::Pixel(22.0),
-        GridLength::Pixel(132.0),
-        GridLength::Star(1.0),
-        GridLength::Pixel(72.0),
-        GridLength::Pixel(58.0),
-        GridLength::Pixel(60.0),
-    ]
+/// Session-table columns: status dot, timestamp, label, collected, errors
+/// and — only in the wide arrangement — duration. The narrow set mirrors the
+/// Store shell's `@container block (max-width: 560px)` rule, which tightens
+/// the fixed columns and drops duration so the label column keeps its room.
+pub(crate) fn history_columns(narrow: bool) -> Vec<GridLength> {
+    if narrow {
+        vec![
+            GridLength::Pixel(22.0),
+            GridLength::Pixel(110.0),
+            GridLength::Star(1.0),
+            GridLength::Pixel(52.0),
+            GridLength::Pixel(52.0),
+        ]
+    } else {
+        vec![
+            GridLength::Pixel(22.0),
+            GridLength::Pixel(132.0),
+            GridLength::Star(1.0),
+            GridLength::Pixel(72.0),
+            GridLength::Pixel(58.0),
+            GridLength::Pixel(60.0),
+        ]
+    }
 }
 
-pub(crate) fn history_header(palette: Palette) -> View {
+pub(crate) fn history_header(palette: Palette, narrow: bool) -> View {
     Border::new()
         .height(43.0)
         .padding(Thickness::xy(14.0, 0.0))
         .border_brush(palette.border)
         .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
-        .content(Grid::new().columns(history_columns()).children((
+        .content(Grid::new().columns(history_columns(narrow)).children((
             table_header("TIMESTAMP", 1),
             table_header("LABEL", 2),
             table_header("COLLECTED", 3),
             table_header("ERRORS", 4),
-            table_header("TIME", 5),
+            if narrow {
+                View::empty()
+            } else {
+                table_header("TIME", 5).into()
+            },
         )))
 }
 
@@ -1440,6 +1483,7 @@ pub(crate) fn history_row(
     time: &str,
     selected: bool,
     latest: bool,
+    narrow: bool,
 ) -> View {
     let label_content: View = if latest {
         StackPanel::new()
@@ -1450,7 +1494,8 @@ pub(crate) fn history_row(
                 TextBlock::new()
                     .text(label)
                     .font_size(11.5)
-                    .font_weight(FontWeight::BOLD),
+                    .font_weight(FontWeight::BOLD)
+                    .text_trimming(TextTrimming::CharacterEllipsis),
                 Border::new()
                     .height(18.0)
                     .padding(Thickness::xy(6.0, 0.0))
@@ -1470,6 +1515,7 @@ pub(crate) fn history_row(
             .text(label)
             .font_size(11.5)
             .font_weight(FontWeight::BOLD)
+            .text_trimming(TextTrimming::CharacterEllipsis)
             .into()
     };
 
@@ -1484,7 +1530,7 @@ pub(crate) fn history_row(
             Color::transparent()
         })
         .content(
-            Grid::new().columns(history_columns()).children((
+            Grid::new().columns(history_columns(narrow)).children((
                 Border::new()
                     .width(7.0)
                     .height(7.0)
@@ -1503,7 +1549,11 @@ pub(crate) fn history_row(
                     .content(label_content),
                 table_cell(pass, 3).foreground(palette.accent),
                 table_cell(fail, 4).foreground(palette.err),
-                table_cell(time, 5),
+                if narrow {
+                    View::empty()
+                } else {
+                    table_cell(time, 5).into()
+                },
             )),
         )
 }

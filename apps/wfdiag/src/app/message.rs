@@ -20,6 +20,7 @@ use crate::app::shell_msg::ShellMsg;
 use crate::dialogs::about::state::AboutMsg;
 use crate::dialogs::action_review::state::ActionReviewMsg;
 use crate::dialogs::export::msg::ExportMsg;
+use crate::dialogs::notice::state::NoticeMsg;
 use crate::dialogs::palette::msg::PaletteMsg;
 use crate::dialogs::settings::msg::SettingsMsg;
 use crate::dialogs::shortcuts_help::state::ShortcutHelpMsg;
@@ -118,6 +119,8 @@ pub(crate) enum Message {
     Settings(SettingsMsg),
     About(AboutMsg),
     UpdateNotice(UpdateNoticeMsg),
+    /// One outcome-notice message (the toast counterpart).
+    Notice(NoticeMsg),
     Export(ExportMsg),
     Palette(PaletteMsg),
     Shortcuts(ShortcutHelpMsg),

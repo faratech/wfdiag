@@ -6,7 +6,8 @@
 use crate::app::WfdiagShell;
 use crate::app::message::{Message, SettingsDialogAction};
 use crate::app::policy::{
-    phi_preference_gate, subscription_auth_provider_for_setup, subscription_auth_state_index,
+    phi_preference_gate, settings_dialog_size, subscription_auth_provider_for_setup,
+    subscription_auth_state_index,
 };
 use crate::app::screen::ShellEnv;
 use crate::dialogs::settings::msg::SettingsMsg;
@@ -71,6 +72,7 @@ impl SettingsDialog {
                 env.palette,
                 env.theme,
                 env.visual_state == VisualState::SettingsBottom,
+                settings_dialog_size(env.window_size.width, env.window_size.height),
                 &self.draft,
                 &settings_phi_gate,
                 provider_status,

@@ -3,6 +3,7 @@
 pub(crate) mod about;
 pub(crate) mod action_review;
 pub(crate) mod export;
+pub(crate) mod notice;
 pub(crate) mod palette;
 pub(crate) mod settings;
 pub(crate) mod shortcuts_help;

@@ -85,29 +85,35 @@ impl WfdiagShell {
                 .border_brush(env.palette.border)
                 .border_thickness(Thickness::new(0.0, 1.0, 0.0, 0.0))
                 .content(
+                    // The status text lives in a bounded Star column so a long
+                    // message trims with an ellipsis instead of pushing the
+                    // version stamp off the window.
                     Grid::new()
-                        .columns([GridLength::Star(1.0), GridLength::Auto])
+                        .columns([
+                            GridLength::Auto,
+                            GridLength::Star(1.0),
+                            GridLength::Auto,
+                        ])
+                        .column_spacing(7.0)
                         .children((
-                            StackPanel::new()
-                                .orientation(Orientation::Horizontal)
-                                .spacing(7.0)
-                                .vertical_alignment(VerticalAlignment::Center)
-                                .children((
-                                    Image::new()
-                                        .source_data(EncodedImage::from_static(status_icon))
-                                        .width(11.0)
-                                        .height(11.0),
-                                    TextBlock::new()
-                                        .text(self.shell.status.clone())
-                                        .foreground(env.palette.muted)
-                                        .font_size(11.5)
-                                        .vertical_alignment(VerticalAlignment::Center),
-                                )),
+                            Image::new()
+                                .source_data(EncodedImage::from_static(status_icon))
+                                .width(11.0)
+                                .height(11.0)
+                                .vertical_alignment(VerticalAlignment::Center),
+                            TextBlock::new()
+                                .text(self.shell.status.clone())
+                                .grid_column(1)
+                                .foreground(env.palette.muted)
+                                .font_size(11.5)
+                                .text_trimming(TextTrimming::CharacterEllipsis)
+                                .vertical_alignment(VerticalAlignment::Center),
                             TextBlock::new()
                                 .text(format!(
                                     "{elapsed_prefix}{privilege}    wfdiag {APP_VERSION} · WindowsForum.com"
                                 ))
-                                .grid_column(1)
+                                .grid_column(2)
+                                .margin(Thickness::new(11.0, 0.0, 0.0, 0.0))
                                 .foreground(env.palette.muted)
                                 .font_size(11.5)
                                 .vertical_alignment(VerticalAlignment::Center),
@@ -129,7 +135,8 @@ impl WfdiagShell {
             .map(|count| count.to_string());
         let primary_nav = Page::ALL
             .into_iter()
-            .map(|page| {
+            .enumerate()
+            .map(|(index, page)| {
                 KeyedView::new(
                     page.tag(),
                     nav_button(
@@ -143,6 +150,7 @@ impl WfdiagShell {
                         } else {
                             None
                         },
+                        Some(format!("Ctrl+{}", index + 1)),
                         vc.message(Message::Shell(ShellMsg::Navigate(Some(
                             page.tag().to_string(),
                         )))),
@@ -167,6 +175,7 @@ impl WfdiagShell {
                     label,
                     false,
                     env.pane_expanded,
+                    None,
                     None,
                     vc.message(Message::Shell(ShellMsg::Navigate(Some(tag.to_string())))),
                     tools_enabled,
@@ -193,6 +202,7 @@ impl WfdiagShell {
                 false,
                 env.pane_expanded,
                 None,
+                None,
                 vc.message(Message::Shell(ShellMsg::TogglePane)),
                 true,
             )
@@ -206,6 +216,7 @@ impl WfdiagShell {
                 false,
                 env.pane_expanded,
                 None,
+                None,
                 vc.message(Message::Settings(SettingsMsg::Open)),
                 true,
             ),
@@ -215,6 +226,7 @@ impl WfdiagShell {
                 "About",
                 false,
                 env.pane_expanded,
+                None,
                 None,
                 vc.message(Message::About(AboutMsg::Open)),
                 true,

@@ -440,18 +440,46 @@ impl AiScreen {
             .find(|message| message.turn == turn && message.role == ChatDisplayRole::Assistant)
     }
 
-    fn on_report_event(event: &ReportEvent, cx: &mut ScreenCx<'_>) {
+    fn on_report_event(&mut self, event: &ReportEvent, cx: &mut ScreenCx<'_>) {
         match event {
-            ReportEvent::Started { .. } => cx.status("Preparing AI report…"),
+            ReportEvent::Started { provider } => {
+                self.report_text = Some(String::new());
+                self.report_generating = true;
+                self.report_error = None;
+                cx.status(format!(
+                    "Generating AI report · {}…",
+                    provider_display_name(provider_from_wire(provider))
+                ));
+            }
+            ReportEvent::Delta { text } => {
+                self.report_generating = true;
+                self.report_text
+                    .get_or_insert_with(String::new)
+                    .push_str(text);
+            }
             ReportEvent::Deferred { reason } => cx.status(reason.clone()),
-            ReportEvent::Cached { provider, .. } => {
+            ReportEvent::Cached {
+                provider, report, ..
+            } => {
+                self.report_text = Some(report.clone());
+                self.report_generating = false;
+                self.report_error = None;
                 cx.status(format!("AI report ready · {provider} · cached"));
             }
             ReportEvent::Done { provider, .. } => {
+                self.report_generating = false;
+                self.report_error = None;
                 cx.status(format!("AI report ready · {provider}"));
             }
-            ReportEvent::Failed { message } => cx.status(message.clone()),
-            ReportEvent::Cancelled => cx.status("AI report cancelled"),
+            ReportEvent::Failed { message } => {
+                self.report_generating = false;
+                self.report_error = Some(message.clone());
+                cx.status(message.clone());
+            }
+            ReportEvent::Cancelled => {
+                self.report_generating = false;
+                cx.status("AI report cancelled");
+            }
             _ => {}
         }
     }
@@ -481,7 +509,7 @@ impl AiScreen {
     pub(crate) fn on_app_event(&mut self, event: &AppEvent, cx: &mut ScreenCx<'_>) {
         match event {
             AppEvent::Chat(event) => self.on_chat_event(event.clone(), cx),
-            AppEvent::Report(event) => Self::on_report_event(event, cx),
+            AppEvent::Report(event) => self.on_report_event(event, cx),
             AppEvent::Provider(event) => self.on_provider_event(event, cx),
             _ => {}
         }

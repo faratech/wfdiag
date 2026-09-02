@@ -65,6 +65,9 @@ pub enum GlobalShortcutCommand {
     ShowHelp,
     QuickScan,
     FullScan,
+    /// A bare Enter inside the armed chat composer (see
+    /// [`set_composer_send_armed`]).
+    ComposerSend,
 }
 
 /// Shortcut evidence captured at key-down time.
@@ -147,6 +150,8 @@ static TRAY_COMMAND: AtomicU8 = AtomicU8::new(TRAY_COMMAND_NONE);
 /// consumes palette-local navigation keys while the palette actually owns
 /// them. Ordinary TextBox arrows/Enter/Escape otherwise remain untouched.
 static PALETTE_OPEN: AtomicBool = AtomicBool::new(false);
+/// Whether a bare Enter in a focused WinUI editable sends the chat composer.
+static COMPOSER_SEND_ARMED: AtomicBool = AtomicBool::new(false);
 /// Preserve discrete key-down order between the Win32 callback and Reactor's
 /// 50 ms poll. A single atomic slot lost rapid sequences such as Down+Enter.
 static SHORTCUT_EVENTS: Mutex<VecDeque<u16>> = Mutex::new(VecDeque::new());
@@ -332,6 +337,17 @@ pub fn set_palette_open(open: bool) {
     PALETTE_OPEN.store(open, Ordering::Release);
 }
 
+/// Arm or disarm Enter-to-send for the chat composer.
+///
+/// While armed, a bare Enter pressed inside a focused WinUI editable is
+/// consumed and published as [`GlobalShortcutCommand::ComposerSend`] instead
+/// of inserting a line break; Shift+Enter is never classified and reaches the
+/// TextBox. The shell arms it only while the Assistant page is open with no
+/// blocking overlay, so no other editable in the app is affected.
+pub fn set_composer_send_armed(armed: bool) {
+    COMPOSER_SEND_ARMED.store(armed, Ordering::Release);
+}
+
 /// Install the UI-thread callback invoked by [`post_ui_wake`].
 ///
 /// The callback normally sends one lightweight drain message through
@@ -508,6 +524,7 @@ fn encode_shortcut_event(event: GlobalShortcutEvent) -> u16 {
         GlobalShortcutCommand::PaletteNext => 12,
         GlobalShortcutCommand::PaletteExecute => 13,
         GlobalShortcutCommand::PaletteClose => 14,
+        GlobalShortcutCommand::ComposerSend => 15,
     };
     command
         | if event.editable_focused {
@@ -528,6 +545,7 @@ fn decode_shortcut_event(encoded: u16) -> Option<GlobalShortcutEvent> {
         12 => GlobalShortcutCommand::PaletteNext,
         13 => GlobalShortcutCommand::PaletteExecute,
         14 => GlobalShortcutCommand::PaletteClose,
+        15 => GlobalShortcutCommand::ComposerSend,
         _ => return None,
     };
     Some(GlobalShortcutEvent {
@@ -592,6 +610,19 @@ fn handle_key_down(virtual_key: u32, repeated: bool) -> bool {
             | GlobalShortcutCommand::PaletteClose
     );
     if palette_local && !PALETTE_OPEN.load(Ordering::Acquire) {
+        // A bare Enter outside the palette sends the chat composer's text
+        // while the shell has armed it and a WinUI editable has focus. The
+        // key is consumed so the TextBox does not also insert a line break;
+        // a held key is swallowed without re-sending.
+        if command == GlobalShortcutCommand::PaletteExecute
+            && COMPOSER_SEND_ARMED.load(Ordering::Acquire)
+            && super::focus::editable_control_focused()
+        {
+            if !repeated {
+                publish_global_shortcut(GlobalShortcutCommand::ComposerSend, true);
+            }
+            return true;
+        }
         return false;
     }
     // Arrow-key repeat is useful while traversing an open palette. Every
@@ -1345,6 +1376,10 @@ mod tests {
             },
             GlobalShortcutEvent {
                 command: GlobalShortcutCommand::PaletteClose,
+                editable_focused: true,
+            },
+            GlobalShortcutEvent {
+                command: GlobalShortcutCommand::ComposerSend,
                 editable_focused: true,
             },
         ] {

@@ -828,7 +828,14 @@ pub(crate) fn diagnostic_output_mode_button(
                 )
                 .set("ButtonBackgroundPointerOver", palette.active)
                 .set("ButtonBackgroundPressed", palette.active)
-                .set("ButtonForeground", palette.text)
+                .set(
+                    "ButtonForeground",
+                    if selected {
+                        palette.text
+                    } else {
+                        palette.muted
+                    },
+                )
                 .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
                 .set("ControlCornerRadius", CornerRadius::uniform(5.0)),
         )
@@ -1786,8 +1793,8 @@ pub(crate) fn diagnostics_page(
         .orientation(Orientation::Horizontal)
         .spacing(4.0)
         .children((
-            small_segment_button(palette, "Output", 70.0),
-            small_segment_button(palette, "Raw", 56.0),
+            small_segment_button(palette, "Output", 70.0, true),
+            small_segment_button(palette, "Raw", 56.0, false),
             Border::new()
                 .width(90.0)
                 .height(28.0)
@@ -2106,15 +2113,35 @@ pub(crate) fn collected_statistic(palette: Palette) -> View {
     ))
 }
 
-pub(crate) fn small_segment_button(palette: Palette, label: &'static str, width: f64) -> View {
+pub(crate) fn small_segment_button(
+    palette: Palette,
+    label: &'static str,
+    width: f64,
+    selected: bool,
+) -> View {
     Button::new()
         .width(width)
         .height(28.0)
         .resource_overrides(
             ResourceOverrides::new()
-                .set("ButtonBackground", palette.card_strong)
+                .set(
+                    "ButtonBackground",
+                    if selected {
+                        palette.active
+                    } else {
+                        Color::transparent()
+                    },
+                )
                 .set("ButtonBackgroundPointerOver", palette.active)
                 .set("ButtonBackgroundPressed", palette.active)
+                .set(
+                    "ButtonForeground",
+                    if selected {
+                        palette.text
+                    } else {
+                        palette.muted
+                    },
+                )
                 .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
                 .set("ButtonPadding", Thickness::xy(12.0, 0.0))
                 .set("ControlCornerRadius", CornerRadius::uniform(5.0)),

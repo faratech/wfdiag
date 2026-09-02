@@ -3,8 +3,7 @@
 #![deny(unsafe_code)]
 
 use crate::app::consts::{
-    AI_PROVIDER_IDS, PROVIDER_KEY_LABELS, PROVIDER_SETUP_LABELS, QUICK_SCAN_TASK_IDS,
-    SETTINGS_MAX_CONCURRENT_TASKS,
+    AI_PROVIDER_IDS, PROVIDER_SETUP_LABELS, QUICK_SCAN_TASK_IDS, SETTINGS_MAX_CONCURRENT_TASKS,
 };
 use crate::app::policy::{
     PhiPreferenceGate, codex_model_options, provider_selector_caption, provider_selector_labels,
@@ -33,6 +32,7 @@ pub(crate) fn settings_dialog(
     palette: Palette,
     theme: WindowTheme,
     bottom: bool,
+    dialog_size: (f64, f64),
     settings: &AppSettings,
     phi_preference_gate: &PhiPreferenceGate,
     provider_status: Option<&AIProviderStatus>,
@@ -129,8 +129,10 @@ pub(crate) fn settings_dialog(
         .background(Color::argb(140, 0, 0, 0))
         .content(
             Border::new()
-                .width(640.0)
-                .height(810.0)
+                // Fitted to the client area by `settings_dialog_size`, so the
+                // Save/Cancel footer is on screen at every window size.
+                .width(dialog_size.0)
+                .height(dialog_size.1)
                 .margin(Thickness::new(0.0, 0.0, 12.0, 0.0))
                 .automation_name("Settings dialog")
                 .horizontal_alignment(HorizontalAlignment::Center)
@@ -216,6 +218,7 @@ pub(crate) fn settings_dialog(
                                 .content(settings_content(
                                     theme,
                                     bottom,
+                                    dialog_size,
                                     settings,
                                     phi_preference_gate,
                                     provider_status,
@@ -320,23 +323,23 @@ pub(crate) fn settings_quick_scan_tasks_section(
             KeyedView::new(
                 task.id.clone(),
                 Border::new()
-                    .height(44.0)
+                    .padding(Thickness::xy(4.0, 4.0))
                     .border_brush(palette.border)
                     .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
                     .content(
                         Grid::new()
-                            .columns([GridLength::Star(1.0), GridLength::Pixel(24.0)])
+                            .columns([GridLength::Star(1.0), GridLength::Auto])
+                            .column_spacing(12.0)
                             .children((
                                 Border::new()
                                     .vertical_alignment(VerticalAlignment::Center)
-                                    .content(StackPanel::new().spacing(2.0).children((
-                                        TextBlock::new().text(task.name.clone()).font_size(12.5),
+                                    .content(StackPanel::new().spacing(1.0).children((
+                                        TextBlock::new().text(task.name.clone()).font_size(12.0),
                                         hint,
                                     ))),
                                 Border::new()
                                     .grid_column(1)
-                                    .width(24.0)
-                                    .height(32.0)
+                                    .height(28.0)
                                     .margin(Thickness::new(0.0, 0.0, 4.0, 0.0))
                                     .horizontal_alignment(HorizontalAlignment::Right)
                                     .vertical_alignment(VerticalAlignment::Center)
@@ -350,9 +353,7 @@ pub(crate) fn settings_quick_scan_tasks_section(
                                             ))
                                             .on_is_checked_changed(move |_| {
                                                 let _ = toggle.call(task_id.clone());
-                                            })
-                                            .width(14.0)
-                                            .height(14.0),
+                                            }),
                                     ),
                             )),
                     ),
@@ -364,23 +365,46 @@ pub(crate) fn settings_quick_scan_tasks_section(
         .children((
             settings_section(palette, "QUICK SCAN TASKS"),
             Border::new()
-                .padding(Thickness::new(0.0, 8.0, 0.0, 5.0))
+                .padding(Thickness::new(0.0, 4.0, 0.0, 4.0))
                 .content(
                     TextBlock::new()
                         .text("Choose which diagnostics a customized Quick Scan runs. Detection-only tasks stay included automatically; an empty selection restores the defaults.")
-                        .font_size(11.5)
+                        .font_size(11.0)
                         .foreground(palette.muted)
                         .text_wrapping(TextWrapping::Wrap),
                 ),
-            StackPanel::new().keyed_children(rows),
+            Border::new()
+                .height(180.0)
+                .background(palette.card_strong)
+                .border_brush(palette.border)
+                .border_thickness(1.0)
+                .corner_radius(6.0)
+                .padding(Thickness::new(8.0, 4.0, 8.0, 4.0))
+                .content(
+                    ScrollViewer::new()
+                        .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
+                        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                        .content(StackPanel::new().keyed_children(rows)),
+                ),
         ))
 }
 
-/// API keys section: DPAPI-backed credential entry per provider. Shared by
-/// both settings layouts.
+/// Label and placeholder for each DPAPI-backed key, indexed like
+/// `ProviderKeyId::ALL` (the same rows the Tauri settings dialog shows inline
+/// in each provider's pane).
+pub(crate) const PROVIDER_KEY_ROWS: [(&str, &str); ProviderKeyId::ALL.len()] = [
+    ("OpenAI API key", "sk-…"),
+    ("Anthropic API key", "sk-ant-…"),
+    ("Gemini API key", "AIza…"),
+    ("DeepSeek API key", "sk-…"),
+    ("Custom endpoint API key", "Optional"),
+];
+
+/// Inline API key row for provider setup panes.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn settings_provider_keys_section(
+pub(crate) fn provider_secret_key_row(
     palette: Palette,
+    key_index: usize,
     provider_key_drafts: &[String; ProviderKeyId::ALL.len()],
     provider_keys_set: [bool; ProviderKeyId::ALL.len()],
     key_busy: bool,
@@ -389,75 +413,67 @@ pub(crate) fn settings_provider_keys_section(
     key_store: Callback<usize>,
     key_clear: Callback<usize>,
 ) -> View {
-    let rows: Vec<KeyedView> = PROVIDER_KEY_LABELS
-        .iter()
-        .enumerate()
-        .map(|(index, label)| {
-            let draft_changed = key_draft_changed.clone();
-            let store = key_store.clone();
-            let clear = key_clear.clone();
-            let set = provider_keys_set[index];
-            let draft = &provider_key_drafts[index];
-            KeyedView::new(
-                *label,
-                settings_wrapped_row(
-                    palette,
-                    label,
-                    Some(if set {
-                        "A key is stored for this provider"
-                    } else {
-                        "No key stored yet"
-                    }),
-                    StackPanel::new()
-                        .orientation(Orientation::Horizontal)
-                        .spacing(6.0)
-                        .children((
-                            PasswordBox::new()
-                                .width(200.0)
-                                .height(32.0)
-                                .password(draft.clone())
-                                .is_enabled(editable && !key_busy)
-                                .on_password_changed(move |value| {
-                                    let _ = draft_changed.call((index, value));
-                                })
-                                .automation_name(format!("{label} API key")),
-                            Button::new()
-                                .height(32.0)
-                                .width(58.0)
-                                .is_enabled(editable && !key_busy)
-                                .on_click(move || {
-                                    let _ = store.call(index);
-                                })
-                                .content("Stage"),
-                            Button::new()
-                                .height(32.0)
-                                .width(68.0)
-                                .is_enabled(editable && !key_busy && set)
-                                .on_click(move || {
-                                    let _ = clear.call(index);
-                                })
-                                .content("Remove"),
-                        )),
-                    58.0,
-                ),
-            )
-        })
-        .collect();
-    StackPanel::new()
-        .spacing(4.0)
+    let set = provider_keys_set[key_index];
+    let draft = &provider_key_drafts[key_index];
+    let draft_changed = key_draft_changed.clone();
+    let store = key_store.clone();
+    let clear = key_clear.clone();
+
+    let (label, prefix_hint) = PROVIDER_KEY_ROWS[key_index];
+    let placeholder = if set && draft.is_empty() {
+        "Stored securely — enter a replacement"
+    } else {
+        prefix_hint
+    };
+
+    let hint = if set && draft.is_empty() {
+        "A key is stored for this provider"
+    } else if set {
+        "Key staged — press Save to commit"
+    } else {
+        "Saved to Windows DPAPI; never enters settings.json"
+    };
+
+    let status_indicator: View = if set && draft.is_empty() {
+        status_pill("Configured", palette.ok, palette.card_strong)
+    } else {
+        View::empty()
+    };
+
+    let actions = StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(6.0)
         .children((
-            settings_section(palette, "API KEYS"),
-            Border::new()
-                .padding(Thickness::new(0.0, 8.0, 0.0, 5.0))
-                .content(
-                    TextBlock::new()
-                        .text("Credential edits remain in this dialog until you press Save. Cancel discards them; committed keys use Windows DPAPI and never enter settings.json.")
-                        .font_size(11.5)
-                        .foreground(palette.muted)
-                        .text_wrapping(TextWrapping::Wrap),
-                ),
-            StackPanel::new().keyed_children(rows),
-        ))
+            status_indicator,
+            PasswordBox::new()
+                .width(180.0)
+                .height(32.0)
+                .password(draft.clone())
+                .placeholder_text(placeholder)
+                .is_enabled(editable && !key_busy)
+                .on_password_changed(move |value| {
+                    let _ = draft_changed.call((key_index, value));
+                })
+                .automation_name(format!("{label} API key")),
+            Button::new()
+                .height(32.0)
+                .width(58.0)
+                .is_enabled(editable && !key_busy && !draft.is_empty())
+                .on_click(move || {
+                    let _ = store.call(key_index);
+                })
+                .content("Stage"),
+            Button::new()
+                .height(32.0)
+                .width(68.0)
+                .is_enabled(editable && !key_busy && set)
+                .on_click(move || {
+                    let _ = clear.call(key_index);
+                })
+                .content("Remove"),
+        ));
+
+    settings_wrapped_row(palette, label, Some(hint), actions, 58.0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -808,11 +824,30 @@ pub(crate) fn provider_setup_fields(
     palette: Palette,
     settings: &AppSettings,
     provider_setup_index: usize,
+    provider_key_drafts: &[String; ProviderKeyId::ALL.len()],
+    provider_keys_set: [bool; ProviderKeyId::ALL.len()],
+    key_busy: bool,
     editable: bool,
     provider_text_changed: Callback<(usize, String)>,
     codex_cli_path_changed: Callback<String>,
     codex_model_changed: Callback<Option<usize>>,
+    key_draft_changed: Callback<(usize, String)>,
+    key_store: Callback<usize>,
+    key_clear: Callback<usize>,
 ) -> View {
+    let secret_row = |key_idx: usize| {
+        provider_secret_key_row(
+            palette,
+            key_idx,
+            provider_key_drafts,
+            provider_keys_set,
+            key_busy,
+            editable,
+            key_draft_changed.clone(),
+            key_store.clone(),
+            key_clear.clone(),
+        )
+    };
     let text_row = |label,
                     hint,
                     value: Option<&str>,
@@ -924,38 +959,50 @@ pub(crate) fn provider_setup_fields(
                 &provider_text_changed,
             ),
         )),
-        5 => text_row(
-            "OpenAI model",
-            "Empty uses the app default; enter a model ID manually if discovery is unavailable",
-            settings.open_ai_model.as_deref(),
-            "Use app default",
-            7,
-            &provider_text_changed,
-        ),
-        6 => text_row(
-            "Anthropic model",
-            "Empty uses claude-sonnet-5",
-            settings.anthropic_model.as_deref(),
-            "claude-sonnet-5",
-            8,
-            &provider_text_changed,
-        ),
-        7 => text_row(
-            "Gemini model",
-            "Empty discovers the newest supported GA model; manual entry remains available",
-            settings.gemini_model.as_deref(),
-            "gemini-3.6-flash",
-            9,
-            &provider_text_changed,
-        ),
-        8 => text_row(
-            "DeepSeek model",
-            "Empty uses the app default; manual entry remains available",
-            settings.deepseek_model.as_deref(),
-            "deepseek-v4-flash",
-            10,
-            &provider_text_changed,
-        ),
+        5 => StackPanel::new().children((
+            secret_row(0),
+            text_row(
+                "OpenAI model",
+                "Empty uses the app default; enter a model ID manually if discovery is unavailable",
+                settings.open_ai_model.as_deref(),
+                "Use app default",
+                7,
+                &provider_text_changed,
+            ),
+        )),
+        6 => StackPanel::new().children((
+            secret_row(1),
+            text_row(
+                "Anthropic model",
+                "Empty uses claude-sonnet-5",
+                settings.anthropic_model.as_deref(),
+                "claude-sonnet-5",
+                8,
+                &provider_text_changed,
+            ),
+        )),
+        7 => StackPanel::new().children((
+            secret_row(2),
+            text_row(
+                "Gemini model",
+                "Empty discovers the newest supported GA model; manual entry remains available",
+                settings.gemini_model.as_deref(),
+                "gemini-3.6-flash",
+                9,
+                &provider_text_changed,
+            ),
+        )),
+        8 => StackPanel::new().children((
+            secret_row(3),
+            text_row(
+                "DeepSeek model",
+                "Empty uses the app default; manual entry remains available",
+                settings.deepseek_model.as_deref(),
+                "deepseek-v4-flash",
+                10,
+                &provider_text_changed,
+            ),
+        )),
         _ => StackPanel::new().children((
             text_row(
                 "Endpoint URL",
@@ -973,6 +1020,7 @@ pub(crate) fn provider_setup_fields(
                 12,
                 &provider_text_changed,
             ),
+            secret_row(4),
         )),
     }
 }
@@ -1024,10 +1072,27 @@ fn settings_provider_selector_caption(palette: Palette, caption: Option<String>)
         )
 }
 
+/// Horizontal chrome around the scrolling body: the dialog border, the
+/// content padding (14 + 23) and the scrollbar gutter.
+const SETTINGS_BODY_HORIZONTAL_CHROME: f64 = 47.0;
+
+/// Vertical chrome around the scrolling body: the 58 px header row, the
+/// 60 px footer row and the dialog border.
+const SETTINGS_BODY_VERTICAL_CHROME: f64 = 120.0;
+
+fn settings_body_width(dialog_size: (f64, f64)) -> f64 {
+    (dialog_size.0 - SETTINGS_BODY_HORIZONTAL_CHROME).max(1.0)
+}
+
+fn settings_body_height(dialog_size: (f64, f64)) -> f64 {
+    (dialog_size.1 - SETTINGS_BODY_VERTICAL_CHROME).max(1.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn settings_content(
     theme: WindowTheme,
     bottom: bool,
+    dialog_size: (f64, f64),
     settings: &AppSettings,
     phi_preference_gate: &PhiPreferenceGate,
     provider_status: Option<&AIProviderStatus>,
@@ -1079,17 +1144,12 @@ pub(crate) fn settings_content(
         return settings_content_bottom(
             palette,
             theme,
+            dialog_size,
             settings,
             provider_setup_partial,
             editable,
             scan_catalog,
             toggle_quick_task,
-            provider_key_drafts,
-            provider_keys_set,
-            key_busy,
-            key_draft_changed,
-            key_store,
-            key_clear,
             theme_changed,
             export_format_changed,
             auto_save_changed,
@@ -1123,8 +1183,8 @@ pub(crate) fn settings_content(
     });
 
     ScrollViewer::new()
-        .width(593.0)
-        .height(690.0)
+        .width(settings_body_width(dialog_size))
+        .height(settings_body_height(dialog_size))
         .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
         .content(
             StackPanel::new().children((
@@ -1223,10 +1283,16 @@ pub(crate) fn settings_content(
                     palette,
                     settings,
                     provider_setup_index,
+                    provider_key_drafts,
+                    provider_keys_set,
+                    key_busy,
                     editable,
                     provider_text_changed,
                     codex_cli_path_changed,
                     codex_model_changed,
+                    key_draft_changed,
+                    key_store,
+                    key_clear,
                 ),
                 subscription_auth_row(
                     palette,
@@ -1262,16 +1328,6 @@ pub(crate) fn settings_content(
                 ),
 
                 StackPanel::new().children((
-                settings_provider_keys_section(
-                    palette,
-                    provider_key_drafts,
-                    provider_keys_set,
-                    key_busy,
-                    editable,
-                    key_draft_changed,
-                    key_store,
-                    key_clear,
-                ),
                 settings_quick_scan_tasks_section(
                     palette,
                     scan_catalog,
@@ -1377,17 +1433,12 @@ pub(crate) fn settings_content(
 pub(crate) fn settings_content_bottom(
     palette: Palette,
     theme: WindowTheme,
+    dialog_size: (f64, f64),
     settings: &AppSettings,
     provider_setup_partial: bool,
     editable: bool,
     scan_catalog: &[DiagnosticTask],
     toggle_quick_task: Callback<String>,
-    provider_key_drafts: &[String; ProviderKeyId::ALL.len()],
-    provider_keys_set: [bool; ProviderKeyId::ALL.len()],
-    key_busy: bool,
-    key_draft_changed: Callback<(usize, String)>,
-    key_store: Callback<usize>,
-    key_clear: Callback<usize>,
     theme_changed: Callback<Option<usize>>,
     export_format_changed: Callback<Option<usize>>,
     auto_save_changed: Callback<bool>,
@@ -1510,16 +1561,6 @@ pub(crate) fn settings_content_bottom(
                     .font_size(13.0)
                     .text_wrapping(TextWrapping::Wrap),
             ),
-        settings_provider_keys_section(
-            palette,
-            provider_key_drafts,
-            provider_keys_set,
-            key_busy,
-            editable,
-            key_draft_changed,
-            key_store,
-            key_clear,
-        ),
         settings_quick_scan_tasks_section(
             palette,
             scan_catalog,
@@ -1531,8 +1572,8 @@ pub(crate) fn settings_content_bottom(
     ));
 
     ScrollViewer::new()
-        .width(593.0)
-        .height(690.0)
+        .width(settings_body_width(dialog_size))
+        .height(settings_body_height(dialog_size))
         .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
         .vertical_scroll_bar_visibility(ScrollBarVisibility::Visible)
         .content(
@@ -1740,24 +1781,25 @@ pub(crate) fn settings_check_row(
     height: f64,
 ) -> View {
     Border::new()
-        .height(height)
+        .min_height(height)
+        .padding(Thickness::new(0.0, 4.0, 0.0, 4.0))
         .border_brush(palette.border)
         .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
         .content(
             Grid::new()
-                .columns([GridLength::Star(1.0), GridLength::Pixel(24.0)])
+                .columns([GridLength::Star(1.0), GridLength::Auto])
+                .column_spacing(12.0)
                 .children((
                     Border::new()
                         .vertical_alignment(VerticalAlignment::Center)
                         .content(settings_label(palette, label, hint)),
                     Border::new()
                         .grid_column(1)
-                        .width(24.0)
                         .height(32.0)
                         .margin(Thickness::new(0.0, 0.0, 4.0, 0.0))
                         .horizontal_alignment(HorizontalAlignment::Right)
                         .vertical_alignment(VerticalAlignment::Center)
-                        .content(checkbox.width(14.0).height(14.0)),
+                        .content(checkbox),
                 )),
         )
 }
@@ -1768,8 +1810,8 @@ mod tests {
 
     #[test]
     fn provider_key_rows_cover_the_closed_provider_set_including_deepseek() {
-        assert_eq!(PROVIDER_KEY_LABELS.len(), ProviderKeyId::ALL.len());
+        assert_eq!(PROVIDER_KEY_ROWS.len(), ProviderKeyId::ALL.len());
         assert_eq!(ProviderKeyId::ALL[3], ProviderKeyId::DeepSeek);
-        assert_eq!(PROVIDER_KEY_LABELS[3], "DeepSeek");
+        assert_eq!(PROVIDER_KEY_ROWS[3].0, "DeepSeek API key");
     }
 }

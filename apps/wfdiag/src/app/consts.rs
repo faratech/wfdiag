@@ -128,7 +128,40 @@ pub(crate) const PROCESS_FILTER_DEBOUNCE: Duration = Duration::from_millis(180);
 /// wasteful, so the page rides every other sample.
 pub(crate) const PROCESS_LIVE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Below this client width the pages use their narrow arrangement: stacked
+/// History and Monitor panes, a two-column metric grid, the trimmed AI
+/// runtime pill and full-width filters. The Store shell's container queries
+/// fire between 944 and 764 px of window width; one shell-wide value keeps
+/// every page switching together.
+pub(crate) const SHELL_NARROW_BREAKPOINT: f64 = 940.0;
+
+/// Below this client height optional AI chrome (the suggestion chips) is
+/// dropped so the composer stays on screen — the Store shell's
+/// `@media (max-height: 650px)` rule.
+pub(crate) const SHELL_SHORT_BREAKPOINT: f64 = 650.0;
+
 pub(crate) const DIAGNOSTICS_COMPACT_BREAKPOINT: f64 = 840.0;
+
+/// Below this client width the AI runtime pill keeps only the status dot,
+/// the provider name and the gear: the Store shell's
+/// `@container content (max-width: 680px)` rule, which with the rail
+/// collapsed (always, at or under 1100 px) is 764 px of window width. Kept
+/// apart from `SHELL_NARROW_BREAKPOINT` so the 900 px compact captures
+/// stay pixel-identical.
+pub(crate) const AI_RUNTIME_PILL_COMPACT_BREAKPOINT: f64 = 764.0;
+
+/// The Settings dialog is the Store shell's `width: 92%; max-width: 640px;
+/// max-height: min(90vh, 100vh - 32px)` modal, fitted to the client area so
+/// the Save/Cancel footer is always on screen down to the 720×540 minimum.
+pub(crate) const SETTINGS_DIALOG_MAX_WIDTH: f64 = 640.0;
+
+pub(crate) const SETTINGS_DIALOG_MAX_HEIGHT: f64 = 810.0;
+
+pub(crate) const SETTINGS_DIALOG_MIN_WIDTH: f64 = 360.0;
+
+pub(crate) const SETTINGS_DIALOG_MIN_HEIGHT: f64 = 360.0;
+
+pub(crate) const SETTINGS_DIALOG_HORIZONTAL_MARGIN: f64 = 48.0;
 
 pub(crate) const PROCESS_WIDE_CONTENT_MIN_WIDTH: f64 = 1_012.0;
 
@@ -165,14 +198,6 @@ pub(crate) const ENGINE_SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
 pub(crate) const WINDOW_HOOK_RETRY_MIN: Duration = Duration::from_millis(100);
 
 pub(crate) const WINDOW_HOOK_RETRY_MAX: Duration = Duration::from_millis(3_200);
-
-pub(crate) const PROVIDER_KEY_LABELS: [&str; 5] = [
-    "OpenAI",
-    "Anthropic Claude",
-    "Google Gemini",
-    "DeepSeek",
-    "Custom endpoint",
-];
 
 pub(crate) const AI_PROVIDER_LABELS: [&str; 11] = [
     "Auto",

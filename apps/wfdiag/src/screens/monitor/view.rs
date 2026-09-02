@@ -422,28 +422,23 @@ pub(crate) fn monitor_page(
             ),
         ));
     }
-    let metrics: View = if narrow {
-        StackPanel::new().spacing(14.0).keyed_children(
-            cards
-                .into_iter()
-                .map(|(key, card)| KeyedView::new(key, card)),
-        )
-    } else {
+    // The Store shell's `repeat(auto-fill, minmax(290px, 1fr))` metric grid
+    // still fits two columns at the 720 px minimum window, so the narrow
+    // arrangement keeps two columns rather than stacking every card.
+    let metrics: View = {
+        let column_count = if narrow { 2 } else { 3 };
+        let row_count = cards.len().div_ceil(column_count).max(1);
         Grid::new()
-            .columns([
-                GridLength::Star(1.0),
-                GridLength::Star(1.0),
-                GridLength::Star(1.0),
-            ])
-            .rows([GridLength::Auto, GridLength::Auto])
+            .columns(vec![GridLength::Star(1.0); column_count])
+            .rows(vec![GridLength::Auto; row_count])
             .column_spacing(14.0)
             .row_spacing(14.0)
             .keyed_children(cards.into_iter().enumerate().map(|(index, (key, card))| {
                 KeyedView::new(
                     key,
                     Border::new()
-                        .grid_column((index % 3) as i32)
-                        .grid_row((index / 3) as i32)
+                        .grid_column((index % column_count) as i32)
+                        .grid_row((index / column_count) as i32)
                         .content(card),
                 )
             }))

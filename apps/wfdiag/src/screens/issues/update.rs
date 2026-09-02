@@ -5,6 +5,7 @@
 use crate::app::policy::{action_run_status_text, rejection_text};
 use crate::app::screen::{Effect, ScreenCx};
 use crate::app::state::{FixPlanActionSelection, Page};
+use crate::dialogs::notice::state::NoticeKind;
 use crate::fixtures::visual::LiveTestFixture;
 use crate::screens::issues::state::{IssuesMsg, IssuesScreen};
 use wfdiag_app::{
@@ -14,6 +15,7 @@ use wfdiag_app::{
 use wfdiag_native_issues::projection::project_issues;
 use wfdiag_native_remediation::broker::ActionRequest;
 use wfdiag_native_remediation::remediation;
+use wfdiag_native_remediation::runtime::ActionRunStatus;
 
 impl IssuesScreen {
     pub(crate) fn update(&mut self, message: IssuesMsg, cx: &mut ScreenCx<'_>) {
@@ -315,6 +317,16 @@ impl IssuesScreen {
                     .iter()
                     .any(|action| action.result.as_ref().is_some_and(|result| result.success));
                 cx.status(action_run_status_text(summary));
+                let outcome = match summary.status {
+                    ActionRunStatus::Succeeded => Some((NoticeKind::Success, "Fix applied")),
+                    ActionRunStatus::Partial => Some((NoticeKind::Warning, "Fix partly completed")),
+                    ActionRunStatus::Failed => Some((NoticeKind::Error, "Fix failed")),
+                    ActionRunStatus::Cancelled => Some((NoticeKind::Info, "Fix cancelled")),
+                    ActionRunStatus::Running | ActionRunStatus::CancelRequested => None,
+                };
+                if let Some((kind, title)) = outcome {
+                    cx.notice(kind, title, action_run_status_text(summary));
+                }
                 if succeeded && !cx.shell.deterministic_visual {
                     // The fix may have changed what detection sees. Refresh
                     // the authoritative projection even when the user left the

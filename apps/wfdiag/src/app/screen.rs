@@ -20,6 +20,7 @@ use crate::app::WfdiagShell;
 use crate::app::policy::rejection_text;
 use crate::app::shell::ShellState;
 use crate::app::state::Page;
+use crate::dialogs::notice::state::{NoticeKind, NoticeRequest};
 use crate::fixtures::visual::VisualState;
 use crate::widgets::palette_colors::Palette;
 use wfdiag_app::{AppCommand, AppService, DispatchOutcome, RejectReason};
@@ -40,6 +41,8 @@ pub(crate) enum Effect {
     Dispatch(AppCommand),
     /// Replace the status line.
     Status(String),
+    /// Raise a transient outcome notice (the Store shell's toast).
+    Notice(NoticeRequest),
     /// Change pages without the destination's entry work (workflow jumps that
     /// perform their own sequencing).
     Transition(Page),
@@ -119,6 +122,17 @@ impl<'a> ScreenCx<'a> {
     /// Replace the status line.
     pub(crate) fn status(&mut self, text: impl Into<String>) {
         self.effects.push(Effect::Status(text.into()));
+    }
+
+    /// Raise a transient outcome notice beside the status line.
+    pub(crate) fn notice(
+        &mut self,
+        kind: NoticeKind,
+        title: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        self.effects
+            .push(Effect::Notice(NoticeRequest::new(kind, title, message)));
     }
 
     /// Show a refusal in the status line, using the engine's own wording.

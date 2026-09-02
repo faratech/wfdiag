@@ -14,6 +14,7 @@ use crate::app::message::Message;
 use crate::app::native_msg::NativeMsg;
 use crate::dialogs::about::state::AboutMsg;
 use crate::dialogs::export::msg::ExportMsg;
+use crate::dialogs::notice::state::NoticeMsg;
 use crate::dialogs::palette::msg::PaletteFocusAction;
 use crate::dialogs::palette::msg::PaletteMsg;
 use crate::dialogs::update_notice::state::UpdateNoticeMsg;
@@ -107,6 +108,39 @@ pub(crate) fn spawn_instance_watch(
             std::thread::sleep(WINDOW_COMMAND_POLL);
         },
         Message::Native(NativeMsg::InstanceWaitCancelled),
+    )
+}
+
+pub(crate) fn spawn_notice_timer(
+    context: &ComponentContext<WfdiagShell>,
+    epoch: u64,
+    timer_generation: u64,
+    duration: Duration,
+) -> ComponentTask {
+    context.spawn_background_with_rejection(
+        move |cancellation| {
+            let deadline = Instant::now() + duration;
+            loop {
+                if cancellation.is_cancelled() {
+                    return Message::Notice(NoticeMsg::TimerCancelled {
+                        epoch,
+                        timer_generation,
+                    });
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Message::Notice(NoticeMsg::Expired {
+                        epoch,
+                        timer_generation,
+                    });
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(100)));
+            }
+        },
+        Message::Notice(NoticeMsg::TimerRejected {
+            epoch,
+            timer_generation,
+        }),
     )
 }
 

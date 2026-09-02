@@ -11,7 +11,7 @@ use crate::app::policy::{
     monitoring_lifecycle_action, onboarding_probe_wanted, window_hook_retry_delay,
     window_is_usable, window_theme_setting,
 };
-use crate::app::state::{Page, PageTransition};
+use crate::app::state::{AiMode, Page, PageTransition};
 use crate::app::tasks::{spawn_instance_watch, spawn_palette_focus_delay, spawn_window_hook_retry};
 use crate::dialogs::export::msg::ExportMsg;
 use crate::dialogs::export::msg::ExportPickerKind;
@@ -23,6 +23,7 @@ use crate::dialogs::palette::view::{
 };
 use crate::fixtures::knobs::tray_enabled;
 use crate::platform::{focus, instance, ui_wake, window};
+use crate::screens::ai::state::AiMsg;
 use crate::widgets::icons::FaIcon;
 use std::borrow::Cow;
 use wfdiag_app::AppCommand;
@@ -349,7 +350,23 @@ impl WfdiagShell {
             window::GlobalShortcutCommand::FullScan => {
                 self.begin_diagnostic_scan(ScanKind::Full);
             }
+            window::GlobalShortcutCommand::ComposerSend => {
+                if self.shell.page == Page::Ai && self.ai.mode == AiMode::Assistant {
+                    self.route_ai(AiMsg::SendChat, context);
+                }
+            }
         }
+    }
+
+    /// Tell the keyboard hook whether a bare Enter belongs to the chat
+    /// composer: only on the Assistant page with no blocking overlay, so no
+    /// other editable in the app can lose its Enter key.
+    pub(crate) fn sync_composer_send_arming(&self) {
+        window::set_composer_send_armed(
+            self.shell.page == Page::Ai
+                && self.ai.mode == AiMode::Assistant
+                && !self.blocking_overlay_open(),
+        );
     }
 
     pub(crate) fn palette_command_specs(&self) -> Vec<PaletteCommandSpec> {
@@ -614,16 +631,18 @@ impl WfdiagShell {
     pub(crate) fn refresh_current_page(&mut self, context: &ComponentContext<Self>) {
         match self.shell.page {
             Page::Ai => {
-                let accepted = self
-                    .dispatch(AppCommand::RequestProviderStatus)
-                    .is_accepted();
-                self.shell.status = if accepted {
-                    "Checking AI providers…".to_string()
-                } else {
-                    self.ai.status_error.clone().unwrap_or_else(|| {
-                        "Native AI provider discovery is unavailable".to_string()
-                    })
-                };
+                if self.ai.provider_status.is_none() {
+                    let accepted = self
+                        .dispatch(AppCommand::RequestProviderStatus)
+                        .is_accepted();
+                    self.shell.status = if accepted {
+                        "Checking AI providers…".to_string()
+                    } else {
+                        self.ai.status_error.clone().unwrap_or_else(|| {
+                            "Native AI provider discovery is unavailable".to_string()
+                        })
+                    };
+                }
             }
             Page::Issues => {
                 self.shell.status = if self.shell.deterministic_visual {

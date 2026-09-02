@@ -111,7 +111,7 @@ impl PaletteDialog {
                                         .columns([
                                             GridLength::Pixel(22.0),
                                             GridLength::Star(1.0),
-                                            GridLength::Pixel(88.0),
+                                            GridLength::Auto,
                                         ])
                                         .column_spacing(8.0)
                                         .children((

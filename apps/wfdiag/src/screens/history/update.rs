@@ -6,6 +6,7 @@ use crate::app::consts::HISTORY_TREND_SCAN_LIMIT;
 use crate::app::policy::rejection_text;
 use crate::app::screen::ScreenCx;
 use crate::app::state::HistoryTaskDiffProjection;
+use crate::dialogs::notice::state::NoticeKind;
 use crate::screens::history::state::{HistoryMsg, HistoryScreen};
 use wfdiag_app::{AppCommand, AppEvent, DispatchOutcome, HistoryEvent, HistoryRequest};
 
@@ -294,16 +295,19 @@ impl HistoryScreen {
             HistoryEvent::LabelSaved { .. } => {
                 self.ack_busy = false;
                 self.label_editing = false;
-                cx.status(if self.label_draft.trim().is_empty() {
-                    "Label removed".to_string()
+                let outcome = if self.label_draft.trim().is_empty() {
+                    "Label removed"
                 } else {
-                    "Label saved".to_string()
-                });
+                    "Label saved"
+                };
+                cx.status(outcome.to_string());
+                cx.notice(NoticeKind::Success, outcome, "Scan history updated");
                 self.request_list(cx);
             }
             HistoryEvent::TagsSaved { .. } => {
                 self.ack_busy = false;
                 cx.status("Tags saved".to_string());
+                cx.notice(NoticeKind::Success, "Tags saved", "Scan history updated");
                 self.request_list(cx);
             }
             HistoryEvent::Cleared => {
@@ -316,6 +320,11 @@ impl HistoryScreen {
                 self.label_editing = false;
                 self.tag_draft.clear();
                 cx.status("Scan history cleared".to_string());
+                cx.notice(
+                    NoticeKind::Success,
+                    "Scan history cleared",
+                    "Every saved scan was removed",
+                );
             }
             HistoryEvent::Failed { request, error } => match request {
                 HistoryRequest::List => {
@@ -341,14 +350,17 @@ impl HistoryScreen {
                 HistoryRequest::Label => {
                     self.ack_busy = false;
                     cx.status(format!("Could not save label · {error}"));
+                    cx.notice(NoticeKind::Error, "Label not saved", error);
                 }
                 HistoryRequest::Tags => {
                     self.ack_busy = false;
                     cx.status(format!("Could not save tags · {error}"));
+                    cx.notice(NoticeKind::Error, "Tags not saved", error);
                 }
                 HistoryRequest::Clear => {
                     self.ack_busy = false;
                     cx.status(format!("Could not clear history · {error}"));
+                    cx.notice(NoticeKind::Error, "History not cleared", error);
                 }
                 HistoryRequest::AutoSave | HistoryRequest::Load => {
                     self.error = Some(error);

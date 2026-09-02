@@ -11,6 +11,7 @@ use crate::app::WfdiagShell;
 use crate::app::screen::{Effect, ScanFacts, route_screen};
 use crate::app::state::{AiMode, Page};
 use crate::dialogs::action_review::state::ActionReviewMsg;
+use crate::dialogs::notice::state::{NoticeKind, NoticeRequest};
 use crate::platform::external::write_text_to_clipboard;
 use crate::screens::ai::state::AiMsg;
 use crate::screens::diagnostics::state::DiagnosticsMsg;
@@ -39,6 +40,7 @@ impl WfdiagShell {
                     let _ = self.dispatch(command);
                 }
                 Effect::Status(text) => self.shell.status = text,
+                Effect::Notice(request) => self.show_notice(request),
                 Effect::Transition(page) => {
                     self.transition_to_page(page);
                 }
@@ -52,9 +54,19 @@ impl WfdiagShell {
                 Effect::CopyReport(text) => match write_text_to_clipboard(&text) {
                     Ok(()) => {
                         self.shell.status = "AI report copied to the clipboard".to_string();
+                        self.show_notice(NoticeRequest::new(
+                            NoticeKind::Success,
+                            "Copied",
+                            "The AI report is on the clipboard",
+                        ));
                     }
                     Err(error) => {
                         self.shell.status = format!("Could not copy the AI report · {error}");
+                        self.show_notice(NoticeRequest::new(
+                            NoticeKind::Error,
+                            "Copy failed",
+                            error.to_string(),
+                        ));
                     }
                 },
                 Effect::StageRemediation {

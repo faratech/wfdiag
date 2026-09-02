@@ -1399,7 +1399,10 @@ pub(crate) fn issue_card(
                         .margin(Thickness::xy(15.0, 0.0))
                         .spacing(7.0)
                         .children((
-                            TextBlock::new().text(title).font_weight(FontWeight::BOLD),
+                            TextBlock::new()
+                                .text(title)
+                                .font_weight(FontWeight::BOLD)
+                                .text_wrapping(TextWrapping::Wrap),
                             TextBlock::new()
                                 .text(description)
                                 .text_wrapping(TextWrapping::Wrap)

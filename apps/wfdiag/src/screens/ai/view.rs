@@ -6,8 +6,8 @@ use crate::app::WfdiagShell;
 use crate::app::consts::{BOT_AVATAR, ISSUE_WARN_DARK};
 use crate::app::message::Message;
 use crate::app::policy::{
-    OnboardingAction, OnboardingCandidate, ai_workspace_height, onboarding_candidates,
-    provider_display_name,
+    OnboardingAction, OnboardingCandidate, ai_runtime_pill_compact, ai_workspace_height,
+    onboarding_candidates, provider_display_name, shell_uses_short_layout,
 };
 use crate::app::screen::ShellEnv;
 use crate::app::state::{
@@ -25,14 +25,17 @@ use crate::widgets::palette_colors::Palette;
 use wfdiag_native_ai_chat::{
     ChatToolActivity, ChatToolActivityState, ChatToolHistory, ProviderUse,
 };
-use wfdiag_native_ai_provider::{AIProvider, AIProviderStatus};
+use wfdiag_native_ai_provider::{
+    AIProvider, AIProviderStatus, parse_provider_preference, route_provider,
+};
 use windows_reactor::*;
 
 pub(crate) fn ai_provider_pill_content(
+    preferred_provider: &str,
     deterministic_visual: bool,
     ai_enabled: bool,
-    status: Option<&AIProviderStatus>,
-    loading: bool,
+    provider_status: Option<&AIProviderStatus>,
+    provider_loading: bool,
     error: Option<&str>,
 ) -> (String, String, Option<String>, bool, bool) {
     if deterministic_visual {
@@ -53,7 +56,7 @@ pub(crate) fn ai_provider_pill_content(
             false,
         );
     }
-    if loading {
+    if provider_loading && provider_status.is_none() {
         return (
             "Checking AI provider".to_string(),
             "·  Please wait".to_string(),
@@ -71,7 +74,15 @@ pub(crate) fn ai_provider_pill_content(
             false,
         );
     }
-    let active = status.map_or(AIProvider::None, |status| status.active_provider);
+    // The same pure decision the engine takes (`route_provider`): an explicit
+    // preference is honoured only while that provider is available and never
+    // falls back; Auto walks the local-first chain. An explicit but
+    // unavailable provider therefore reads "No provider · Not connected",
+    // exactly as the Tauri shell's AIContext mirror does.
+    let preferred = parse_provider_preference(preferred_provider);
+    let active = provider_status.map_or(AIProvider::None, |status| {
+        route_provider(preferred, status.availability())
+    });
     let (provider, execution, cloud) = match active {
         AIProvider::PhiSilica => ("Phi Silica", "·  On device", false),
         AIProvider::FoundryLocal => ("Foundry Local", "·  Local server", false),
@@ -85,12 +96,12 @@ pub(crate) fn ai_provider_pill_content(
         AIProvider::DeepSeek => ("DeepSeek", "·  API cloud", true),
         AIProvider::None => ("No provider", "·  Not connected", false),
     };
-    let model = status.and_then(|status| {
+    let model = provider_status.and_then(|status| {
         status
             .providers
             .iter()
-            .find(|provider| provider.id == active)
-            .and_then(|provider| provider.model.clone())
+            .find(|p| p.id == active)
+            .and_then(|p| p.model.clone())
     });
     (
         provider.to_string(),
@@ -106,8 +117,10 @@ impl AiScreen {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn view(&self, env: &ShellEnv<'_>, vc: &mut ViewContext<WfdiagShell>) -> View {
         ai_page(
+            &env.settings.preferred_ai_provider,
             env.palette,
             env.narrow,
+            ai_runtime_pill_compact(env.window_size.width),
             env.window_size.height,
             env.visual_state,
             env.deterministic_visual,
@@ -165,8 +178,10 @@ impl AiScreen {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ai_page(
+    preferred_provider: &str,
     palette: Palette,
     narrow: bool,
+    pill_compact: bool,
     window_height: f64,
     visual_state: VisualState,
     deterministic_visual: bool,
@@ -227,42 +242,48 @@ pub(crate) fn ai_page(
         "Any security concerns?",
         "How do I free up disk space?",
     ];
-    let prompt_buttons = prompts
-        .into_iter()
-        .enumerate()
-        .map(|(index, prompt)| {
-            let callback = use_prompt.clone();
-            KeyedView::new(
-                index.to_string(),
-                Border::new()
-                    .height(27.0)
-                    .background(palette.card)
-                    .border_brush(palette.border)
-                    .border_thickness(1.0)
-                    .corner_radius(999.0)
-                    .content(
-                        Button::new()
-                            .height(27.0)
-                            .is_enabled(
-                                !provider_loading && !chat_pending && !chat_interaction_blocked,
-                            )
-                            .resource_overrides(
-                                ResourceOverrides::new()
-                                    .set("ButtonBackground", Color::transparent())
-                                    .set("ButtonBackgroundPointerOver", Color::transparent())
-                                    .set("ButtonBackgroundPressed", Color::transparent())
-                                    .set("ButtonForeground", palette.text)
-                                    .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
-                                    .set("ButtonPadding", Thickness::xy(10.0, 0.0)),
-                            )
-                            .on_click(move || {
-                                let _ = callback.call(prompt.to_string());
-                            })
-                            .content(TextBlock::new().text(prompt).font_size(12.0)),
-                    ),
-            )
-        })
-        .collect::<Vec<_>>();
+    // Suggestion chips are optional chrome: the Store shell drops them under
+    // 650 px of height so the composer keeps its room.
+    let prompt_buttons = if shell_uses_short_layout(window_height) {
+        Vec::new()
+    } else {
+        prompts
+            .into_iter()
+            .enumerate()
+            .map(|(index, prompt)| {
+                let callback = use_prompt.clone();
+                KeyedView::new(
+                    index.to_string(),
+                    Border::new()
+                        .height(27.0)
+                        .background(palette.card)
+                        .border_brush(palette.border)
+                        .border_thickness(1.0)
+                        .corner_radius(999.0)
+                        .content(
+                            Button::new()
+                                .height(27.0)
+                                .is_enabled(
+                                    !provider_loading && !chat_pending && !chat_interaction_blocked,
+                                )
+                                .resource_overrides(
+                                    ResourceOverrides::new()
+                                        .set("ButtonBackground", Color::transparent())
+                                        .set("ButtonBackgroundPointerOver", Color::transparent())
+                                        .set("ButtonBackgroundPressed", Color::transparent())
+                                        .set("ButtonForeground", palette.text)
+                                        .set("ButtonBorderThemeThickness", Thickness::uniform(0.0))
+                                        .set("ButtonPadding", Thickness::xy(10.0, 0.0)),
+                                )
+                                .on_click(move || {
+                                    let _ = callback.call(prompt.to_string());
+                                })
+                                .content(TextBlock::new().text(prompt).font_size(12.0)),
+                        ),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
 
     let mode_switch = Border::new()
         .width(217.0)
@@ -297,6 +318,7 @@ pub(crate) fn ai_page(
 
     let (provider_label, execution_label, model_label, provider_ready, cloud_execution) =
         ai_provider_pill_content(
+            preferred_provider,
             deterministic_visual,
             ai_enabled,
             provider_status,
@@ -313,8 +335,35 @@ pub(crate) fn ai_page(
             .into()
     });
     let configure_ai = open_settings.clone();
+    // Compact: only the status dot, the provider name and the gear remain,
+    // as the Store shell hides `.ai-runtime-class` / `.ai-runtime-model`
+    // below 680 px of content width.
+    let execution_view: View = if pill_compact {
+        View::empty()
+    } else {
+        TextBlock::new()
+            .text(execution_label)
+            .font_size(12.0)
+            .foreground(palette.muted)
+            .into()
+    };
+    let model_view: View = if pill_compact {
+        View::empty()
+    } else {
+        model_view
+    };
+    let provider_view = TextBlock::new()
+        .text(provider_label)
+        .font_size(12.0)
+        .font_weight(FontWeight::SEMI_BOLD)
+        .text_trimming(TextTrimming::CharacterEllipsis);
+    let provider_view = if pill_compact {
+        provider_view.max_width(150.0)
+    } else {
+        provider_view
+    };
     let runtime_pill = Border::new()
-        .min_width(179.0)
+        .min_width(if pill_compact { 0.0 } else { 179.0 })
         .height(38.0)
         .padding(Thickness::new(10.0, 0.0, 5.0, 0.0))
         .background(palette.card)
@@ -337,14 +386,8 @@ pub(crate) fn ai_page(
                         } else {
                             palette.muted
                         }),
-                    TextBlock::new()
-                        .text(provider_label)
-                        .font_size(12.0)
-                        .font_weight(FontWeight::SEMI_BOLD),
-                    TextBlock::new()
-                        .text(execution_label)
-                        .font_size(12.0)
-                        .foreground(palette.muted),
+                    provider_view,
+                    execution_view,
                     model_view,
                     Button::new()
                         .width(27.0)
@@ -461,7 +504,7 @@ pub(crate) fn ai_mode_button(
                 .set(
                     "ButtonBackground",
                     if selected {
-                        palette.card_strong
+                        palette.active
                     } else {
                         Color::transparent()
                     },
@@ -807,6 +850,7 @@ pub(crate) fn ai_assistant_workspace(
     dismiss_onboarding: Callback<()>,
 ) -> View {
     let conversation_active = visual_state.is_conversation() || !chat_messages.is_empty();
+    let strip_open_settings = open_settings.clone();
     let interaction_blocked = preparation.intent.is_some()
         || full_scan_consent.is_some()
         || cloud_fallback_consent.is_some();
@@ -943,8 +987,17 @@ pub(crate) fn ai_assistant_workspace(
                         },
                     )
                 };
-                let text = if message.text.is_empty() && message.finish_reason.is_none() {
-                    "Thinking…".to_string()
+                // The last assistant turn streams while a request is pending:
+                // a spinner before the first token, then a caret after the
+                // text, as the Store shell's blinking caret does.
+                let awaiting_first_token =
+                    !is_user && message.text.is_empty() && message.finish_reason.is_none();
+                let streaming = !is_user
+                    && chat_pending
+                    && message.finish_reason.is_none()
+                    && index + 1 == chat_messages.len();
+                let text = if streaming && !message.text.is_empty() {
+                    format!("{}▍", message.text)
                 } else {
                     message.text.clone()
                 };
@@ -955,6 +1008,18 @@ pub(crate) fn ai_assistant_workspace(
                         .is_text_selection_enabled(true)
                         .text_wrapping(TextWrapping::Wrap)
                         .into()
+                } else if awaiting_first_token {
+                    StackPanel::new()
+                        .orientation(Orientation::Horizontal)
+                        .spacing(8.0)
+                        .children((
+                            ProgressRing::new().is_active(true).width(14.0).height(14.0),
+                            TextBlock::new()
+                                .text("Thinking…")
+                                .font_size(12.5)
+                                .foreground(palette.muted)
+                                .vertical_alignment(VerticalAlignment::Center),
+                        ))
                 } else {
                     render_markdown_lite(
                         &text,
@@ -1065,7 +1130,7 @@ pub(crate) fn ai_assistant_workspace(
                             )),
                     ),
             )
-    } else if !deterministic_visual && provider_loading {
+    } else if !deterministic_visual && (provider_loading && !provider_ready) {
         StackPanel::new()
             .horizontal_alignment(HorizontalAlignment::Center)
             .vertical_alignment(VerticalAlignment::Center)
@@ -1193,9 +1258,49 @@ pub(crate) fn ai_assistant_workspace(
             .keyed_children(prompt_buttons)
     };
 
+    // A conversation whose provider has since dropped keeps its transcript
+    // but says why the composer is disabled, as the Store shell's
+    // `.chat-unavailable` strip does.
+    let unavailable_strip: View = if conversation_active
+        && !deterministic_visual
+        && !provider_loading
+        && (!ai_enabled || !provider_ready)
+    {
+        Border::new()
+            .grid_row(2)
+            .padding(Thickness::new(14.0, 7.0, 14.0, 7.0))
+            .border_brush(palette.border)
+            .border_thickness(Thickness::new(0.0, 1.0, 0.0, 0.0))
+            .content(
+                Grid::new()
+                    .columns([GridLength::Star(1.0), GridLength::Auto])
+                    .column_spacing(12.0)
+                    .children((
+                        TextBlock::new()
+                            .text(if ai_enabled {
+                                "The AI provider is unavailable · connect a provider to continue this conversation"
+                            } else {
+                                "AI insights are turned off · enable them to continue this conversation"
+                            })
+                            .font_size(11.5)
+                            .foreground(palette.muted)
+                            .text_wrapping(TextWrapping::Wrap)
+                            .vertical_alignment(VerticalAlignment::Center),
+                        Button::new()
+                            .grid_column(1)
+                            .height(27.0)
+                            .on_click(strip_open_settings)
+                            .automation_name("Open Settings")
+                            .content("Open Settings"),
+                    )),
+            )
+    } else {
+        View::empty()
+    };
+
     let composer_placeholder = if preparation.intent.is_some() {
         "Preparing scan evidence…"
-    } else if !deterministic_visual && provider_loading {
+    } else if !deterministic_visual && (provider_loading && !provider_ready) {
         "Checking AI provider…"
     } else if !deterministic_visual && (!ai_enabled || !provider_ready) {
         "Configure an AI provider to start…"
@@ -1215,7 +1320,7 @@ pub(crate) fn ai_assistant_workspace(
                     GridLength::Pixel(62.0),
                     GridLength::Star(1.0),
                     GridLength::Auto,
-                    GridLength::Pixel(58.0),
+                    GridLength::Auto,
                 ])
                 .children((
                     Border::new()
@@ -1248,6 +1353,7 @@ pub(crate) fn ai_assistant_workspace(
                         ),
                     Border::new().grid_row(1).content(body),
                     prompts,
+                    unavailable_strip,
                     Border::new()
                         .grid_row(3)
                         .padding(Thickness::new(13.0, 10.0, 13.0, 10.0))
@@ -1259,7 +1365,13 @@ pub(crate) fn ai_assistant_workspace(
                                 .column_spacing(8.0)
                                 .children((
                                     TextBox::new()
-                                        .height(36.0)
+                                        // Grows with the draft like the Store
+                                        // shell's textarea (36 → 92 px); Enter
+                                        // sends, Shift+Enter adds a line.
+                                        .min_height(36.0)
+                                        .max_height(92.0)
+                                        .accepts_return(true)
+                                        .text_wrapping(TextWrapping::Wrap)
                                         .text(input)
                                         .placeholder_text(composer_placeholder)
                                         .is_enabled(
@@ -1675,6 +1787,39 @@ pub(crate) fn ai_scan_report_workspace(
     cancel_preparation: Callback<()>,
     retry_preparation: Callback<()>,
 ) -> View {
+    // Same state order as the Tauri ScanReportPanel: an existing report is
+    // always shown, otherwise the reasons a report cannot start come before
+    // the invitation to generate one.
+    let has_report = report_text.is_some();
+    let can_generate = deterministic_visual || (ai_enabled && provider_ready && !provider_loading);
+    let empty_state = |icon: FaIcon, title: &'static str, detail: &'static str, action: View| {
+        StackPanel::new()
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .vertical_alignment(VerticalAlignment::Center)
+            .spacing(9.0)
+            .children((
+                Border::new()
+                    .width(48.0)
+                    .height(48.0)
+                    .background(palette.active)
+                    .corner_radius(10.0)
+                    .content(icons::path(icon).width(23.0).height(23.0)),
+                TextBlock::new()
+                    .text(title)
+                    .font_size(18.0)
+                    .font_weight(FontWeight::BOLD)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .horizontal_alignment(HorizontalAlignment::Center),
+                TextBlock::new()
+                    .text(detail)
+                    .font_size(12.5)
+                    .foreground(palette.muted)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .max_width(470.0)
+                    .horizontal_alignment(HorizontalAlignment::Center),
+                action,
+            ))
+    };
     let body: View = if preparation.is_report() {
         ai_preparation_panel(
             palette,
@@ -1684,152 +1829,116 @@ pub(crate) fn ai_scan_report_workspace(
             cancel_preparation,
             retry_preparation,
         )
-    } else if !report_generating
-        && report_text.is_none()
-        && !deterministic_visual
-        && provider_loading
-    {
-        StackPanel::new()
-            .horizontal_alignment(HorizontalAlignment::Center)
-            .vertical_alignment(VerticalAlignment::Center)
-            .spacing(10.0)
-            .children((
-                icons::path(FaIcon::Refresh).width(28.0).height(28.0),
-                TextBlock::new()
-                    .text("Checking AI availability…")
-                    .font_size(18.0)
-                    .font_weight(FontWeight::BOLD),
-                TextBlock::new()
-                    .text("Report generation will be available when provider discovery completes.")
-                    .font_size(12.5)
-                    .foreground(palette.muted)
-                    .text_wrapping(TextWrapping::Wrap)
-                    .max_width(470.0),
-            ))
-    } else if !report_generating
-        && report_text.is_none()
-        && !deterministic_visual
-        && (!ai_enabled || !provider_ready)
-    {
-        StackPanel::new()
-            .horizontal_alignment(HorizontalAlignment::Center)
-            .vertical_alignment(VerticalAlignment::Center)
-            .spacing(9.0)
-            .children((
-                icons::path(if ai_enabled {
-                    FaIcon::CircleInfo
-                } else {
-                    FaIcon::Gear
-                })
-                .width(30.0)
-                .height(30.0),
-                TextBlock::new()
-                    .text(if ai_enabled {
-                        "Connect an AI provider"
-                    } else {
-                        "AI insights are turned off"
-                    })
-                    .font_size(18.0)
-                    .font_weight(FontWeight::BOLD),
-                TextBlock::new()
-                    .text(if ai_enabled {
-                        "Choose an available local, subscription, or API provider before generating a report."
-                    } else {
-                        "Enable AI insights in Settings to generate scan reports."
-                    })
-                    .font_size(12.5)
-                    .foreground(palette.muted)
-                    .text_wrapping(TextWrapping::Wrap)
-                    .max_width(470.0),
-                Button::new()
-                    .height(32.0)
-                    .resource_overrides(primary_button_resources())
-                    .on_click(open_settings)
-                    .content(if ai_enabled {
-                        "Configure AI"
-                    } else {
-                        "Open Settings"
-                    }),
-            ))
-    } else if !has_scan {
-        StackPanel::new()
-            .horizontal_alignment(HorizontalAlignment::Center)
-            .vertical_alignment(VerticalAlignment::Center)
-            .spacing(9.0)
-            .children((
-                Border::new()
-                    .width(48.0)
-                    .height(48.0)
-                    .background(palette.active)
-                    .corner_radius(10.0)
-                    .content(icons::path(FaIcon::FileExport).width(23.0).height(23.0)),
-                TextBlock::new()
-                    .text("Run a scan to create a report")
-                    .font_size(18.0)
-                    .font_weight(FontWeight::BOLD),
-                TextBlock::new()
-                    .text("A focused health report will summarize collected diagnostics, errors, risks, and next steps.")
-                    .font_size(12.5)
-                    .foreground(palette.muted)
-                    .text_wrapping(TextWrapping::Wrap)
-                    .max_width(470.0),
-                Button::new()
-                    .on_click(generate)
-                    .automation_name("Run Quick Scan and generate report")
-                    .content("Run Quick Scan & Generate"),
-            ))
+    } else if !has_scan && !has_report && !report_generating {
+        empty_state(
+            FaIcon::FileExport,
+            "Run a scan to create a report",
+            "A Quick Scan will run first, then the AI report will generate automatically.",
+            Button::new()
+                .height(32.0)
+                .resource_overrides(primary_button_resources())
+                .on_click(generate)
+                .automation_name("Run Quick Scan and generate report")
+                .content("Run Quick Scan & Generate"),
+        )
+    } else if !deterministic_visual && !ai_enabled && !has_report {
+        empty_state(
+            FaIcon::Gear,
+            "AI insights are turned off",
+            "Enable AI insights in Settings to create a report.",
+            Button::new()
+                .height(32.0)
+                .resource_overrides(primary_button_resources())
+                .on_click(open_settings)
+                .automation_name("Open Settings")
+                .content("Open Settings"),
+        )
+    } else if !deterministic_visual && provider_loading && !provider_ready && !has_report {
+        empty_state(
+            FaIcon::Refresh,
+            "Checking AI provider…",
+            "Report actions will be available when the provider check finishes.",
+            View::empty(),
+        )
+    } else if !deterministic_visual && !provider_ready && !has_report {
+        empty_state(
+            FaIcon::CircleInfo,
+            "Connect an AI provider",
+            "Configure a local, subscription, or API provider before generating a report.",
+            Button::new()
+                .height(32.0)
+                .resource_overrides(primary_button_resources())
+                .on_click(open_settings)
+                .automation_name("Configure AI")
+                .content("Configure AI"),
+        )
     } else if let Some(error) = report_error {
         StackPanel::new()
             .horizontal_alignment(HorizontalAlignment::Center)
             .vertical_alignment(VerticalAlignment::Center)
-            .spacing(10.0)
+            .spacing(9.0)
             .children((
                 icons::path(FaIcon::TriangleExclamation)
                     .width(30.0)
                     .height(30.0),
                 TextBlock::new()
-                    .text("The report could not be generated")
-                    .font_size(16.0)
-                    .font_weight(FontWeight::SEMI_BOLD),
+                    .text("Report could not be generated")
+                    .font_size(18.0)
+                    .font_weight(FontWeight::BOLD)
+                    .horizontal_alignment(HorizontalAlignment::Center),
                 TextBlock::new()
                     .text(error.to_string())
                     .font_size(12.5)
-                    .foreground(palette.muted)
+                    .foreground(palette.err)
                     .text_wrapping(TextWrapping::Wrap)
                     .max_width(470.0)
                     .horizontal_alignment(HorizontalAlignment::Center),
-                Button::new().on_click(regenerate).content("Try again"),
-            ))
-    } else if report_generating {
-        StackPanel::new()
-            .horizontal_alignment(HorizontalAlignment::Center)
-            .vertical_alignment(VerticalAlignment::Center)
-            .spacing(10.0)
-            .children((
-                Border::new()
-                    .width(48.0)
-                    .height(48.0)
-                    .background(palette.active)
-                    .corner_radius(10.0)
-                    .content(
-                        icons::path(FaIcon::WandMagicSparkles)
-                            .width(23.0)
-                            .height(23.0),
-                    ),
-                TextBlock::new()
-                    .text("Generating report…")
-                    .font_size(18.0)
-                    .font_weight(FontWeight::BOLD),
-                TextBlock::new()
-                    .text("The AI assistant is reviewing the latest scan.")
-                    .font_size(12.5)
-                    .foreground(palette.muted),
                 Button::new()
-                    .on_click(cancel)
-                    .automation_name("Cancel report")
-                    .content("Cancel"),
+                    .is_enabled(can_generate)
+                    .on_click(regenerate)
+                    .automation_name("Try again")
+                    .content("Try again"),
             ))
-    } else if let Some(text) = report_text {
+    } else if has_report || report_generating {
+        let text = report_text.unwrap_or_default();
+        let header_actions: View = if report_generating {
+            Button::new()
+                .on_click(cancel)
+                .automation_name("Stop report generation")
+                .content("Stop")
+        } else {
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(8.0)
+                .children((
+                    Button::new()
+                        .on_click(copy)
+                        .automation_name("Copy report")
+                        .content("Copy"),
+                    Button::new()
+                        .is_enabled(can_generate)
+                        .on_click(regenerate)
+                        .automation_name("Regenerate report")
+                        .content("Regenerate"),
+                ))
+        };
+        let content: View = if text.is_empty() {
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(8.0)
+                .children((
+                    icons::path(FaIcon::Refresh).width(14.0).height(14.0),
+                    TextBlock::new()
+                        .text("Reading the latest scan…")
+                        .font_size(12.5)
+                        .foreground(palette.muted),
+                ))
+        } else {
+            render_markdown_lite(
+                text,
+                MarkdownStyle::with_palette(palette.text, palette.card_strong, palette.border),
+            )
+        };
         ScrollViewer::new()
             .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
             .content(
@@ -1839,31 +1948,14 @@ pub(crate) fn ai_scan_report_workspace(
                         StackPanel::new().spacing(12.0).children((
                             Grid::new()
                                 .columns([GridLength::Star(1.0), GridLength::Auto])
+                                .column_spacing(12.0)
                                 .children((
                                     TextBlock::new()
                                         .text("Scan health report")
                                         .font_size(17.0)
-                                        .font_weight(FontWeight::BOLD),
-                                    StackPanel::new()
-                                        .grid_column(1)
-                                        .orientation(Orientation::Horizontal)
-                                        .spacing(8.0)
-                                        .children((
-                                            Button::new()
-                                                .on_click(copy)
-                                                .automation_name("Copy report")
-                                                .content("Copy"),
-                                            Button::new()
-                                                .is_enabled(
-                                                    deterministic_visual
-                                                        || (ai_enabled
-                                                            && provider_ready
-                                                            && !provider_loading),
-                                                )
-                                                .on_click(regenerate)
-                                                .automation_name("Regenerate report")
-                                                .content("Regenerate"),
-                                        )),
+                                        .font_weight(FontWeight::BOLD)
+                                        .vertical_alignment(VerticalAlignment::Center),
+                                    Border::new().grid_column(1).content(header_actions),
                                 )),
                             TextBlock::new()
                                 .text(report_provider_attribution(
@@ -1871,46 +1963,24 @@ pub(crate) fn ai_scan_report_workspace(
                                     report_provider_use,
                                 ))
                                 .font_size(11.5)
-                                .foreground(palette.muted),
-                            render_markdown_lite(
-                                text,
-                                MarkdownStyle::with_palette(
-                                    palette.text,
-                                    palette.card_strong,
-                                    palette.border,
-                                ),
-                            ),
+                                .foreground(palette.muted)
+                                .text_wrapping(TextWrapping::Wrap),
+                            content,
                         )),
                     ),
             )
     } else {
-        StackPanel::new()
-            .horizontal_alignment(HorizontalAlignment::Center)
-            .vertical_alignment(VerticalAlignment::Center)
-            .spacing(9.0)
-            .children((
-                Border::new()
-                    .width(48.0)
-                    .height(48.0)
-                    .background(palette.active)
-                    .corner_radius(10.0)
-                    .content(icons::path(FaIcon::FileExport).width(23.0).height(23.0)),
-                TextBlock::new()
-                    .text("Ready to create your report")
-                    .font_size(18.0)
-                    .font_weight(FontWeight::BOLD),
-                TextBlock::new()
-                    .text("A focused health report will summarize collected diagnostics, errors, risks, and next steps.")
-                    .font_size(12.5)
-                    .foreground(palette.muted)
-                    .text_wrapping(TextWrapping::Wrap)
-                    .max_width(470.0)
-                    .horizontal_alignment(HorizontalAlignment::Center),
-                Button::new()
-                    .on_click(generate)
-                    .automation_name("Generate report")
-                    .content("Generate report"),
-            ))
+        empty_state(
+            FaIcon::FileExport,
+            "Ready to create your report",
+            "A focused health report will summarize collected diagnostics, errors, risks, and next steps.",
+            Button::new()
+                .height(32.0)
+                .resource_overrides(primary_button_resources())
+                .on_click(generate)
+                .automation_name("Generate report")
+                .content("Generate report"),
+        )
     };
     Border::new()
         .height(workspace_height)
@@ -1929,7 +1999,7 @@ mod tests {
     #[test]
     fn ai_provider_pill_is_fixture_exact_but_live_state_driven() {
         assert_eq!(
-            ai_provider_pill_content(true, true, None, false, None),
+            ai_provider_pill_content("auto", true, true, None, false, None),
             (
                 "Phi Silica".to_string(),
                 "·  On device".to_string(),
@@ -1939,7 +2009,7 @@ mod tests {
             )
         );
         assert_eq!(
-            ai_provider_pill_content(false, true, None, true, None),
+            ai_provider_pill_content("auto", false, true, None, true, None),
             (
                 "Checking AI provider".to_string(),
                 "·  Please wait".to_string(),
@@ -1950,6 +2020,7 @@ mod tests {
         );
         assert_eq!(
             ai_provider_pill_content(
+                "auto",
                 false,
                 false,
                 Some(&provider_status(AIProvider::OpenAI)),
@@ -1966,6 +2037,7 @@ mod tests {
         );
         assert_eq!(
             ai_provider_pill_content(
+                "auto",
                 false,
                 true,
                 Some(&provider_status(AIProvider::OpenAI)),
@@ -1982,6 +2054,7 @@ mod tests {
         );
         assert_eq!(
             ai_provider_pill_content(
+                "auto",
                 false,
                 true,
                 Some(&provider_status(AIProvider::OpenAI)),
@@ -1994,6 +2067,48 @@ mod tests {
                 None,
                 false,
                 false
+            )
+        );
+    }
+
+    #[test]
+    fn an_explicit_preference_never_falls_back_in_the_pill() {
+        // Anthropic is preferred but only OpenAI is available: the pill says
+        // so instead of silently advertising OpenAI.
+        assert_eq!(
+            ai_provider_pill_content(
+                "anthropic",
+                false,
+                true,
+                Some(&provider_status(AIProvider::OpenAI)),
+                false,
+                None,
+            ),
+            (
+                "No provider".to_string(),
+                "·  Not connected".to_string(),
+                None,
+                false,
+                false
+            )
+        );
+        // The preferred provider is available: it is named even while a
+        // background refresh is running.
+        assert_eq!(
+            ai_provider_pill_content(
+                "openai",
+                false,
+                true,
+                Some(&provider_status(AIProvider::OpenAI)),
+                true,
+                None,
+            ),
+            (
+                "OpenAI".to_string(),
+                "·  API cloud".to_string(),
+                None,
+                true,
+                true
             )
         );
     }

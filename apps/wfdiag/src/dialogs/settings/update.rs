@@ -28,6 +28,7 @@ use crate::app::policy::{
     set_provider_setup_model, settings_dialog_callback_is_current, subscription_auth_state_index,
     validate_phi_preference, window_theme_from_setting, window_theme_setting,
 };
+use crate::dialogs::notice::state::{NoticeKind, NoticeRequest};
 use crate::platform::window;
 use wfdiag_app::{
     AppCommand, DispatchOutcome, ModelCatalogEvent, ProviderCredentialCommand, ProviderEvent,
@@ -333,6 +334,11 @@ impl WfdiagShell {
             self.settings.open = false;
             self.settings.save_error = None;
             self.shell.status = "Settings saved".to_string();
+            self.show_notice(NoticeRequest::new(
+                NoticeKind::Success,
+                "Settings saved",
+                "Your preferences were stored",
+            ));
             return;
         }
         if self.settings.loading || self.settings.saving {
@@ -739,13 +745,28 @@ impl WfdiagShell {
                     self.cancel_provider_model_request();
                     self.cancel_subscription_auth();
                 }
+                // Push the persisted preference to the provider runtime; the
+                // engine answers that command with a fresh status probe, so a
+                // separate `RequestProviderStatus` here would only race it.
+                let _ = self.dispatch(AppCommand::SetProviderPreference {
+                    preference: settings.preferred_ai_provider.clone(),
+                });
                 self.shell.status = "Settings saved".to_string();
+                self.show_notice(NoticeRequest::new(
+                    NoticeKind::Success,
+                    "Settings saved",
+                    "Your preferences were stored",
+                ));
             }
             SettingsEvent::Updated { settings } => {
                 self.shell.settings.cloud_fallback_policy = settings.cloud_fallback_policy;
                 self.settings.draft.cloud_fallback_policy = settings.cloud_fallback_policy;
             }
-            SettingsEvent::CredentialsCommitted => {}
+            SettingsEvent::CredentialsCommitted => {
+                // A stored or cleared API key changes which providers are
+                // available, so re-probe once the keys have actually landed.
+                let _ = self.dispatch(AppCommand::RequestProviderStatus);
+            }
             SettingsEvent::Failed { error } => {
                 self.settings.saving = false;
                 self.settings.save_epoch = None;

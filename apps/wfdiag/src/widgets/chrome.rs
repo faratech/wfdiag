@@ -74,6 +74,7 @@ pub(crate) fn nav_button(
     selected: bool,
     expanded: bool,
     badge: Option<&str>,
+    shortcut: Option<String>,
     action: Callback<()>,
     enabled: bool,
 ) -> View {
@@ -163,7 +164,7 @@ pub(crate) fn nav_button(
         .automation_name(label)
         .content(content);
 
-    if selected {
+    let view: View = if selected {
         Grid::new().children((
             button,
             Border::new()
@@ -177,6 +178,16 @@ pub(crate) fn nav_button(
         ))
     } else {
         button
+    };
+    // An icon-only rail item names itself on hover, with its shortcut, as
+    // the Store shell's collapsed-rail tooltips do.
+    if expanded {
+        view
+    } else {
+        view.tooltip(match shortcut {
+            Some(shortcut) => format!("{label} · {shortcut}"),
+            None => label.to_string(),
+        })
     }
 }
 
@@ -241,7 +252,8 @@ pub(crate) fn page_header(palette: Palette, page: Page, trailing: impl Into<View
                 TextBlock::new()
                     .text(page.subtitle())
                     .font_size(12.5)
-                    .foreground(palette.muted),
+                    .foreground(palette.muted)
+                    .text_trimming(TextTrimming::CharacterEllipsis),
             )),
             Border::new().grid_column(1).content(trailing),
         ))

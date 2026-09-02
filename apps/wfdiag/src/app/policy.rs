@@ -6,9 +6,12 @@
 #![deny(unsafe_code)]
 
 use crate::app::consts::{
-    AI_PROVIDER_IDS, AI_PROVIDER_LABELS, AI_WORKSPACE_MIN_HEIGHT, AI_WORKSPACE_VERTICAL_CHROME,
-    CODEX_MODEL_IDS, DIAGNOSTICS_COMPACT_BREAKPOINT, PROCESS_DETAILS_COLUMN_WIDTH,
-    PROCESS_WIDE_CONTENT_MIN_WIDTH, PROVIDER_SETUP_PROVIDERS, SHELL_CONTENT_HORIZONTAL_CHROME,
+    AI_PROVIDER_IDS, AI_PROVIDER_LABELS, AI_RUNTIME_PILL_COMPACT_BREAKPOINT,
+    AI_WORKSPACE_MIN_HEIGHT, AI_WORKSPACE_VERTICAL_CHROME, CODEX_MODEL_IDS,
+    DIAGNOSTICS_COMPACT_BREAKPOINT, PROCESS_DETAILS_COLUMN_WIDTH, PROCESS_WIDE_CONTENT_MIN_WIDTH,
+    PROVIDER_SETUP_PROVIDERS, SETTINGS_DIALOG_HORIZONTAL_MARGIN, SETTINGS_DIALOG_MAX_HEIGHT,
+    SETTINGS_DIALOG_MAX_WIDTH, SETTINGS_DIALOG_MIN_HEIGHT, SETTINGS_DIALOG_MIN_WIDTH,
+    SHELL_CONTENT_HORIZONTAL_CHROME, SHELL_NARROW_BREAKPOINT, SHELL_SHORT_BREAKPOINT,
     WINDOW_HOOK_RETRY_MAX, WINDOW_HOOK_RETRY_MIN,
 };
 use crate::app::message::HistoryChangeKind;
@@ -732,6 +735,35 @@ pub(crate) fn diagnostics_uses_compact_layout(client_width: f64) -> bool {
     client_width < DIAGNOSTICS_COMPACT_BREAKPOINT
 }
 
+/// Whether the pages use their narrow arrangement (see
+/// `SHELL_NARROW_BREAKPOINT`).
+pub(crate) fn shell_uses_narrow_layout(client_width: f64) -> bool {
+    client_width < SHELL_NARROW_BREAKPOINT
+}
+
+/// Whether the AI runtime pill drops its execution class and model (see
+/// `AI_RUNTIME_PILL_COMPACT_BREAKPOINT`).
+pub(crate) fn ai_runtime_pill_compact(client_width: f64) -> bool {
+    client_width < AI_RUNTIME_PILL_COMPACT_BREAKPOINT
+}
+
+/// Whether the window is too short for optional page chrome (see
+/// `SHELL_SHORT_BREAKPOINT`).
+pub(crate) fn shell_uses_short_layout(client_height: f64) -> bool {
+    client_height < SHELL_SHORT_BREAKPOINT
+}
+
+/// The Settings dialog's outer size for a client area (see
+/// `SETTINGS_DIALOG_MAX_WIDTH`).
+pub(crate) fn settings_dialog_size(client_width: f64, client_height: f64) -> (f64, f64) {
+    let width = (client_width - SETTINGS_DIALOG_HORIZONTAL_MARGIN)
+        .clamp(SETTINGS_DIALOG_MIN_WIDTH, SETTINGS_DIALOG_MAX_WIDTH);
+    let height = (client_height * 0.9)
+        .min(client_height - 32.0)
+        .clamp(SETTINGS_DIALOG_MIN_HEIGHT, SETTINGS_DIALOG_MAX_HEIGHT);
+    (width, height)
+}
+
 /// Whether the shell's page host scrolls the open page (#193).
 ///
 /// The host owns the **one** `ScrollViewer` in the window and always shows its
@@ -1047,6 +1079,11 @@ pub(crate) fn global_shortcut_is_allowed(
     if event.command == window::GlobalShortcutCommand::TogglePalette && palette_open {
         return true;
     }
+    if event.command == window::GlobalShortcutCommand::ComposerSend {
+        // Enter inside the chat composer: the editable focus is the point,
+        // and a scan in progress does not block sending a message.
+        return !blocking_overlay_open;
+    }
     if blocking_overlay_open {
         return false;
     }
@@ -1282,6 +1319,54 @@ pub(crate) mod tests {
         assert!(!navigation_rail_forced_collapsed(1100.1));
         assert!(navigation_rail_forced_collapsed(1100.0));
         assert!(navigation_rail_forced_collapsed(720.0));
+    }
+
+    #[test]
+    fn the_narrow_shell_layout_covers_the_compact_capture_and_the_minimum_window() {
+        assert!(!shell_uses_narrow_layout(1200.0));
+        assert!(!shell_uses_narrow_layout(940.0));
+        assert!(shell_uses_narrow_layout(939.9));
+        assert!(shell_uses_narrow_layout(900.0));
+        assert!(shell_uses_narrow_layout(720.0));
+    }
+
+    #[test]
+    fn the_ai_pill_trims_only_below_the_store_content_query_width() {
+        // The 900 px compact captures keep the full pill.
+        assert!(!ai_runtime_pill_compact(900.0));
+        assert!(!ai_runtime_pill_compact(764.0));
+        assert!(ai_runtime_pill_compact(763.9));
+        assert!(ai_runtime_pill_compact(720.0));
+    }
+
+    #[test]
+    fn the_short_shell_layout_matches_the_store_max_height_rule() {
+        assert!(!shell_uses_short_layout(800.0));
+        assert!(!shell_uses_short_layout(650.0));
+        assert!(shell_uses_short_layout(649.9));
+        assert!(shell_uses_short_layout(540.0));
+    }
+
+    #[test]
+    fn the_settings_dialog_keeps_its_footer_inside_every_shipping_window() {
+        // Default 1200×800: full width, 90% of the client height.
+        assert_eq!(settings_dialog_size(1200.0, 800.0), (640.0, 720.0));
+        // Wide 1440×1000: capped at the designed 640×810.
+        assert_eq!(settings_dialog_size(1440.0, 1000.0), (640.0, 810.0));
+        // Minimum 720×540: the footer stays on screen.
+        assert_eq!(settings_dialog_size(720.0, 540.0), (640.0, 486.0));
+        // Below the minimum the floors keep the dialog usable.
+        assert_eq!(settings_dialog_size(400.0, 300.0), (360.0, 360.0));
+    }
+
+    #[test]
+    fn composer_send_is_allowed_only_without_a_blocking_overlay() {
+        let event = window::GlobalShortcutEvent {
+            command: window::GlobalShortcutCommand::ComposerSend,
+            editable_focused: true,
+        };
+        assert!(global_shortcut_is_allowed(event, false, false, true));
+        assert!(!global_shortcut_is_allowed(event, true, false, false));
     }
 
     #[test]
