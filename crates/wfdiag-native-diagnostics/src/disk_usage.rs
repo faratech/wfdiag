@@ -65,7 +65,7 @@ impl ConsumerId {
             | Self::WindowsOld
             | Self::OneDriveCache => Some("open_storage_settings"),
             Self::UserTemp => Some("clear_temp_files"),
-            Self::WindowsTemp => Some("open_disk_cleanup"),
+            Self::WindowsTemp => Some("clear_windows_temp"),
             Self::SoftwareDistribution => Some("windows_update_reset"),
             Self::RecycleBin => Some("empty_recycle_bin"),
             Self::HibernationFile | Self::PageFile => None,

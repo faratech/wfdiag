@@ -206,7 +206,7 @@ impl CauseCategory {
     pub const fn remediation(self) -> Option<&'static str> {
         match self {
             Self::Driver => Some("open_device_manager"),
-            Self::MemoryHardware => Some("open_memory_diagnostic"),
+            Self::MemoryHardware => Some("schedule_memory_diagnostic"),
             Self::Software => Some("sfc_scannow"),
             Self::Disk | Self::PowerOrThermal | Self::Firmware | Self::Unknown => None,
         }
@@ -792,7 +792,7 @@ mod tests {
         assert_eq!(decode_bugcheck(0x124).cause, CauseCategory::PowerOrThermal);
         assert_eq!(
             decode_bugcheck(0x1A).remediation,
-            Some("open_memory_diagnostic")
+            Some("schedule_memory_diagnostic")
         );
         assert_eq!(
             decode_bugcheck(0xC000_021A).remediation,

@@ -433,7 +433,11 @@ fn validate_generation(generation: &FixPlanGeneration) -> Result<Vec<Issue>, Str
             .remediation
             .as_ref()
             .map(|remediation| remediation.id.as_str());
-        if actual_remediation != spec.remediation_id {
+        // Detection may embed one of the rule's listed alternates when the
+        // evidence points at it (`IssueSpec::alternate_remediations`).
+        let canonical = actual_remediation == spec.remediation_id
+            || actual_remediation.is_some_and(|id| spec.alternate_remediations.contains(&id));
+        if !canonical {
             return Err(format!(
                 "Detected issue '{}' does not match its canonical remediation mapping",
                 issue.id
@@ -693,7 +697,7 @@ mod tests {
             recommendation: "Review disk usage.".to_string(),
             detected: true,
             source_tasks: Some(vec!["storage_space".to_string()]),
-            remediation: Some(remediation("open_disk_cleanup")),
+            remediation: Some(remediation("clear_temp_files")),
         }
     }
 
@@ -780,6 +784,11 @@ mod tests {
                 .unwrap_err()
                 .contains("canonical remediation mapping")
         );
+
+        // An evidence-driven alternate the rule lists is canonical too.
+        let mut alternate = generation();
+        alternate.detected_issues[0].remediation = Some(remediation("empty_recycle_bin"));
+        assert!(validate_generation(&alternate).is_ok());
     }
 
     #[test]
@@ -788,7 +797,7 @@ mod tests {
         let detected = validate_generation(&generation).unwrap();
         let parsed = parse_fix_plan(
             r#"{"entries":[
-                {"issue_id":"low_disk_space","remediation_id":"open_disk_cleanup","rationale":"Inspect usage."},
+                {"issue_id":"low_disk_space","remediation_id":"clear_temp_files","rationale":"Inspect usage."},
                 {"issue_id":"low_disk_space","remediation_id":"network_reset","rationale":"Invented pairing."},
                 {"issue_id":"not_current","remediation_id":"flush_dns","rationale":"Stale."}
             ],"notes":"Review first."}"#,
@@ -805,7 +814,7 @@ mod tests {
         };
         assert_eq!(plan.entries.len(), 1);
         assert_eq!(plan.entries[0].issue_id, "low_disk_space");
-        assert_eq!(plan.entries[0].remediation_id, "open_disk_cleanup");
+        assert_eq!(plan.entries[0].remediation_id, "clear_temp_files");
         assert_eq!(plan.scan_fingerprint, "scan-v1");
         assert_eq!(plan.catalog_fingerprint, "catalog-v1");
     }

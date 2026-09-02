@@ -464,6 +464,29 @@ fn unique_output_path(label: &str, stream: &str) -> PathBuf {
     ))
 }
 
+/// `%SystemRoot%\Temp`: the machine-wide temp directory the
+/// `clear_windows_temp` remediation empties (the user temp is
+/// `std::env::temp_dir()`). Non-Windows dev hosts get the process temp dir.
+#[must_use]
+pub fn windows_temp_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        windows_root().join("Temp")
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::temp_dir()
+    }
+}
+
+#[cfg(windows)]
+fn program_files() -> PathBuf {
+    std::env::var_os("ProgramFiles")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
+}
+
 #[cfg(windows)]
 fn windows_root() -> PathBuf {
     std::env::var_os("SystemRoot")
@@ -486,6 +509,11 @@ fn with_exe_extension(program: &str) -> String {
 /// launching elevated diagnostics or remediations through the current directory
 /// or PATH search order.
 ///
+/// Every name resolves under `%SystemRoot%\System32`, except the two
+/// components Windows installs elsewhere: `explorer.exe` (the Windows root)
+/// and Microsoft Defender's `MpCmdRun.exe` (`%ProgramFiles%\Windows Defender`,
+/// a stub that forwards to the current platform version).
+///
 /// # Errors
 /// Returns an error when `program` carries a path separator or is absolute,
 /// or (on Windows) when the resolved trusted path does not exist.
@@ -506,6 +534,9 @@ pub fn trusted_system_program(program: &str) -> Result<PathBuf> {
         let lower = program.to_ascii_lowercase();
         let path = match lower.as_str() {
             "explorer" | "explorer.exe" => root.join("explorer.exe"),
+            "mpcmdrun" | "mpcmdrun.exe" => program_files()
+                .join("Windows Defender")
+                .join("MpCmdRun.exe"),
             _ => root.join("System32").join(with_exe_extension(program)),
         };
         if path.exists() {

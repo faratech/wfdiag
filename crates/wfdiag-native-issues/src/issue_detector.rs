@@ -59,7 +59,13 @@ pub fn detect_low_disk_space(ctx: &DetectCtx) -> Option<Detection> {
                     description.push_str(&largest);
                     description.push('.');
                 }
-                return Some(Detection::new(description));
+                let detection = Detection::new(description);
+                // The fix that frees the most: the largest consumer's own
+                // remediation when the breakdown ran, else the default.
+                return Some(match top_space_remediation(ctx) {
+                    Some(remediation) => detection.with_remediation(remediation),
+                    None => detection,
+                });
             }
         }
     }
@@ -87,6 +93,17 @@ fn actionable_space_consumers(ctx: &DetectCtx) -> Option<Vec<(String, u64, Strin
         .collect();
     consumers.sort_by(|a, b| b.1.cmp(&a.1));
     Some(consumers)
+}
+
+/// The vetted remediation of the largest actionable consumer, when `disk_usage`
+/// ran and its id is one the rules list.
+fn top_space_remediation(ctx: &DetectCtx) -> Option<&'static str> {
+    let consumers = actionable_space_consumers(ctx)?;
+    let (_, _, remediation) = consumers.first()?;
+    ALTERNATE_SPACE_REMEDIATIONS
+        .iter()
+        .copied()
+        .find(|known| known == remediation)
 }
 
 fn largest_reclaimable_consumers(ctx: &DetectCtx, limit: usize) -> Option<String> {
@@ -125,10 +142,11 @@ pub fn detect_space_consumers(ctx: &DetectCtx) -> Option<Detection> {
 }
 
 /// The remediations `space_consumers` may select; mirrors its spec.
-const ALTERNATE_SPACE_REMEDIATIONS: [&str; 6] = [
+const ALTERNATE_SPACE_REMEDIATIONS: [&str; 7] = [
     "open_storage_settings",
     "open_downloads_folder",
     "clear_temp_files",
+    "clear_windows_temp",
     "empty_recycle_bin",
     "windows_update_reset",
     "open_disk_cleanup",
@@ -566,9 +584,10 @@ pub fn detect_dism_corruption(ctx: &DetectCtx) -> Option<Detection> {
 }
 
 /// The remediations `bsod_recent` may select; mirrors its spec.
-const BSOD_REMEDIATIONS: [&str; 3] = [
+const BSOD_REMEDIATIONS: [&str; 4] = [
     "open_device_manager",
     "open_memory_diagnostic",
+    "schedule_memory_diagnostic",
     "sfc_scannow",
 ];
 

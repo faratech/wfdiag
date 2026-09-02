@@ -19,7 +19,7 @@ use std::ops::Deref;
 use std::pin::Pin;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use wfdiag_native_core::security::trusted_system_program;
+use wfdiag_native_core::security::{trusted_system_program, windows_temp_dir};
 use wfdiag_remediation_catalog as remediation_catalog;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,9 +117,15 @@ impl RemediationSpec {
     #[must_use]
     pub fn cancellable(&self) -> bool {
         match &self.run {
-            // Do not terminate integrity-repair tools midway through a write.
-            RunKind::Steps { .. } => !self.long_running && self.id != "restart_system",
-            RunKind::Custom { .. } => matches!(self.id, "clear_icon_cache" | "clear_temp_files"),
+            // Do not terminate integrity-repair tools midway through a write,
+            // and never leave an adapter between `release` and `renew`.
+            RunKind::Steps { .. } => {
+                !self.long_running && !matches!(self.id, "restart_system" | "renew_ip_lease")
+            }
+            RunKind::Custom { .. } => matches!(
+                self.id,
+                "clear_icon_cache" | "clear_temp_files" | "clear_windows_temp"
+            ),
             RunKind::Spawn { .. } => false,
         }
     }
@@ -513,6 +519,116 @@ pub fn remediations() -> &'static [RemediationSpec] {
                               and check for updates.",
             },
         },
+        // ---- 2.6: built-in fixes. Each is the constant command the matching
+        // Windows tool would run for the user; the tool handoffs stay in the
+        // catalog as alternates. ----
+        RemediationSpec {
+            metadata: remediation_catalog::OPTIMIZE_DRIVES,
+            run: RunKind::Steps {
+                steps: &[CmdStep {
+                    program: "defrag",
+                    // /C = every volume, /O = the right operation per media
+                    // (defragment HDDs, retrim SSDs) — what the weekly task does.
+                    args: &["/C", "/O"],
+                    ignore_failure: false,
+                    action_label: "Optimized every drive",
+                }],
+                timeout_secs: 7200,
+                success_msg: "Drives optimized.",
+            },
+        },
+        RemediationSpec {
+            metadata: remediation_catalog::CLEAR_WINDOWS_TEMP,
+            run: RunKind::Custom {
+                f: clear_windows_temp,
+            },
+        },
+        RemediationSpec {
+            metadata: remediation_catalog::UPDATE_DEFENDER_SIGNATURES,
+            run: RunKind::Steps {
+                steps: &[CmdStep {
+                    program: "MpCmdRun.exe",
+                    args: &["-SignatureUpdate"],
+                    ignore_failure: false,
+                    action_label: "Updated Microsoft Defender definitions",
+                }],
+                timeout_secs: 600,
+                success_msg: "Microsoft Defender's protection definitions are up to date.",
+            },
+        },
+        RemediationSpec {
+            metadata: remediation_catalog::DEFENDER_QUICK_SCAN,
+            run: RunKind::Steps {
+                steps: &[CmdStep {
+                    program: "MpCmdRun.exe",
+                    // ScanType 1 = quick scan. A non-zero exit means threats
+                    // were found and handled — not a failed remediation.
+                    args: &["-Scan", "-ScanType", "1"],
+                    ignore_failure: true,
+                    action_label: "Ran a Microsoft Defender quick scan",
+                }],
+                timeout_secs: 1800,
+                success_msg: "Quick scan finished. Windows Security lists anything it found.",
+            },
+        },
+        RemediationSpec {
+            metadata: remediation_catalog::ENABLE_FIREWALL,
+            run: RunKind::Steps {
+                steps: &[CmdStep {
+                    program: "netsh",
+                    args: &["advfirewall", "set", "allprofiles", "state", "on"],
+                    ignore_failure: false,
+                    action_label: "Turned Windows Firewall on for every profile",
+                }],
+                timeout_secs: 60,
+                success_msg: "Windows Firewall is on for every network profile.",
+            },
+        },
+        RemediationSpec {
+            metadata: remediation_catalog::RENEW_IP_LEASE,
+            run: RunKind::Steps {
+                steps: &[
+                    CmdStep {
+                        program: "ipconfig",
+                        args: &["/release"],
+                        // Nothing to release when the adapter never had a lease.
+                        ignore_failure: true,
+                        action_label: "Released the current address",
+                    },
+                    CmdStep {
+                        program: "ipconfig",
+                        args: &["/renew"],
+                        ignore_failure: false,
+                        action_label: "Asked the router for a new address",
+                    },
+                    CmdStep {
+                        program: "ipconfig",
+                        args: &["/flushdns"],
+                        ignore_failure: true,
+                        action_label: "Flushed the DNS cache",
+                    },
+                ],
+                timeout_secs: 120,
+                success_msg: "Network address renewed. If the router still does not answer, \
+                              restart it.",
+            },
+        },
+        RemediationSpec {
+            metadata: remediation_catalog::SCHEDULE_MEMORY_DIAGNOSTIC,
+            run: RunKind::Steps {
+                steps: &[CmdStep {
+                    program: "bcdedit",
+                    // One-time boot sequence: the memory test runs at the next
+                    // restart only, then the normal boot order resumes.
+                    args: &["/bootsequence", "{memdiag}"],
+                    ignore_failure: false,
+                    action_label: "Scheduled Windows Memory Diagnostic for the next restart",
+                }],
+                timeout_secs: 30,
+                success_msg: "Windows Memory Diagnostic will test your RAM at the next restart; \
+                              results appear after Windows starts.",
+            },
+        },
     ]
 }
 
@@ -888,10 +1004,22 @@ fn empty_recycle_bin(_cancel: &CancellationToken) -> anyhow::Result<FixResult> {
 }
 
 fn clear_temp_files(cancel: &CancellationToken) -> anyhow::Result<FixResult> {
-    let temp = std::env::temp_dir();
+    clear_directory(&std::env::temp_dir(), cancel)
+}
+
+fn clear_windows_temp(cancel: &CancellationToken) -> anyhow::Result<FixResult> {
+    clear_directory(&windows_temp_dir(), cancel)
+}
+
+/// Delete everything inside `temp` (never `temp` itself); items in use by
+/// running programs are expected and counted as skipped.
+fn clear_directory(
+    temp: &std::path::Path,
+    cancel: &CancellationToken,
+) -> anyhow::Result<FixResult> {
     let mut removed = 0u32;
     let mut skipped = 0u32;
-    let entries = std::fs::read_dir(&temp)
+    let entries = std::fs::read_dir(temp)
         .map_err(|error| anyhow::anyhow!("Could not read {}: {}", temp.display(), error))?;
     for entry in entries {
         if cancel.is_cancelled() {
@@ -1366,6 +1494,81 @@ mod tests {
         assert_eq!(steps[0].args, ["config", "wuauserv", "start=", "demand"]);
         assert_eq!(steps[1].args, ["start", "wuauserv"]);
         assert!(enable.cancellable());
+    }
+
+    /// 2.6: every built-in fix is the constant command the matching Windows
+    /// tool would run; nothing is composed at runtime.
+    #[test]
+    fn built_in_fixes_run_constant_commands() {
+        let steps_of = |id: &str| -> Vec<(String, Vec<String>, bool)> {
+            let spec = remediations()
+                .iter()
+                .find(|spec| spec.id == id)
+                .unwrap_or_else(|| panic!("{id} missing"));
+            let RunKind::Steps { steps, .. } = &spec.run else {
+                panic!("{id} must be Steps");
+            };
+            steps
+                .iter()
+                .map(|step| {
+                    (
+                        step.program.to_string(),
+                        step.args.iter().map(ToString::to_string).collect(),
+                        step.ignore_failure,
+                    )
+                })
+                .collect()
+        };
+        let step = |program: &str, args: &[&str], ignore: bool| {
+            (
+                program.to_string(),
+                args.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                ignore,
+            )
+        };
+        assert_eq!(
+            steps_of("optimize_drives"),
+            [step("defrag", &["/C", "/O"], false)]
+        );
+        assert_eq!(
+            steps_of("update_defender_signatures"),
+            [step("MpCmdRun.exe", &["-SignatureUpdate"], false)]
+        );
+        assert_eq!(
+            steps_of("defender_quick_scan"),
+            [step("MpCmdRun.exe", &["-Scan", "-ScanType", "1"], true)]
+        );
+        assert_eq!(
+            steps_of("enable_firewall"),
+            [step(
+                "netsh",
+                &["advfirewall", "set", "allprofiles", "state", "on"],
+                false
+            )]
+        );
+        assert_eq!(
+            steps_of("renew_ip_lease"),
+            [
+                step("ipconfig", &["/release"], true),
+                step("ipconfig", &["/renew"], false),
+                step("ipconfig", &["/flushdns"], true),
+            ]
+        );
+        assert_eq!(
+            steps_of("schedule_memory_diagnostic"),
+            [step("bcdedit", &["/bootsequence", "{memdiag}"], false)]
+        );
+        let custom = |id: &str| {
+            matches!(
+                remediations()
+                    .iter()
+                    .find(|spec| spec.id == id)
+                    .unwrap()
+                    .run,
+                RunKind::Custom { .. }
+            )
+        };
+        assert!(custom("clear_windows_temp"));
     }
 
     #[test]

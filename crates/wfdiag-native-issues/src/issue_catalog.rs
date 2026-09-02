@@ -146,10 +146,17 @@ pub fn catalog() -> &'static [IssueSpec] {
             title: "Low Disk Space",
             ok_title: "Disk Space",
             ok_description: "All disks have adequate free space (>10%).",
-            recommendation: "Free up disk space by deleting unnecessary files.",
+            recommendation: "Free up space: clear temporary files and empty the Recycle Bin first, then remove large downloads you no longer need.",
             source_tasks: &["logical_disk"],
-            remediation_id: Some("open_disk_cleanup"),
-            alternate_remediations: &[],
+            remediation_id: Some("clear_temp_files"),
+            alternate_remediations: &[
+                "empty_recycle_bin",
+                "windows_update_reset",
+                "clear_windows_temp",
+                "open_downloads_folder",
+                "open_storage_settings",
+                "open_disk_cleanup",
+            ],
             detect: det::detect_low_disk_space,
         },
         IssueSpec {
@@ -165,6 +172,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             alternate_remediations: &[
                 "open_downloads_folder",
                 "clear_temp_files",
+                "clear_windows_temp",
                 "empty_recycle_bin",
                 "windows_update_reset",
                 "open_disk_cleanup",
@@ -178,10 +186,10 @@ pub fn catalog() -> &'static [IssueSpec] {
             title: "High Disk Fragmentation",
             ok_title: "Disk Fragmentation",
             ok_description: "Disk fragmentation is within normal levels (<20%).",
-            recommendation: "Defragment your disk to improve performance.",
+            recommendation: "Optimize the drive. Windows normally does this weekly; running it now brings the schedule up to date.",
             source_tasks: &["disk_fragmentation"],
-            remediation_id: Some("open_defrag"),
-            alternate_remediations: &[],
+            remediation_id: Some("optimize_drives"),
+            alternate_remediations: &["open_defrag"],
             detect: det::detect_disk_fragmentation,
         },
         IssueSpec {
@@ -230,9 +238,9 @@ pub fn catalog() -> &'static [IssueSpec] {
             title: "High CPU Usage",
             ok_title: "CPU Usage",
             ok_description: "CPU usage is within normal range (<90%).",
-            recommendation: "Check Task Manager for resource-intensive processes.",
+            recommendation: "See which programs are using the processor on the Processes page and close the ones you do not need.",
             source_tasks: &["performance"],
-            remediation_id: Some("open_task_manager"),
+            remediation_id: None,
             alternate_remediations: &[],
             detect: det::detect_high_cpu_usage,
         },
@@ -243,9 +251,9 @@ pub fn catalog() -> &'static [IssueSpec] {
             title: "High Memory Usage",
             ok_title: "Memory Usage",
             ok_description: "Memory usage is within normal range (<90%).",
-            recommendation: "Close unnecessary programs to free memory.",
+            recommendation: "See which programs are using the most memory on the Processes page and close the ones you do not need.",
             source_tasks: &["performance"],
-            remediation_id: Some("open_task_manager"),
+            remediation_id: None,
             alternate_remediations: &[],
             detect: det::detect_high_memory_usage,
         },
@@ -276,6 +284,7 @@ pub fn catalog() -> &'static [IssueSpec] {
                 "dism_restorehealth",
                 "enable_windows_update_service",
                 "open_disk_cleanup",
+                "clear_temp_files",
                 "open_network_settings",
                 "restart_system",
             ],
@@ -301,10 +310,10 @@ pub fn catalog() -> &'static [IssueSpec] {
             title: "Firewall Disabled",
             ok_title: "Firewall Status",
             ok_description: "Firewall is enabled and protecting your system.",
-            recommendation: "Enable firewall for network protection.",
+            recommendation: "Turn the firewall on for every network profile.",
             source_tasks: &["firewall_status"],
-            remediation_id: Some("open_security_center"),
-            alternate_remediations: &[],
+            remediation_id: Some("enable_firewall"),
+            alternate_remediations: &["open_security_center"],
             detect: det::detect_firewall_disabled,
         },
         IssueSpec {
@@ -341,10 +350,10 @@ pub fn catalog() -> &'static [IssueSpec] {
             title: "No Internet Connection",
             ok_title: "Internet Connection",
             ok_description: "The connectivity test reached the internet.",
-            recommendation: "Check the cable or Wi-Fi, then restart the router. If the router answers but the internet does not, the problem is on the provider's side.",
+            recommendation: "Check the cable or Wi-Fi and renew the network address. If the router answers but the internet does not, the problem is on the provider's side.",
             source_tasks: &["network_path"],
-            remediation_id: Some("open_network_settings"),
-            alternate_remediations: &[],
+            remediation_id: Some("renew_ip_lease"),
+            alternate_remediations: &["open_network_settings", "network_reset"],
             detect: det::detect_no_internet,
         },
         IssueSpec {
@@ -354,10 +363,10 @@ pub fn catalog() -> &'static [IssueSpec] {
             title: "Router Not Reachable",
             ok_title: "Router Reachability",
             ok_description: "The default gateway answered, or the internet beyond it did.",
-            recommendation: "Reconnect to Wi-Fi or reseat the network cable, then restart the router. The 'Reset network stack' maintenance action is the next step if the adapter is the problem.",
+            recommendation: "Renew the network address, then reconnect to Wi-Fi or reseat the cable and restart the router. 'Reset network stack' is the next step if the adapter is the problem.",
             source_tasks: &["network_path"],
-            remediation_id: Some("open_network_settings"),
-            alternate_remediations: &[],
+            remediation_id: Some("renew_ip_lease"),
+            alternate_remediations: &["open_network_settings", "network_reset"],
             detect: det::detect_gateway_unreachable,
         },
         IssueSpec {
@@ -425,6 +434,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             alternate_remediations: &[
                 "open_device_manager",
                 "open_memory_diagnostic",
+                "schedule_memory_diagnostic",
                 "sfc_scannow",
             ],
             detect: det::detect_bsod_recent,
@@ -540,10 +550,10 @@ pub fn catalog() -> &'static [IssueSpec] {
             title: "Antivirus Definitions Are Out of Date",
             ok_title: "Antivirus Definitions",
             ok_description: "Microsoft Defender's security intelligence was updated within the last week.",
-            recommendation: "Open Windows Security > Virus & threat protection and check for protection updates; if that fails, run the Windows Update fix.",
+            recommendation: "Update Microsoft Defender's protection definitions; if that fails, run the Windows Update fix.",
             source_tasks: &["defender_health"],
-            remediation_id: Some("open_security_center"),
-            alternate_remediations: &[],
+            remediation_id: Some("update_defender_signatures"),
+            alternate_remediations: &["open_security_center", "windows_update_reset"],
             detect: det::detect_defender_definitions_stale,
         },
         IssueSpec {
@@ -553,10 +563,10 @@ pub fn catalog() -> &'static [IssueSpec] {
             title: "No Antivirus Scan This Month",
             ok_title: "Recent Antivirus Scan",
             ok_description: "Microsoft Defender ran a scan within the last 30 days.",
-            recommendation: "Run a quick scan from Windows Security; it takes a few minutes.",
+            recommendation: "Run a Microsoft Defender quick scan; it takes a few minutes.",
             source_tasks: &["defender_health"],
-            remediation_id: Some("open_security_center"),
-            alternate_remediations: &[],
+            remediation_id: Some("defender_quick_scan"),
+            alternate_remediations: &["open_security_center"],
             detect: det::detect_defender_quick_scan_overdue,
         },
         IssueSpec {
@@ -579,9 +589,9 @@ pub fn catalog() -> &'static [IssueSpec] {
             title: "Page File Nearly Full",
             ok_title: "Page File",
             ok_description: "Page file usage is within normal limits.",
-            recommendation: "Close memory-heavy programs or increase the page file size.",
+            recommendation: "Close memory-heavy programs (the Processes page shows them) or add memory.",
             source_tasks: &["performance"],
-            remediation_id: Some("open_task_manager"),
+            remediation_id: None,
             alternate_remediations: &[],
             detect: det::detect_page_file_pressure,
         },
@@ -1248,6 +1258,36 @@ mod tests {
             Some("open_disk_cleanup")
         );
         assert_eq!(chosen_remediation(&spec, None), Some("open_disk_cleanup"));
+    }
+
+    /// 2.6: a rule opens another program only where the fix genuinely needs
+    /// the user's judgement (which device, which update, which files). Every
+    /// other rule with a remediation runs a built-in fix, and CPU/memory
+    /// rules point at this app's own Processes page.
+    #[test]
+    fn tool_handoffs_are_defaults_only_where_no_safe_built_in_fix_exists() {
+        const HANDOFF_DEFAULTS: [&str; 6] = [
+            "space_consumers",
+            "pending_windows_updates",
+            "device_manager_errors",
+            "defender_disabled",
+            "realtime_protection_off",
+            "startup_bloat",
+        ];
+        for spec in catalog() {
+            let Some(remediation_id) = spec.remediation_id else {
+                continue;
+            };
+            let tier = wfdiag_remediation_catalog::find(remediation_id)
+                .unwrap_or_else(|| panic!("{}: unknown remediation", spec.id))
+                .tier;
+            assert_eq!(
+                tier == wfdiag_remediation_catalog::RemediationTier::OpenTool,
+                HANDOFF_DEFAULTS.contains(&spec.id),
+                "{}: default '{remediation_id}' has tier {tier:?}",
+                spec.id
+            );
+        }
     }
 
     #[test]

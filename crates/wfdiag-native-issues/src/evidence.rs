@@ -74,7 +74,7 @@ pub mod windows_update {
                 Self::CacheCorruption | Self::Permissions | Self::Unknown => "windows_update_reset",
                 Self::ComponentStore => "dism_restorehealth",
                 Self::ServiceDisabled => "enable_windows_update_service",
-                Self::DiskFull => "open_disk_cleanup",
+                Self::DiskFull => "clear_temp_files",
                 Self::Network => "open_network_settings",
                 Self::RestartRequired => "restart_system",
             }

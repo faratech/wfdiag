@@ -80,7 +80,7 @@ pub struct RemediationSummary {
     pub cancellable: bool,
 }
 
-pub const REMEDIATION_COUNT: usize = 22;
+pub const REMEDIATION_COUNT: usize = 29;
 
 /// The single canonical metadata catalog, in the shipping display order.
 pub static REMEDIATIONS: [RemediationMetadata; REMEDIATION_COUNT] = [
@@ -327,6 +327,85 @@ pub static REMEDIATIONS: [RemediationMetadata; REMEDIATION_COUNT] = [
         maintenance: false,
         cancellable: true,
     },
+    // ---- 2.6: built-in fixes that replace the matching tool handoffs as
+    // rule defaults (the handoffs stay as alternates). ----
+    RemediationMetadata {
+        id: "optimize_drives",
+        label: "Optimize drives",
+        description: "Runs 'defrag /C /O' to defragment hard drives and trim SSDs, the same weekly optimization Windows schedules.",
+        tier: RemediationTier::Repair,
+        admin_required: true,
+        requires_restart: false,
+        long_running: true,
+        maintenance: true,
+        cancellable: false,
+    },
+    RemediationMetadata {
+        id: "clear_windows_temp",
+        label: "Clear Windows temp folder",
+        description: "Permanently deletes files and folders in the Windows temp directory (needs administrator); locked items are skipped.",
+        tier: RemediationTier::Repair,
+        admin_required: true,
+        requires_restart: false,
+        long_running: false,
+        maintenance: true,
+        cancellable: true,
+    },
+    RemediationMetadata {
+        id: "update_defender_signatures",
+        label: "Update Defender definitions",
+        description: "Runs 'MpCmdRun -SignatureUpdate' so Microsoft Defender downloads its latest protection definitions.",
+        tier: RemediationTier::AutoSafe,
+        admin_required: false,
+        requires_restart: false,
+        long_running: false,
+        maintenance: false,
+        cancellable: true,
+    },
+    RemediationMetadata {
+        id: "defender_quick_scan",
+        label: "Run Defender quick scan",
+        description: "Runs 'MpCmdRun -Scan -ScanType 1', a Microsoft Defender quick scan of the places malware usually hides. Takes a few minutes.",
+        tier: RemediationTier::AutoSafe,
+        admin_required: false,
+        requires_restart: false,
+        long_running: true,
+        maintenance: true,
+        cancellable: false,
+    },
+    RemediationMetadata {
+        id: "enable_firewall",
+        label: "Turn on Windows Firewall",
+        description: "Runs 'netsh advfirewall set allprofiles state on' so the firewall protects every network profile.",
+        tier: RemediationTier::AutoSafe,
+        admin_required: true,
+        requires_restart: false,
+        long_running: false,
+        maintenance: false,
+        cancellable: true,
+    },
+    RemediationMetadata {
+        id: "renew_ip_lease",
+        label: "Renew network address",
+        description: "Runs 'ipconfig /release', 'ipconfig /renew' and 'ipconfig /flushdns' to get a fresh address from the router. The connection drops for a few seconds.",
+        tier: RemediationTier::Repair,
+        admin_required: true,
+        requires_restart: false,
+        long_running: false,
+        maintenance: false,
+        cancellable: false,
+    },
+    RemediationMetadata {
+        id: "schedule_memory_diagnostic",
+        label: "Test memory at next restart",
+        description: "Runs 'bcdedit /bootsequence {memdiag}' so Windows Memory Diagnostic tests your RAM once at the next restart, then Windows starts normally.",
+        tier: RemediationTier::Repair,
+        admin_required: true,
+        requires_restart: true,
+        long_running: false,
+        maintenance: false,
+        cancellable: true,
+    },
 ];
 
 pub const OPEN_DEFRAG: &RemediationMetadata = &REMEDIATIONS[0];
@@ -351,6 +430,13 @@ pub const OPEN_STORAGE_SETTINGS: &RemediationMetadata = &REMEDIATIONS[18];
 pub const OPEN_NETWORK_SETTINGS: &RemediationMetadata = &REMEDIATIONS[19];
 pub const OPEN_MEMORY_DIAGNOSTIC: &RemediationMetadata = &REMEDIATIONS[20];
 pub const ENABLE_WINDOWS_UPDATE_SERVICE: &RemediationMetadata = &REMEDIATIONS[21];
+pub const OPTIMIZE_DRIVES: &RemediationMetadata = &REMEDIATIONS[22];
+pub const CLEAR_WINDOWS_TEMP: &RemediationMetadata = &REMEDIATIONS[23];
+pub const UPDATE_DEFENDER_SIGNATURES: &RemediationMetadata = &REMEDIATIONS[24];
+pub const DEFENDER_QUICK_SCAN: &RemediationMetadata = &REMEDIATIONS[25];
+pub const ENABLE_FIREWALL: &RemediationMetadata = &REMEDIATIONS[26];
+pub const RENEW_IP_LEASE: &RemediationMetadata = &REMEDIATIONS[27];
+pub const SCHEDULE_MEMORY_DIAGNOSTIC: &RemediationMetadata = &REMEDIATIONS[28];
 
 #[must_use]
 pub fn catalog() -> &'static [RemediationMetadata] {
@@ -423,6 +509,13 @@ mod tests {
                 ENABLE_WINDOWS_UPDATE_SERVICE,
                 "enable_windows_update_service",
             ),
+            (OPTIMIZE_DRIVES, "optimize_drives"),
+            (CLEAR_WINDOWS_TEMP, "clear_windows_temp"),
+            (UPDATE_DEFENDER_SIGNATURES, "update_defender_signatures"),
+            (DEFENDER_QUICK_SCAN, "defender_quick_scan"),
+            (ENABLE_FIREWALL, "enable_firewall"),
+            (RENEW_IP_LEASE, "renew_ip_lease"),
+            (SCHEDULE_MEMORY_DIAGNOSTIC, "schedule_memory_diagnostic"),
         ];
 
         assert_eq!(aliases.len(), REMEDIATION_COUNT);
@@ -460,7 +553,14 @@ mod tests {
                 {"id":"open_storage_settings","label":"Open Storage settings","description":"Opens Settings > System > Storage (ms-settings:storagesense) to see what is using space and remove Windows.old, temporary files and unused apps.","tier":"open_tool","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
                 {"id":"open_network_settings","label":"Open Network settings","description":"Opens Settings > Network & internet (ms-settings:network-status) to check the connection and run the Windows network troubleshooter.","tier":"open_tool","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
                 {"id":"open_memory_diagnostic","label":"Run Windows Memory Diagnostic","description":"Opens Windows Memory Diagnostic (mdsched.exe), which tests your RAM during the next restart.","tier":"open_tool","admin_required":true,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
-                {"id":"enable_windows_update_service","label":"Enable Windows Update service","description":"Runs 'sc config wuauserv start= demand' and 'sc start wuauserv' so Windows Update can run again.","tier":"auto_safe","admin_required":true,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":true}
+                {"id":"enable_windows_update_service","label":"Enable Windows Update service","description":"Runs 'sc config wuauserv start= demand' and 'sc start wuauserv' so Windows Update can run again.","tier":"auto_safe","admin_required":true,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":true},
+                {"id":"optimize_drives","label":"Optimize drives","description":"Runs 'defrag /C /O' to defragment hard drives and trim SSDs, the same weekly optimization Windows schedules.","tier":"repair","admin_required":true,"requires_restart":false,"long_running":true,"maintenance":true,"batch_eligible":false,"cancellable":false},
+                {"id":"clear_windows_temp","label":"Clear Windows temp folder","description":"Permanently deletes files and folders in the Windows temp directory (needs administrator); locked items are skipped.","tier":"repair","admin_required":true,"requires_restart":false,"long_running":false,"maintenance":true,"batch_eligible":false,"cancellable":true},
+                {"id":"update_defender_signatures","label":"Update Defender definitions","description":"Runs 'MpCmdRun -SignatureUpdate' so Microsoft Defender downloads its latest protection definitions.","tier":"auto_safe","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":true,"cancellable":true},
+                {"id":"defender_quick_scan","label":"Run Defender quick scan","description":"Runs 'MpCmdRun -Scan -ScanType 1', a Microsoft Defender quick scan of the places malware usually hides. Takes a few minutes.","tier":"auto_safe","admin_required":false,"requires_restart":false,"long_running":true,"maintenance":true,"batch_eligible":false,"cancellable":false},
+                {"id":"enable_firewall","label":"Turn on Windows Firewall","description":"Runs 'netsh advfirewall set allprofiles state on' so the firewall protects every network profile.","tier":"auto_safe","admin_required":true,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":true},
+                {"id":"renew_ip_lease","label":"Renew network address","description":"Runs 'ipconfig /release', 'ipconfig /renew' and 'ipconfig /flushdns' to get a fresh address from the router. The connection drops for a few seconds.","tier":"repair","admin_required":true,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
+                {"id":"schedule_memory_diagnostic","label":"Test memory at next restart","description":"Runs 'bcdedit /bootsequence {memdiag}' so Windows Memory Diagnostic tests your RAM once at the next restart, then Windows starts normally.","tier":"repair","admin_required":true,"requires_restart":true,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":true}
             ])
         );
     }

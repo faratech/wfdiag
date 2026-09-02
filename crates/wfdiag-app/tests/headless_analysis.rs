@@ -139,9 +139,9 @@ fn a_validated_fix_plan_names_only_catalog_ids_and_stages_through_the_broker() {
     harness.mocks.ai.fix_plan.script(ValidatedFixPlan {
         entries: vec![FixPlanEntry {
             issue_id: "low_disk_space".to_string(),
-            remediation_id: "open_disk_cleanup".to_string(),
+            remediation_id: "clear_temp_files".to_string(),
             rationale: "C: is under 10% free".to_string(),
-            tier: RemediationTier::OpenTool,
+            tier: RemediationTier::Repair,
         }],
         notes: "One safe action.".to_string(),
         provider_use: ProviderUse::for_provider(AIProvider::Ollama, None),
@@ -194,7 +194,7 @@ fn a_validated_fix_plan_names_only_catalog_ids_and_stages_through_the_broker() {
         })
         .expect("the broker staged the plan's action");
     assert_eq!(proposal.actions.len(), 1);
-    assert_eq!(proposal.actions[0].remediation.id, "open_disk_cleanup");
+    assert_eq!(proposal.actions[0].remediation.id, "clear_temp_files");
     assert_eq!(
         proposal.actions[0].issue_id.as_deref(),
         Some("low_disk_space")

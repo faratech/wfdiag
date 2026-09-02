@@ -658,6 +658,9 @@ mod tests {
                 "dism_restorehealth",
                 "sfc_scannow",
                 "network_reset",
+                "optimize_drives",
+                "clear_windows_temp",
+                "defender_quick_scan",
             ]
         );
         assert!(

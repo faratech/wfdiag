@@ -358,7 +358,7 @@ mod tests {
         assert_eq!(low_disk.status, IssueStatus::Detected);
         assert_eq!(
             low_disk.remediation.as_ref().map(|value| value.id.as_str()),
-            Some("open_disk_cleanup")
+            Some("clear_temp_files")
         );
         runtime.shutdown(Duration::from_secs(2)).unwrap();
     }
@@ -397,20 +397,20 @@ mod tests {
                 "status": "detected",
                 "title": "Low Disk Space",
                 "description": "The disk 'C:' is running low on space (5.00% free).",
-                "recommendation": "Free up disk space by deleting unnecessary files.",
+                "recommendation": "Free up space: clear temporary files and empty the Recycle Bin first, then remove large downloads you no longer need.",
                 "detected": true,
                 "source_tasks": ["logical_disk"],
                 "remediation": {
-                    "id": "open_disk_cleanup",
-                    "label": "Open Disk Cleanup",
-                    "description": "Opens Windows Disk Cleanup (cleanmgr.exe) to pick what to remove.",
-                    "tier": "open_tool",
+                    "id": "clear_temp_files",
+                    "label": "Clean temp files",
+                    "description": "Permanently deletes files and folders in the user temp directory; locked items are skipped.",
+                    "tier": "repair",
                     "admin_required": false,
                     "requires_restart": false,
                     "long_running": false,
-                    "maintenance": false,
+                    "maintenance": true,
                     "batch_eligible": false,
-                    "cancellable": false
+                    "cancellable": true
                 }
             })
         );

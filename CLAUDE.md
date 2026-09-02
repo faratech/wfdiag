@@ -41,7 +41,7 @@ with `[lints] workspace = true`, release/dev profiles at the root, one `Cargo.lo
 | Crate | Responsibility | Portable |
 | --- | --- | --- |
 | `wfdiag-native-core` | error type, timestamps, atomic file writes, trusted-program command executor (`src/security.rs`), native WMI wrapper | yes |
-| `wfdiag-remediation-catalog` | read-only remediation metadata (`REMEDIATION_COUNT = 22`, tiers `OpenTool`/`AutoSafe`/`Repair`, 8 `maintenance` entries) | yes |
+| `wfdiag-remediation-catalog` | read-only remediation metadata (`REMEDIATION_COUNT = 29`, tiers `OpenTool`/`AutoSafe`/`Repair`, 11 `maintenance` entries) | yes |
 | `wfdiag-native-issues` | issue catalog (37 `IssueSpec`s), pure detectors, UI projection, fix-plan validation, worker runtime | yes |
 | `wfdiag-native-remediation` | remediation engine + `broker::ActionBroker` — the **only** execution path | yes |
 | `wfdiag-native-diagnostics` | task catalog (49 tasks), Windows collectors, scan orchestration runtime | yes |
