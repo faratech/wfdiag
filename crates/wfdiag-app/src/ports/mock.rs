@@ -14,6 +14,7 @@ use wfdiag_native_ai_provider::{
     AIProviderPreference, ANTHROPIC_DEFAULT_MODEL, BackendFuture, DEEPSEEK_DEFAULT_MODEL,
     FOUNDRY_DEFAULT_MODEL, GEMINI_DEFAULT_MODEL, OPENAI_DEFAULT_MODEL, ProviderManagementBackend,
     ProviderModelDefaults, ProviderProbeSnapshot, ProviderSettingsSnapshot, ProviderStatusInput,
+    SubscriptionProbes,
 };
 use wfdiag_native_diagnostics::{
     DiagnosticExecutor, DiagnosticFuture, DiagnosticOutput, DiagnosticTask,
@@ -509,6 +510,16 @@ impl ProviderManagementBackend for MockProviderBackend {
 
     fn list_ollama_models(&self) -> BackendFuture<'_, Result<Vec<String>, String>> {
         Box::pin(async move { lock(&self.ollama_models).clone() })
+    }
+
+    fn subscription_probes(&self) -> BackendFuture<'_, SubscriptionProbes> {
+        Box::pin(async move {
+            let probes = lock(&self.probes).clone();
+            SubscriptionProbes {
+                codex: probes.codex,
+                claude: probes.claude,
+            }
+        })
     }
 }
 

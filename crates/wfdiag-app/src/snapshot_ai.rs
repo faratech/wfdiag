@@ -7,6 +7,7 @@
 
 use crate::domain::ai_intent::PendingAiIntent;
 use crate::domain::catalog::CatalogState;
+use crate::domain::subscriptions::SignInRequirement;
 use crate::domain::subscriptions::{AccountState, InstallPrompt};
 use std::collections::BTreeMap;
 use wfdiag_native_ai_analysis::{GroundingTrace, ValidatedFixPlan};
@@ -179,4 +180,7 @@ pub struct ProviderSetupSnapshot {
     pub install_progress: Option<SubscriptionInstallProgress>,
     /// The last installation failure.
     pub install_error: Option<String>,
+    /// An installed subscription CLI that is the one thing between the user
+    /// and a usable assistant (see `SubscriptionEvent::SignInRequired`).
+    pub sign_in_required: Option<SignInRequirement>,
 }

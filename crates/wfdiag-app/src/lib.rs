@@ -68,6 +68,7 @@ pub use command::{
 };
 pub use config::AppConfig;
 pub use domain::scan::running_label;
+pub use domain::subscriptions::{SignInRequiredReason, SignInRequirement};
 pub use event::{
     ActionEvent, AnalysisEvent, AppEvent, AppEventReceiver, ChatEvent, ExportEvent, FixPlanEvent,
     HistoryEvent, HistoryRequest, IssuesEvent, ModelCatalogEvent, MonitorEvent,
@@ -85,6 +86,7 @@ pub use snapshot_ai::{
     FixPlanSnapshot, FullScanRequest, PrioritizationSnapshot, ProviderSetupSnapshot,
     ReportSnapshot, StagedProposalRequest,
 };
+pub use wfdiag_native_ai_chat::CliObstacle;
 /// The host wake callback. This is `ui-core`'s handler, not a mirror of it, so
 /// one callback serves the event buses and this facade alike.
 pub use wfdiag_ui_core::UiWakeHandler;

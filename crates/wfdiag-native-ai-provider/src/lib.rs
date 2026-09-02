@@ -628,8 +628,22 @@ pub type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Implementations may perform network, CLI, secure-storage, or `WinRT` work.
 /// They always execute on [`NativeAiProviderRuntime`]'s worker, never on the
 /// caller's UI thread.
+/// The two subscription CLIs' probe results on their own: the cheap check a
+/// host runs at startup without probing every provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubscriptionProbes {
+    pub codex: CliProbeSnapshot,
+    pub claude: CliProbeSnapshot,
+}
+
 pub trait ProviderManagementBackend: Send + Sync + 'static {
     fn status_input(&self) -> BackendFuture<'_, ProviderStatusInput>;
+    /// Probe only the subscription CLIs (a file check, and the vendor status
+    /// command only when a login cache exists). Backends without CLI probes
+    /// report both as absent.
+    fn subscription_probes(&self) -> BackendFuture<'_, SubscriptionProbes> {
+        Box::pin(async { SubscriptionProbes::default() })
+    }
     fn has_package_identity(&self) -> bool;
     fn set_preference(&self, preference: AIProviderPreference);
     fn clear_cache(&self, session_id: Option<&str>);
@@ -639,6 +653,9 @@ pub trait ProviderManagementBackend: Send + Sync + 'static {
 enum ProviderCommand {
     GetStatus {
         reply: oneshot::Sender<AIProviderStatus>,
+    },
+    ProbeSubscriptions {
+        reply: oneshot::Sender<SubscriptionProbes>,
     },
     SetPreference {
         preference: String,
@@ -659,6 +676,7 @@ enum ProviderCommand {
 }
 
 pub type ProviderStatusReply = oneshot::Receiver<AIProviderStatus>;
+pub type SubscriptionProbesReply = oneshot::Receiver<SubscriptionProbes>;
 pub type ProviderMutationReply = oneshot::Receiver<Result<(), String>>;
 pub type ProviderPreferenceStatusReply = oneshot::Receiver<Result<AIProviderStatus, String>>;
 pub type ProviderCacheReply = oneshot::Receiver<()>;
@@ -726,6 +744,18 @@ impl NativeAiProviderRuntime {
                                 let _ = reply.send(project_provider_status(input));
                             }
                         }
+                        ProviderCommand::ProbeSubscriptions { mut reply } => {
+                            let probes = runtime.block_on(async {
+                                tokio::select! {
+                                    biased;
+                                    () = reply.closed() => None,
+                                    probes = backend.subscription_probes() => Some(probes),
+                                }
+                            });
+                            if let Some(probes) = probes {
+                                let _ = reply.send(probes);
+                            }
+                        }
                         ProviderCommand::SetPreference { preference, reply } => {
                             let result = parse_and_validate_provider_preference(
                                 &preference,
@@ -784,6 +814,20 @@ impl NativeAiProviderRuntime {
         let (reply, receiver) = oneshot::channel();
         self.commands
             .send(ProviderCommand::GetStatus { reply })
+            .map_err(|_| ProviderRuntimeError::WorkerStopped)?;
+        Ok(receiver)
+    }
+
+    /// Probe only the two subscription CLIs.
+    ///
+    /// # Errors
+    /// The worker thread has stopped.
+    pub fn request_subscription_probes(
+        &self,
+    ) -> Result<SubscriptionProbesReply, ProviderRuntimeError> {
+        let (reply, receiver) = oneshot::channel();
+        self.commands
+            .send(ProviderCommand::ProbeSubscriptions { reply })
             .map_err(|_| ProviderRuntimeError::WorkerStopped)?;
         Ok(receiver)
     }

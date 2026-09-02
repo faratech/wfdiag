@@ -1,7 +1,7 @@
 use crate::{
     AIProviderPreference, BackendFuture, CliProbeSnapshot, ProviderManagementBackend,
     ProviderModelDefaults, ProviderProbeSnapshot, ProviderSettingsSnapshot, ProviderStatusInput,
-    parse_and_validate_provider_preference, provider_preference_for_runtime,
+    SubscriptionProbes, parse_and_validate_provider_preference, provider_preference_for_runtime,
 };
 use crate::{ProviderCacheControl, ReqwestOllamaSource, TcpCustomEndpointSource};
 use std::fmt;
@@ -296,6 +296,25 @@ impl ProviderManagementService {
 }
 
 impl ProviderManagementBackend for ProviderManagementService {
+    fn subscription_probes(&self) -> BackendFuture<'_, SubscriptionProbes> {
+        Box::pin(async move {
+            let configuration_source = std::sync::Arc::clone(&self.probes.configuration);
+            let configuration =
+                tokio::task::spawn_blocking(move || configuration_source.snapshot())
+                    .await
+                    .unwrap_or_default();
+            let (codex, claude) = tokio::join!(
+                self.probes
+                    .cli
+                    .probe(SubscriptionCli::Codex, configuration.codex_cli_path),
+                self.probes
+                    .cli
+                    .probe(SubscriptionCli::ClaudeCode, configuration.claude_cli_path),
+            );
+            SubscriptionProbes { codex, claude }
+        })
+    }
+
     fn status_input(&self) -> BackendFuture<'_, ProviderStatusInput> {
         Box::pin(async move {
             // The settings read plus the per-provider DPAPI key checks are

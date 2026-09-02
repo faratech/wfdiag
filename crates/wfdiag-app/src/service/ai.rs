@@ -16,7 +16,8 @@
 //! * **Every staleness comparison happens here**, against the newtypes in
 //!   [`crate::ids`], never in a host.
 
-use super::{AppService, Internal};
+use super::{AppService, Internal, failure_text};
+use crate::WorkerKind;
 use crate::command::{DispatchOutcome, RejectReason, SubscriptionOperation};
 use crate::domain::actions::{
     PendingVerification, ReviewSurface, StagedReview, admin_blocked, build_snapshot,
@@ -37,6 +38,9 @@ use crate::domain::providers::PendingAiProviderGate;
 use crate::domain::subscriptions::{
     AuthAdmission, InstallAdmission, InstallPrompt, admit_auth, admit_install,
     completion_refreshes_models, progress_label, verified_install_path,
+};
+use crate::domain::subscriptions::{
+    SignInRequirement, account_from_row, account_projection_allowed, sign_in_requirement,
 };
 use crate::event::SafeFixOrigin;
 use crate::event::{
@@ -60,6 +64,8 @@ use wfdiag_native_ai_chat::workers::subscription_install::SubscriptionInstallWor
 use wfdiag_native_ai_chat::{
     ChatWorkerEvent, SubscriptionAuthOperation, SubscriptionAuthProvider, SubscriptionInstallMethod,
 };
+use wfdiag_native_ai_chat::{SubscriptionAuthState, auth_status_from_probe};
+use wfdiag_native_ai_provider::SubscriptionProbes;
 use wfdiag_native_ai_provider::{
     AIProvider, AIProviderPreference, AIProviderStatus, ModelCatalogRequest,
     parse_provider_preference,
@@ -399,6 +405,143 @@ impl AppService {
         DispatchOutcome::accepted()
     }
 
+    /// Why no provider is ready, as the user should hear it: a sign-in
+    /// requirement names the CLI and the way out; otherwise the generic
+    /// "set up a provider". Pure; see `provider_not_ready` for the event.
+    fn provider_not_ready_reason(&self, verb: &str) -> RejectReason {
+        let preference = parse_provider_preference(&self.snapshot.settings.preferred_ai_provider);
+        let requirement = self
+            .snapshot
+            .provider_status
+            .as_ref()
+            .and_then(|status| sign_in_requirement(preference, status));
+        RejectReason::NotReady {
+            detail: requirement.map_or_else(
+                || format!("Set up an available AI provider before {verb}"),
+                |requirement| requirement.refusal(verb),
+            ),
+        }
+    }
+
+    /// As `provider_not_ready_reason`, and a user action always deserves the
+    /// typed prompt: the requirement is raised even if it was raised before.
+    pub(super) fn provider_not_ready(&mut self, verb: &str) -> RejectReason {
+        let preference = parse_provider_preference(&self.snapshot.settings.preferred_ai_provider);
+        if let Some(requirement) = self
+            .snapshot
+            .provider_status
+            .as_ref()
+            .and_then(|status| sign_in_requirement(preference, status))
+        {
+            self.raise_sign_in_required(requirement);
+        }
+        self.provider_not_ready_reason(verb)
+    }
+
+    fn raise_sign_in_required(&mut self, requirement: SignInRequirement) {
+        self.last_sign_in_requirement = Some(requirement);
+        self.queue
+            .push(AppEvent::Provider(ProviderEvent::Subscription(Box::new(
+                SubscriptionEvent::SignInRequired {
+                    provider: requirement.provider,
+                    obstacle: requirement.obstacle,
+                    reason: requirement.reason,
+                },
+            ))));
+    }
+
+    /// Read both subscription CLIs' accounts off a fresh provider status, so
+    /// Settings never says "Not checked", and announce a changed sign-in
+    /// requirement.
+    pub(super) fn project_subscription_accounts(
+        &mut self,
+        status: &AIProviderStatus,
+        preference: AIProviderPreference,
+    ) {
+        for row in &status.providers {
+            let Some(account_status) = account_from_row(row) else {
+                continue;
+            };
+            let account = self
+                .snapshot
+                .provider_setup
+                .accounts
+                .entry(subscription_key(account_status.provider))
+                .or_default();
+            if !account_projection_allowed(account) {
+                continue;
+            }
+            if account_status.signed_in() {
+                account.error = None;
+            }
+            account.status = Some(account_status);
+        }
+        let requirement = sign_in_requirement(preference, status);
+        self.snapshot.provider_setup.sign_in_required = requirement;
+        if requirement != self.last_sign_in_requirement {
+            self.last_sign_in_requirement = requirement;
+            if let Some(requirement) = requirement {
+                self.raise_sign_in_required(requirement);
+            }
+        }
+    }
+
+    /// The cheap startup check: probe only the two CLIs.
+    pub(super) fn request_subscription_accounts(&mut self) -> DispatchOutcome {
+        let Some(runtime) = self.workers.provider.as_ref() else {
+            return DispatchOutcome::Rejected(self.provider_unavailable());
+        };
+        if self.subscription_accounts_request.is_some() {
+            return DispatchOutcome::Ignored {
+                detail: "a subscription account check is already running",
+            };
+        }
+        match runtime.request_subscription_probes() {
+            Ok(reply) => {
+                let Some(request) = self.requests.issue() else {
+                    return DispatchOutcome::Rejected(RejectReason::IdentityExhausted);
+                };
+                self.subscription_accounts_request = Some(request);
+                self.replies
+                    .register(WorkerKind::Provider, request, reply, move |result| {
+                        Internal::SubscriptionAccounts {
+                            request,
+                            probes: result.map_err(failure_text),
+                        }
+                    });
+                DispatchOutcome::accepted_request(request)
+            }
+            Err(error) => DispatchOutcome::Rejected(RejectReason::WorkerUnavailable {
+                worker: WorkerKind::Provider,
+                detail: error.to_string(),
+            }),
+        }
+    }
+
+    /// The CLI-only probe answered: fill the account rows (never over an
+    /// operation in flight).
+    pub(super) fn apply_subscription_probes(&mut self, probes: &SubscriptionProbes) {
+        for (provider, snapshot) in [
+            (SubscriptionAuthProvider::Codex, &probes.codex),
+            (SubscriptionAuthProvider::ClaudeCode, &probes.claude),
+        ] {
+            let account = self
+                .snapshot
+                .provider_setup
+                .accounts
+                .entry(subscription_key(provider))
+                .or_default();
+            if !account_projection_allowed(account) {
+                continue;
+            }
+            let status = auth_status_from_probe(provider, snapshot);
+            if status.signed_in() {
+                account.error = None;
+            }
+            account.status = Some(status);
+        }
+    }
+
     fn provider_status(&self) -> Option<&AIProviderStatus> {
         self.snapshot
             .provider_status
@@ -454,9 +597,8 @@ impl AppService {
                 });
             }
             PendingAiProviderGate::Unavailable => {
-                return DispatchOutcome::Rejected(RejectReason::NotReady {
-                    detail: "Set up an available AI provider before sending".to_string(),
-                });
+                let reason = self.provider_not_ready("sending");
+                return DispatchOutcome::Rejected(reason);
             }
         }
         // A question about *this* PC needs evidence. A general Windows
@@ -483,9 +625,8 @@ impl AppService {
 
     fn begin_chat_turn(&mut self, prompt: String) -> DispatchOutcome {
         let Some(status) = self.provider_status().cloned() else {
-            return DispatchOutcome::Rejected(RejectReason::NotReady {
-                detail: "Set up an available AI provider before sending".to_string(),
-            });
+            let reason = self.provider_not_ready("sending");
+            return DispatchOutcome::Rejected(reason);
         };
         let preference = parse_provider_preference(&self.snapshot.settings.preferred_ai_provider);
         let Some(turn) = self.chat_turns.issue() else {
@@ -494,9 +635,8 @@ impl AppService {
         let Some(attempt) =
             ChatAttempt::plan(turn.get(), prompt, preference, status.availability())
         else {
-            return DispatchOutcome::Rejected(RejectReason::NotReady {
-                detail: "Set up an available AI provider before sending".to_string(),
-            });
+            let reason = self.provider_not_ready("sending");
+            return DispatchOutcome::Rejected(reason);
         };
         self.chat_turn = Some(turn);
         self.snapshot.ai.chat = crate::snapshot_ai::ChatSnapshot::default();
@@ -813,9 +953,8 @@ impl AppService {
                 });
             }
             PendingAiProviderGate::Unavailable => {
-                return DispatchOutcome::Rejected(RejectReason::NotReady {
-                    detail: "Set up an available AI provider before generating".to_string(),
-                });
+                let reason = self.provider_not_ready("generating");
+                return DispatchOutcome::Rejected(reason);
             }
         }
         if self.scan.snapshot().results.is_empty() {
@@ -855,9 +994,8 @@ impl AppService {
 
     fn begin_report(&mut self, force_refresh: bool) -> DispatchOutcome {
         let Some(status) = self.provider_status().cloned() else {
-            return DispatchOutcome::Rejected(RejectReason::NotReady {
-                detail: "Set up an available AI provider before generating".to_string(),
-            });
+            let reason = self.provider_not_ready("generating");
+            return DispatchOutcome::Rejected(reason);
         };
         let Some(session_id) = self.scan.snapshot().effective_session_id() else {
             return DispatchOutcome::Rejected(RejectReason::NotReady {
@@ -981,9 +1119,9 @@ impl AppService {
     // ---- analysis, prioritisation, fix plan ------------------------------
 
     fn analysis_route(&self) -> Result<AnalysisRoute, RejectReason> {
-        let status = self.provider_status().ok_or(RejectReason::NotReady {
-            detail: "Set up an available AI provider before interpreting".to_string(),
-        })?;
+        let status = self
+            .provider_status()
+            .ok_or_else(|| self.provider_not_ready_reason("interpreting"))?;
         let preference = parse_provider_preference(&self.snapshot.settings.preferred_ai_provider);
         let provider = self.effective_ai_provider(status);
         Ok(AnalysisRoute {
@@ -1169,17 +1307,15 @@ impl AppService {
             };
         }
         let Some(status) = self.provider_status().cloned() else {
-            return DispatchOutcome::Rejected(RejectReason::NotReady {
-                detail: "Set up an available AI provider before proposing a fix plan".to_string(),
-            });
+            let reason = self.provider_not_ready("proposing a fix plan");
+            return DispatchOutcome::Rejected(reason);
         };
         let preference = parse_provider_preference(&self.snapshot.settings.preferred_ai_provider);
         let route: FixPlanRoute =
             initial_fix_plan_route(preference, status.active_provider, status.availability());
         if route.provider == AIProvider::None || !route.availability.contains(route.provider) {
-            return DispatchOutcome::Rejected(RejectReason::NotReady {
-                detail: "Set up an available AI provider before proposing a fix plan".to_string(),
-            });
+            let reason = self.provider_not_ready("proposing a fix plan");
+            return DispatchOutcome::Rejected(reason);
         }
         let snapshot = self.action_snapshot();
         let Some(runtime) = self.workers.fix_plan.as_ref() else {
@@ -2984,12 +3120,22 @@ impl AppService {
                 if verified_install_path(&status.path) {
                     self.record_account(status.provider, Some(status.auth_status()), None);
                     self.snapshot.provider_setup.install_error = None;
+                    let provider = status.provider;
+                    let signed_in = status.state == SubscriptionAuthState::SignedIn;
                     self.queue
                         .push(AppEvent::Provider(ProviderEvent::Subscription(Box::new(
                             SubscriptionEvent::Installed {
                                 status: Box::new(status),
                             },
                         ))));
+                    if !signed_in {
+                        // Installation never signs in; the next step is
+                        // offered, in front of the user, right away.
+                        self.queue
+                            .push(AppEvent::Provider(ProviderEvent::Subscription(Box::new(
+                                SubscriptionEvent::SignInOffered { provider },
+                            ))));
+                    }
                     let _ = self.request_provider_status();
                 } else {
                     let error =

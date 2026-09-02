@@ -369,6 +369,10 @@ pub enum AppCommand {
     },
     /// Cancel subscription authentication.
     CancelSubscriptionAuth,
+    /// Check both subscription CLIs' accounts without probing every provider:
+    /// a credential-cache look, and the vendor status command only when a
+    /// cache exists. Fills the Settings account rows at startup.
+    RequestSubscriptionAccounts,
     /// Ask to install a subscription CLI. This only raises the confirmation:
     /// nothing is installed until [`AppCommand::ConfirmSubscriptionInstall`].
     InstallSubscriptionCli {

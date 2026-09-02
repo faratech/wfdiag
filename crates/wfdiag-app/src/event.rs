@@ -6,6 +6,7 @@
 //! that stream — it registers the wake callback and reports termination.
 
 use crate::command::WorkerKind;
+use crate::domain::subscriptions::SignInRequiredReason;
 use crate::ids::RequestId;
 use crate::ports::monitor::ProcessDetail;
 use crate::ports::monitor::{NetworkConnection, ProcessPage};
@@ -14,6 +15,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use wfdiag_native_ai_analysis::ValidatedFixPlan;
+use wfdiag_native_ai_chat::CliObstacle;
 use wfdiag_native_ai_chat::{
     ChatToolActivity, ChatToolHistory, ProviderUse, SubscriptionAuthOperation,
     SubscriptionAuthProvider, SubscriptionAuthStatus, SubscriptionInstallFallbackReason,
@@ -840,6 +842,24 @@ pub enum SubscriptionEvent {
         provider: SubscriptionAuthProvider,
         /// Which method.
         method: SubscriptionInstallMethod,
+    },
+    /// No provider routes, and an installed subscription CLI would once it
+    /// is signed in (or, for a shim, natively installed). Raised when the
+    /// requirement changes after a status refresh and on every refused AI
+    /// action.
+    SignInRequired {
+        /// Which CLI.
+        provider: SubscriptionAuthProvider,
+        /// Why it is unusable.
+        obstacle: CliObstacle,
+        /// Why it matters.
+        reason: SignInRequiredReason,
+    },
+    /// A CLI was just installed and is not signed in: the next step is the
+    /// user's, never started automatically.
+    SignInOffered {
+        /// Which CLI.
+        provider: SubscriptionAuthProvider,
     },
 }
 

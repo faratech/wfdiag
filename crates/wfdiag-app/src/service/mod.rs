@@ -41,6 +41,7 @@ use crate::domain::scan::{
     RunOutcome, ScanPhase, ScanPolicy, ScanState, select_scan_tasks, task_allowed_by_privacy,
 };
 use crate::domain::startup::{StartupReadiness, StartupScanGate};
+use crate::domain::subscriptions::SignInRequirement;
 use crate::domain::update::{START_DELAY, UpdateSchedule, schedule};
 use crate::event::SafeFixOrigin;
 use crate::event::{
@@ -61,6 +62,8 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use wfdiag_native_ai_provider::AIProviderStatus;
+use wfdiag_native_ai_provider::SubscriptionProbes;
+use wfdiag_native_ai_provider::parse_provider_preference;
 use wfdiag_native_diagnostics::{DiagnosticRuntime, ScanKind};
 use wfdiag_native_export::{ExportRequest, ExportRequestKind};
 use wfdiag_native_history::{
@@ -174,6 +177,10 @@ enum Internal {
         request: RequestId,
         status: Result<Box<AIProviderStatus>, String>,
     },
+    SubscriptionAccounts {
+        request: RequestId,
+        probes: Result<SubscriptionProbes, String>,
+    },
     ProviderPreference {
         request: RequestId,
         preference: String,
@@ -246,6 +253,10 @@ pub struct AppService {
     export_requests: Vec<u64>,
     history_latest: HashMap<HistoryRequest, RequestId>,
     provider_status_request: Option<RequestId>,
+    subscription_accounts_request: Option<RequestId>,
+    /// The last sign-in requirement announced, so a refresh that changes
+    /// nothing does not re-raise a dismissed banner.
+    last_sign_in_requirement: Option<SignInRequirement>,
     update_request: Option<RequestId>,
     process_page_request: Option<RequestId>,
     network_request_id: Option<RequestId>,
@@ -372,6 +383,8 @@ impl AppService {
             export_requests: Vec::new(),
             history_latest: HashMap::new(),
             provider_status_request: None,
+            subscription_accounts_request: None,
+            last_sign_in_requirement: None,
             update_request: None,
             process_page_request: None,
             network_request_id: None,
@@ -543,6 +556,7 @@ impl AppService {
                 operation,
             } => self.subscription_auth(&provider, operation),
             AppCommand::CancelSubscriptionAuth => self.cancel_subscription_auth(),
+            AppCommand::RequestSubscriptionAccounts => self.request_subscription_accounts(),
             AppCommand::InstallSubscriptionCli { provider } => {
                 self.install_subscription_cli(&provider)
             }
@@ -1955,8 +1969,25 @@ impl AppService {
                     Ok(status) => {
                         self.snapshot.provider_status = Some((*status).clone());
                         self.queue
-                            .push(AppEvent::Provider(ProviderEvent::Status(status)));
+                            .push(AppEvent::Provider(ProviderEvent::Status(status.clone())));
+                        let preference = parse_provider_preference(
+                            &self.snapshot.settings.preferred_ai_provider,
+                        );
+                        self.project_subscription_accounts(&status, preference);
                     }
+                    Err(error) => {
+                        self.queue
+                            .push(AppEvent::Provider(ProviderEvent::Failed { error }));
+                    }
+                }
+            }
+            Internal::SubscriptionAccounts { request, probes } => {
+                if self.subscription_accounts_request != Some(request) {
+                    return;
+                }
+                self.subscription_accounts_request = None;
+                match probes {
+                    Ok(probes) => self.apply_subscription_probes(&probes),
                     Err(error) => {
                         self.queue
                             .push(AppEvent::Provider(ProviderEvent::Failed { error }));
@@ -1976,11 +2007,15 @@ impl AppService {
                 match status {
                     Ok(status) => {
                         self.snapshot.provider_status = Some((*status).clone());
+                        // The applied preference is the truth here even before
+                        // the settings document catches up.
+                        let applied = parse_provider_preference(&preference);
                         self.queue
                             .push(AppEvent::Provider(ProviderEvent::PreferenceApplied {
                                 preference,
-                                status,
+                                status: status.clone(),
                             }));
+                        self.project_subscription_accounts(&status, applied);
                     }
                     Err(error) => {
                         self.queue

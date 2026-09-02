@@ -7,12 +7,55 @@
 mod support;
 
 use std::time::Duration;
-use support::boot_ai;
-use wfdiag_app::{AppCommand, AppEvent, ProviderEvent, SubscriptionEvent, SubscriptionOperation};
+use support::{Harness, boot_ai, boot_with};
+use wfdiag_app::ports::mock::MockPorts;
+use wfdiag_app::{
+    AppCommand, AppEvent, DispatchOutcome, ProviderEvent, RejectReason, SignInRequiredReason,
+    SubscriptionEvent, SubscriptionOperation,
+};
 use wfdiag_native_ai_chat::{
-    SubscriptionAuthOperation, SubscriptionAuthProvider, SubscriptionAuthState,
+    CliObstacle, SubscriptionAuthOperation, SubscriptionAuthProvider, SubscriptionAuthState,
     SubscriptionInstallMethod,
 };
+use wfdiag_native_ai_provider::{CliProbeSnapshot, ProviderProbeSnapshot};
+
+/// An installed CLI with no login cache, as the probe reports it.
+fn installed_no_login(path: &str) -> CliProbeSnapshot {
+    CliProbeSnapshot {
+        usable: false,
+        installed: true,
+        path: Some(path.to_string()),
+        obstacle: Some(CliObstacle::NoStoredLogin),
+    }
+}
+
+fn refresh_status(harness: &mut Harness) -> Vec<AppEvent> {
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::RequestProviderStatus)
+            .is_accepted()
+    );
+    harness.pump_for("the provider status", |event| {
+        matches!(event, AppEvent::Provider(ProviderEvent::Status(_)))
+    })
+}
+
+fn sign_in_required(
+    events: &[AppEvent],
+) -> Vec<(SubscriptionAuthProvider, CliObstacle, SignInRequiredReason)> {
+    subscription_events(events)
+        .into_iter()
+        .filter_map(|event| match event {
+            SubscriptionEvent::SignInRequired {
+                provider,
+                obstacle,
+                reason,
+            } => Some((*provider, *obstacle, *reason)),
+            _ => None,
+        })
+        .collect()
+}
 
 const CODEX: &str = "codex_cli";
 
@@ -359,6 +402,305 @@ fn cancelling_an_installation_kills_its_process_tree() {
             .provider_setup
             .install_progress
             .is_none()
+    );
+    harness.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn a_status_refresh_projects_both_cli_accounts_so_settings_never_says_not_checked() {
+    let mocks = MockPorts::new();
+    mocks.provider_backend.set_probes(ProviderProbeSnapshot {
+        codex: installed_no_login("C:/tools/codex.exe"),
+        ..ProviderProbeSnapshot::default()
+    });
+    let mut harness = boot_with("subscription_projection", mocks);
+    let events = refresh_status(&mut harness);
+
+    let accounts = &harness.service.snapshot().provider_setup.accounts;
+    let codex = accounts["codex_cli"].status.as_ref().expect("projected");
+    assert_eq!(codex.state, SubscriptionAuthState::SignedOut);
+    assert_eq!(codex.obstacle, Some(CliObstacle::NoStoredLogin));
+    assert!(codex.installed());
+    let claude = accounts["claude_code"].status.as_ref().expect("projected");
+    assert_eq!(claude.state, SubscriptionAuthState::NotInstalled);
+    assert!(
+        !subscription_events(&events)
+            .iter()
+            .any(|event| matches!(event, SubscriptionEvent::Status { .. })),
+        "a projection is not an account operation"
+    );
+    // Nothing else is usable, so the installed CLI is the way in.
+    assert_eq!(
+        sign_in_required(&events),
+        [(
+            SubscriptionAuthProvider::Codex,
+            CliObstacle::NoStoredLogin,
+            SignInRequiredReason::OnlyCandidate
+        )]
+    );
+    assert_eq!(
+        harness
+            .service
+            .snapshot()
+            .provider_setup
+            .sign_in_required
+            .map(|requirement| requirement.reason),
+        Some(SignInRequiredReason::OnlyCandidate)
+    );
+    harness.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn an_explicit_signed_out_cli_preference_raises_sign_in_required_instead_of_a_bare_refusal() {
+    let mocks = MockPorts::new();
+    mocks.provider_backend.set_probes(ProviderProbeSnapshot {
+        openai_available: true,
+        codex: installed_no_login("C:/tools/codex.exe"),
+        ..ProviderProbeSnapshot::default()
+    });
+    let mut harness = boot_with("subscription_explicit", mocks);
+    let events = refresh_status(&mut harness);
+    assert!(
+        sign_in_required(&events).is_empty(),
+        "Auto routes to OpenAI, so nothing is required yet"
+    );
+    // The shell persists the preference and applies it to the backend; both
+    // halves happen here so the refusal below reads the persisted choice.
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::UpdateSetting(
+                wfdiag_native_settings::SettingsUpdate::PreferredAiProvider(CODEX.to_string())
+            ))
+            .is_accepted()
+    );
+    harness.pump_for("the setting", |event| {
+        matches!(
+            event,
+            AppEvent::Settings(wfdiag_app::SettingsEvent::Updated { .. })
+        )
+    });
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::SetProviderPreference {
+                preference: CODEX.to_string(),
+            })
+            .is_accepted()
+    );
+    let events = harness.pump_for("the preference", |event| {
+        matches!(
+            event,
+            AppEvent::Provider(ProviderEvent::PreferenceApplied { .. })
+        )
+    });
+    assert_eq!(
+        sign_in_required(&events)
+            .iter()
+            .map(|(_, _, reason)| *reason)
+            .collect::<Vec<_>>(),
+        [SignInRequiredReason::ExplicitPreference]
+    );
+
+    let outcome = harness.service.dispatch(AppCommand::ChatSend {
+        prompt: "why is my PC slow?".to_string(),
+    });
+    let DispatchOutcome::Rejected(RejectReason::NotReady { detail }) = outcome else {
+        panic!("a signed-out explicit CLI must refuse with NotReady, got {outcome:?}");
+    };
+    assert!(
+        detail.starts_with("Sign in to ChatGPT before sending: Codex CLI has no stored login"),
+        "{detail}"
+    );
+    let events = harness.pump_briefly();
+    assert_eq!(
+        sign_in_required(&events).len(),
+        1,
+        "a refused user action raises the prompt again"
+    );
+    harness.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn auto_with_only_a_signed_out_cli_raises_sign_in_required_once_per_change() {
+    let mocks = MockPorts::new();
+    mocks.provider_backend.set_probes(ProviderProbeSnapshot {
+        claude: installed_no_login("C:/tools/claude.exe"),
+        ..ProviderProbeSnapshot::default()
+    });
+    let mut harness = boot_with("subscription_once", mocks);
+    let first = refresh_status(&mut harness);
+    let second = refresh_status(&mut harness);
+    assert_eq!(sign_in_required(&first).len(), 1);
+    assert!(
+        sign_in_required(&second).is_empty(),
+        "an unchanged requirement is not re-raised by a refresh"
+    );
+    harness
+        .mocks
+        .provider_backend
+        .set_probes(ProviderProbeSnapshot {
+            claude: CliProbeSnapshot {
+                obstacle: Some(CliObstacle::SignedOut),
+                ..installed_no_login("C:/tools/claude.exe")
+            },
+            ..ProviderProbeSnapshot::default()
+        });
+    let third = refresh_status(&mut harness);
+    assert_eq!(
+        sign_in_required(&third),
+        [(
+            SubscriptionAuthProvider::ClaudeCode,
+            CliObstacle::SignedOut,
+            SignInRequiredReason::OnlyCandidate
+        )]
+    );
+    harness.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn a_completed_install_offers_sign_in_without_starting_it() {
+    let mut harness = boot_ai("subscription_install_offer");
+    harness
+        .mocks
+        .ai
+        .subscriptions
+        .set_install_path("/opt/codex/codex");
+    let _ = harness
+        .service
+        .dispatch(AppCommand::InstallSubscriptionCli {
+            provider: CODEX.to_string(),
+        });
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::ConfirmSubscriptionInstall { accepted: true })
+            .is_accepted()
+    );
+    let events = harness.pump_for("the offer", |event| {
+        matches!(
+            event,
+            AppEvent::Provider(ProviderEvent::Subscription(event))
+                if matches!(**event, SubscriptionEvent::SignInOffered { .. })
+        )
+    });
+    let subscription = subscription_events(&events);
+    let installed_at = subscription
+        .iter()
+        .position(|event| matches!(event, SubscriptionEvent::Installed { .. }))
+        .expect("installed first");
+    let offered_at = subscription
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                SubscriptionEvent::SignInOffered {
+                    provider: SubscriptionAuthProvider::Codex
+                }
+            )
+        })
+        .expect("then offered");
+    assert!(installed_at < offered_at);
+    assert!(
+        !harness
+            .mocks
+            .ai
+            .subscriptions
+            .operations()
+            .iter()
+            .any(|(_, operation)| *operation == SubscriptionAuthOperation::SignIn),
+        "offered, never started"
+    );
+    harness.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn a_pending_account_operation_is_not_overwritten_by_a_status_projection() {
+    let mut harness = boot_ai("subscription_pending");
+    harness.mocks.ai.subscriptions.hold_auth();
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::SubscriptionAuth {
+                provider: CODEX.to_string(),
+                operation: SubscriptionOperation::SignIn,
+            })
+            .is_accepted()
+    );
+    harness.pump_for("the sign-in to start", |event| {
+        matches!(
+            event,
+            AppEvent::Provider(ProviderEvent::Subscription(event))
+                if matches!(**event, SubscriptionEvent::Started { .. })
+        )
+    });
+    harness
+        .mocks
+        .provider_backend
+        .set_probes(ProviderProbeSnapshot {
+            codex: CliProbeSnapshot {
+                usable: true,
+                installed: true,
+                path: Some("C:/tools/codex.exe".to_string()),
+                obstacle: None,
+            },
+            ..ProviderProbeSnapshot::default()
+        });
+    refresh_status(&mut harness);
+    let account = &harness.service.snapshot().provider_setup.accounts["codex_cli"];
+    assert_eq!(account.operation, Some(SubscriptionAuthOperation::SignIn));
+    assert_ne!(
+        account.status.as_ref().map(|status| status.state),
+        Some(SubscriptionAuthState::SignedIn),
+        "the running sign-in reports the truth when it is done, not the projection"
+    );
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::CancelSubscriptionAuth)
+            .is_accepted()
+    );
+    harness.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn request_subscription_accounts_probes_only_the_two_clis() {
+    let mocks = MockPorts::new();
+    mocks.provider_backend.set_probes(ProviderProbeSnapshot {
+        codex: installed_no_login("C:/tools/codex.exe"),
+        ..ProviderProbeSnapshot::default()
+    });
+    let mut harness = boot_with("subscription_startup_check", mocks);
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::RequestSubscriptionAccounts)
+            .is_accepted()
+    );
+    harness.pump_until(
+        |harness, _| {
+            harness
+                .service
+                .snapshot()
+                .provider_setup
+                .accounts
+                .get("codex_cli")
+                .is_some_and(|account| account.status.is_some())
+        },
+        "the account rows",
+    );
+    let accounts = &harness.service.snapshot().provider_setup.accounts;
+    assert_eq!(
+        accounts["codex_cli"].status.as_ref().unwrap().state,
+        SubscriptionAuthState::SignedOut
+    );
+    assert_eq!(
+        accounts["claude_code"].status.as_ref().unwrap().state,
+        SubscriptionAuthState::NotInstalled
+    );
+    assert!(
+        harness.service.snapshot().provider_status.is_none(),
+        "no full provider refresh happened"
     );
     harness.shutdown(Duration::from_secs(2));
 }
