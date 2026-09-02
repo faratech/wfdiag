@@ -45,6 +45,8 @@ export interface ProviderInfo {
   configured: boolean
   model?: string
   endpoint?: string
+  /** Subscription CLIs only: why an installed CLI is not usable. */
+  obstacle?: 'no_stored_login' | 'signed_out' | 'batch_shim_only' | 'status_unclear'
   supports_tools: boolean
   supports_streaming: boolean
 }

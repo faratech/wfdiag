@@ -1,4 +1,5 @@
 use super::*;
+use crate::CliObstacle;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -23,6 +24,7 @@ fn status_input() -> ProviderStatusInput {
             codex: CliProbeSnapshot {
                 installed: true,
                 path: Some("C:\\Tools\\codex.exe".to_string()),
+                obstacle: Some(CliObstacle::NoStoredLogin),
                 ..Default::default()
             },
             ..Default::default()
@@ -166,6 +168,7 @@ fn availability_rows_are_authoritative_and_legacy_flags_bridge_rowless_payloads(
         configured: available,
         model: None,
         endpoint: None,
+        obstacle: None,
         supports_tools: false,
         supports_streaming: false,
     };
@@ -299,6 +302,7 @@ fn status_projection_matches_legacy_shape_order_and_defaults() {
     assert!(!codex.available);
     assert!(codex.configured);
     assert_eq!(codex.endpoint.as_deref(), Some("C:\\Tools\\codex.exe"));
+    assert_eq!(codex.obstacle, Some(CliObstacle::NoStoredLogin));
     let openai = status
         .providers
         .iter()
@@ -355,6 +359,7 @@ fn status_projection_matches_legacy_shape_order_and_defaults() {
                     "available": false,
                     "configured": true,
                     "endpoint": "C:\\Tools\\codex.exe",
+                    "obstacle": "no_stored_login",
                     "supports_tools": false,
                     "supports_streaming": false
                 },

@@ -1603,6 +1603,7 @@ pub(crate) mod tests {
             configured,
             model: None,
             endpoint: None,
+            obstacle: None,
             supports_tools: false,
             supports_streaming: false,
         }

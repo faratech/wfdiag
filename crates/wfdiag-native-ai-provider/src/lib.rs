@@ -20,11 +20,13 @@ mod cache;
 mod catalog_service;
 mod compat;
 mod composition;
+mod credential_store;
 mod fallback;
 mod local_probes;
 mod model_catalog;
 mod network;
 mod provider_config;
+mod subscription_spec;
 
 pub use cache::{ProviderCacheControl, SharedAiCache};
 pub use catalog_service::{
@@ -43,6 +45,12 @@ pub use composition::{
     ProviderManagementService, ProviderPreferenceSettingsValidator, ProviderProbeBundle,
     ProviderSelectionState, SettingsServiceProviderConfigurationSource, SubscriptionCli,
     SubscriptionCliStatusSource,
+};
+pub use credential_store::{
+    CredentialEnv, CredentialStore, CredentialStoreKind, CredentialStoreProbe, FileFact,
+    HostCredentialStoreProbe, VENDOR_CONFIG_ENV_VARS, classify_file,
+    claude_settings_use_key_helper, codex_config_uses_keyring, credential_store_file,
+    detect_credential_store, file_fact, vendor_config_env_vars,
 };
 pub use fallback::{
     AUTO_FALLBACK_ORDER, FallbackCandidate, ProviderTrustZone, crosses_local_to_cloud,
@@ -65,6 +73,10 @@ pub use network::{
     resolve_ollama_model,
 };
 pub use provider_config::ResolvedProviderConfig;
+pub use subscription_spec::{
+    CLAUDE_CODE_SPEC, CODEX_CLI_SPEC, StatusVerdict, SubscriptionCliSpec, parse_status_output,
+    subscription_cli_spec,
+};
 
 /// Exact provider identifiers exposed to every UI shell.
 ///
@@ -278,8 +290,48 @@ pub struct ProviderInfo {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    /// For the subscription CLIs: why an installed CLI is not usable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obstacle: Option<CliObstacle>,
     pub supports_tools: bool,
     pub supports_streaming: bool,
+}
+
+/// Why an installed subscription CLI is not usable right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CliObstacle {
+    /// The vendor's credential cache does not exist: never signed in here.
+    NoStoredLogin,
+    /// The vendor's status command says signed out.
+    SignedOut,
+    /// Only an npm script shim (`.cmd`/`.bat`) was found; it cannot be run.
+    BatchShimOnly,
+    /// The status command failed or timed out without saying signed out.
+    StatusUnclear,
+}
+
+impl CliObstacle {
+    /// A short phrase for status lines: "… is installed but {summary}".
+    #[must_use]
+    pub const fn summary(self) -> &'static str {
+        match self {
+            Self::NoStoredLogin => "has no stored login",
+            Self::SignedOut => "is signed out",
+            Self::BatchShimOnly => "is only the npm script shim, which WFDiag cannot run",
+            Self::StatusUnclear => "could not confirm its account status",
+        }
+    }
+
+    /// Whether signing in is the fix (as opposed to installing the native CLI
+    /// or checking again).
+    #[must_use]
+    pub const fn needs_sign_in(self) -> bool {
+        matches!(
+            self,
+            Self::NoStoredLogin | Self::SignedOut | Self::StatusUnclear
+        )
+    }
 }
 
 /// Exact `ai_get_status` wire contract.
@@ -350,6 +402,8 @@ pub struct CliProbeSnapshot {
     pub usable: bool,
     pub installed: bool,
     pub path: Option<String>,
+    /// Why an installed CLI is not usable; `None` when usable or absent.
+    pub obstacle: Option<CliObstacle>,
 }
 
 /// Results of all provider probes used by a status refresh.
@@ -426,9 +480,16 @@ fn provider_info(
         configured,
         model: nonempty(model),
         endpoint,
+        obstacle: None,
         supports_tools: caps.supports_tools,
         supports_streaming: caps.supports_streaming,
     }
+}
+
+/// A subscription CLI row carries the probe's obstacle.
+fn with_obstacle(mut info: ProviderInfo, obstacle: Option<CliObstacle>) -> ProviderInfo {
+    info.obstacle = obstacle;
+    info
 }
 
 /// Build the exact shipping status response from injected settings and probe
@@ -492,19 +553,25 @@ pub fn project_provider_status(input: ProviderStatusInput) -> AIProviderStatus {
             settings.custom_model,
             probes.custom_endpoint.or(settings.custom_endpoint),
         ),
-        provider_info(
-            AIProvider::CodexCli,
-            probes.codex.usable,
-            probes.codex.installed,
-            settings.codex_model,
-            probes.codex.path,
+        with_obstacle(
+            provider_info(
+                AIProvider::CodexCli,
+                probes.codex.usable,
+                probes.codex.installed,
+                settings.codex_model,
+                probes.codex.path,
+            ),
+            probes.codex.obstacle,
         ),
-        provider_info(
-            AIProvider::ClaudeCode,
-            probes.claude.usable,
-            probes.claude.installed,
-            settings.claude_model,
-            probes.claude.path,
+        with_obstacle(
+            provider_info(
+                AIProvider::ClaudeCode,
+                probes.claude.usable,
+                probes.claude.installed,
+                settings.claude_model,
+                probes.claude.path,
+            ),
+            probes.claude.obstacle,
         ),
         provider_info(
             AIProvider::OpenAI,

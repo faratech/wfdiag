@@ -1,5 +1,7 @@
+use crate::credential_store::{CredentialStore, CredentialStoreProbe, HostCredentialStoreProbe};
+use crate::subscription_spec::{StatusVerdict, parse_status_output, subscription_cli_spec};
 use crate::{
-    BackendFuture, CliProbeSnapshot, FoundryEndpointSource, SubscriptionCli,
+    BackendFuture, CliObstacle, CliProbeSnapshot, FoundryEndpointSource, SubscriptionCli,
     SubscriptionCliStatusSource, normalize_base_url,
 };
 use serde_json::Value;
@@ -459,50 +461,29 @@ impl FoundryEndpointSource for FoundryCliEndpointSource {
     }
 }
 
-#[derive(Debug)]
-struct SubscriptionCliSpec {
-    binary: &'static str,
-    status_args: &'static [&'static str],
-    signed_out_markers: &'static [&'static str],
-}
-
-const CODEX_SPEC: SubscriptionCliSpec = SubscriptionCliSpec {
-    binary: "codex",
-    status_args: &["login", "status"],
-    signed_out_markers: &["not logged in"],
-};
-
-const CLAUDE_SPEC: SubscriptionCliSpec = SubscriptionCliSpec {
-    binary: "claude",
-    status_args: &["auth", "status"],
-    signed_out_markers: &["not logged in", "please run /login"],
-};
-
-const fn subscription_cli_spec(provider: SubscriptionCli) -> &'static SubscriptionCliSpec {
-    match provider {
-        SubscriptionCli::Codex => &CODEX_SPEC,
-        SubscriptionCli::ClaudeCode => &CLAUDE_SPEC,
-    }
-}
-
-fn is_signed_in(spec: &SubscriptionCliSpec, exit_ok: bool, output: &str) -> bool {
-    let text = output.to_lowercase();
-    exit_ok
-        && !spec
-            .signed_out_markers
-            .iter()
-            .any(|marker| text.contains(marker))
+/// An npm script shim (`.cmd`/`.bat`) resolves on PATH but cannot receive
+/// arguments from a Rust child process; only the native executable works.
+#[must_use]
+pub fn is_batch_shim(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        })
 }
 
 /// Shipping Codex/Claude subscription status probe without Tauri or Reactor.
 ///
 /// Configured paths must be absolute existing files; otherwise `where.exe`
-/// (Windows) or `which` resolves the executable. A CLI is usable only when its
-/// status command exits successfully and emits no signed-out marker. Definitive
-/// results are cached for 30 seconds, while spawn failures and timeouts are not.
+/// (Windows) or `which` resolves the executable. A shim-only resolution and a
+/// missing credential cache are decided without spawning the CLI; otherwise
+/// the CLI is usable only when its status command exits successfully and
+/// emits no signed-out marker. Definitive results are cached for 30 seconds,
+/// while spawn failures and timeouts are not.
 #[derive(Clone)]
 pub struct ProcessSubscriptionCliStatusSource {
     runner: Arc<dyn ProcessRunner>,
+    credentials: Arc<dyn CredentialStoreProbe>,
     cache: SubscriptionProbeCache,
     /// Per-key async mutexes: concurrent cache misses share one probe instead
     /// of spawning one child process per caller. Entries live for the
@@ -543,15 +524,20 @@ impl ProcessSubscriptionCliStatusSource {
     pub fn new() -> Self {
         Self {
             runner: Arc::new(TokioProcessRunner),
+            credentials: Arc::new(HostCredentialStoreProbe),
             cache: shared_subscription_probe_cache(),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     #[cfg(test)]
-    fn with_runner(runner: Arc<dyn ProcessRunner>) -> Self {
+    fn with_dependencies(
+        runner: Arc<dyn ProcessRunner>,
+        credentials: Arc<dyn CredentialStoreProbe>,
+    ) -> Self {
         Self {
             runner,
+            credentials,
             cache: Arc::new(Mutex::new(HashMap::new())),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -580,6 +566,20 @@ impl ProcessSubscriptionCliStatusSource {
         else {
             return (CliProbeSnapshot::default(), true);
         };
+        let installed = |usable: bool, obstacle: Option<CliObstacle>| CliProbeSnapshot {
+            usable,
+            installed: true,
+            path: Some(path.display().to_string()),
+            obstacle,
+        };
+        if is_batch_shim(&path) {
+            return (installed(false, Some(CliObstacle::BatchShimOnly)), true);
+        }
+        // No credential cache means never signed in here: decided without
+        // spawning. Present or unknown caches still ask the CLI.
+        if self.credentials.detect(spec.credential_store) == CredentialStore::Absent {
+            return (installed(false, Some(CliObstacle::NoStoredLogin)), true);
+        }
         let output = self
             .runner
             .run(ProcessRequest {
@@ -591,31 +591,22 @@ impl ProcessSubscriptionCliStatusSource {
             .await;
         match output {
             Ok(output) => {
-                let text = format!(
-                    "{}\n{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
+                let verdict = parse_status_output(
+                    spec,
+                    output.success,
+                    &String::from_utf8_lossy(&output.stdout),
+                    &String::from_utf8_lossy(&output.stderr),
                 );
-                let authed = is_signed_in(spec, output.success, &text);
-                (
-                    CliProbeSnapshot {
-                        usable: authed,
-                        installed: true,
-                        path: Some(path.display().to_string()),
-                    },
-                    true,
-                )
+                let snapshot = match verdict {
+                    StatusVerdict::SignedIn => installed(true, None),
+                    StatusVerdict::SignedOut => installed(false, Some(CliObstacle::SignedOut)),
+                    StatusVerdict::Unclear => installed(false, Some(CliObstacle::StatusUnclear)),
+                };
+                (snapshot, true)
             }
             Err(error) => {
                 eprintln!("Bridge probe for {} inconclusive: {error}", spec.binary);
-                (
-                    CliProbeSnapshot {
-                        usable: false,
-                        installed: true,
-                        path: Some(path.display().to_string()),
-                    },
-                    false,
-                )
+                (installed(false, Some(CliObstacle::StatusUnclear)), false)
             }
         }
     }
@@ -1008,23 +999,83 @@ mod tests {
         );
     }
 
-    #[test]
-    fn signed_out_markers_override_success_case_insensitively() {
-        assert!(is_signed_in(
-            &CLAUDE_SPEC,
+    struct FakeCredentials(CredentialStore);
+
+    impl CredentialStoreProbe for FakeCredentials {
+        fn detect(&self, _kind: crate::credential_store::CredentialStoreKind) -> CredentialStore {
+            self.0
+        }
+    }
+
+    fn source_with(
+        runner: Arc<FakeRunner>,
+        store: CredentialStore,
+    ) -> ProcessSubscriptionCliStatusSource {
+        ProcessSubscriptionCliStatusSource::with_dependencies(
+            runner,
+            Arc::new(FakeCredentials(store)),
+        )
+    }
+
+    #[tokio::test]
+    async fn absent_credential_store_reports_no_stored_login_without_running_the_status_command() {
+        let runner = Arc::new(FakeRunner::with_outputs(vec![Ok(output(
             true,
-            "Logged in as: mike@example.com"
-        ));
-        assert!(!is_signed_in(
-            &CLAUDE_SPEC,
+            "/opt/codex\n",
+            "",
+        ))]));
+        let source = source_with(runner.clone(), CredentialStore::Absent);
+
+        let first = source.probe(SubscriptionCli::Codex, None).await;
+        let cached = source.probe(SubscriptionCli::Codex, None).await;
+
+        assert_eq!(
+            first,
+            CliProbeSnapshot {
+                usable: false,
+                installed: true,
+                path: Some("/opt/codex".to_string()),
+                obstacle: Some(CliObstacle::NoStoredLogin),
+            }
+        );
+        assert_eq!(cached, first, "decisive, so cached");
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1, "only the executable lookup ran");
+        assert_eq!(requests[0].args, ["codex"]);
+    }
+
+    #[tokio::test]
+    async fn present_credential_store_still_runs_the_status_command() {
+        let runner = Arc::new(FakeRunner::with_outputs(vec![
+            Ok(output(true, "/opt/codex\n", "")),
+            Ok(output(true, "Not logged in", "")),
+        ]));
+        let source = source_with(runner.clone(), CredentialStore::Present);
+
+        let probe = source.probe(SubscriptionCli::Codex, None).await;
+
+        assert!(probe.installed && !probe.usable);
+        assert_eq!(probe.obstacle, Some(CliObstacle::SignedOut));
+        assert_eq!(runner.requests().len(), 2);
+        assert_eq!(runner.requests()[1].args, ["login", "status"]);
+    }
+
+    #[tokio::test]
+    async fn batch_shim_only_resolution_is_installed_but_unusable_without_a_spawn() {
+        let runner = Arc::new(FakeRunner::with_outputs(vec![Ok(output(
             true,
-            "NOT LOGGED IN · Please run /login"
-        ));
-        assert!(!is_signed_in(
-            &CODEX_SPEC,
-            false,
-            "Logged in as: mike@example.com"
-        ));
+            "C:\\Users\\mike\\AppData\\Roaming\\npm\\codex.cmd\n",
+            "",
+        ))]));
+        let source = source_with(runner.clone(), CredentialStore::Present);
+
+        let probe = source.probe(SubscriptionCli::Codex, None).await;
+
+        assert!(probe.installed && !probe.usable);
+        assert_eq!(probe.obstacle, Some(CliObstacle::BatchShimOnly));
+        assert_eq!(runner.requests().len(), 1);
+        assert!(is_batch_shim(Path::new("x.CMD")) && is_batch_shim(Path::new("x.bat")));
+        assert!(!is_batch_shim(Path::new("codex.exe")) && !is_batch_shim(Path::new("codex")));
     }
 
     #[tokio::test]
@@ -1033,7 +1084,7 @@ mod tests {
             Ok(output(true, "/opt/codex\n", "")),
             Ok(output(true, "Logged in using ChatGPT", "")),
         ]));
-        let source = ProcessSubscriptionCliStatusSource::with_runner(runner.clone());
+        let source = source_with(runner.clone(), CredentialStore::Unknown);
 
         let first = source.probe(SubscriptionCli::Codex, None).await;
         let cached = source.probe(SubscriptionCli::Codex, None).await;
@@ -1045,6 +1096,7 @@ mod tests {
                 usable: true,
                 installed: true,
                 path: Some("/opt/codex".to_string()),
+                obstacle: None,
             }
         );
         let requests = runner.requests();
@@ -1063,7 +1115,7 @@ mod tests {
             "Logged in using ChatGPT",
             "",
         ))]));
-        let source = ProcessSubscriptionCliStatusSource::with_runner(runner.clone());
+        let source = source_with(runner.clone(), CredentialStore::Unknown);
 
         let probe = source
             .probe(
@@ -1092,7 +1144,7 @@ mod tests {
             Ok(output(true, "/opt/claude\n", "")),
             Ok(output(true, "Logged in", "")),
         ]));
-        let source = ProcessSubscriptionCliStatusSource::with_runner(runner.clone());
+        let source = source_with(runner.clone(), CredentialStore::Unknown);
 
         let inconclusive = source.probe(SubscriptionCli::ClaudeCode, None).await;
         let recovered = source.probe(SubscriptionCli::ClaudeCode, None).await;
@@ -1100,6 +1152,7 @@ mod tests {
         assert_eq!(inconclusive.path.as_deref(), Some("/opt/claude"));
         assert!(inconclusive.installed);
         assert!(!inconclusive.usable);
+        assert_eq!(inconclusive.obstacle, Some(CliObstacle::StatusUnclear));
         assert!(recovered.usable);
         assert_eq!(runner.requests().len(), 4);
         assert_eq!(runner.requests()[1].args, ["auth", "status"]);
@@ -1108,7 +1161,7 @@ mod tests {
     #[tokio::test]
     async fn definitive_missing_cli_result_is_cached() {
         let runner = Arc::new(FakeRunner::with_outputs(vec![Ok(output(false, "", ""))]));
-        let source = ProcessSubscriptionCliStatusSource::with_runner(runner.clone());
+        let source = source_with(runner.clone(), CredentialStore::Unknown);
 
         let first = source.probe(SubscriptionCli::Codex, None).await;
         let cached = source.probe(SubscriptionCli::Codex, None).await;

@@ -410,6 +410,7 @@ impl SubscriptionCliStatusSource for TauriSubscriptionCliStatusSource {
                 usable: probe.usable(),
                 installed: probe.path.is_some(),
                 path: probe.path.map(|path| path.display().to_string()),
+                obstacle: None,
             }
         })
     }

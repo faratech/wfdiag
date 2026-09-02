@@ -7,7 +7,8 @@ use crate::composition::{
 };
 use crate::network::normalize_base_url;
 use crate::provider_config::ResolvedProviderConfig;
-use crate::{AIProvider, ProviderCaps, capabilities};
+use crate::subscription_spec::{SubscriptionCliSpec, subscription_cli_spec};
+use crate::{AIProvider, CliObstacle, ProviderCaps, capabilities};
 use wfdiag_native_settings::{AppSettings, ProviderKeyId, SettingsService};
 
 /// Synchronous credential lookup. The shipping implementation wraps the
@@ -203,31 +204,31 @@ pub async fn resolve_subscription_config(
     provider: AIProvider,
     ports: &SubscriptionConfigPorts,
 ) -> Result<ResolvedProviderConfig, String> {
-    let (cli, configured_path, configured_model, label) = match provider {
+    let (cli, configured_path, configured_model) = match provider {
         AIProvider::CodexCli => (
             SubscriptionCli::Codex,
             ports.settings.codex_cli_path.clone(),
             ports.settings.codex_model.clone(),
-            "Codex CLI",
         ),
         AIProvider::ClaudeCode => (
             SubscriptionCli::ClaudeCode,
             ports.settings.claude_cli_path.clone(),
             ports.settings.claude_model.clone(),
-            "Claude Code",
         ),
         other => {
             return Err(format!("{other} is not a subscription CLI provider"));
         }
     };
+    let spec = subscription_cli_spec(cli);
     let probe = ports.status.probe(cli, configured_path).await;
     let path = probe.path.ok_or_else(|| {
-        format!("{label} was not found. Install it or configure its executable path in Settings.")
+        format!(
+            "{} was not found. Install it or configure its executable path in Settings.",
+            spec.label
+        )
     })?;
     if !probe.usable {
-        return Err(format!(
-            "{label} is installed but not signed in. Open Settings and sign in with the vendor CLI."
-        ));
+        return Err(subscription_obstacle_message(spec, probe.obstacle));
     }
     Ok(ResolvedProviderConfig {
         api_key: None,
@@ -237,6 +238,31 @@ pub async fn resolve_subscription_config(
             .map(|model| sanitize_subscription_model(&model))
             .transpose()?,
     })
+}
+
+/// The one sentence every AI entry point shows when an installed
+/// subscription CLI cannot be used, naming the obstacle and the way out.
+#[must_use]
+pub fn subscription_obstacle_message(
+    spec: &SubscriptionCliSpec,
+    obstacle: Option<CliObstacle>,
+) -> String {
+    let label = spec.label;
+    let account = spec.account_label;
+    match obstacle {
+        Some(CliObstacle::NoStoredLogin) => format!(
+            "{label} is installed but has no stored login. Sign in to {account} from the AI page or Settings."
+        ),
+        Some(CliObstacle::BatchShimOnly) => format!(
+            "Only the npm script shim of {label} was found and WFDiag cannot run it. Install the native {label} from Settings."
+        ),
+        Some(CliObstacle::StatusUnclear) => format!(
+            "{label} is installed but its account status could not be confirmed. Open Settings and check the {account} account."
+        ),
+        Some(CliObstacle::SignedOut) | None => format!(
+            "{label} is installed but not signed in. Sign in to {account} from the AI page or Settings."
+        ),
+    }
 }
 
 /// Validate a subscription model selector before it can reach an argument or
@@ -491,12 +517,51 @@ mod tests {
                 usable: false,
                 installed: true,
                 path: Some("codex".to_string()),
+                obstacle: None,
             })),
         };
         assert!(
             resolve_subscription_config(AIProvider::CodexCli, &signed_out)
                 .await
                 .unwrap_err()
+                .contains("not signed in")
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_config_error_names_the_obstacle() {
+        let with = |obstacle| SubscriptionConfigPorts {
+            settings: AppSettings::default(),
+            status: std::sync::Arc::new(FixedSubscriptionStatus(CliProbeSnapshot {
+                usable: false,
+                installed: true,
+                path: Some("C:/tools/codex.exe".to_string()),
+                obstacle: Some(obstacle),
+            })),
+        };
+        let message = |obstacle| async move {
+            resolve_subscription_config(AIProvider::CodexCli, &with(obstacle))
+                .await
+                .unwrap_err()
+        };
+        assert!(
+            message(CliObstacle::NoStoredLogin)
+                .await
+                .contains("has no stored login. Sign in to ChatGPT")
+        );
+        assert!(
+            message(CliObstacle::BatchShimOnly)
+                .await
+                .contains("npm script shim")
+        );
+        assert!(
+            message(CliObstacle::StatusUnclear)
+                .await
+                .contains("could not be confirmed")
+        );
+        assert!(
+            message(CliObstacle::SignedOut)
+                .await
                 .contains("not signed in")
         );
     }
@@ -512,6 +577,7 @@ mod tests {
                 usable: true,
                 installed: true,
                 path: Some("C:/tools/claude.exe".to_string()),
+                obstacle: None,
             })),
         };
         let resolved = resolve_subscription_config(AIProvider::ClaudeCode, &ports)
@@ -533,6 +599,7 @@ mod tests {
                 usable: true,
                 installed: true,
                 path: Some("C:/tools/codex.exe".to_string()),
+                obstacle: None,
             })),
         };
         let error = resolve_subscription_config(AIProvider::CodexCli, &ports)

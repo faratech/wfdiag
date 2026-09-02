@@ -454,6 +454,7 @@ mod tests {
                         usable: true,
                         installed: true,
                         path: configured_path,
+                        obstacle: None,
                     },
                     SubscriptionCli::ClaudeCode => CliProbeSnapshot::default(),
                 }
