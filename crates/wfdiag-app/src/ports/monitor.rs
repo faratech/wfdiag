@@ -157,6 +157,20 @@ pub struct NetworkConnection {
     pub status: String,
 }
 
+/// One process's on-demand identity facts (see `RequestProcessDetail`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessDetail {
+    /// The process id the facts belong to.
+    pub pid: u32,
+    /// The full image path, when Windows exposes it.
+    pub image_path: Option<String>,
+    /// Windows refused to open the process (system or elevated process).
+    pub access_denied: bool,
+}
+
+/// Reply handle for one process's detail.
+pub type ProcessDetailReply = oneshot::Receiver<ProcessDetail>;
+
 /// Result of one queued process query.
 #[derive(Debug)]
 pub enum ProcessQueryOutcome {
@@ -193,6 +207,13 @@ pub trait MonitorHandle: Send + Sync {
     ///
     /// Returns a message when the collector has stopped.
     fn request_network_connections(&self) -> Result<NetworkConnectionsReply, String>;
+
+    /// Queue one process's image path and access facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the collector has stopped.
+    fn request_process_detail(&self, pid: u32) -> Result<ProcessDetailReply, String>;
 }
 
 /// A started collector plus the event stream it publishes to.

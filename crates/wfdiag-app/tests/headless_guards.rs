@@ -308,3 +308,59 @@ fn live_monitoring_streams_samples_pages_and_connections() {
     assert_eq!(harness.mocks.monitor.control().refreshes(), 1);
     harness.shutdown(Duration::from_secs(2));
 }
+
+#[test]
+fn a_superseded_process_detail_reply_is_dropped_and_only_the_newest_updates_the_snapshot() {
+    use wfdiag_app::ports::monitor::ProcessDetail;
+
+    let mocks = MockPorts::new();
+    mocks.monitor.set_process_detail(ProcessDetail {
+        pid: 7,
+        image_path: Some(r"C:\\Program Files\\Seven\\seven.exe".to_string()),
+        access_denied: false,
+    });
+    mocks.monitor.set_process_detail(ProcessDetail {
+        pid: 8,
+        image_path: None,
+        access_denied: true,
+    });
+    let mut harness = boot_with("guards_stale_process_detail", mocks);
+
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::RequestProcessDetail { pid: 7 })
+            .is_accepted()
+    );
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::RequestProcessDetail { pid: 8 })
+            .is_accepted()
+    );
+    let events = harness.pump_for("the process detail", |event| {
+        matches!(event, AppEvent::Monitor(MonitorEvent::ProcessDetail(_)))
+    });
+    let delivered: Vec<u32> = events
+        .iter()
+        .filter_map(|event| match event {
+            AppEvent::Monitor(MonitorEvent::ProcessDetail(detail)) => Some(detail.pid),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        delivered,
+        [8],
+        "the older reply is dropped, not merely overwritten"
+    );
+    let detail = harness
+        .service
+        .snapshot()
+        .monitor
+        .process_detail
+        .clone()
+        .expect("the newest detail is in the read model");
+    assert_eq!(detail.pid, 8);
+    assert!(detail.access_denied);
+    harness.shutdown(Duration::from_secs(2));
+}

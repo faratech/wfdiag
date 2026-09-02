@@ -13,7 +13,9 @@ use crate::screens::processes::state::{ProcessQueryOrigin, ProcessesMsg, Process
 use std::time::Instant;
 use wfdiag_app::ports::monitor::{ProcessQuery, ProcessSortDirection, ProcessSortKey};
 use wfdiag_app::{AppCommand, AppEvent, DispatchOutcome, MonitorEvent};
-use wfdiag_native_projection::process_identity::{ProcessIdentity, reconcile_process_selection_by};
+use wfdiag_native_projection::process_identity::{
+    ProcessIdentity, reconcile_process_selection_by, reveal_target_is_safe,
+};
 
 impl ProcessesScreen {
     pub(crate) fn update(&mut self, message: ProcessesMsg, cx: &mut ScreenCx<'_>) {
@@ -53,7 +55,25 @@ impl ProcessesScreen {
                     self.loading = false;
                 }
             }
-            ProcessesMsg::Select(identity) => self.selected = identity,
+            ProcessesMsg::Select(identity) => {
+                self.selected = identity;
+                self.detail = None;
+                if let Some(identity) = identity
+                    && !cx.shell.deterministic_visual
+                {
+                    let _ = cx.dispatch(AppCommand::RequestProcessDetail { pid: identity.pid });
+                }
+            }
+            ProcessesMsg::RevealSelected => {
+                if let Some(path) = self
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.image_path.as_deref())
+                    .filter(|path| reveal_target_is_safe(path))
+                {
+                    cx.reveal_in_explorer(path.to_string());
+                }
+            }
         }
     }
 
@@ -173,6 +193,11 @@ impl ProcessesScreen {
                     page.items.len(),
                     page.total
                 ));
+            }
+            MonitorEvent::ProcessDetail(detail) => {
+                if self.selected.map(|selected| selected.pid) == Some(detail.pid) {
+                    self.detail = Some((**detail).clone());
+                }
             }
             MonitorEvent::ProcessPageSuperseded => self.loading = false,
             MonitorEvent::Unavailable { reason } => {

@@ -85,7 +85,7 @@ AppService::start(config: AppConfig, ports: AppPorts) -> Result<(Self, AppEventR
 `RefreshIssues`; *history*: `ListHistory`, `LoadHistoryScan`, `CompareHistory`,
 `CompareCurrentToLatest`, `HistoryTaskDiff`, `SaveHistoryLabel`, `SaveHistoryTags`,
 `HistoryTrends`, `ClearHistory`; *monitor*: `MonitorRefresh`, `SetMonitorPaused`,
-`RequestProcessPage`, `RequestNetworkConnections`; *provider*: `RequestProviderStatus`,
+`RequestProcessPage`, `RequestNetworkConnections`, `RequestProcessDetail`; *provider*: `RequestProviderStatus`,
 `SetProviderPreference`, `ClearAiCache`, `ListOllamaModels`, `RefreshModelCatalog`,
 `CancelModelCatalog`; *settings*: `LoadSettings`, `SaveSettings`, `UpdateSetting`,
 `ProviderCredential`; *host*: `ExportResults`, `CheckForUpdates`, `RequestSystemInfo`,

@@ -2198,6 +2198,88 @@ fn unix_timestamp_secs() -> i64 {
         .map_or(0, |duration| duration.as_secs().cast_signed())
 }
 
+/// On-demand identity facts for one process. Kept off the bulk enumeration
+/// because it opens a process handle; a limited-information handle is enough
+/// for most processes, and a refused one is reported rather than guessed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessDetail {
+    pub pid: u32,
+    /// Creation time as Unix seconds, 0 when unavailable.
+    pub start_time: i64,
+    /// The full Win32 image path, when Windows exposes it.
+    pub image_path: Option<String>,
+    /// Windows refused to open the process (system or elevated process).
+    pub access_denied: bool,
+}
+
+/// Query one process's image path and creation time.
+#[must_use]
+pub fn query_process_detail(pid: u32) -> ProcessDetail {
+    use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED, FILETIME};
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+    use windows::core::PWSTR;
+
+    let mut detail = ProcessDetail {
+        pid,
+        start_time: 0,
+        image_path: None,
+        access_denied: false,
+    };
+    // SAFETY: opening a process by id; the handle is closed below.
+    let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(handle) => handle,
+        Err(error) => {
+            detail.access_denied = error.code() == E_ACCESSDENIED;
+            return detail;
+        }
+    };
+    let mut buffer = vec![0_u16; 32_768];
+    let mut length = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
+    // SAFETY: the buffer is valid for `length` UTF-16 units and outlives the call.
+    if unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &raw mut length,
+        )
+    }
+    .is_ok()
+    {
+        let used = usize::try_from(length).unwrap_or(0).min(buffer.len());
+        let path = String::from_utf16_lossy(&buffer[..used]);
+        if !path.is_empty() {
+            detail.image_path = Some(path);
+        }
+    }
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: four valid out-pointers for the duration of the call.
+    if unsafe {
+        GetProcessTimes(
+            handle,
+            &raw mut creation,
+            &raw mut exit,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    }
+    .is_ok()
+    {
+        let filetime =
+            (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+        detail.start_time = filetime_to_unix(filetime).cast_signed();
+    }
+    // SAFETY: closing the handle this function opened.
+    let _ = unsafe { CloseHandle(handle) };
+    detail
+}
+
 #[inline]
 fn filetime_to_unix(filetime: u64) -> u64 {
     filetime.saturating_sub(116_444_736_000_000_000) / 10_000_000

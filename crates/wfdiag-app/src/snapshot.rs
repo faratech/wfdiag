@@ -11,6 +11,7 @@
 use crate::command::WorkerKind;
 use crate::domain::invalidation::Invalidation;
 use crate::domain::scan::{ScanPhase, ScanSnapshot};
+use crate::ports::monitor::ProcessDetail;
 use crate::ports::monitor::{NetworkConnection, ProcessPage};
 use crate::snapshot_ai::{ActionsSnapshot, AiSnapshot, ProviderSetupSnapshot};
 use wfdiag_native_ai_provider::AIProviderStatus;
@@ -63,6 +64,8 @@ pub struct MonitorSnapshot {
     pub process_page: Option<ProcessPage>,
     /// The most recent network-connection list.
     pub connections: Option<Vec<NetworkConnection>>,
+    /// The most recently answered process detail.
+    pub process_detail: Option<ProcessDetail>,
 }
 
 /// Update-channel read model.

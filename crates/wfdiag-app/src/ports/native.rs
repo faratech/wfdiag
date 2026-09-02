@@ -4,6 +4,7 @@
 //! part: it is the only adapter that converts between this crate's portable
 //! telemetry projections and the `#![cfg(windows)]` collector crate.
 
+use crate::ports::monitor::{ProcessDetail, ProcessDetailReply};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use wfdiag_native_ai_provider::ProviderManagementBackend;
@@ -188,6 +189,27 @@ impl MonitorHandle for WindowsMonitorHandle {
             })
             .map_err(|error| error.to_string())?;
         Ok(receiver)
+    }
+
+    fn request_process_detail(&self, pid: u32) -> Result<ProcessDetailReply, String> {
+        let (sender, receiver) = oneshot::channel();
+        std::thread::Builder::new()
+            .name("wfdiag-app-process-detail".to_string())
+            .spawn(move || {
+                let _ = sender.send(wfdiag_native_monitor::query_process_detail(pid).into());
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(receiver)
+    }
+}
+
+impl From<wfdiag_native_monitor::ProcessDetail> for ProcessDetail {
+    fn from(detail: wfdiag_native_monitor::ProcessDetail) -> Self {
+        Self {
+            pid: detail.pid,
+            image_path: detail.image_path,
+            access_denied: detail.access_denied,
+        }
     }
 }
 

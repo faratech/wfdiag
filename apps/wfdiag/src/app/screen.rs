@@ -49,6 +49,9 @@ pub(crate) enum Effect {
     /// Raise the Windows toast for a check that turned Critical since the
     /// previous scan (honours the notifications setting in the shell).
     NewCriticalToast { title: String, count: usize },
+    /// Open File Explorer with this image path selected (re-validated by
+    /// the platform layer).
+    RevealInExplorer(String),
     /// Change pages without the destination's entry work (workflow jumps that
     /// perform their own sequencing).
     Transition(Page),
@@ -128,6 +131,11 @@ impl<'a> ScreenCx<'a> {
     /// Replace the status line.
     pub(crate) fn status(&mut self, text: impl Into<String>) {
         self.effects.push(Effect::Status(text.into()));
+    }
+
+    /// Open File Explorer at a process image the projection judged safe.
+    pub(crate) fn reveal_in_explorer(&mut self, path: String) {
+        self.effects.push(Effect::RevealInExplorer(path));
     }
 
     /// Ask the shell for the new-critical Windows toast.

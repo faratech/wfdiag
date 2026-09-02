@@ -192,6 +192,12 @@ pub enum AppCommand {
     RequestProcessPage(ProcessQuery),
     /// Request the current network-connection list.
     RequestNetworkConnections,
+    /// Request one process's image path and access facts (the Processes
+    /// page's details pane; the newest request wins).
+    RequestProcessDetail {
+        /// The process id.
+        pid: u32,
+    },
 
     // ---- providers -----------------------------------------------------
     /// Refresh AI provider availability.

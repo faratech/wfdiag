@@ -18,8 +18,11 @@ use crate::widgets::icons;
 use crate::widgets::icons::FaIcon;
 use crate::widgets::palette_colors::{Palette, palette_track};
 use std::sync::Arc;
-use wfdiag_app::ports::monitor::{ProcessPage, ProcessRow, ProcessSortDirection, ProcessSortKey};
+use wfdiag_app::ports::monitor::{
+    ProcessDetail, ProcessPage, ProcessRow, ProcessSortDirection, ProcessSortKey,
+};
 use wfdiag_native_projection::process_identity::ProcessIdentity;
+use wfdiag_native_projection::process_identity::reveal_target_is_safe;
 use windows_reactor::*;
 
 #[derive(Clone, PartialEq)]
@@ -185,12 +188,14 @@ impl ProcessesScreen {
             self.sort_direction,
             env.deterministic_visual,
             self.selected,
+            self.detail.as_ref(),
             env.monitoring_paused,
             vc.callback(|value| Message::Processes(ProcessesMsg::FilterChanged(value))),
             vc.callback(|value| Message::Processes(ProcessesMsg::Sort(value))),
             vc.message(Message::Processes(ProcessesMsg::Previous)),
             vc.message(Message::Processes(ProcessesMsg::Next)),
             vc.callback(|value| Message::Processes(ProcessesMsg::Select(value))),
+            vc.message(Message::Processes(ProcessesMsg::RevealSelected)),
             vc.message(Message::Monitor(MonitorMsg::ToggleMonitoring)),
             vc.message(Message::Shell(ShellMsg::Refresh)),
         )
@@ -211,12 +216,14 @@ pub(crate) fn processes_page(
     sort_direction: ProcessSortDirection,
     deterministic_visual: bool,
     selected_identity: Option<ProcessIdentity>,
+    selected_detail: Option<&ProcessDetail>,
     paused: bool,
     filter_changed: Callback<String>,
     sort_processes: Callback<ProcessSortKey>,
     previous: Callback<()>,
     next: Callback<()>,
     select_process: Callback<Option<ProcessIdentity>>,
+    reveal_selected: Callback<()>,
     toggle: Callback<()>,
     refresh: Callback<()>,
 ) -> View {
@@ -400,7 +407,15 @@ pub(crate) fn processes_page(
         )));
     let detail = selected
         .as_ref()
-        .map(|process| process_details_258(palette, process.as_ref(), select_process))
+        .map(|process| {
+            process_details_258(
+                palette,
+                process.as_ref(),
+                selected_detail,
+                reveal_selected,
+                select_process,
+            )
+        })
         .unwrap_or_else(View::empty);
     let layout: View = if narrow {
         StackPanel::new().spacing(12.0).children((table, detail))
@@ -855,95 +870,132 @@ pub(crate) fn process_pagination_258(
 pub(crate) fn process_details_258(
     palette: Palette,
     process: &ProcessViewRow,
+    detail: Option<&ProcessDetail>,
+    reveal: Callback<()>,
     select_process: Callback<Option<ProcessIdentity>>,
 ) -> View {
     let close = select_process.clone();
+    let image_path = detail
+        .and_then(|detail| detail.image_path.as_deref())
+        .filter(|path| reveal_target_is_safe(path));
+    let path_row: View = detail
+        .and_then(|detail| detail.image_path.as_deref())
+        .map_or_else(View::empty, |path| {
+            process_detail_row_258(palette, "Path", path.to_string())
+        });
+    let footnote = match detail {
+        Some(detail) if detail.access_denied => {
+            "Windows refused to open this process: it is a system or elevated process, so its path, owner and elevation are not shown."
+        }
+        Some(_) => {
+            "Owner, architecture and elevation are omitted when Windows does not expose them without an additional privileged query."
+        }
+        None => "Looking up the program file…",
+    };
+    let reveal_button: View = image_path.map_or_else(View::empty, |_| {
+        Border::new()
+            .padding(Thickness::new(15.0, 4.0, 15.0, 4.0))
+            .content(
+                Button::new()
+                    .height(30.0)
+                    .horizontal_alignment(HorizontalAlignment::Stretch)
+                    .on_click(move || {
+                        let _ = reveal.call(());
+                    })
+                    .automation_name("Open file location")
+                    .content(fa_icon_label(
+                        FaIcon::ArrowUpRightFromSquare,
+                        "Open file location",
+                    )),
+            )
+    });
     Border::new()
         .background(palette.card)
         .border_brush(palette.border)
         .border_thickness(1.0)
         .corner_radius(9.0)
-        .content(StackPanel::new().children((
-            Border::new()
-                .padding(Thickness::new(15.0, 13.0, 10.0, 13.0))
-                .border_brush(palette.border)
-                .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
-                .content(
-                    Grid::new()
-                        .columns([GridLength::Star(1.0), GridLength::Auto])
-                        .children((
-                            StackPanel::new().spacing(2.0).children((
-                                TextBlock::new()
-                                    .text(process.name.clone())
-                                    .font_size(13.0)
-                                    .font_weight(FontWeight::SEMI_BOLD)
-                                    .text_trimming(TextTrimming::CharacterEllipsis),
-                                TextBlock::new()
-                                    .text(format!("PID {}", process.pid))
-                                    .font_size(11.0)
-                                    .foreground(palette.muted),
+        .content(
+            StackPanel::new().children((
+                Border::new()
+                    .padding(Thickness::new(15.0, 13.0, 10.0, 13.0))
+                    .border_brush(palette.border)
+                    .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
+                    .content(
+                        Grid::new()
+                            .columns([GridLength::Star(1.0), GridLength::Auto])
+                            .children((
+                                StackPanel::new().spacing(2.0).children((
+                                    TextBlock::new()
+                                        .text(process.name.clone())
+                                        .font_size(13.0)
+                                        .font_weight(FontWeight::SEMI_BOLD)
+                                        .text_trimming(TextTrimming::CharacterEllipsis),
+                                    TextBlock::new()
+                                        .text(format!("PID {}", process.pid))
+                                        .font_size(11.0)
+                                        .foreground(palette.muted),
+                                )),
+                                Button::new()
+                                    .grid_column(1)
+                                    .width(28.0)
+                                    .height(28.0)
+                                    .resource_overrides(
+                                        ResourceOverrides::new()
+                                            .set("ButtonBackground", Color::transparent())
+                                            .set("ButtonBackgroundPointerOver", palette.active)
+                                            .set("ButtonBackgroundPressed", palette.active)
+                                            .set("ButtonForeground", palette.muted)
+                                            .set(
+                                                "ButtonBorderThemeThickness",
+                                                Thickness::uniform(0.0),
+                                            )
+                                            .set("ButtonPadding", Thickness::uniform(6.0))
+                                            .set("ControlCornerRadius", CornerRadius::uniform(5.0)),
+                                    )
+                                    .automation_name("Close process details")
+                                    .on_click(move || {
+                                        let _ = close.call(None);
+                                    })
+                                    .content(icons::path(FaIcon::Xmark)),
                             )),
-                            Button::new()
-                                .grid_column(1)
-                                .width(28.0)
-                                .height(28.0)
-                                .resource_overrides(
-                                    ResourceOverrides::new()
-                                        .set("ButtonBackground", Color::transparent())
-                                        .set("ButtonBackgroundPointerOver", palette.active)
-                                        .set("ButtonBackgroundPressed", palette.active)
-                                        .set("ButtonForeground", palette.muted)
-                                        .set(
-                                            "ButtonBorderThemeThickness",
-                                            Thickness::uniform(0.0),
-                                        )
-                                        .set("ButtonPadding", Thickness::uniform(6.0))
-                                        .set(
-                                            "ControlCornerRadius",
-                                            CornerRadius::uniform(5.0),
-                                        ),
-                                )
-                                .automation_name("Close process details")
-                                .on_click(move || {
-                                    let _ = close.call(None);
-                                })
-                                .content(icons::path(FaIcon::Xmark)),
-                        )),
-                ),
-            Border::new()
-                .padding(Thickness::new(15.0, 7.0, 15.0, 7.0))
-                .content(StackPanel::new().children((
-                    process_detail_row_258(palette, "CPU", format!("{:.1}%", process.cpu)),
-                    process_detail_row_258(
-                        palette,
-                        "Memory",
-                        format!("{} ({:.1}%)", process.memory, process.memory_percent),
                     ),
-                    process_detail_row_258(
-                        palette,
-                        "Virtual memory",
-                        process.virtual_memory.clone(),
+                Border::new()
+                    .padding(Thickness::new(15.0, 7.0, 15.0, 7.0))
+                    .content(StackPanel::new().children((
+                        process_detail_row_258(palette, "CPU", format!("{:.1}%", process.cpu)),
+                        process_detail_row_258(
+                            palette,
+                            "Memory",
+                            format!("{} ({:.1}%)", process.memory, process.memory_percent),
+                        ),
+                        process_detail_row_258(
+                            palette,
+                            "Virtual memory",
+                            process.virtual_memory.clone(),
+                        ),
+                        process_detail_row_258(palette, "Threads", process.threads.to_string()),
+                        process_detail_row_258(palette, "Handles", process.handles.to_string()),
+                        process_detail_row_258(
+                            palette,
+                            "CPU time",
+                            format!("{}s", process.cpu_time_secs),
+                        ),
+                        process_detail_row_258(palette, "Read", process.read.clone()),
+                        process_detail_row_258(palette, "Written", process.written.clone()),
+                        path_row,
+                    ))),
+                reveal_button,
+                Border::new()
+                    .padding(Thickness::new(15.0, 10.0, 15.0, 14.0))
+                    .content(
+                        TextBlock::new()
+                            .text(footnote)
+                            .font_size(10.5)
+                            .foreground(palette.muted)
+                            .text_wrapping(TextWrapping::Wrap),
                     ),
-                    process_detail_row_258(palette, "Threads", process.threads.to_string()),
-                    process_detail_row_258(palette, "Handles", process.handles.to_string()),
-                    process_detail_row_258(
-                        palette,
-                        "CPU time",
-                        format!("{}s", process.cpu_time_secs),
-                    ),
-                    process_detail_row_258(palette, "Read", process.read.clone()),
-                    process_detail_row_258(palette, "Written", process.written.clone()),
-                ))),
-            Border::new()
-                .padding(Thickness::new(15.0, 10.0, 15.0, 14.0))
-                .content(
-                    TextBlock::new()
-                        .text("Path, owner, architecture, and elevation are omitted when Windows does not expose them without an additional privileged query.")
-                        .font_size(10.5)
-                        .foreground(palette.muted)
-                        .text_wrapping(TextWrapping::Wrap),
-                ),
-        )))
+            )),
+        )
 }
 
 pub(crate) fn process_detail_row_258(

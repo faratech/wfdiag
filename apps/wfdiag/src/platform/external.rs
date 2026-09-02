@@ -297,6 +297,40 @@ pub fn launch_email_compose_draft(payload: &EmailPayload) -> Result<(), ExportDe
 
 /// Open one typed About action through the Windows shell.
 ///
+/// Open File Explorer with `path` selected.
+///
+/// The path is re-validated here (`reveal_target_is_safe`) and must be a
+/// real file that is not a reparse point, so nothing but a process image the
+/// projection already judged safe ever reaches the shell.
+///
+/// # Errors
+/// When the path fails validation, does not exist, or Explorer refuses it.
+pub fn reveal_in_explorer(path: &str) -> Result<(), String> {
+    use wfdiag_native_projection::process_identity::reveal_target_is_safe;
+    use windows::Win32::UI::Shell::{ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems};
+    use windows::core::PCWSTR;
+
+    if !reveal_target_is_safe(path) {
+        return Err("this path is not a program file".to_string());
+    }
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("the file could not be found ({error})"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("the file is not a regular program file".to_string());
+    }
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: the path is NUL-terminated; the item list is freed below.
+    let item = unsafe { ILCreateFromPathW(PCWSTR(wide.as_ptr())) };
+    if item.is_null() {
+        return Err("Explorer could not resolve the path".to_string());
+    }
+    // SAFETY: `item` is a valid item list until `ILFree`.
+    let result = unsafe { SHOpenFolderAndSelectItems(item, None, 0) };
+    // SAFETY: freeing the item list created above.
+    unsafe { ILFree(Some(item)) };
+    result.map_err(|error| format!("Explorer refused to open the folder ({error})"))
+}
+
 /// The passive update path never calls this function: launching a browser is
 /// possible only after an explicit button activation.
 pub fn launch_external_action(

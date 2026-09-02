@@ -48,6 +48,7 @@ use crate::event::{
 };
 use crate::ids::{Generation, Generations, RequestId, RequestIds};
 use crate::ports::AppPorts;
+use crate::ports::monitor::ProcessDetail;
 use crate::ports::monitor::{NetworkConnection, ProcessQuery, ProcessQueryOutcome};
 use crate::replies::{PendingReplies, ReplyFailure, ReplyWatcher};
 use crate::snapshot::AppSnapshot;
@@ -197,6 +198,10 @@ enum Internal {
         request: RequestId,
         connections: Result<Vec<NetworkConnection>, String>,
     },
+    ProcessDetail {
+        request: RequestId,
+        detail: Result<ProcessDetail, String>,
+    },
 }
 
 fn failure_text(failure: ReplyFailure) -> String {
@@ -242,6 +247,7 @@ pub struct AppService {
     update_request: Option<RequestId>,
     process_page_request: Option<RequestId>,
     network_request_id: Option<RequestId>,
+    process_detail_request: Option<RequestId>,
     issue_outstanding: bool,
     /// The scan whose issues are currently projected; a projection for a
     /// different scan compares against the previous one for escalations.
@@ -363,6 +369,7 @@ impl AppService {
             update_request: None,
             process_page_request: None,
             network_request_id: None,
+            process_detail_request: None,
             issue_outstanding: false,
             projected_issue_session: None,
             update_startup_due: None,
@@ -447,6 +454,7 @@ impl AppService {
             AppCommand::SetMonitorPaused { paused } => self.set_monitor_paused(paused),
             AppCommand::RequestProcessPage(query) => self.request_process_page(query),
             AppCommand::RequestNetworkConnections => self.request_network_connections(),
+            AppCommand::RequestProcessDetail { pid } => self.request_process_detail(pid),
 
             AppCommand::RequestProviderStatus => self.request_provider_status(),
             AppCommand::SetProviderPreference { preference } => {
@@ -1392,6 +1400,32 @@ impl AppService {
         }
     }
 
+    fn request_process_detail(&mut self, pid: u32) -> DispatchOutcome {
+        let Some(handle) = self.workers.monitor.as_ref() else {
+            return DispatchOutcome::Rejected(self.monitor_unavailable());
+        };
+        match handle.request_process_detail(pid) {
+            Ok(reply) => {
+                let Some(request) = self.requests.issue() else {
+                    return DispatchOutcome::Rejected(RejectReason::IdentityExhausted);
+                };
+                self.process_detail_request = Some(request);
+                self.replies
+                    .register(WorkerKind::Monitor, request, reply, move |result| {
+                        Internal::ProcessDetail {
+                            request,
+                            detail: result.map_err(failure_text),
+                        }
+                    });
+                DispatchOutcome::accepted_request(request)
+            }
+            Err(error) => DispatchOutcome::Rejected(RejectReason::WorkerUnavailable {
+                worker: WorkerKind::Monitor,
+                detail: error,
+            }),
+        }
+    }
+
     // ---- providers -----------------------------------------------------
 
     fn provider_unavailable(&self) -> RejectReason {
@@ -1986,6 +2020,22 @@ impl AppService {
                                 reason: error,
                             }));
                     }
+                }
+            }
+            Internal::ProcessDetail { request, detail } => {
+                // Only the newest request's reply is applied (#198): the port
+                // answers each request on its own thread, so an older reply can
+                // land after a newer one was issued.
+                if self.process_detail_request != Some(request) {
+                    return;
+                }
+                self.process_detail_request = None;
+                if let Ok(detail) = detail {
+                    self.snapshot.monitor.process_detail = Some(detail.clone());
+                    self.queue
+                        .push(AppEvent::Monitor(MonitorEvent::ProcessDetail(Box::new(
+                            detail,
+                        ))));
                 }
             }
             Internal::NetworkConnections {

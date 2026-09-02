@@ -6,7 +6,9 @@ use crate::screens::processes::view::ProcessViewRow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use wfdiag_app::ports::monitor::{ProcessPage, ProcessSortDirection, ProcessSortKey};
+use wfdiag_app::ports::monitor::{
+    ProcessDetail, ProcessPage, ProcessSortDirection, ProcessSortKey,
+};
 use wfdiag_native_projection::process_identity::ProcessIdentity;
 use windows_reactor::*;
 
@@ -51,6 +53,8 @@ pub(crate) struct ProcessesScreen {
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
     pub(crate) selected: Option<ProcessIdentity>,
+    /// The selected process's on-demand detail (image path), once answered.
+    pub(crate) detail: Option<ProcessDetail>,
     /// The process-filter debounce. This is the one remaining
     /// `spawn_background` on the data path: it is pure typing latency, not a
     /// worker wait.
@@ -71,6 +75,7 @@ impl Default for ProcessesScreen {
             loading: false,
             error: None,
             selected: None,
+            detail: None,
             debounce_revision: 0,
             debounce_task: None,
             last_refresh_started_at: None,
@@ -136,6 +141,8 @@ pub(crate) enum ProcessesMsg {
         revision: u64,
     },
     Select(Option<ProcessIdentity>),
+    /// Open File Explorer with the selected process's image selected.
+    RevealSelected,
 }
 
 #[cfg(test)]

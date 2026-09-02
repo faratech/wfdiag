@@ -5,6 +5,7 @@
 //! thing they replace is the environment. Nothing here touches the network,
 //! the registry, `WinRT`, or the user's disk.
 
+use crate::ports::monitor::{ProcessDetail, ProcessDetailReply};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -516,6 +517,7 @@ impl ProviderManagementBackend for MockProviderBackend {
 pub struct ScriptedMonitor {
     page: Arc<Mutex<ProcessPage>>,
     connections: Arc<Mutex<Vec<NetworkConnection>>>,
+    details: Arc<Mutex<std::collections::HashMap<u32, ProcessDetail>>>,
     publisher: Arc<Mutex<Option<UiEventPublisher>>>,
     control: Arc<MonitorControl>,
     stall: Arc<std::sync::atomic::AtomicBool>,
@@ -548,6 +550,11 @@ impl ScriptedMonitor {
     #[must_use]
     pub fn control(&self) -> Arc<MonitorControl> {
         Arc::clone(&self.control)
+    }
+
+    /// Script one process's detail reply.
+    pub fn set_process_detail(&self, detail: ProcessDetail) {
+        lock(&self.details).insert(detail.pid, detail);
     }
 
     /// Accept process queries but never answer them, so a test can observe
@@ -583,6 +590,7 @@ impl ScriptedMonitor {
 struct ScriptedMonitorHandle {
     page: Arc<Mutex<ProcessPage>>,
     connections: Arc<Mutex<Vec<NetworkConnection>>>,
+    details: Arc<Mutex<std::collections::HashMap<u32, ProcessDetail>>>,
     control: Arc<MonitorControl>,
     stall: Arc<std::sync::atomic::AtomicBool>,
     held: Arc<Mutex<Vec<oneshot::Sender<ProcessQueryOutcome>>>>,
@@ -623,6 +631,20 @@ impl MonitorHandle for ScriptedMonitorHandle {
         let _ = sender.send(lock(&self.connections).clone());
         Ok(receiver)
     }
+
+    fn request_process_detail(&self, pid: u32) -> Result<ProcessDetailReply, String> {
+        let (sender, receiver) = oneshot::channel();
+        let detail = lock(&self.details)
+            .get(&pid)
+            .cloned()
+            .unwrap_or(ProcessDetail {
+                pid,
+                image_path: None,
+                access_denied: false,
+            });
+        let _ = sender.send(detail);
+        Ok(receiver)
+    }
 }
 
 impl MonitorPort for ScriptedMonitor {
@@ -634,6 +656,7 @@ impl MonitorPort for ScriptedMonitor {
             handle: Box::new(ScriptedMonitorHandle {
                 page: Arc::clone(&self.page),
                 connections: Arc::clone(&self.connections),
+                details: Arc::clone(&self.details),
                 control: Arc::clone(&self.control),
                 stall: Arc::clone(&self.stall),
                 held: Arc::clone(&self.held),

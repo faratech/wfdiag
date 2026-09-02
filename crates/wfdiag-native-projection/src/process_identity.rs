@@ -159,9 +159,66 @@ pub fn reconcile_process_selection<Row: ProcessIdentitySource>(
     reconcile_process_selection_by(selection, rows, ProcessIdentitySource::process_identity)
 }
 
+/// Whether a process image path may be handed to File Explorer.
+///
+/// Only an absolute, drive-rooted path to an executable image qualifies: no
+/// UNC or device paths, no `.` / `..` segments, no control characters. The
+/// platform layer re-checks this and requires a real, non-reparse-point file
+/// before it opens anything.
+#[must_use]
+pub fn reveal_target_is_safe(path: &str) -> bool {
+    const IMAGE_EXTENSIONS: [&str; 8] = ["exe", "dll", "sys", "com", "scr", "cpl", "ocx", "drv"];
+    let bytes = path.as_bytes();
+    if bytes.len() < 4 || bytes.len() > 4096 {
+        return false;
+    }
+    if !(bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\') {
+        return false;
+    }
+    if path.chars().any(char::is_control) {
+        return false;
+    }
+    if path
+        .split(['\\', '/'])
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return false;
+    }
+    let file_name = path.rsplit('\\').next().unwrap_or_default();
+    file_name.rsplit_once('.').is_some_and(|(stem, extension)| {
+        !stem.is_empty()
+            && IMAGE_EXTENSIONS
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reveal_targets_are_drive_rooted_executable_images() {
+        assert!(reveal_target_is_safe(r"C:\Windows\explorer.exe"));
+        assert!(reveal_target_is_safe(
+            r"C:\Program Files\WindowsApps\App_1.0\app.EXE"
+        ));
+        assert!(reveal_target_is_safe(r"D:\drivers\storahci.sys"));
+        for bad in [
+            "",
+            "explorer.exe",
+            r"\\server\share\evil.exe",
+            r"\\?\C:\Windows\explorer.exe",
+            r"C:\Windows\..\evil.exe",
+            r"C:\Windows\.\explorer.exe",
+            r"C:\Windows\notes.txt",
+            r"C:\Windows\explorer",
+            "C:\\Windows\\bad\u{7}.exe",
+            r"C:\.exe",
+        ] {
+            assert!(!reveal_target_is_safe(bad), "{bad:?} must be refused");
+        }
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct FixtureRow {

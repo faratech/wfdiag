@@ -7,6 +7,7 @@
 
 use crate::command::WorkerKind;
 use crate::ids::RequestId;
+use crate::ports::monitor::ProcessDetail;
 use crate::ports::monitor::{NetworkConnection, ProcessPage};
 use crate::snapshot::AppSnapshot;
 use std::collections::VecDeque;
@@ -259,6 +260,8 @@ pub enum MonitorEvent {
     ProcessPageSuperseded,
     /// The current network connections.
     NetworkConnections(Vec<NetworkConnection>),
+    /// One process's on-demand detail (the newest request's reply only).
+    ProcessDetail(Box<ProcessDetail>),
     /// Sampling was paused or resumed.
     PausedChanged {
         /// Whether sampling is paused.
