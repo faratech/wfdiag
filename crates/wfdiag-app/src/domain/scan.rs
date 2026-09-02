@@ -1028,17 +1028,20 @@ pub const QUICK_DETECTION_SOURCE_TASK_IDS: [&str; 11] = [
 ///
 /// A full or targeted scan drops admin-only tasks when the process is not
 /// elevated. A quick scan uses the user's custom set when they have one, always
-/// unioned with the cheap issue sources.
+/// unioned with the cheap issue sources. Tasks that send probes off the
+/// machine run only when the user has turned connectivity tests on.
 #[must_use]
 pub fn select_scan_tasks(
     catalog: &[DiagnosticTask],
     scan_kind: ScanKind,
     is_admin: bool,
     custom_quick_tasks: Option<&[String]>,
+    network_tests_enabled: bool,
 ) -> Vec<String> {
     let custom_quick_tasks = custom_quick_tasks.filter(|tasks| !tasks.is_empty());
     catalog
         .iter()
+        .filter(|task| task_allowed_by_privacy(&task.id, network_tests_enabled))
         .filter(|task| match scan_kind {
             ScanKind::Quick => custom_quick_tasks.map_or_else(
                 || QUICK_SCAN_TASK_IDS.contains(&task.id.as_str()),
@@ -1053,9 +1056,21 @@ pub fn select_scan_tasks(
         .collect()
 }
 
+/// Tasks that send probes off this machine. They run only when the user has
+/// turned connectivity tests on (`AppSettings::network_tests_enabled`), in
+/// every scan kind, from every caller — including the AI chat's
+/// `run_diagnostic` tool.
+pub const NETWORK_PROBE_TASK_IDS: [&str; 1] = ["network_path"];
+
+/// Whether a task may run under the user's privacy settings.
+#[must_use]
+pub fn task_allowed_by_privacy(task_id: &str, network_tests_enabled: bool) -> bool {
+    network_tests_enabled || !NETWORK_PROBE_TASK_IDS.contains(&task_id)
+}
+
 #[cfg(test)]
 mod selection_tests {
-    use super::select_scan_tasks;
+    use super::{select_scan_tasks, task_allowed_by_privacy};
     use wfdiag_native_diagnostics::{DiagnosticTask, ScanKind};
 
     fn task(id: &str, admin_required: bool) -> DiagnosticTask {
@@ -1072,11 +1087,11 @@ mod selection_tests {
     fn a_full_scan_drops_admin_tasks_without_elevation() {
         let catalog = vec![task("os_info", false), task("bsod_dumps", true)];
         assert_eq!(
-            select_scan_tasks(&catalog, ScanKind::Full, false, None),
+            select_scan_tasks(&catalog, ScanKind::Full, false, None, false),
             ["os_info"]
         );
         assert_eq!(
-            select_scan_tasks(&catalog, ScanKind::Full, true, None).len(),
+            select_scan_tasks(&catalog, ScanKind::Full, true, None, false).len(),
             2
         );
     }
@@ -1089,7 +1104,7 @@ mod selection_tests {
             task("processor", false),
         ];
         let custom = vec!["processor".to_string()];
-        let selected = select_scan_tasks(&catalog, ScanKind::Quick, false, Some(&custom));
+        let selected = select_scan_tasks(&catalog, ScanKind::Quick, false, Some(&custom), false);
         assert!(selected.contains(&"processor".to_string()));
         assert!(
             selected.contains(&"logical_disk".to_string()),
@@ -1102,8 +1117,29 @@ mod selection_tests {
     fn the_default_quick_scan_uses_the_shipping_task_set() {
         let catalog = vec![task("os_info", false), task("unlisted", false)];
         assert_eq!(
-            select_scan_tasks(&catalog, ScanKind::Quick, true, None),
+            select_scan_tasks(&catalog, ScanKind::Quick, true, None, false),
             ["os_info"]
         );
+    }
+
+    #[test]
+    fn network_probes_run_only_when_connectivity_tests_are_on() {
+        let catalog = vec![task("os_info", false), task("network_path", false)];
+        for kind in [ScanKind::Quick, ScanKind::Full, ScanKind::Targeted] {
+            let custom = vec!["network_path".to_string()];
+            let selected = select_scan_tasks(&catalog, kind, true, Some(&custom), false);
+            assert!(
+                !selected.iter().any(|id| id == "network_path"),
+                "{kind:?} must not probe the network while tests are off"
+            );
+        }
+        assert!(
+            select_scan_tasks(&catalog, ScanKind::Full, true, None, true)
+                .iter()
+                .any(|id| id == "network_path")
+        );
+        assert!(task_allowed_by_privacy("os_info", false));
+        assert!(!task_allowed_by_privacy("network_path", false));
+        assert!(task_allowed_by_privacy("network_path", true));
     }
 }

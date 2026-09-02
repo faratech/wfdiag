@@ -36,7 +36,9 @@ use crate::domain::history::{
 use crate::domain::invalidation::Invalidation;
 use crate::domain::issues::IssueTracker;
 use crate::domain::providers::PhiPreferenceGate;
-use crate::domain::scan::{RunOutcome, ScanPhase, ScanPolicy, ScanState, select_scan_tasks};
+use crate::domain::scan::{
+    RunOutcome, ScanPhase, ScanPolicy, ScanState, select_scan_tasks, task_allowed_by_privacy,
+};
 use crate::domain::startup::{StartupReadiness, StartupScanGate};
 use crate::domain::update::{START_DELAY, UpdateSchedule, schedule};
 use crate::event::{
@@ -660,7 +662,10 @@ impl AppService {
                 let available: Vec<String> = requested
                     .into_iter()
                     .filter(|task_id| {
-                        self.snapshot.catalog.iter().any(|task| {
+                        task_allowed_by_privacy(
+                            task_id,
+                            self.snapshot.settings.network_tests_enabled,
+                        ) && self.snapshot.catalog.iter().any(|task| {
                             &task.id == task_id
                                 && (self.snapshot.is_admin() || !task.admin_required)
                         })
@@ -673,6 +678,7 @@ impl AppService {
                 kind,
                 self.snapshot.is_admin(),
                 self.snapshot.settings.quick_scan_tasks.as_deref(),
+                self.snapshot.settings.network_tests_enabled,
             ),
         };
         if task_ids.is_empty() {

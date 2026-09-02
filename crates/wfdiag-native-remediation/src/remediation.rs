@@ -457,6 +457,62 @@ pub fn remediations() -> &'static [RemediationSpec] {
                               cancel.",
             },
         },
+        // ---- 2.6: evidence-driven handoffs. Folder paths never enter argv:
+        // known-folder names (`shell:`) and `ms-settings:` URIs are the
+        // compile-time constants Explorer resolves itself. ----
+        RemediationSpec {
+            metadata: remediation_catalog::OPEN_DOWNLOADS_FOLDER,
+            run: RunKind::Spawn {
+                program: "explorer.exe",
+                args: &["shell:Downloads"],
+            },
+        },
+        RemediationSpec {
+            metadata: remediation_catalog::OPEN_STORAGE_SETTINGS,
+            run: RunKind::Spawn {
+                program: "explorer.exe",
+                args: &["ms-settings:storagesense"],
+            },
+        },
+        RemediationSpec {
+            metadata: remediation_catalog::OPEN_NETWORK_SETTINGS,
+            run: RunKind::Spawn {
+                program: "explorer.exe",
+                args: &["ms-settings:network-status"],
+            },
+        },
+        RemediationSpec {
+            metadata: remediation_catalog::OPEN_MEMORY_DIAGNOSTIC,
+            run: RunKind::Spawn {
+                // mdsched.exe declares requireAdministrator; the broker's
+                // admin gate keeps a standard user from an elevation error.
+                program: "mdsched.exe",
+                args: &[],
+            },
+        },
+        RemediationSpec {
+            metadata: remediation_catalog::ENABLE_WINDOWS_UPDATE_SERVICE,
+            run: RunKind::Steps {
+                steps: &[
+                    CmdStep {
+                        program: "sc",
+                        // `sc` insists on the space after `start=`.
+                        args: &["config", "wuauserv", "start=", "demand"],
+                        ignore_failure: false,
+                        action_label: "Set the Windows Update service to start on demand",
+                    },
+                    CmdStep {
+                        program: "sc",
+                        args: &["start", "wuauserv"],
+                        ignore_failure: true,
+                        action_label: "Started the Windows Update service",
+                    },
+                ],
+                timeout_secs: 60,
+                success_msg: "The Windows Update service is enabled again. Open Windows Update \
+                              and check for updates.",
+            },
+        },
     ]
 }
 
@@ -1207,10 +1263,15 @@ mod tests {
             );
         }
 
-        // Every issue's remediation_id resolves to exactly one metadata and
-        // trusted execution entry.
+        // Every issue's remediation_id (and every alternate a detector may
+        // choose) resolves to exactly one metadata and trusted execution entry.
         for issue in wfdiag_native_issues::catalog() {
-            if let Some(remediation_id) = issue.remediation_id {
+            for remediation_id in issue
+                .remediation_id
+                .iter()
+                .copied()
+                .chain(issue.alternate_remediations.iter().copied())
+            {
                 assert_eq!(
                     metadata_catalog
                         .iter()
@@ -1233,6 +1294,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Remediation arguments are constants; a filesystem path (drive letter,
+    /// backslash) would mean a user-influenced value reached a command line.
+    #[test]
+    fn no_remediation_argument_carries_a_filesystem_path() {
+        const SCHEMES: [&str; 3] = ["shell:", "ms-settings:", "windowsdefender:"];
+        let check = |id: &str, arg: &str| {
+            assert!(!arg.contains('\\'), "{id}: '{arg}' looks like a path");
+            if arg.contains(':') {
+                assert!(
+                    SCHEMES.iter().any(|scheme| arg.starts_with(scheme)),
+                    "{id}: '{arg}' carries a colon outside the known URI schemes"
+                );
+            }
+        };
+        for spec in remediations() {
+            match &spec.run {
+                RunKind::Spawn { args, .. } => args.iter().for_each(|arg| check(spec.id, arg)),
+                RunKind::Steps { steps, .. } => steps
+                    .iter()
+                    .flat_map(|step| step.args.iter())
+                    .for_each(|arg| check(spec.id, arg)),
+                RunKind::Custom { .. } => {}
+            }
+        }
+    }
+
+    #[test]
+    fn evidence_driven_handoffs_spawn_constant_targets() {
+        let expect = |id: &str, program: &str, args: &[&str]| {
+            let spec = remediations()
+                .iter()
+                .find(|spec| spec.id == id)
+                .unwrap_or_else(|| panic!("{id} missing"));
+            match &spec.run {
+                RunKind::Spawn {
+                    program: actual,
+                    args: actual_args,
+                } => {
+                    assert_eq!(*actual, program, "{id}");
+                    assert_eq!(*actual_args, args, "{id}");
+                }
+                _ => panic!("{id} must be a Spawn"),
+            }
+        };
+        expect(
+            "open_downloads_folder",
+            "explorer.exe",
+            &["shell:Downloads"],
+        );
+        expect(
+            "open_storage_settings",
+            "explorer.exe",
+            &["ms-settings:storagesense"],
+        );
+        expect(
+            "open_network_settings",
+            "explorer.exe",
+            &["ms-settings:network-status"],
+        );
+        expect("open_memory_diagnostic", "mdsched.exe", &[]);
+        let enable = remediations()
+            .iter()
+            .find(|spec| spec.id == "enable_windows_update_service")
+            .unwrap();
+        let RunKind::Steps { steps, .. } = &enable.run else {
+            panic!("enable_windows_update_service must be Steps");
+        };
+        assert_eq!(steps[0].args, ["config", "wuauserv", "start=", "demand"]);
+        assert_eq!(steps[1].args, ["start", "wuauserv"]);
+        assert!(enable.cancellable());
     }
 
     #[test]

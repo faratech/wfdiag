@@ -62,6 +62,11 @@ pub struct AppSettings {
     pub preferred_ai_provider: String,
     #[serde(default)]
     pub network_grounding_enabled: bool,
+    /// Whether scans may run the network connectivity test, which sends a
+    /// few small probes off this machine (2.6). Off by default; with it off
+    /// nothing in a scan leaves the PC.
+    #[serde(default)]
+    pub network_tests_enabled: bool,
     /// Whether the one-time "connect an AI provider" offer was shown (#32).
     /// Only a fresh, nothing-configured profile is offered, and dismissing
     /// or connecting sets this so the offer never nags.
@@ -141,6 +146,7 @@ impl Default for AppSettings {
             ai_enabled: true,
             preferred_ai_provider: default_ai_provider(),
             network_grounding_enabled: false,
+            network_tests_enabled: false,
             ai_onboarding_seen: false,
             cloud_fallback_policy: CloudFallbackPolicy::Ask,
             open_ai_api_key: None,
@@ -540,6 +546,7 @@ pub enum SettingsUpdate {
     CloseToTray(bool),
     PreferredAiProvider(String),
     NetworkGrounding(bool),
+    NetworkTests(bool),
     CloudFallbackPolicy(CloudFallbackPolicy),
     AiOnboardingSeen(bool),
 }
@@ -556,6 +563,7 @@ impl SettingsUpdate {
             Self::CloseToTray(value) => settings.close_to_tray = value,
             Self::PreferredAiProvider(value) => settings.preferred_ai_provider = value,
             Self::NetworkGrounding(value) => settings.network_grounding_enabled = value,
+            Self::NetworkTests(value) => settings.network_tests_enabled = value,
             Self::AiOnboardingSeen(value) => settings.ai_onboarding_seen = value,
             Self::CloudFallbackPolicy(value) => settings.cloud_fallback_policy = value,
         }

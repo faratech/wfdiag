@@ -66,10 +66,17 @@ pub struct DetectCtx<'a> {
 }
 
 /// A positive detection: dynamic description plus an optional severity
-/// override (e.g. a count crossing a higher threshold upgrades to Critical).
+/// override (e.g. a count crossing a higher threshold upgrades to Critical)
+/// and an optional evidence-dependent remediation (e.g. the fix for the
+/// largest reclaimable disk consumer).
 pub struct Detection {
     pub severity: Option<IssueSeverity>,
     pub description: String,
+    /// A remediation chosen from the evidence. It is honoured only when the
+    /// spec lists it (its default or one of `alternate_remediations`);
+    /// anything else silently falls back to the spec's default, so a detector
+    /// can never widen the closed remediation set.
+    pub remediation_id: Option<&'static str>,
 }
 
 /// The result of evaluating one catalog rule. A detector may only report
@@ -86,6 +93,7 @@ impl Detection {
         Self {
             severity: None,
             description: description.into(),
+            remediation_id: None,
         }
     }
 
@@ -93,7 +101,15 @@ impl Detection {
         Self {
             severity: Some(severity),
             description: description.into(),
+            remediation_id: None,
         }
+    }
+
+    /// Point the issue at an evidence-dependent remediation.
+    #[must_use]
+    pub fn with_remediation(mut self, remediation_id: &'static str) -> Self {
+        self.remediation_id = Some(remediation_id);
+        self
     }
 }
 
@@ -113,6 +129,9 @@ pub struct IssueSpec {
     pub source_tasks: &'static [&'static str],
     /// Remediation from the remediation catalog, when one applies
     pub remediation_id: Option<&'static str>,
+    /// Further catalog remediations a detector may select from the evidence
+    /// (see [`Detection::with_remediation`]). Closed and catalog-checked.
+    pub alternate_remediations: &'static [&'static str],
     pub detect: DetectFn,
 }
 
@@ -130,6 +149,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Free up disk space by deleting unnecessary files.",
             source_tasks: &["logical_disk"],
             remediation_id: Some("open_disk_cleanup"),
+            alternate_remediations: &[],
             detect: det::detect_low_disk_space,
         },
         IssueSpec {
@@ -142,6 +162,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Defragment your disk to improve performance.",
             source_tasks: &["disk_fragmentation"],
             remediation_id: Some("open_defrag"),
+            alternate_remediations: &[],
             detect: det::detect_disk_fragmentation,
         },
         IssueSpec {
@@ -154,6 +175,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Update drivers from manufacturer websites.",
             source_tasks: &["drivers_list"],
             remediation_id: None,
+            alternate_remediations: &[],
             detect: det::detect_unsigned_drivers,
         },
         IssueSpec {
@@ -166,6 +188,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Review event logs for details.",
             source_tasks: &["event_logs"],
             remediation_id: None,
+            alternate_remediations: &[],
             detect: det::detect_event_log_errors,
         },
         IssueSpec {
@@ -178,6 +201,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Start stopped core services or investigate why they failed.",
             source_tasks: &["services"],
             remediation_id: Some("start_critical_services"),
+            alternate_remediations: &[],
             detect: det::detect_stopped_services,
         },
         IssueSpec {
@@ -190,6 +214,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Check Task Manager for resource-intensive processes.",
             source_tasks: &["performance"],
             remediation_id: Some("open_task_manager"),
+            alternate_remediations: &[],
             detect: det::detect_high_cpu_usage,
         },
         IssueSpec {
@@ -202,6 +227,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Close unnecessary programs to free memory.",
             source_tasks: &["performance"],
             remediation_id: Some("open_task_manager"),
+            alternate_remediations: &[],
             detect: det::detect_high_memory_usage,
         },
         IssueSpec {
@@ -214,6 +240,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Open Windows Update to review and install the pending updates.",
             source_tasks: &["windows_update"],
             remediation_id: Some("open_windows_update"),
+            alternate_remediations: &[],
             detect: det::detect_pending_windows_updates,
         },
         IssueSpec {
@@ -226,6 +253,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Enable firewall for network protection.",
             source_tasks: &["firewall_status"],
             remediation_id: Some("open_security_center"),
+            alternate_remediations: &[],
             detect: det::detect_firewall_disabled,
         },
         IssueSpec {
@@ -238,6 +266,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Clean temporary files to free disk space.",
             source_tasks: &[],
             remediation_id: Some("clear_temp_files"),
+            alternate_remediations: &[],
             detect: det::detect_temp_files,
         },
         IssueSpec {
@@ -251,6 +280,7 @@ pub fn catalog() -> &'static [IssueSpec] {
                              them name resolution fails even though the network is up.",
             source_tasks: &["network_adapter"],
             remediation_id: None,
+            alternate_remediations: &[],
             detect: det::detect_dns_misconfigured,
         },
         IssueSpec {
@@ -263,6 +293,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Back up your data immediately and replace the disk.",
             source_tasks: &["chkdsk"],
             remediation_id: None,
+            alternate_remediations: &[],
             detect: det::detect_smart_failure_predicted,
         },
         IssueSpec {
@@ -275,6 +306,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Back up important data and monitor the disk closely.",
             source_tasks: &["chkdsk"],
             remediation_id: None,
+            alternate_remediations: &[],
             detect: det::detect_disk_unhealthy,
         },
         IssueSpec {
@@ -287,6 +319,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Run the DISM repair to restore the component store.",
             source_tasks: &["dism_health"],
             remediation_id: Some("dism_restorehealth"),
+            alternate_remediations: &[],
             detect: det::detect_dism_corruption,
         },
         IssueSpec {
@@ -299,6 +332,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Copy the minidumps (Diagnostics > Debug) and analyze them, or share them on WindowsForum for help.",
             source_tasks: &["minidump"],
             remediation_id: None,
+            alternate_remediations: &[],
             detect: det::detect_bsod_recent,
         },
         IssueSpec {
@@ -311,6 +345,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Check PSU/power cabling, overheating and driver crashes; review what happened right before each event.",
             source_tasks: &["event_codes_critical"],
             remediation_id: None,
+            alternate_remediations: &[],
             detect: det::detect_kernel_power_crashes,
         },
         IssueSpec {
@@ -323,6 +358,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Correlate the times with power events or crashes; check Reliability Monitor.",
             source_tasks: &["event_codes_critical"],
             remediation_id: None,
+            alternate_remediations: &[],
             detect: det::detect_unexpected_shutdowns,
         },
         IssueSpec {
@@ -335,6 +371,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Back up the affected disk, check SATA/NVMe cabling and run the disk health check.",
             source_tasks: &["event_codes_critical"],
             remediation_id: None,
+            alternate_remediations: &[],
             detect: det::detect_disk_io_errors,
         },
         IssueSpec {
@@ -347,6 +384,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Check CPU/RAM stability (disable overclocks, run memtest) and update firmware.",
             source_tasks: &["event_codes_critical"],
             remediation_id: None,
+            alternate_remediations: &[],
             detect: det::detect_whea_errors,
         },
         IssueSpec {
@@ -359,6 +397,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Identify the crashing service in the event log and reinstall or update its application.",
             source_tasks: &["event_codes_critical"],
             remediation_id: None,
+            alternate_remediations: &[],
             detect: det::detect_service_crash_loops,
         },
         IssueSpec {
@@ -371,6 +410,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Open Device Manager and update or reinstall the flagged drivers.",
             source_tasks: &["device_errors"],
             remediation_id: Some("open_device_manager"),
+            alternate_remediations: &[],
             detect: det::detect_device_manager_errors,
         },
         IssueSpec {
@@ -383,6 +423,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Enable Windows Security (or your AV product) immediately.",
             source_tasks: &["defender_status"],
             remediation_id: Some("open_security_center"),
+            alternate_remediations: &[],
             detect: det::detect_defender_disabled,
         },
         IssueSpec {
@@ -395,6 +436,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Restart Windows to complete the operation identified above. If the same marker remains afterward, re-run this check before restarting again.",
             source_tasks: &["pending_reboot"],
             remediation_id: Some("restart_system"),
+            alternate_remediations: &[],
             detect: det::detect_pending_reboot,
         },
         IssueSpec {
@@ -407,6 +449,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Close memory-heavy programs or increase the page file size.",
             source_tasks: &["performance"],
             remediation_id: Some("open_task_manager"),
+            alternate_remediations: &[],
             detect: det::detect_page_file_pressure,
         },
         IssueSpec {
@@ -419,6 +462,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Consider replacing the battery; reduce charge cycles by avoiding deep discharges.",
             source_tasks: &["battery_report"],
             remediation_id: None,
+            alternate_remediations: &[],
             detect: det::detect_battery_degraded,
         },
         IssueSpec {
@@ -431,6 +475,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Disable unneeded startup entries in Task Manager's Startup tab.",
             source_tasks: &["startup_command"],
             remediation_id: Some("open_task_manager"),
+            alternate_remediations: &[],
             detect: det::detect_startup_bloat,
         },
         IssueSpec {
@@ -443,6 +488,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Driver age alone does not prove a problem. Check the PC or device manufacturer's support page if you are troubleshooting a related symptom.",
             source_tasks: &["drivers_list"],
             remediation_id: None,
+            alternate_remediations: &[],
             detect: det::detect_outdated_drivers,
         },
         IssueSpec {
@@ -455,6 +501,7 @@ pub fn catalog() -> &'static [IssueSpec] {
             recommendation: "Review the hosts file and run a full antivirus scan; do not log into redirected sites.",
             source_tasks: &["hosts_file"],
             remediation_id: None,
+            alternate_remediations: &[],
             detect: det::detect_hosts_file_hijack,
         },
     ]
@@ -488,8 +535,7 @@ pub fn detect_all_with(
                 recommendation: spec.recommendation.to_string(),
                 detected: true,
                 source_tasks: source_tasks_for_issue(spec),
-                remediation: spec
-                    .remediation_id
+                remediation: chosen_remediation(spec, detection.remediation_id)
                     .and_then(remediation_summary),
             },
             DetectionOutcome::Clear => Issue {
@@ -518,6 +564,14 @@ pub fn detect_all_with(
             },
         })
         .collect()
+}
+
+/// The remediation an issue carries: the detector's evidence-based choice when
+/// the spec declares it, else the spec's default. Never anything else.
+fn chosen_remediation(spec: &IssueSpec, override_id: Option<&'static str>) -> Option<&'static str> {
+    override_id
+        .filter(|id| spec.remediation_id == Some(id) || spec.alternate_remediations.contains(id))
+        .or(spec.remediation_id)
 }
 
 fn evaluate(spec: &IssueSpec, ctx: &DetectCtx) -> DetectionOutcome {
@@ -926,19 +980,77 @@ mod tests {
     #[test]
     fn issue_linked_remediations_resolve_exactly_once_in_the_canonical_catalog() {
         for spec in catalog() {
-            let Some(remediation_id) = spec.remediation_id else {
-                continue;
-            };
-            let matches = crate::remediation_catalog()
+            for remediation_id in spec
+                .remediation_id
                 .iter()
-                .filter(|metadata| metadata.id == remediation_id)
-                .count();
-            assert_eq!(
-                matches, 1,
-                "issue '{}' must resolve remediation '{}' exactly once",
-                spec.id, remediation_id
-            );
+                .chain(spec.alternate_remediations.iter())
+            {
+                let matches = crate::remediation_catalog()
+                    .iter()
+                    .filter(|metadata| metadata.id == *remediation_id)
+                    .count();
+                assert_eq!(
+                    matches, 1,
+                    "issue '{}' must resolve remediation '{}' exactly once",
+                    spec.id, remediation_id
+                );
+            }
+            let mut seen = std::collections::HashSet::new();
+            for remediation_id in spec.alternate_remediations {
+                assert!(
+                    seen.insert(*remediation_id) && spec.remediation_id != Some(*remediation_id),
+                    "issue '{}' lists remediation '{}' twice",
+                    spec.id,
+                    remediation_id
+                );
+            }
         }
+    }
+
+    fn spec_with_alternates() -> IssueSpec {
+        IssueSpec {
+            id: "test_rule",
+            category: "Test",
+            default_severity: IssueSeverity::Warning,
+            title: "Test",
+            ok_title: "Test",
+            ok_description: "Test",
+            recommendation: "Test",
+            source_tasks: &[],
+            remediation_id: Some("open_disk_cleanup"),
+            alternate_remediations: &["empty_recycle_bin"],
+            detect: |_| None,
+        }
+    }
+
+    #[test]
+    fn override_in_alternates_is_embedded_in_issue() {
+        let spec = spec_with_alternates();
+        assert_eq!(
+            chosen_remediation(&spec, Some("empty_recycle_bin")),
+            Some("empty_recycle_bin")
+        );
+        assert_eq!(
+            chosen_remediation(&spec, Some("open_disk_cleanup")),
+            Some("open_disk_cleanup")
+        );
+        assert_eq!(chosen_remediation(&spec, None), Some("open_disk_cleanup"));
+    }
+
+    #[test]
+    fn override_outside_alternates_falls_back_to_spec_default() {
+        let spec = spec_with_alternates();
+        assert_eq!(
+            chosen_remediation(&spec, Some("sfc_scannow")),
+            Some("open_disk_cleanup"),
+            "a detector cannot widen the closed remediation set"
+        );
+        let no_default = IssueSpec {
+            remediation_id: None,
+            alternate_remediations: &[],
+            ..spec_with_alternates()
+        };
+        assert_eq!(chosen_remediation(&no_default, Some("sfc_scannow")), None);
     }
 
     #[test]

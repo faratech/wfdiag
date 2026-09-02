@@ -752,6 +752,7 @@ impl AppService {
             live_stats: self.snapshot.monitor.latest.clone(),
             remediations: self.snapshot.remediations.clone(),
             network_grounding_enabled: self.snapshot.settings.network_grounding_enabled,
+            network_tests_enabled: self.snapshot.settings.network_tests_enabled,
         }
     }
 

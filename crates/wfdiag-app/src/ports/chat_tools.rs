@@ -11,6 +11,7 @@
 //! back into service state, which is what lets a turn keep answering about the
 //! scan it was asked about even while a newer scan replaces it.
 
+use crate::domain::scan::task_allowed_by_privacy;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio_util::sync::CancellationToken;
@@ -65,6 +66,9 @@ pub struct ChatToolSnapshot {
     pub remediations: Vec<RemediationSummary>,
     /// Whether the user enabled live network grounding.
     pub network_grounding_enabled: bool,
+    /// Whether scans may send connectivity probes off the machine; gates the
+    /// `run_diagnostic` tool exactly like every other scan path.
+    pub network_tests_enabled: bool,
 }
 
 /// The read-only platform ports the tools reach through.
@@ -198,6 +202,11 @@ impl BoundedToolBackend for AppChatToolBackend {
         Box::pin(async move {
             match operation {
                 BoundedToolOperation::RunDiagnostic { task_id, .. } => {
+                    if !task_allowed_by_privacy(&task_id, self.snapshot.network_tests_enabled) {
+                        return Err(format!(
+                            "Diagnostic {task_id} sends network probes and is disabled in Settings"
+                        ));
+                    }
                     let execution = self.ports.diagnostics.execute(task_id.clone());
                     let output = tokio::select! {
                         biased;

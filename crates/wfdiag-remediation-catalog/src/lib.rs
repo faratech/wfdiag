@@ -80,7 +80,7 @@ pub struct RemediationSummary {
     pub cancellable: bool,
 }
 
-pub const REMEDIATION_COUNT: usize = 17;
+pub const REMEDIATION_COUNT: usize = 22;
 
 /// The single canonical metadata catalog, in the shipping display order.
 pub static REMEDIATIONS: [RemediationMetadata; REMEDIATION_COUNT] = [
@@ -271,6 +271,62 @@ pub static REMEDIATIONS: [RemediationMetadata; REMEDIATION_COUNT] = [
         maintenance: false,
         cancellable: false,
     },
+    // ---- 2.6: evidence-driven handoffs ----
+    RemediationMetadata {
+        id: "open_downloads_folder",
+        label: "Open Downloads folder",
+        description: "Opens your Downloads folder in File Explorer so you can delete or move large files.",
+        tier: RemediationTier::OpenTool,
+        admin_required: false,
+        requires_restart: false,
+        long_running: false,
+        maintenance: false,
+        cancellable: false,
+    },
+    RemediationMetadata {
+        id: "open_storage_settings",
+        label: "Open Storage settings",
+        description: "Opens Settings > System > Storage (ms-settings:storagesense) to see what is using space and remove Windows.old, temporary files and unused apps.",
+        tier: RemediationTier::OpenTool,
+        admin_required: false,
+        requires_restart: false,
+        long_running: false,
+        maintenance: false,
+        cancellable: false,
+    },
+    RemediationMetadata {
+        id: "open_network_settings",
+        label: "Open Network settings",
+        description: "Opens Settings > Network & internet (ms-settings:network-status) to check the connection and run the Windows network troubleshooter.",
+        tier: RemediationTier::OpenTool,
+        admin_required: false,
+        requires_restart: false,
+        long_running: false,
+        maintenance: false,
+        cancellable: false,
+    },
+    RemediationMetadata {
+        id: "open_memory_diagnostic",
+        label: "Run Windows Memory Diagnostic",
+        description: "Opens Windows Memory Diagnostic (mdsched.exe), which tests your RAM during the next restart.",
+        tier: RemediationTier::OpenTool,
+        admin_required: true,
+        requires_restart: false,
+        long_running: false,
+        maintenance: false,
+        cancellable: false,
+    },
+    RemediationMetadata {
+        id: "enable_windows_update_service",
+        label: "Enable Windows Update service",
+        description: "Runs 'sc config wuauserv start= demand' and 'sc start wuauserv' so Windows Update can run again.",
+        tier: RemediationTier::AutoSafe,
+        admin_required: true,
+        requires_restart: false,
+        long_running: false,
+        maintenance: false,
+        cancellable: true,
+    },
 ];
 
 pub const OPEN_DEFRAG: &RemediationMetadata = &REMEDIATIONS[0];
@@ -290,6 +346,11 @@ pub const DISM_RESTOREHEALTH: &RemediationMetadata = &REMEDIATIONS[13];
 pub const SFC_SCANNOW: &RemediationMetadata = &REMEDIATIONS[14];
 pub const NETWORK_RESET: &RemediationMetadata = &REMEDIATIONS[15];
 pub const RESTART_SYSTEM: &RemediationMetadata = &REMEDIATIONS[16];
+pub const OPEN_DOWNLOADS_FOLDER: &RemediationMetadata = &REMEDIATIONS[17];
+pub const OPEN_STORAGE_SETTINGS: &RemediationMetadata = &REMEDIATIONS[18];
+pub const OPEN_NETWORK_SETTINGS: &RemediationMetadata = &REMEDIATIONS[19];
+pub const OPEN_MEMORY_DIAGNOSTIC: &RemediationMetadata = &REMEDIATIONS[20];
+pub const ENABLE_WINDOWS_UPDATE_SERVICE: &RemediationMetadata = &REMEDIATIONS[21];
 
 #[must_use]
 pub fn catalog() -> &'static [RemediationMetadata] {
@@ -354,6 +415,14 @@ mod tests {
             (SFC_SCANNOW, "sfc_scannow"),
             (NETWORK_RESET, "network_reset"),
             (RESTART_SYSTEM, "restart_system"),
+            (OPEN_DOWNLOADS_FOLDER, "open_downloads_folder"),
+            (OPEN_STORAGE_SETTINGS, "open_storage_settings"),
+            (OPEN_NETWORK_SETTINGS, "open_network_settings"),
+            (OPEN_MEMORY_DIAGNOSTIC, "open_memory_diagnostic"),
+            (
+                ENABLE_WINDOWS_UPDATE_SERVICE,
+                "enable_windows_update_service",
+            ),
         ];
 
         assert_eq!(aliases.len(), REMEDIATION_COUNT);
@@ -386,7 +455,12 @@ mod tests {
                 {"id":"dism_restorehealth","label":"Repair Windows image (DISM)","description":"Runs 'DISM /Online /Cleanup-Image /RestoreHealth' to repair the Windows component store. Can take 10-30 minutes.","tier":"repair","admin_required":true,"requires_restart":false,"long_running":true,"maintenance":true,"batch_eligible":false,"cancellable":false},
                 {"id":"sfc_scannow","label":"System File Checker","description":"Runs 'sfc /scannow' to verify and repair protected system files. Can take 5-15 minutes.","tier":"repair","admin_required":true,"requires_restart":false,"long_running":true,"maintenance":true,"batch_eligible":false,"cancellable":false},
                 {"id":"network_reset","label":"Reset network stack","description":"Runs 'netsh winsock reset' and 'netsh int ip reset'. Requires a restart to take effect.","tier":"repair","admin_required":true,"requires_restart":true,"long_running":false,"maintenance":true,"batch_eligible":false,"cancellable":true},
-                {"id":"restart_system","label":"Restart Windows (60s)","description":"Schedules a restart in 60 seconds via 'shutdown /r /t 60'. Cancel with 'shutdown /a'.","tier":"repair","admin_required":false,"requires_restart":true,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false}
+                {"id":"restart_system","label":"Restart Windows (60s)","description":"Schedules a restart in 60 seconds via 'shutdown /r /t 60'. Cancel with 'shutdown /a'.","tier":"repair","admin_required":false,"requires_restart":true,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
+                {"id":"open_downloads_folder","label":"Open Downloads folder","description":"Opens your Downloads folder in File Explorer so you can delete or move large files.","tier":"open_tool","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
+                {"id":"open_storage_settings","label":"Open Storage settings","description":"Opens Settings > System > Storage (ms-settings:storagesense) to see what is using space and remove Windows.old, temporary files and unused apps.","tier":"open_tool","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
+                {"id":"open_network_settings","label":"Open Network settings","description":"Opens Settings > Network & internet (ms-settings:network-status) to check the connection and run the Windows network troubleshooter.","tier":"open_tool","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
+                {"id":"open_memory_diagnostic","label":"Run Windows Memory Diagnostic","description":"Opens Windows Memory Diagnostic (mdsched.exe), which tests your RAM during the next restart.","tier":"open_tool","admin_required":true,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
+                {"id":"enable_windows_update_service","label":"Enable Windows Update service","description":"Runs 'sc config wuauserv start= demand' and 'sc start wuauserv' so Windows Update can run again.","tier":"auto_safe","admin_required":true,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":true}
             ])
         );
     }

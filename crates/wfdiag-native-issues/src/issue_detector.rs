@@ -464,6 +464,7 @@ pub fn detect_disk_io_errors(ctx: &DetectCtx) -> Option<Detection> {
             "{} disk I/O error event(s) (codes 7/51/153) in the last 7 days. Check cables and back up the affected disk.",
             count
         ),
+        remediation_id: None,
     })
 }
 
@@ -480,6 +481,7 @@ pub fn detect_whea_errors(ctx: &DetectCtx) -> Option<Detection> {
             "{} hardware error event(s) (WHEA) in the last 7 days - possible CPU, memory or bus fault.",
             count
         ),
+        remediation_id: None,
     })
 }
 

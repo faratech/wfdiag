@@ -95,27 +95,9 @@ pub(crate) const WALLPAPER_LIGHT: &[u8] =
 pub(crate) const WALLPAPER_DARK: &[u8] =
     include_bytes!("../../assets/bg-24H4-oled-native-blurred.webp");
 
-// This is the exact 2.5.8 default Quick Scan union from `useScanner.ts`:
-// baseline inventory plus the cheap, non-admin issue-detection sources.
-pub(crate) const QUICK_SCAN_TASK_IDS: [&str; 17] = [
-    "comp_system",
-    "os_info",
-    "processor",
-    "physical_memory",
-    "disk_drive",
-    "logical_disk",
-    "network_adapter",
-    "systeminfo",
-    "pending_reboot",
-    "device_errors",
-    "defender_status",
-    "event_codes_critical",
-    "services",
-    "performance",
-    "startup_command",
-    "hosts_file",
-    "firewall_status",
-];
+// The default Quick Scan set is single-sourced in the facade; the Settings
+// dialog reads it to show which tasks a customised Quick Scan starts from.
+pub(crate) use wfdiag_app::domain::scan::QUICK_SCAN_TASK_IDS;
 
 pub(crate) const PROCESS_PAGE_SIZE: usize =
     wfdiag_native_projection::render::PROCESS_REPEATER_SLOTS;
