@@ -10,6 +10,12 @@ mod runtime;
 
 pub use runtime::*;
 
+/// Portable disk-space breakdown (walker, budget, consumer table).
+pub mod disk_usage;
+
+/// Portable blue-screen decoding (dump header parser, stop-code table).
+pub mod bugcheck;
+
 // FFI-heavy collectors keep `unsafe` scoped to themselves; the workspace (and
 // this crate) denies `unsafe_code` everywhere else.
 #[cfg(windows)]

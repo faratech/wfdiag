@@ -988,7 +988,7 @@ mod tests {
 }
 
 /// The Store 2.5.8 Quick Scan task set.
-pub const QUICK_SCAN_TASK_IDS: [&str; 18] = [
+pub const QUICK_SCAN_TASK_IDS: [&str; 20] = [
     "comp_system",
     "os_info",
     "processor",
@@ -1007,11 +1007,13 @@ pub const QUICK_SCAN_TASK_IDS: [&str; 18] = [
     "hosts_file",
     "firewall_status",
     "windows_update_events",
+    "disk_usage",
+    "defender_health",
 ];
 
 /// Cheap, non-admin issue sources always unioned into a customised Quick Scan
 /// so issue detection keeps working when the user trims the task list.
-pub const QUICK_DETECTION_SOURCE_TASK_IDS: [&str; 12] = [
+pub const QUICK_DETECTION_SOURCE_TASK_IDS: [&str; 14] = [
     "logical_disk",
     "network_adapter",
     "pending_reboot",
@@ -1024,6 +1026,8 @@ pub const QUICK_DETECTION_SOURCE_TASK_IDS: [&str; 12] = [
     "hosts_file",
     "firewall_status",
     "windows_update_events",
+    "disk_usage",
+    "defender_health",
 ];
 
 /// Choose the tasks one scan runs.

@@ -135,6 +135,13 @@ pub fn get_all_tasks() -> Vec<DiagnosticTask> {
             admin_required: false,
         },
         DiagnosticTask {
+            id: "disk_usage".to_string(),
+            name: "Disk Space Breakdown".to_string(),
+            description: "What is using space on the system drive: Downloads, temporary files, the Recycle Bin, the Windows Update cache, Windows.old and other well-known consumers".to_string(),
+            category: "Storage".to_string(),
+            admin_required: false,
+        },
+        DiagnosticTask {
             id: "disk_fragmentation".to_string(),
             name: "Disk Fragmentation".to_string(),
             description: "Analyze disk fragmentation".to_string(),
@@ -279,6 +286,13 @@ pub fn get_all_tasks() -> Vec<DiagnosticTask> {
             name: "Windows Update History".to_string(),
             description: "Installed Windows updates and hotfix history".to_string(),
             category: "Logs".to_string(),
+            admin_required: false,
+        },
+        DiagnosticTask {
+            id: "defender_health".to_string(),
+            name: "Microsoft Defender Health".to_string(),
+            description: "Defender's running mode, real-time protection, signature age and last scan age".to_string(),
+            category: "Security".to_string(),
             admin_required: false,
         },
         DiagnosticTask {
@@ -435,6 +449,8 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             "dsregcmd" => diagnostics.run_dsregcmd(),
             "windows_update" => diagnostics.get_windows_update_history(),
             "windows_update_events" => diagnostics.get_windows_update_events(),
+            "disk_usage" => diagnostics.get_disk_usage(),
+            "defender_health" => diagnostics.get_defender_health(),
             "event_codes_critical" => diagnostics.get_critical_event_codes(),
             "pending_reboot" => diagnostics.get_pending_reboot(),
             "device_errors" => diagnostics.get_device_errors(),

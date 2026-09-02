@@ -1427,6 +1427,180 @@ impl NativeDiagnostics {
         cleaned.parse::<f64>()
     }
 
+    /// Disk-space breakdown of the system drive: the well-known consumers a
+    /// home user can act on, measured by the portable walker inside a fixed
+    /// budget. Output never carries absolute profile paths.
+    pub fn get_disk_usage(&self) -> Result<Value> {
+        use crate::disk_usage::{TargetKind, WalkBudget, measure};
+        use std::os::windows::fs::MetadataExt;
+        use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+        use windows::Win32::UI::Shell::{SHQUERYRBINFO, SHQueryRecycleBinW};
+
+        // Cloud placeholders take no local space; count only what is here.
+        const FILE_ATTRIBUTE_OFFLINE: u32 = 0x1000;
+        const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
+        const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+
+        let system_root = std::env::var_os("SystemRoot")
+            .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+        let drive_root: PathBuf = system_root
+            .ancestors()
+            .last()
+            .map_or_else(|| PathBuf::from(r"C:\"), Path::to_path_buf);
+        let drive = drive_root
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_string();
+
+        let drive_root_w = wide_null(&drive_root.to_string_lossy());
+        let mut free_bytes = 0u64;
+        let mut total_bytes = 0u64;
+        let mut total_free = 0u64;
+        // SAFETY: the out-pointers are valid for the call; the path is NUL-terminated.
+        unsafe {
+            GetDiskFreeSpaceExW(
+                PCWSTR(drive_root_w.as_ptr()),
+                Some(&raw mut free_bytes),
+                Some(&raw mut total_bytes),
+                Some(&raw mut total_free),
+            )
+        }
+        .map_err(|error| anyhow::anyhow!("GetDiskFreeSpaceExW failed for {drive}: {error}"))?;
+
+        let mut recycle = SHQUERYRBINFO {
+            cbSize: u32::try_from(std::mem::size_of::<SHQUERYRBINFO>()).unwrap_or(u32::MAX),
+            ..Default::default()
+        };
+        // SAFETY: `recycle.cbSize` is set and the struct outlives the call.
+        let recycle_bin =
+            unsafe { SHQueryRecycleBinW(PCWSTR(drive_root_w.as_ptr()), &raw mut recycle) }
+                .ok()
+                .map(|()| TargetKind::Measured {
+                    bytes: u64::try_from(recycle.i64Size).unwrap_or(0),
+                    entries: u64::try_from(recycle.i64NumItems).unwrap_or(0),
+                });
+
+        let targets = Self::disk_usage_targets(&system_root, &drive_root, recycle_bin);
+
+        let placeholder = |metadata: &fs::Metadata| {
+            metadata.file_attributes()
+                & (FILE_ATTRIBUTE_OFFLINE
+                    | FILE_ATTRIBUTE_RECALL_ON_OPEN
+                    | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+                != 0
+        };
+        let report = measure(
+            &drive,
+            total_bytes,
+            free_bytes,
+            &targets,
+            WalkBudget::default(),
+            &std::time::Instant::now,
+            &placeholder,
+        );
+        serde_json::to_value(report)
+            .map_err(|error| anyhow::anyhow!("disk usage report did not serialise: {error}"))
+    }
+
+    /// The consumers `get_disk_usage` measures, in a fixed order; the walker
+    /// sorts the result by size.
+    fn disk_usage_targets(
+        system_root: &Path,
+        drive_root: &Path,
+        recycle_bin: Option<crate::disk_usage::TargetKind>,
+    ) -> Vec<crate::disk_usage::ConsumerTarget> {
+        use crate::disk_usage::{ConsumerId, ConsumerTarget, TargetKind};
+
+        let mut targets: Vec<ConsumerTarget> = Vec::new();
+        let mut directory = |id: ConsumerId, root: Option<PathBuf>| {
+            if let Some(root) = root {
+                targets.push(ConsumerTarget {
+                    id,
+                    root,
+                    kind: TargetKind::Directory,
+                });
+            }
+        };
+        directory(ConsumerId::Downloads, dirs::download_dir());
+        directory(ConsumerId::Desktop, dirs::desktop_dir());
+        directory(ConsumerId::Documents, dirs::document_dir());
+        directory(ConsumerId::Videos, dirs::video_dir());
+        directory(ConsumerId::Pictures, dirs::picture_dir());
+        directory(ConsumerId::UserTemp, Some(std::env::temp_dir()));
+        directory(ConsumerId::WindowsTemp, Some(system_root.join("Temp")));
+        directory(
+            ConsumerId::SoftwareDistribution,
+            Some(system_root.join("SoftwareDistribution").join("Download")),
+        );
+        directory(ConsumerId::WindowsOld, Some(drive_root.join("Windows.old")));
+        directory(
+            ConsumerId::OneDriveCache,
+            dirs::home_dir().map(|home| home.join("OneDrive")),
+        );
+        if let Some(kind) = recycle_bin {
+            targets.push(ConsumerTarget {
+                id: ConsumerId::RecycleBin,
+                root: PathBuf::new(),
+                kind,
+            });
+        }
+        for (id, file) in [
+            (ConsumerId::HibernationFile, "hiberfil.sys"),
+            (ConsumerId::PageFile, "pagefile.sys"),
+        ] {
+            targets.push(ConsumerTarget {
+                id,
+                root: drive_root.join(file),
+                kind: TargetKind::SingleFile,
+            });
+        }
+        targets
+    }
+
+    /// Decode one kernel minidump's header (and, for 64-bit triage dumps,
+    /// the faulting module). Never fails the task: a decode problem is
+    /// reported as text beside the raw file facts.
+    fn decode_minidump(path: &Path) -> (Option<Value>, Option<String>) {
+        use crate::bugcheck::{decode_bugcheck, faulting_module, format_code, parse_dump_header};
+        use std::io::Read;
+
+        const MAX_READ: u64 = 1024 * 1024;
+        let mut bytes = Vec::new();
+        let read = fs::File::open(path)
+            .and_then(|file| file.take(MAX_READ).read_to_end(&mut bytes))
+            .map_err(|error| error.to_string());
+        if let Err(error) = read {
+            return (None, Some(format!("could not read the dump: {error}")));
+        }
+        let header = match parse_dump_header(&bytes) {
+            Ok(header) => header,
+            Err(error) => return (None, Some(error.to_string())),
+        };
+        let info = decode_bugcheck(header.bugcheck_code);
+        let module = faulting_module(&bytes, &header);
+        let crash_time = header
+            .crash_time_unix_secs()
+            .map(|secs| wfdiag_native_core::timestamp::Timestamp::from_secs(secs).to_iso_string());
+        (
+            Some(json!({
+                "code": format_code(info.code),
+                "code_value": info.code,
+                "name": info.name,
+                "plain": info.plain,
+                "cause": info.cause,
+                "cause_label": info.cause.label(),
+                "next_action": info.next_action,
+                "remediation": info.remediation,
+                "parameters": header.parameters.iter().map(|p| format!("0x{p:016X}")).collect::<Vec<_>>(),
+                "faulting_module": module,
+                "crash_time": crash_time,
+                "is_64": header.is_64,
+                "dump_type": header.dump_type,
+            })),
+            None,
+        )
+    }
+
     pub fn get_minidumps(&self) -> Result<Value> {
         let minidump_path = Path::new("C:\\Windows\\Minidump");
 
@@ -1466,13 +1640,16 @@ impl NativeDiagnostics {
         candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.2));
 
         for (entry, metadata, modified) in candidates.into_iter().take(10) {
+            let (bugcheck, decode_error) = Self::decode_minidump(&entry.path());
             dumps.push(json!({
                 "filename": entry.file_name().to_string_lossy(),
                 "size": metadata.len(),
                 "created": metadata.created().unwrap_or(modified)
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |duration| duration.as_secs()),
-                "path": entry.path().to_string_lossy()
+                "path": entry.path().to_string_lossy(),
+                "bugcheck": bugcheck,
+                "decode_error": decode_error,
             }));
         }
 
@@ -1916,6 +2093,33 @@ impl NativeDiagnostics {
         }
 
         Ok(update_info)
+    }
+
+    /// Microsoft Defender's own health row (`MSFT_MpComputerStatus`): running
+    /// mode, real-time protection, signature and scan ages. A missing
+    /// namespace (Defender removed, Server SKU) is an error, so the rules
+    /// read Unknown rather than "off".
+    pub fn get_defender_health(&self) -> Result<Value> {
+        const NAMESPACE: &str = r"root\Microsoft\Windows\Defender";
+        const QUERY: &str = "SELECT AMRunningMode, AMServiceEnabled, AntivirusEnabled, \
+                             AntispywareEnabled, RealTimeProtectionEnabled, \
+                             AntivirusSignatureAge, AntispywareSignatureAge, \
+                             AntivirusSignatureLastUpdated, QuickScanAge, FullScanAge, \
+                             IsTamperProtected, NISEnabled, IsVirtualMachine, \
+                             AMEngineVersion, AMProductVersion \
+                             FROM MSFT_MpComputerStatus";
+        let wmi_con = WmiConnection::with_namespace(NAMESPACE)
+            .map_err(|error| anyhow::anyhow!("Defender WMI namespace unavailable: {error}"))?;
+        let rows = wmi_con.query(QUERY)?;
+        let row = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("MSFT_MpComputerStatus returned no rows"))?;
+        let defender: serde_json::Map<String, Value> = row.into_iter().collect();
+        Ok(json!({
+            "defender": defender,
+            "data_source": "root\\Microsoft\\Windows\\Defender MSFT_MpComputerStatus",
+        }))
     }
 
     /// Windows Update client failures from the operational channel, each

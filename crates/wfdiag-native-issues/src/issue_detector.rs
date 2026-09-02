@@ -7,6 +7,7 @@
 //! deterministic: time comes from `ctx.now`, environment state (temp-file
 //! count) is injected by the caller.
 
+use crate::evidence::size::format_bytes;
 use crate::issue_catalog::{DetectCtx, Detection, IssueSeverity};
 use serde_json::Value;
 
@@ -46,16 +47,92 @@ pub fn detect_low_disk_space(ctx: &DetectCtx) -> Option<Detection> {
         {
             let free_percent = (free_space as f64 / size as f64) * 100.0;
             if free_percent < 10.0 {
-                return Some(Detection::new(format!(
+                let mut description = format!(
                     "The disk '{}' is running low on space ({:.2}% free).",
                     disk["Name"].as_str().unwrap_or("Unknown"),
                     free_percent
-                )));
+                );
+                // `disk_usage` is not a listed source (old scans lack it), so
+                // its breakdown only enriches the wording when present.
+                if let Some(largest) = largest_reclaimable_consumers(ctx, 3) {
+                    description.push_str(" Largest items: ");
+                    description.push_str(&largest);
+                    description.push('.');
+                }
+                return Some(Detection::new(description));
             }
         }
     }
     None
 }
+
+/// The actionable consumers from `disk_usage`, largest first, that are at
+/// least 1 GiB or 2 % of the drive.
+fn actionable_space_consumers(ctx: &DetectCtx) -> Option<Vec<(String, u64, String)>> {
+    const MIN_BYTES: u64 = 1024 * 1024 * 1024;
+    let usage = task_object(ctx, "disk_usage")?;
+    let total = json_u64(&usage["total_bytes"]).unwrap_or(0);
+    let threshold = MIN_BYTES.min((total / 100).saturating_mul(2).max(1));
+    let mut consumers: Vec<(String, u64, String)> = usage["consumers"]
+        .as_array()?
+        .iter()
+        .filter_map(|consumer| {
+            let bytes = json_u64(&consumer["bytes"])?;
+            let remediation = consumer["remediation"].as_str()?;
+            let label = consumer["label"]
+                .as_str()
+                .or_else(|| consumer["id"].as_str())?;
+            (bytes >= threshold).then(|| (label.to_string(), bytes, remediation.to_string()))
+        })
+        .collect();
+    consumers.sort_by(|a, b| b.1.cmp(&a.1));
+    Some(consumers)
+}
+
+fn largest_reclaimable_consumers(ctx: &DetectCtx, limit: usize) -> Option<String> {
+    let consumers = actionable_space_consumers(ctx)?;
+    if consumers.is_empty() {
+        return None;
+    }
+    Some(
+        consumers
+            .iter()
+            .take(limit)
+            .map(|(label, bytes, _)| format!("{label} {}", format_bytes(*bytes)))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+/// Info-level: the largest reclaimable items, with the top one's remediation.
+pub fn detect_space_consumers(ctx: &DetectCtx) -> Option<Detection> {
+    let consumers = actionable_space_consumers(ctx)?;
+    let (_, _, top_remediation) = consumers.first()?;
+    let listed = consumers
+        .iter()
+        .take(3)
+        .map(|(label, bytes, _)| format!("{label} {}", format_bytes(*bytes)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remediation: &'static str = ALTERNATE_SPACE_REMEDIATIONS
+        .iter()
+        .copied()
+        .find(|known| *known == top_remediation)?;
+    Some(
+        Detection::new(format!("Largest reclaimable items: {listed}."))
+            .with_remediation(remediation),
+    )
+}
+
+/// The remediations `space_consumers` may select; mirrors its spec.
+const ALTERNATE_SPACE_REMEDIATIONS: [&str; 6] = [
+    "open_storage_settings",
+    "open_downloads_folder",
+    "clear_temp_files",
+    "empty_recycle_bin",
+    "windows_update_reset",
+    "open_disk_cleanup",
+];
 
 pub fn detect_disk_fragmentation(ctx: &DetectCtx) -> Option<Detection> {
     for disk in task_array(ctx, "disk_fragmentation")? {
@@ -444,26 +521,64 @@ pub fn detect_dism_corruption(ctx: &DetectCtx) -> Option<Detection> {
     None
 }
 
+/// The remediations `bsod_recent` may select; mirrors its spec.
+const BSOD_REMEDIATIONS: [&str; 3] = [
+    "open_device_manager",
+    "open_memory_diagnostic",
+    "sfc_scannow",
+];
+
 pub fn detect_bsod_recent(ctx: &DetectCtx) -> Option<Detection> {
     let minidump = task_object(ctx, "minidump")?;
     let dumps = minidump["dumps"].as_array()?;
     let thirty_days_ago = ctx.now.secs - 30 * 24 * 3600;
-    let recent = dumps
+    let created_secs = |dump: &Value| {
+        dump["created"]
+            .as_i64()
+            .or_else(|| json_u64(&dump["created"]).and_then(|created| i64::try_from(created).ok()))
+    };
+    let recent: Vec<&Value> = dumps
         .iter()
-        .filter(|d| {
-            d["created"]
-                .as_i64()
-                .or_else(|| json_u64(&d["created"]).and_then(|created| i64::try_from(created).ok()))
-                .is_some_and(|created| created >= thirty_days_ago)
-        })
-        .count();
-    if recent > 0 {
-        return Some(Detection::new(format!(
-            "{} blue-screen crash dump(s) from the last 30 days.",
-            recent
-        )));
+        .filter(|dump| created_secs(dump).is_some_and(|created| created >= thirty_days_ago))
+        .collect();
+    if recent.is_empty() {
+        return None;
     }
-    None
+    let count = recent.len();
+    let newest = recent
+        .iter()
+        .copied()
+        .max_by_key(|dump| created_secs(dump).unwrap_or(i64::MIN))?;
+    let bugcheck = &newest["bugcheck"];
+    let Some(name) = bugcheck["name"].as_str() else {
+        return Some(Detection::new(format!(
+            "{count} blue-screen crash dump(s) from the last 30 days."
+        )));
+    };
+    let code = bugcheck["code"].as_str().unwrap_or("?");
+    let module = bugcheck["faulting_module"]
+        .as_str()
+        .map(|module| format!(" in {module}"))
+        .unwrap_or_default();
+    let cause_label = bugcheck["cause_label"]
+        .as_str()
+        .unwrap_or("cause not recognised");
+    let plain = bugcheck["plain"].as_str().unwrap_or_default();
+    let next_action = bugcheck["next_action"].as_str().unwrap_or_default();
+    let description = format!(
+        "Latest crash: {name} ({code}){module} — {cause_label}. {plain} {next_action} {count} crash dump(s) in the last 30 days."
+    );
+    let detection = Detection::new(description);
+    let remediation = bugcheck["remediation"].as_str().and_then(|chosen| {
+        BSOD_REMEDIATIONS
+            .iter()
+            .copied()
+            .find(|known| *known == chosen)
+    });
+    Some(match remediation {
+        Some(remediation) => detection.with_remediation(remediation),
+        None => detection,
+    })
 }
 
 // ============================================================================
@@ -623,6 +738,61 @@ pub fn detect_defender_disabled(ctx: &DetectCtx) -> Option<Detection> {
             names.join(", ")
         }
     )))
+}
+
+/// Defender is the active engine only in "Normal" mode; in Passive or EDR
+/// Block mode another product owns real-time protection.
+fn defender_is_active(defender: &Value) -> bool {
+    defender["AMRunningMode"]
+        .as_str()
+        .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("Normal"))
+}
+
+fn defender_row(ctx: &DetectCtx) -> Option<Value> {
+    let health = task_object(ctx, "defender_health")?;
+    health.get("defender").cloned()
+}
+
+pub fn detect_realtime_protection_off(ctx: &DetectCtx) -> Option<Detection> {
+    let defender = defender_row(ctx)?;
+    if !defender_is_active(&defender) {
+        return None;
+    }
+    (defender["RealTimeProtectionEnabled"].as_bool() == Some(false)).then(|| {
+        Detection::new(
+            "Microsoft Defender is the active antivirus but real-time protection is turned off, so new files and downloads are not being checked.",
+        )
+    })
+}
+
+pub fn detect_defender_definitions_stale(ctx: &DetectCtx) -> Option<Detection> {
+    const MAX_AGE_DAYS: u64 = 7;
+    let defender = defender_row(ctx)?;
+    if !defender_is_active(&defender) {
+        return None;
+    }
+    let age = json_u64(&defender["AntivirusSignatureAge"])?;
+    (age > MAX_AGE_DAYS).then(|| {
+        Detection::new(format!(
+            "Microsoft Defender's security intelligence is {age} days old; new threats from the last week are not recognised."
+        ))
+    })
+}
+
+pub fn detect_defender_quick_scan_overdue(ctx: &DetectCtx) -> Option<Detection> {
+    const MAX_AGE_DAYS: u64 = 30;
+    let defender = defender_row(ctx)?;
+    if !defender_is_active(&defender) {
+        return None;
+    }
+    let quick = json_u64(&defender["QuickScanAge"])?;
+    let full = json_u64(&defender["FullScanAge"]).unwrap_or(u64::MAX);
+    (quick.min(full) > MAX_AGE_DAYS).then(|| {
+        Detection::new(format!(
+            "The last Microsoft Defender scan was {} days ago.",
+            quick.min(full)
+        ))
+    })
 }
 
 pub fn detect_pending_reboot(ctx: &DetectCtx) -> Option<Detection> {
@@ -867,6 +1037,127 @@ mod tests {
             r#"[{"Name": "wuauserv", "StartMode": "Manual", "State": "Stopped"}]"#,
         );
         assert!(detect_windows_update_service_disabled(&ctx(&manual)).is_none());
+    }
+
+    #[test]
+    fn space_consumers_rank_actionable_items_and_pick_the_top_remediation() {
+        let results = results_with(
+            "disk_usage",
+            r#"{"drive": "C:", "total_bytes": 500000000000, "free_bytes": 20000000000, "consumers": [
+                {"id": "downloads", "label": "Downloads", "bytes": 4400000000, "remediation": "open_downloads_folder"},
+                {"id": "recycle_bin", "label": "Recycle Bin", "bytes": 6600000000, "remediation": "empty_recycle_bin"},
+                {"id": "user_temp", "label": "Temporary files", "bytes": 1400000000, "remediation": "clear_temp_files"},
+                {"id": "page_file", "label": "Page file", "bytes": 9000000000, "remediation": null},
+                {"id": "desktop", "label": "Desktop", "bytes": 12000, "remediation": "open_storage_settings"}
+            ]}"#,
+        );
+        let detection = detect_space_consumers(&ctx(&results)).expect("should detect");
+        assert_eq!(
+            detection.description,
+            "Largest reclaimable items: Recycle Bin 6.1 GB, Downloads 4.1 GB, Temporary files 1.3 GB."
+        );
+        assert_eq!(detection.remediation_id, Some("empty_recycle_bin"));
+
+        let quiet = results_with(
+            "disk_usage",
+            r#"{"drive": "C:", "total_bytes": 500000000000, "free_bytes": 20000000000, "consumers": [
+                {"id": "downloads", "label": "Downloads", "bytes": 1000, "remediation": "open_downloads_folder"}
+            ]}"#,
+        );
+        assert!(detect_space_consumers(&ctx(&quiet)).is_none());
+    }
+
+    #[test]
+    fn low_disk_space_names_the_largest_items_when_the_breakdown_is_present() {
+        let mut results = results_with(
+            "logical_disk",
+            r#"[{"Name": "C:", "FreeSpace": "5000000000", "Size": "100000000000"}]"#,
+        );
+        results.insert(
+            "disk_usage".to_string(),
+            ok_result(
+                r#"{"total_bytes": 100000000000, "free_bytes": 5000000000, "consumers": [
+                    {"id": "downloads", "label": "Downloads", "bytes": 30000000000, "remediation": "open_downloads_folder"}
+                ]}"#,
+            ),
+        );
+        let detection = detect_low_disk_space(&ctx(&results)).expect("should detect");
+        assert!(
+            detection
+                .description
+                .contains("Largest items: Downloads 27.9 GB.")
+        );
+    }
+
+    #[test]
+    fn bsod_recent_describes_the_newest_decoded_dump_and_picks_its_remediation() {
+        let now = ctx(&HashMap::new()).now.secs;
+        let output = format!(
+            r#"{{"dumps": [
+                {{"filename": "old.dmp", "created": {old}, "bugcheck": {{"name": "MEMORY_MANAGEMENT", "code": "0x0000001A", "cause_label": "usually faulty RAM", "plain": "x", "next_action": "y", "remediation": "open_memory_diagnostic"}}}},
+                {{"filename": "new.dmp", "created": {new}, "bugcheck": {{"name": "DRIVER_IRQL_NOT_LESS_OR_EQUAL", "code": "0x000000D1", "faulting_module": "nvlddmkm.sys", "cause_label": "usually a faulty driver", "plain": "A driver accessed pageable memory at too high a priority level.", "next_action": "Update or roll back the driver.", "remediation": "open_device_manager"}}}}
+            ]}}"#,
+            old = now - 5 * 24 * 3600,
+            new = now - 24 * 3600
+        );
+        let results = results_with("minidump", &output);
+        let detection = detect_bsod_recent(&ctx(&results)).expect("should detect");
+        assert!(detection.description.starts_with(
+            "Latest crash: DRIVER_IRQL_NOT_LESS_OR_EQUAL (0x000000D1) in nvlddmkm.sys — usually a faulty driver."
+        ));
+        assert!(
+            detection
+                .description
+                .ends_with("2 crash dump(s) in the last 30 days.")
+        );
+        assert_eq!(detection.remediation_id, Some("open_device_manager"));
+
+        let undecoded = format!(
+            r#"{{"dumps": [{{"filename": "a.dmp", "created": {new}, "bugcheck": null, "decode_error": "too short"}}]}}"#,
+            new = now - 3600
+        );
+        let results = results_with("minidump", &undecoded);
+        let detection = detect_bsod_recent(&ctx(&results)).expect("should detect");
+        assert_eq!(
+            detection.description,
+            "1 blue-screen crash dump(s) from the last 30 days."
+        );
+        assert_eq!(detection.remediation_id, None);
+
+        let stale = format!(
+            r#"{{"dumps": [{{"filename": "a.dmp", "created": {old}}}]}}"#,
+            old = now - 90 * 24 * 3600
+        );
+        assert!(detect_bsod_recent(&ctx(&results_with("minidump", &stale))).is_none());
+    }
+
+    #[test]
+    fn defender_health_rules_fire_only_while_defender_is_the_active_engine() {
+        let active = results_with(
+            "defender_health",
+            r#"{"defender": {"AMRunningMode": "Normal", "RealTimeProtectionEnabled": false, "AntivirusSignatureAge": 12, "QuickScanAge": 45, "FullScanAge": 200}}"#,
+        );
+        assert!(detect_realtime_protection_off(&ctx(&active)).is_some());
+        let stale = detect_defender_definitions_stale(&ctx(&active)).expect("stale");
+        assert!(stale.description.contains("12 days old"));
+        let overdue = detect_defender_quick_scan_overdue(&ctx(&active)).expect("overdue");
+        assert!(overdue.description.contains("45 days ago"));
+
+        let passive = results_with(
+            "defender_health",
+            r#"{"defender": {"AMRunningMode": "Passive Mode", "RealTimeProtectionEnabled": false, "AntivirusSignatureAge": 40, "QuickScanAge": 90}}"#,
+        );
+        assert!(detect_realtime_protection_off(&ctx(&passive)).is_none());
+        assert!(detect_defender_definitions_stale(&ctx(&passive)).is_none());
+        assert!(detect_defender_quick_scan_overdue(&ctx(&passive)).is_none());
+
+        let healthy = results_with(
+            "defender_health",
+            r#"{"defender": {"AMRunningMode": "Normal", "RealTimeProtectionEnabled": true, "AntivirusSignatureAge": "1", "QuickScanAge": "3", "FullScanAge": "60"}}"#,
+        );
+        assert!(detect_realtime_protection_off(&ctx(&healthy)).is_none());
+        assert!(detect_defender_definitions_stale(&ctx(&healthy)).is_none());
+        assert!(detect_defender_quick_scan_overdue(&ctx(&healthy)).is_none());
     }
 
     #[test]

@@ -7,7 +7,11 @@
 use wfdiag_native_issues::projection::canonical_issue_metadata_snapshot;
 use wfdiag_native_issues::{Issue, IssueSeverity, IssueStatus, catalog};
 
-const FIXTURE_258_UNKNOWN_IDS: [&str; 13] = [
+const FIXTURE_258_UNKNOWN_IDS: [&str; 17] = [
+    "space_consumers",
+    "realtime_protection_off",
+    "defender_definitions_stale",
+    "defender_quick_scan_overdue",
     "disk_fragmentation",
     "windows_update_failing",
     "windows_update_service_disabled",
@@ -155,12 +159,12 @@ mod tests {
         assert_eq!(
             projection.counts,
             IssueCounts {
-                total: 30,
+                total: 34,
                 detected: 3,
                 critical: 0,
                 warnings: 2,
                 passed: 14,
-                unknown: 13,
+                unknown: 17,
             }
         );
         assert_eq!(projection.counts.nav_badge_count(), Some(3));

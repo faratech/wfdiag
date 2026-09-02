@@ -153,6 +153,25 @@ pub fn catalog() -> &'static [IssueSpec] {
             detect: det::detect_low_disk_space,
         },
         IssueSpec {
+            id: "space_consumers",
+            category: "Storage",
+            default_severity: IssueSeverity::Info,
+            title: "Space You Can Reclaim",
+            ok_title: "Disk Space Breakdown",
+            ok_description: "No single reclaimable item on the system drive is large enough to matter.",
+            recommendation: "Start with the largest item: the suggested action opens the right folder or tool, or clears it safely. Hibernation and page files are normal and are left alone.",
+            source_tasks: &["disk_usage"],
+            remediation_id: Some("open_storage_settings"),
+            alternate_remediations: &[
+                "open_downloads_folder",
+                "clear_temp_files",
+                "empty_recycle_bin",
+                "windows_update_reset",
+                "open_disk_cleanup",
+            ],
+            detect: det::detect_space_consumers,
+        },
+        IssueSpec {
             id: "disk_fragmentation",
             category: "Storage",
             default_severity: IssueSeverity::Warning,
@@ -361,10 +380,14 @@ pub fn catalog() -> &'static [IssueSpec] {
             title: "Recent Blue Screen Crashes",
             ok_title: "Blue Screen Crashes",
             ok_description: "No crash dumps from the last 30 days.",
-            recommendation: "Copy the minidumps (Diagnostics > Debug) and analyze them, or share them on WindowsForum for help.",
+            recommendation: "Start with the next step for the decoded cause. To get help, copy the minidumps (Diagnostics > Debug) and share them on WindowsForum together with the stop code.",
             source_tasks: &["minidump"],
             remediation_id: None,
-            alternate_remediations: &[],
+            alternate_remediations: &[
+                "open_device_manager",
+                "open_memory_diagnostic",
+                "sfc_scannow",
+            ],
             detect: det::detect_bsod_recent,
         },
         IssueSpec {
@@ -457,6 +480,45 @@ pub fn catalog() -> &'static [IssueSpec] {
             remediation_id: Some("open_security_center"),
             alternate_remediations: &[],
             detect: det::detect_defender_disabled,
+        },
+        IssueSpec {
+            id: "realtime_protection_off",
+            category: "Security",
+            default_severity: IssueSeverity::Critical,
+            title: "Real-Time Protection Is Off",
+            ok_title: "Real-Time Protection",
+            ok_description: "Microsoft Defender's real-time protection is on, or another antivirus product is in charge.",
+            recommendation: "Turn real-time protection back on in Windows Security; if it keeps turning off, run a full scan — some malware disables it.",
+            source_tasks: &["defender_health"],
+            remediation_id: Some("open_security_center"),
+            alternate_remediations: &[],
+            detect: det::detect_realtime_protection_off,
+        },
+        IssueSpec {
+            id: "defender_definitions_stale",
+            category: "Security",
+            default_severity: IssueSeverity::Warning,
+            title: "Antivirus Definitions Are Out of Date",
+            ok_title: "Antivirus Definitions",
+            ok_description: "Microsoft Defender's security intelligence was updated within the last week.",
+            recommendation: "Open Windows Security > Virus & threat protection and check for protection updates; if that fails, run the Windows Update fix.",
+            source_tasks: &["defender_health"],
+            remediation_id: Some("open_security_center"),
+            alternate_remediations: &[],
+            detect: det::detect_defender_definitions_stale,
+        },
+        IssueSpec {
+            id: "defender_quick_scan_overdue",
+            category: "Security",
+            default_severity: IssueSeverity::Info,
+            title: "No Antivirus Scan This Month",
+            ok_title: "Recent Antivirus Scan",
+            ok_description: "Microsoft Defender ran a scan within the last 30 days.",
+            recommendation: "Run a quick scan from Windows Security; it takes a few minutes.",
+            source_tasks: &["defender_health"],
+            remediation_id: Some("open_security_center"),
+            alternate_remediations: &[],
+            detect: det::detect_defender_quick_scan_overdue,
         },
         IssueSpec {
             id: "pending_reboot",
@@ -624,6 +686,25 @@ fn source_tasks_for_issue(spec: &IssueSpec) -> Option<Vec<String>> {
     }
 }
 
+/// The Defender health row must name its running mode and carry the field a
+/// rule reads, in a usable shape.
+fn defender_health_field(
+    health: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    usable: impl Fn(&serde_json::Value) -> bool,
+) -> bool {
+    health
+        .get("defender")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|defender| {
+            defender
+                .get("AMRunningMode")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+                && defender.get(field).is_some_and(usable)
+        })
+}
+
 fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
     if spec.id == "temp_files" {
         return ctx
@@ -721,6 +802,22 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
                             .is_some_and(|size| size > 0)
                 })
         }),
+        "space_consumers" => {
+            let usage = object("disk_usage")?;
+            usage.get("total_bytes").is_some_and(&numeric)
+                && usage
+                    .get("consumers")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|consumers| {
+                        consumers.iter().all(|consumer| {
+                            consumer
+                                .get("id")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some()
+                                && consumer.get("bytes").is_some_and(&numeric)
+                        })
+                    })
+        }
         "disk_fragmentation" => nonempty_array("disk_fragmentation")?
             .iter()
             .all(|disk| disk.get("fragmentation_percent").is_some_and(&numeric)),
@@ -803,6 +900,19 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
                     .and_then(serde_json::Value::as_str)
                     .is_some()
         }),
+        "realtime_protection_off" => defender_health_field(
+            object("defender_health")?,
+            "RealTimeProtectionEnabled",
+            |value| value.as_bool().is_some(),
+        ),
+        "defender_definitions_stale" => defender_health_field(
+            object("defender_health")?,
+            "AntivirusSignatureAge",
+            &numeric,
+        ),
+        "defender_quick_scan_overdue" => {
+            defender_health_field(object("defender_health")?, "QuickScanAge", &numeric)
+        }
         "firewall_disabled" | "defender_disabled" => nonempty_array(spec.source_tasks[0])?
             .iter()
             .all(|product| product.get("productState").is_some_and(&numeric)),

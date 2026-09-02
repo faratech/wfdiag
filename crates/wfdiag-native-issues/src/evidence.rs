@@ -3,6 +3,40 @@
 //! this one) keeps one source of truth for what a code means and which
 //! vetted remediation answers it.
 
+pub mod size {
+    //! Byte counts the way people paste them on forums.
+
+    /// `6.2 GB`, `412 MB`, `9 KB`, `12 B`.
+    #[must_use]
+    pub fn format_bytes(bytes: u64) -> String {
+        const KB: f64 = 1024.0;
+        const MB: f64 = KB * 1024.0;
+        const GB: f64 = MB * 1024.0;
+        #[allow(clippy::cast_precision_loss)]
+        let value = bytes as f64;
+        if value >= GB {
+            format!("{:.1} GB", value / GB)
+        } else if value >= MB {
+            format!("{:.0} MB", value / MB)
+        } else if value >= KB {
+            format!("{:.0} KB", value / KB)
+        } else {
+            format!("{bytes} B")
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn formats_each_magnitude() {
+            assert_eq!(super::format_bytes(6_657_199_309), "6.2 GB");
+            assert_eq!(super::format_bytes(432_013_312), "412 MB");
+            assert_eq!(super::format_bytes(9_216), "9 KB");
+            assert_eq!(super::format_bytes(12), "12 B");
+        }
+    }
+}
+
 pub mod windows_update {
     //! Windows Update client error codes, decoded into plain English and a
     //! remediation family.
