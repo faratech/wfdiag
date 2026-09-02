@@ -2101,12 +2101,12 @@ pub(crate) fn diagnostics_empty_page(
                 .spacing(4.0)
                 .children((
                     TextBlock::new()
-                        .text("Run a Quick Scan to inventory this PC. Checks are read-only, finish")
+                        .text("Run a Quick Scan to inventory this PC. Checks are read-only, finish in")
                         .font_size(13.5)
                         .foreground(palette.muted)
                         .horizontal_alignment(HorizontalAlignment::Center),
                     TextBlock::new()
-                        .text("in seconds, and never leave this machine.")
+                        .text("seconds, and nothing leaves this machine unless you turn on connectivity tests.")
                         .font_size(13.5)
                         .foreground(palette.muted)
                         .horizontal_alignment(HorizontalAlignment::Center),

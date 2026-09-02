@@ -390,6 +390,50 @@ pub fn detect_dns_misconfigured(ctx: &DetectCtx) -> Option<Detection> {
 // Disk & system health
 // ============================================================================
 
+fn network_verdict(ctx: &DetectCtx) -> Option<(String, Value)> {
+    let report = task_object(ctx, "network_path")?;
+    let verdict = report["verdict"].as_str()?.to_string();
+    Some((verdict, report))
+}
+
+pub fn detect_no_internet(ctx: &DetectCtx) -> Option<Detection> {
+    let (verdict, report) = network_verdict(ctx)?;
+    match verdict.as_str() {
+        "no_internet" => Some(Detection::new(
+            "No network adapter is connected with a default gateway, so this PC has no route to the internet.",
+        )),
+        "wan_down" => Some(Detection::new(format!(
+            "The router ({}) answers, but nothing beyond it does: the internet connection itself is down.",
+            report["probes"]["gateway"]
+                .as_str()
+                .unwrap_or("default gateway")
+        ))),
+        _ => None,
+    }
+}
+
+pub fn detect_gateway_unreachable(ctx: &DetectCtx) -> Option<Detection> {
+    let (verdict, report) = network_verdict(ctx)?;
+    (verdict == "gateway_unreachable").then(|| {
+        Detection::new(format!(
+            "The router ({}) did not answer and nothing beyond it could be reached.",
+            report["probes"]["gateway"]
+                .as_str()
+                .unwrap_or("default gateway")
+        ))
+    })
+}
+
+pub fn detect_dns_resolution_failing(ctx: &DetectCtx) -> Option<Detection> {
+    let (verdict, report) = network_verdict(ctx)?;
+    (verdict == "dns_resolution_failing").then(|| {
+        Detection::new(format!(
+            "The internet is reachable but {} did not resolve: DNS is misconfigured or the resolver is down.",
+            report["dns_probe_host"].as_str().unwrap_or("a well-known name")
+        ))
+    })
+}
+
 pub fn detect_smart_failure_predicted(ctx: &DetectCtx) -> Option<Detection> {
     let health = task_object(ctx, "chkdsk")?;
     for disk in health["disks"].as_array()? {
@@ -1158,6 +1202,31 @@ mod tests {
         assert!(detect_realtime_protection_off(&ctx(&healthy)).is_none());
         assert!(detect_defender_definitions_stale(&ctx(&healthy)).is_none());
         assert!(detect_defender_quick_scan_overdue(&ctx(&healthy)).is_none());
+    }
+
+    #[test]
+    fn network_path_verdicts_map_to_one_rule_each() {
+        let report = |verdict: &str| {
+            results_with(
+                "network_path",
+                &format!(
+                    r#"{{"verdict": "{verdict}", "probes": {{"gateway": "192.168.1.1"}}, "dns_probe_host": "www.msftconnecttest.com"}}"#
+                ),
+            )
+        };
+        assert!(detect_no_internet(&ctx(&report("no_internet"))).is_some());
+        let wan = detect_no_internet(&ctx(&report("wan_down"))).expect("wan down");
+        assert!(wan.description.contains("192.168.1.1"));
+        assert!(detect_gateway_unreachable(&ctx(&report("gateway_unreachable"))).is_some());
+        let dns =
+            detect_dns_resolution_failing(&ctx(&report("dns_resolution_failing"))).expect("dns");
+        assert!(dns.description.contains("www.msftconnecttest.com"));
+        for verdict in ["clear", "unknown"] {
+            assert!(detect_no_internet(&ctx(&report(verdict))).is_none());
+            assert!(detect_gateway_unreachable(&ctx(&report(verdict))).is_none());
+            assert!(detect_dns_resolution_failing(&ctx(&report(verdict))).is_none());
+        }
+        assert!(detect_gateway_unreachable(&ctx(&report("wan_down"))).is_none());
     }
 
     #[test]

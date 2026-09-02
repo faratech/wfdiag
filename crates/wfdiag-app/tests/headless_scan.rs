@@ -5,9 +5,10 @@ mod support;
 
 use std::time::Duration;
 use support::{boot, boot_with};
-use wfdiag_app::ports::mock::{MockPorts, TaskScript};
-use wfdiag_app::{AppCommand, AppEvent, IssuesEvent, ScanEvent};
+use wfdiag_app::ports::mock::{MockPorts, ScriptedExecutor, TaskScript};
+use wfdiag_app::{AppCommand, AppEvent, IssuesEvent, ScanEvent, SettingsEvent};
 use wfdiag_native_diagnostics::ScanKind;
+use wfdiag_native_settings::SettingsUpdate;
 
 fn committed(events: &[AppEvent]) -> Option<(&String, usize, usize, bool)> {
     events.iter().find_map(|event| match event {
@@ -302,5 +303,72 @@ fn stopping_a_scan_restores_the_previous_evidence() {
         "the previous committed scan is visible again"
     );
     assert_eq!(after.results.len(), before.results.len());
+    harness.shutdown(Duration::from_secs(2));
+}
+
+/// The connectivity test is the one task that sends anything off the machine,
+/// so it never runs — targeted or otherwise — until the user turns it on.
+#[test]
+fn network_probes_are_refused_until_connectivity_tests_are_on() {
+    let mut mocks = MockPorts::new();
+    mocks.executor = ScriptedExecutor::with_tasks(&["os_info", "network_path"]);
+    mocks.executor.script(
+        "network_path",
+        TaskScript::ok(r#"{"verdict": "clear", "probes": {"gateway": "192.168.1.1"}}"#),
+    );
+    let mut harness = boot_with("network gate", mocks);
+
+    assert!(
+        !harness
+            .service
+            .dispatch(AppCommand::StartTargetedScan {
+                task_ids: vec!["network_path".to_string()],
+            })
+            .is_accepted(),
+        "a targeted probe run is refused while connectivity tests are off"
+    );
+    assert!(
+        !harness
+            .mocks
+            .executor
+            .executed()
+            .iter()
+            .any(|id| id == "network_path"),
+        "nothing was probed"
+    );
+
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::UpdateSetting(SettingsUpdate::NetworkTests(
+                true
+            )))
+            .is_accepted()
+    );
+    harness.pump_for("the setting to persist", |event| {
+        matches!(event, AppEvent::Settings(SettingsEvent::Updated { .. }))
+    });
+    assert!(harness.service.snapshot().settings.network_tests_enabled);
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::StartTargetedScan {
+                task_ids: vec!["network_path".to_string()],
+            })
+            .is_accepted(),
+        "the same request is accepted once the user opted in"
+    );
+    harness.pump_for("the probe to run", |event| {
+        matches!(event, AppEvent::Scan(ScanEvent::Committed { .. }))
+    });
+    assert!(
+        harness
+            .mocks
+            .executor
+            .executed()
+            .iter()
+            .any(|id| id == "network_path"),
+        "the probe ran after opt-in"
+    );
     harness.shutdown(Duration::from_secs(2));
 }

@@ -7,8 +7,11 @@
 use wfdiag_native_issues::projection::canonical_issue_metadata_snapshot;
 use wfdiag_native_issues::{Issue, IssueSeverity, IssueStatus, catalog};
 
-const FIXTURE_258_UNKNOWN_IDS: [&str; 17] = [
+const FIXTURE_258_UNKNOWN_IDS: [&str; 20] = [
     "space_consumers",
+    "no_internet",
+    "gateway_unreachable",
+    "dns_resolution_failing",
     "realtime_protection_off",
     "defender_definitions_stale",
     "defender_quick_scan_overdue",
@@ -159,12 +162,12 @@ mod tests {
         assert_eq!(
             projection.counts,
             IssueCounts {
-                total: 34,
+                total: 37,
                 detected: 3,
                 critical: 0,
                 warnings: 2,
                 passed: 14,
-                unknown: 17,
+                unknown: 20,
             }
         );
         assert_eq!(projection.counts.nav_badge_count(), Some(3));

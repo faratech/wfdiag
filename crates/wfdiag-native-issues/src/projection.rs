@@ -192,6 +192,20 @@ pub struct IssueProjection<'a> {
     pub counts: IssueCounts,
 }
 
+/// A friendlier reason for an Unknown check whose source is the opt-in
+/// connectivity test: "not run" only because the user has not turned it on.
+#[must_use]
+pub fn unknown_check_hint(issue: &Issue, network_tests_enabled: bool) -> Option<&'static str> {
+    if network_tests_enabled || issue.status != IssueStatus::Unknown {
+        return None;
+    }
+    issue
+        .source_tasks
+        .as_ref()
+        .is_some_and(|tasks| tasks.iter().any(|task| task == "network_path"))
+        .then_some("Connectivity tests are off. Turn them on in Settings to run this check (it sends three small probes).")
+}
+
 /// Match the Store's compatibility projection. `detected` and the explicit
 /// status are both honored; legacy `Skipped` is grouped with `Unknown` and is
 /// never presented as a passed check.
@@ -259,6 +273,7 @@ pub fn canonical_issue_metadata_snapshot() -> IssueMetadataSnapshot {
 
 #[cfg(test)]
 mod tests {
+    use super::unknown_check_hint;
     use super::{
         IssueCounts, PendingIssueDetection, advance_nonzero_generation,
         canonical_issue_metadata_snapshot, issue_projection_matches_evidence,
@@ -626,5 +641,29 @@ mod tests {
                 .iter()
                 .any(|summary| summary.requires_restart && summary.cancellable)
         );
+    }
+
+    #[test]
+    fn unknown_check_hint_only_names_the_opt_in_probe() {
+        let mut issue = Issue {
+            id: "no_internet".to_string(),
+            category: "Network".to_string(),
+            severity: IssueSeverity::Info,
+            status: IssueStatus::Unknown,
+            title: "Internet Connection".to_string(),
+            description: "Couldn't verify this check: diagnostic 'network_path' was not run"
+                .to_string(),
+            recommendation: String::new(),
+            detected: false,
+            source_tasks: Some(vec!["network_path".to_string()]),
+            remediation: None,
+        };
+        assert!(unknown_check_hint(&issue, false).is_some());
+        assert!(unknown_check_hint(&issue, true).is_none());
+        issue.source_tasks = Some(vec!["services".to_string()]);
+        assert!(unknown_check_hint(&issue, false).is_none());
+        issue.source_tasks = Some(vec!["network_path".to_string()]);
+        issue.status = IssueStatus::Ok;
+        assert!(unknown_check_hint(&issue, false).is_none());
     }
 }

@@ -42,6 +42,7 @@ pub(crate) enum SettingsDialogAction {
     PreferredAiProviderSelectionChanged(Option<usize>),
     CloudFallbackSelectionChanged(Option<usize>),
     NetworkGroundingChanged(bool),
+    NetworkTestsChanged(bool),
     CodexCliPathChanged(String),
     CodexModelSelectionChanged(Option<usize>),
     ProviderSetupSelectionChanged(Option<usize>),

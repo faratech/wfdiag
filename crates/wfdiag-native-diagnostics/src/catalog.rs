@@ -163,6 +163,13 @@ pub fn get_all_tasks() -> Vec<DiagnosticTask> {
             admin_required: false,
         },
         DiagnosticTask {
+            id: "network_path".to_string(),
+            name: "Network Connectivity Test (sends 3 small probes)".to_string(),
+            description: "Pings your router, connects to 1.1.1.1 and 8.8.8.8 on port 443, and resolves www.msftconnecttest.com; runs only when connectivity tests are turned on in Settings".to_string(),
+            category: "Network".to_string(),
+            admin_required: false,
+        },
+        DiagnosticTask {
             id: "printer".to_string(),
             name: "Printers".to_string(),
             description: "Installed printers".to_string(),
@@ -451,6 +458,7 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             "windows_update_events" => diagnostics.get_windows_update_events(),
             "disk_usage" => diagnostics.get_disk_usage(),
             "defender_health" => diagnostics.get_defender_health(),
+            "network_path" => diagnostics.get_network_path(),
             "event_codes_critical" => diagnostics.get_critical_event_codes(),
             "pending_reboot" => diagnostics.get_pending_reboot(),
             "device_errors" => diagnostics.get_device_errors(),

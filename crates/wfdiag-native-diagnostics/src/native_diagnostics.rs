@@ -2095,6 +2095,147 @@ impl NativeDiagnostics {
         Ok(update_info)
     }
 
+    /// The opt-in connectivity test: two ICMP echoes to the IPv4 default
+    /// gateway, TCP 443 to two public resolvers, and one DNS lookup of the
+    /// host Windows' own connectivity check uses. Every target is a constant
+    /// in `crate::network_path`; the verdict is decided there.
+    pub fn get_network_path(&self) -> Result<Value> {
+        use crate::network_path::{
+            DNS_PROBE_HOST, DNS_TIMEOUT, GATEWAY_PING_ATTEMPTS, GATEWAY_PING_TIMEOUT, ProbeOutcome,
+            Probes, TCP_CONNECT_TIMEOUT, TCP_PROBE_TARGETS, assess,
+        };
+        use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+
+        let wmi_con = WmiConnection::new()?;
+        let rows = wmi_con.query(
+            "SELECT DefaultIPGateway FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled=TRUE",
+        )?;
+        let mut gateway_v4: Option<String> = None;
+        let mut saw_v6 = false;
+        for row in rows {
+            for (key, value) in row {
+                if key != "DefaultIPGateway" {
+                    continue;
+                }
+                let candidates: Vec<String> = match value {
+                    Value::Array(values) => values
+                        .into_iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect(),
+                    Value::String(text) => vec![text],
+                    _ => Vec::new(),
+                };
+                for candidate in candidates {
+                    let candidate = candidate.trim().to_string();
+                    if candidate.parse::<std::net::Ipv4Addr>().is_ok() {
+                        gateway_v4.get_or_insert(candidate);
+                    } else if candidate.contains(':') {
+                        saw_v6 = true;
+                    }
+                }
+            }
+        }
+
+        let gateway_ping = match gateway_v4
+            .as_deref()
+            .and_then(|gateway| gateway.parse::<std::net::Ipv4Addr>().ok())
+        {
+            Some(address) => ProbeOutcome::from_result(Self::icmp_echo_any(
+                address,
+                GATEWAY_PING_ATTEMPTS,
+                GATEWAY_PING_TIMEOUT,
+            )),
+            None => ProbeOutcome::Skipped,
+        };
+        let tcp: Vec<(String, ProbeOutcome)> = TCP_PROBE_TARGETS
+            .iter()
+            .map(|(host, port)| {
+                let outcome =
+                    host.parse::<std::net::IpAddr>()
+                        .map_or(ProbeOutcome::Skipped, |ip| {
+                            ProbeOutcome::from_result(
+                                TcpStream::connect_timeout(
+                                    &SocketAddr::new(ip, *port),
+                                    TCP_CONNECT_TIMEOUT,
+                                )
+                                .is_ok(),
+                            )
+                        });
+                ((*host).to_string(), outcome)
+            })
+            .collect();
+        let dns = {
+            // `getaddrinfo` has no timeout of its own; bound it with a thread.
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let resolved = (DNS_PROBE_HOST, 443).to_socket_addrs().is_ok();
+                let _ = sender.send(resolved);
+            });
+            match receiver.recv_timeout(DNS_TIMEOUT) {
+                Ok(resolved) => ProbeOutcome::from_result(resolved),
+                Err(_) => ProbeOutcome::Failed,
+            }
+        };
+        let report = assess(Probes {
+            ipv6_only: gateway_v4.is_none() && saw_v6,
+            gateway: gateway_v4,
+            gateway_ping,
+            tcp,
+            dns,
+        });
+        serde_json::to_value(report)
+            .map_err(|error| anyhow::anyhow!("network path report did not serialise: {error}"))
+    }
+
+    /// One or more ICMP echoes to an IPv4 address; true when any answers.
+    fn icmp_echo_any(
+        address: std::net::Ipv4Addr,
+        attempts: u32,
+        timeout: std::time::Duration,
+    ) -> bool {
+        use windows::Win32::NetworkManagement::IpHelper::{
+            ICMP_ECHO_REPLY, IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho,
+        };
+
+        const PAYLOAD: &[u8] = b"wfdiag";
+        // SAFETY: plain handle creation with no arguments.
+        let Ok(handle) = (unsafe { IcmpCreateFile() }) else {
+            return false;
+        };
+        let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(1_000);
+        let destination = u32::from_ne_bytes(address.octets());
+        let reply_len = std::mem::size_of::<ICMP_ECHO_REPLY>() + PAYLOAD.len() + 8;
+        let mut reply = vec![0_u8; reply_len];
+        let mut answered = false;
+        for _ in 0..attempts.max(1) {
+            // SAFETY: the request buffer outlives the call and the reply buffer
+            // is at least `sizeof(ICMP_ECHO_REPLY) + payload + 8`, as documented.
+            let replies = unsafe {
+                IcmpSendEcho(
+                    handle,
+                    destination,
+                    PAYLOAD.as_ptr().cast(),
+                    u16::try_from(PAYLOAD.len()).unwrap_or(u16::MAX),
+                    None,
+                    reply.as_mut_ptr().cast(),
+                    u32::try_from(reply_len).unwrap_or(u32::MAX),
+                    timeout_ms,
+                )
+            };
+            if replies > 0 {
+                // `ICMP_ECHO_REPLY.Status` is the second u32; 0 = IP_SUCCESS.
+                let status = u32::from_ne_bytes([reply[4], reply[5], reply[6], reply[7]]);
+                if status == 0 {
+                    answered = true;
+                    break;
+                }
+            }
+        }
+        // SAFETY: closing the handle this function created.
+        let _ = unsafe { IcmpCloseHandle(handle) };
+        answered
+    }
+
     /// Microsoft Defender's own health row (`MSFT_MpComputerStatus`): running
     /// mode, real-time protection, signature and scan ages. A missing
     /// namespace (Defender removed, Server SKU) is an error, so the rules

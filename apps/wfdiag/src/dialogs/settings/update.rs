@@ -228,6 +228,9 @@ impl WfdiagShell {
             SettingsDialogAction::NetworkGroundingChanged(value) => {
                 self.settings.draft.network_grounding_enabled = value;
             }
+            SettingsDialogAction::NetworkTestsChanged(value) => {
+                self.settings.draft.network_tests_enabled = value;
+            }
             SettingsDialogAction::CodexCliPathChanged(value) => {
                 self.settings.draft.codex_cli_path =
                     if value.is_empty() { None } else { Some(value) };

@@ -335,6 +335,45 @@ pub fn catalog() -> &'static [IssueSpec] {
             detect: det::detect_dns_misconfigured,
         },
         IssueSpec {
+            id: "no_internet",
+            category: "Network",
+            default_severity: IssueSeverity::Warning,
+            title: "No Internet Connection",
+            ok_title: "Internet Connection",
+            ok_description: "The connectivity test reached the internet.",
+            recommendation: "Check the cable or Wi-Fi, then restart the router. If the router answers but the internet does not, the problem is on the provider's side.",
+            source_tasks: &["network_path"],
+            remediation_id: Some("open_network_settings"),
+            alternate_remediations: &[],
+            detect: det::detect_no_internet,
+        },
+        IssueSpec {
+            id: "gateway_unreachable",
+            category: "Network",
+            default_severity: IssueSeverity::Warning,
+            title: "Router Not Reachable",
+            ok_title: "Router Reachability",
+            ok_description: "The default gateway answered, or the internet beyond it did.",
+            recommendation: "Reconnect to Wi-Fi or reseat the network cable, then restart the router. The 'Reset network stack' maintenance action is the next step if the adapter is the problem.",
+            source_tasks: &["network_path"],
+            remediation_id: Some("open_network_settings"),
+            alternate_remediations: &[],
+            detect: det::detect_gateway_unreachable,
+        },
+        IssueSpec {
+            id: "dns_resolution_failing",
+            category: "Network",
+            default_severity: IssueSeverity::Warning,
+            title: "Web Addresses Do Not Resolve",
+            ok_title: "DNS Resolution",
+            ok_description: "The connectivity test resolved a well-known name.",
+            recommendation: "Flush the DNS cache first; if names still fail, set the adapter's DNS server to 1.1.1.1 or 8.8.8.8 in Network settings, or run 'Reset network stack' from Maintenance.",
+            source_tasks: &["network_path"],
+            remediation_id: Some("flush_dns"),
+            alternate_remediations: &[],
+            detect: det::detect_dns_resolution_failing,
+        },
+        IssueSpec {
             id: "smart_failure_predicted",
             category: "Storage",
             default_severity: IssueSeverity::Critical,
@@ -900,6 +939,10 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
                     .and_then(serde_json::Value::as_str)
                     .is_some()
         }),
+        "no_internet" | "gateway_unreachable" | "dns_resolution_failing" => object("network_path")?
+            .get("verdict")
+            .and_then(serde_json::Value::as_str)
+            .is_some(),
         "realtime_protection_off" => defender_health_field(
             object("defender_health")?,
             "RealTimeProtectionEnabled",

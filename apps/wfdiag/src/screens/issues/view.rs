@@ -26,7 +26,7 @@ use wfdiag_native_issues::health::{
     DO_THIS_FIRST_LIMIT, HealthBand, HealthConfidence, HealthScore, NextStep, do_this_first,
     health_score,
 };
-use wfdiag_native_issues::projection::project_issues;
+use wfdiag_native_issues::projection::{project_issues, unknown_check_hint};
 use wfdiag_native_issues::{Issue, IssueSeverity, RemediationSummary, RemediationTier};
 use wfdiag_native_remediation::broker::{ActionRequest, MAX_BATCH_ACTIONS};
 use wfdiag_native_remediation::remediation;
@@ -65,6 +65,7 @@ impl IssuesScreen {
             self.error.as_deref(),
             env.scan.has_results,
             self.projection_current(env.scan.session_id),
+            env.settings.network_tests_enabled,
             vc.message(Message::Diagnostics(DiagnosticsMsg::RequestQuickScan)),
             vc.callback(|value| Message::Issues(IssuesMsg::RunRemediation(value))),
             vc.callback(|value| Message::Issues(IssuesMsg::AskAiAboutIssue(value))),
@@ -102,6 +103,7 @@ pub(crate) fn issues_page(
     detection_error: Option<&str>,
     has_committed_evidence: bool,
     projection_current: bool,
+    network_tests_enabled: bool,
     quick_scan: Callback<()>,
     run_remediation: Callback<String>,
     ask_ai: Callback<String>,
@@ -324,6 +326,7 @@ pub(crate) fn issues_page(
                 &format!("{} checks passed", projection.counts.passed),
                 &projection.passed,
                 true,
+                network_tests_enabled,
             ),
         ));
     }
@@ -334,7 +337,8 @@ pub(crate) fn issues_page(
                 palette,
                 &format!("Couldn’t verify ({})", projection.counts.unknown),
                 &projection.unknown,
-                true,
+                false,
+                network_tests_enabled,
             ),
         ));
     }
@@ -1483,6 +1487,7 @@ pub(crate) fn issue_check_group(
     label: &str,
     issues: &[&Issue],
     passed: bool,
+    network_tests_enabled: bool,
 ) -> View {
     let rows = issues
         .iter()
@@ -1527,7 +1532,13 @@ pub(crate) fn issue_check_group(
                                     .vertical_alignment(VerticalAlignment::Top),
                                 TextBlock::new()
                                     .grid_column(2)
-                                    .text(issue.description.clone())
+                                    .text(
+                                        unknown_check_hint(issue, network_tests_enabled)
+                                            .map_or_else(
+                                                || issue.description.clone(),
+                                                str::to_string,
+                                            ),
+                                    )
                                     .font_size(12.0)
                                     .foreground(palette.muted)
                                     .text_wrapping(TextWrapping::Wrap),

@@ -60,6 +60,7 @@ pub(crate) fn settings_dialog(
     preferred_ai_provider_changed: Callback<Option<usize>>,
     cloud_fallback_changed: Callback<Option<usize>>,
     network_grounding_changed: Callback<bool>,
+    network_tests_changed: Callback<bool>,
     codex_cli_path_changed: Callback<String>,
     codex_model_changed: Callback<Option<usize>>,
     provider_setup_changed: Callback<Option<usize>>,
@@ -251,6 +252,7 @@ pub(crate) fn settings_dialog(
                                     preferred_ai_provider_changed,
                                     cloud_fallback_changed,
                                     network_grounding_changed,
+                                    network_tests_changed,
                                     codex_cli_path_changed,
                                     codex_model_changed,
                                     provider_setup_changed,
@@ -1125,6 +1127,7 @@ pub(crate) fn settings_content(
     preferred_ai_provider_changed: Callback<Option<usize>>,
     cloud_fallback_changed: Callback<Option<usize>>,
     network_grounding_changed: Callback<bool>,
+    network_tests_changed: Callback<bool>,
     codex_cli_path_changed: Callback<String>,
     codex_model_changed: Callback<Option<usize>>,
     provider_setup_changed: Callback<Option<usize>>,
@@ -1254,6 +1257,17 @@ pub(crate) fn settings_content(
                         .is_enabled(editable)
                         .automation_name("Enable web grounding")
                         .on_is_checked_changed(network_grounding_changed),
+                    59.0,
+                ),
+                settings_check_row(
+                    palette,
+                    "Connectivity tests during scans",
+                    Some("Sends up to three small probes: to your router, to 1.1.1.1 and 8.8.8.8 on port 443, and one DNS lookup of www.msftconnecttest.com. Off: nothing in a scan leaves this PC."),
+                    CheckBox::new()
+                        .is_checked(settings.network_tests_enabled)
+                        .is_enabled(editable)
+                        .automation_name("Enable connectivity tests during scans")
+                        .on_is_checked_changed(network_tests_changed),
                     59.0,
                 ),
                 settings_section(palette, "PROVIDER SETUP"),

@@ -16,6 +16,9 @@ pub mod disk_usage;
 /// Portable blue-screen decoding (dump header parser, stop-code table).
 pub mod bugcheck;
 
+/// Portable network-path verdict (probe constants, decision table).
+pub mod network_path;
+
 // FFI-heavy collectors keep `unsafe` scoped to themselves; the workspace (and
 // this crate) denies `unsafe_code` everywhere else.
 #[cfg(windows)]

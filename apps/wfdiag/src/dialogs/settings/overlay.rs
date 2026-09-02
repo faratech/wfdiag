@@ -158,6 +158,12 @@ impl SettingsDialog {
                 vc.callback(move |value| {
                     Message::Settings(SettingsMsg::Dialog {
                         epoch,
+                        action: SettingsDialogAction::NetworkTestsChanged(value),
+                    })
+                }),
+                vc.callback(move |value| {
+                    Message::Settings(SettingsMsg::Dialog {
+                        epoch,
                         action: SettingsDialogAction::CodexCliPathChanged(value),
                     })
                 }),
