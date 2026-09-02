@@ -20,6 +20,7 @@ The shipping UI is a **native WinUI 3 shell** (`apps/wfdiag`, binary `wfdiag.exe
 - **Tiered Remediation** with backend-enforced confirmation for repair operations
 - **Safe-fix automation** (opt-in, off by default): one-click safe fixes run after each scan or on demand ("Fix safe issues now"); repairs always wait for your confirmation
 - **Assistant that acts** (opt-in): let the AI run the safe fixes it stages or plans; every fix is verified by re-collecting its evidence and the result is reported
+- **Root cause first**: symptoms rank below the issue they follow from and say so; unverified checks can be re-collected with one click; every action and automation decision lands in an audit trail (`%LOCALAPPDATA%\WFDiag\logs\actions.jsonl`)
 - **Scan History & Comparison** with intelligent change detection
 - **Process Explorer** with backend filtering, sorting, pagination, pause, and detail lookup
 - **Multiple Export Formats** (JSON, text, HTML, and forum-friendly text)

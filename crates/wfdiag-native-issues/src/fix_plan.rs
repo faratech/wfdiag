@@ -39,10 +39,14 @@ pub fn build_fix_plan_prompt(
     catalog: &[RemediationMetadata],
     max_data_chars: usize,
 ) -> String {
-    let issue_lines = issues
+    let detected: Vec<&Issue> = issues.iter().filter(|issue| issue.detected).collect();
+    let issue_lines = detected
         .iter()
-        .filter(|issue| issue.detected)
         .map(|issue| {
+            let cause_note = crate::correlation::likely_cause(&issue.id, &detected)
+                .map_or_else(String::new, |(cause, _)| {
+                    format!("; likely a consequence of {}", cause.id)
+                });
             let remediation_note = issue.remediation.as_ref().map_or_else(
                 || "no vetted remediation available for this issue".to_string(),
                 |remediation| {
@@ -63,8 +67,8 @@ pub fn build_fix_plan_prompt(
                 },
             );
             format!(
-                "- {} [{:?}] {}: {} ({})",
-                issue.id, issue.severity, issue.title, issue.description, remediation_note
+                "- {} [{:?}] {}: {} ({remediation_note}{cause_note})",
+                issue.id, issue.severity, issue.title, issue.description
             )
         })
         .collect::<Vec<_>>();

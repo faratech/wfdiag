@@ -788,6 +788,8 @@ pub struct MockPorts {
     pub monitor: ScriptedMonitor,
     /// The clock and temporary-directory inputs.
     pub environment: MockEnvironment,
+    /// The audit trail, readable by the test.
+    pub audit: super::audit::MemoryAuditSink,
     /// The update throttle.
     pub update_throttle: MemoryUpdateThrottle,
     /// Elevation requests.
@@ -818,6 +820,7 @@ impl MockPorts {
             provider_backend: MockProviderBackend::default(),
             monitor: ScriptedMonitor::default(),
             environment: MockEnvironment::default(),
+            audit: super::audit::MemoryAuditSink::default(),
             update_throttle: MemoryUpdateThrottle::default(),
             elevation: MockElevation::default(),
             ai: MockAiPorts::new(),
@@ -852,6 +855,7 @@ impl MockPorts {
             environment: Arc::new(self.environment.clone()),
             update_throttle: Arc::new(self.update_throttle.clone()),
             ai: self.ai.to_ports(),
+            audit: Arc::new(self.audit.clone()),
         }
     }
 

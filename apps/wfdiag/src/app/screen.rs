@@ -57,6 +57,8 @@ pub(crate) enum Effect {
     ShowProcesses(InAppAction),
     /// Start a scan through the shell's own scan orchestration.
     BeginScan(ScanKind),
+    /// Re-collect exactly these tasks (the unverified checks' sources).
+    BeginTargetedScan(Vec<String>),
     /// Copy the finished AI report to the clipboard.
     CopyReport(String),
     /// Stage the remediation the assistant asked for, through the Issues

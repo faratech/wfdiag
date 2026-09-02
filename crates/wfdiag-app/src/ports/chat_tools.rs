@@ -28,6 +28,7 @@ use wfdiag_native_ai_chat::{
 use wfdiag_native_diagnostics::{DiagnosticExecutor, ScanKind};
 use wfdiag_native_history::{NativeHistoryRuntime, ScanRecord, ScanSummary, TaskChange};
 use wfdiag_native_issues::RemediationTier;
+use wfdiag_native_issues::correlation::likely_cause;
 use wfdiag_native_issues::next_steps::{InAppAction, in_app_action};
 use wfdiag_native_issues::{Issue, IssueSeverity, IssueStatus, RemediationSummary};
 use wfdiag_ui_core::{DiagnosticTaskResult, SystemStats};
@@ -399,9 +400,14 @@ fn snapshot_detected_issues_text(snapshot: &ChatToolSnapshot) -> String {
 }
 
 fn issue_texts(issues: &[Issue]) -> Vec<IssueText<'_>> {
+    let detected: Vec<&Issue> = issues
+        .iter()
+        .filter(|issue| issue.status == IssueStatus::Detected)
+        .collect();
     issues
         .iter()
         .map(|issue| IssueText {
+            likely_cause: likely_cause(&issue.id, &detected).map(|(cause, _)| cause.id.as_str()),
             id: &issue.id,
             remediation_id: issue
                 .remediation

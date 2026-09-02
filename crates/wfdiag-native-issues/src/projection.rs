@@ -243,6 +243,25 @@ pub fn unknown_check_hint(issue: &Issue, network_tests_enabled: bool) -> Option<
         .then_some("Connectivity tests are off. Turn them on in Settings to run this check (it sends three small probes).")
 }
 
+/// The diagnostic tasks that would decide the unverified checks in `unknown`:
+/// their source tasks, deduplicated, without the privacy-gated connectivity
+/// test while it is switched off.
+#[must_use]
+pub fn missing_check_tasks(unknown: &[&Issue], network_tests_enabled: bool) -> Vec<String> {
+    let mut tasks: Vec<String> = Vec::new();
+    for issue in unknown {
+        for task in issue.source_tasks.iter().flatten() {
+            if !network_tests_enabled && task == "network_path" {
+                continue;
+            }
+            if !tasks.contains(task) {
+                tasks.push(task.clone());
+            }
+        }
+    }
+    tasks
+}
+
 /// Match the Store's compatibility projection. `detected` and the explicit
 /// status are both honored; legacy `Skipped` is grouped with `Unknown` and is
 /// never presented as a passed check.
@@ -312,7 +331,7 @@ pub fn canonical_issue_metadata_snapshot() -> IssueMetadataSnapshot {
 mod tests {
     use super::{
         IssueCounts, PendingIssueDetection, advance_nonzero_generation,
-        canonical_issue_metadata_snapshot, issue_projection_matches_evidence,
+        canonical_issue_metadata_snapshot, issue_projection_matches_evidence, missing_check_tasks,
         pending_issue_preparation_is_current, prepare_issue_detection, project_issues,
         take_current_issue_completion,
     };
@@ -759,5 +778,29 @@ mod tests {
         issue.source_tasks = Some(vec!["network_path".to_string()]);
         issue.status = IssueStatus::Ok;
         assert!(unknown_check_hint(&issue, false).is_none());
+    }
+
+    #[test]
+    fn missing_check_tasks_are_the_unverified_rules_sources_minus_gated_probes() {
+        let unknown = |id: &str, tasks: &[&str]| Issue {
+            id: id.to_string(),
+            category: "Test".to_string(),
+            severity: IssueSeverity::Warning,
+            status: IssueStatus::Unknown,
+            title: id.to_string(),
+            description: String::new(),
+            recommendation: String::new(),
+            detected: false,
+            source_tasks: Some(tasks.iter().map(|task| (*task).to_string()).collect()),
+            remediation: None,
+        };
+        let a = unknown("bsod_recent", &["minidump"]);
+        let b = unknown("space_consumers", &["disk_usage", "logical_disk"]);
+        let c = unknown("no_internet", &["network_path"]);
+        assert_eq!(
+            missing_check_tasks(&[&a, &b, &c], false),
+            ["minidump", "disk_usage", "logical_disk"]
+        );
+        assert_eq!(missing_check_tasks(&[&c], true), ["network_path"]);
     }
 }

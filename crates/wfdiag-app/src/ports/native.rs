@@ -363,5 +363,18 @@ pub fn windows_ports_with(
             )
         }),
         ai,
+        audit: audit_sink(),
+    }
+}
+
+/// The shipping audit trail: `%LOCALAPPDATA%\WFDiag\logs\actions.jsonl`. A
+/// plain OS path lookup, like the crash log's — not a behaviour knob. Without
+/// a usable location the trail is dropped rather than written elsewhere.
+fn audit_sink() -> Arc<dyn super::AuditSink> {
+    match std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty()) {
+        Some(local) => Arc::new(super::FileAuditSink::in_directory(
+            &std::path::Path::new(&local).join("WFDiag").join("logs"),
+        )),
+        None => Arc::new(super::NoopAuditSink),
     }
 }

@@ -44,6 +44,7 @@ use crate::event::{
     PrioritizationEvent, ProviderEvent, ReportEvent, SubscriptionEvent,
 };
 use crate::ids::{Generation, RequestId};
+use crate::ports::audit::{AuditEntry, AuditKind};
 use crate::ports::chat_tools::{ChatScanSnapshot, ChatToolSnapshot};
 use crate::snapshot_ai::{CloudFallbackPrompt, FullScanRequest, StagedProposalRequest};
 use std::sync::Arc;
@@ -1427,6 +1428,7 @@ impl AppService {
                 issue_id: Some(action.issue_id.clone()),
             })
             .collect();
+        self.audit_planned(origin, &actions, &plan.deferred);
         self.queue
             .push(AppEvent::Action(ActionEvent::SafeFixesPlanned {
                 origin,
@@ -1458,6 +1460,7 @@ impl AppService {
         deferred: Vec<wfdiag_native_issues::auto_fix::DeferredFix>,
     ) -> DispatchOutcome {
         let actions: Vec<ActionRequest> = groups.iter().flatten().cloned().collect();
+        self.audit_planned(origin, &actions, &deferred);
         self.queue
             .push(AppEvent::Action(ActionEvent::SafeFixesPlanned {
                 origin,
@@ -1619,6 +1622,12 @@ impl AppService {
         let runs = self.automation.runs;
         let succeeded = self.automation.succeeded;
         if let Some(origin) = self.automation.finish() {
+            self.ports.audit.record(&AuditEntry {
+                at: self.ports.environment.now(),
+                kind: AuditKind::SafeFixesFinished,
+                origin: Some(origin),
+                detail: serde_json::json!({ "runs": runs, "succeeded": succeeded }),
+            });
             self.queue
                 .push(AppEvent::Action(ActionEvent::SafeFixesFinished {
                     origin,
@@ -1626,6 +1635,47 @@ impl AppService {
                     succeeded,
                 }));
         }
+    }
+
+    /// Record one audit entry attributed to the active automation session,
+    /// or to the user's own review when none is active.
+    pub(super) fn audit(&self, kind: AuditKind, detail: serde_json::Value) {
+        self.ports.audit.record(&AuditEntry {
+            at: self.ports.environment.now(),
+            kind,
+            origin: self.automation.origin,
+            detail,
+        });
+    }
+
+    fn audit_planned(
+        &self,
+        origin: SafeFixOrigin,
+        actions: &[ActionRequest],
+        deferred: &[wfdiag_native_issues::auto_fix::DeferredFix],
+    ) {
+        self.ports.audit.record(&AuditEntry {
+            at: self.ports.environment.now(),
+            kind: AuditKind::SafeFixesPlanned,
+            origin: Some(origin),
+            detail: serde_json::json!({
+                "actions": actions
+                    .iter()
+                    .map(|action| serde_json::json!({
+                        "remediationId": action.remediation_id,
+                        "issueId": action.issue_id,
+                    }))
+                    .collect::<Vec<_>>(),
+                "deferred": deferred
+                    .iter()
+                    .map(|deferred| serde_json::json!({
+                        "issueId": deferred.issue_id,
+                        "remediationId": deferred.remediation_id,
+                        "reason": deferred.reason.label(),
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        });
     }
 
     /// The broker prepared a preview the automation asked for: approve it
@@ -1761,6 +1811,10 @@ impl AppService {
             {
                 self.snapshot.actions.active_run = None;
             }
+            self.audit(
+                AuditKind::RunFinished,
+                serde_json::json!({ "run": serde_json::to_value(&summary).unwrap_or_default() }),
+            );
             self.queue.push(AppEvent::Action(ActionEvent::Summary {
                 summary: Box::new(summary),
             }));

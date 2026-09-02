@@ -47,6 +47,8 @@ pub(crate) enum IssuesMsg {
     RunRemediation(String),
     /// Run every one-click safe fix for the detected issues now.
     RunSafeFixes,
+    /// Re-collect the evidence behind the checks that could not be verified.
+    RunMissingChecks,
     /// Jump to the Processes page sorted for this rule's culprits.
     ShowProcesses(InAppAction),
     AskAiAboutIssue(String),

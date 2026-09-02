@@ -23,10 +23,11 @@ use crate::widgets::palette_colors::Palette;
 use std::collections::HashSet;
 use wfdiag_native_ai_analysis::ValidatedFixPlan;
 use wfdiag_native_issues::auto_fix::safe_fix_plan;
+use wfdiag_native_issues::correlation::{cause_hint, likely_cause};
 use wfdiag_native_issues::next_steps::{
     DO_THIS_FIRST_LIMIT, InAppAction, NextStep, do_this_first, in_app_action,
 };
-use wfdiag_native_issues::projection::{project_issues, unknown_check_hint};
+use wfdiag_native_issues::projection::{missing_check_tasks, project_issues, unknown_check_hint};
 use wfdiag_native_issues::{Issue, IssueSeverity, RemediationSummary, RemediationTier};
 use wfdiag_native_remediation::broker::{ActionRequest, MAX_BATCH_ACTIONS};
 use wfdiag_native_remediation::remediation;
@@ -70,6 +71,7 @@ impl IssuesScreen {
             vc.callback(|value| Message::Issues(IssuesMsg::RunRemediation(value))),
             vc.callback(|value| Message::Issues(IssuesMsg::ShowProcesses(value))),
             vc.message(Message::Issues(IssuesMsg::RunSafeFixes)),
+            vc.message(Message::Issues(IssuesMsg::RunMissingChecks)),
             vc.callback(|value| Message::Issues(IssuesMsg::AskAiAboutIssue(value))),
             vc.message(Message::Issues(IssuesMsg::Prioritize)),
             vc.message(Message::Issues(IssuesMsg::CancelPrioritization)),
@@ -110,6 +112,7 @@ pub(crate) fn issues_page(
     run_remediation: Callback<String>,
     show_processes: Callback<InAppAction>,
     run_safe_fixes: Callback<()>,
+    run_missing_checks: Callback<()>,
     ask_ai: Callback<String>,
     prioritize_issues: Callback<()>,
     cancel_issue_prioritization: Callback<()>,
@@ -326,6 +329,12 @@ pub(crate) fn issues_page(
                 let _ = ask_ai.call(issue_id.clone());
             }
         };
+        // A symptom names its likely cause ahead of its own recommendation.
+        let recommendation_text = match likely_cause(&issue.id, &projection.detected) {
+            Some((cause, note)) if issue.recommendation.is_empty() => cause_hint(cause, note),
+            Some((cause, note)) => format!("{} {}", cause_hint(cause, note), issue.recommendation),
+            None => issue.recommendation.clone(),
+        };
         children.push(KeyedView::new(
             format!("issue:{}", issue.id),
             issue_card(
@@ -336,7 +345,7 @@ pub(crate) fn issues_page(
                 category_icon,
                 &issue.title,
                 &issue.description,
-                (!issue.recommendation.is_empty()).then_some(issue.recommendation.as_str()),
+                (!recommendation_text.is_empty()).then_some(recommendation_text.as_str()),
                 Some((issue.category.as_str(), severity_label)),
                 primary_action,
                 Some(("Ask AI", ai_enabled, ask_ai_callback)),
@@ -355,6 +364,7 @@ pub(crate) fn issues_page(
                 &projection.passed,
                 true,
                 network_tests_enabled,
+                None,
             ),
         ));
     }
@@ -367,6 +377,18 @@ pub(crate) fn issues_page(
                 &projection.unknown,
                 false,
                 network_tests_enabled,
+                {
+                    let tasks = missing_check_tasks(&projection.unknown, network_tests_enabled);
+                    (!tasks.is_empty()).then(|| {
+                        (
+                            format!(
+                                "Run the missing check{}",
+                                if tasks.len() == 1 { "" } else { "s" }
+                            ),
+                            run_missing_checks,
+                        )
+                    })
+                },
             ),
         ));
     }
@@ -1519,7 +1541,31 @@ pub(crate) fn issue_check_group(
     issues: &[&Issue],
     passed: bool,
     network_tests_enabled: bool,
+    action: Option<(String, Callback<()>)>,
 ) -> View {
+    let header: View = match action {
+        Some((text, callback)) => Grid::new()
+            .columns([GridLength::Star(1.0), GridLength::Auto])
+            .column_spacing(10.0)
+            .children((
+                TextBlock::new()
+                    .text(label)
+                    .font_size(12.0)
+                    .font_weight(FontWeight::BOLD)
+                    .vertical_alignment(VerticalAlignment::Center),
+                Button::new()
+                    .grid_column(1)
+                    .height(28.0)
+                    .on_click(callback)
+                    .automation_name("Run the missing checks")
+                    .content(fa_icon_label(FaIcon::Refresh, &text)),
+            )),
+        None => TextBlock::new()
+            .text(label)
+            .font_size(12.0)
+            .font_weight(FontWeight::BOLD)
+            .into(),
+    };
     let rows = issues
         .iter()
         .map(|issue| {
@@ -1586,13 +1632,7 @@ pub(crate) fn issue_check_group(
         .corner_radius(8.0)
         .content(
             Expander::new().is_expanded(false).slots([
-                SlotView::new(
-                    ExpanderSlot::Header,
-                    TextBlock::new()
-                        .text(label)
-                        .font_size(12.0)
-                        .font_weight(FontWeight::BOLD),
-                ),
+                SlotView::new(ExpanderSlot::Header, header),
                 SlotView::new(
                     ExpanderSlot::Content,
                     Border::new()

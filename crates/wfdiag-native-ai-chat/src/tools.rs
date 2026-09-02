@@ -194,6 +194,8 @@ pub struct IssueText<'a> {
     pub fix: Option<FixText<'a>>,
     /// The in-app destination when the fix is a page of this app.
     pub in_app: Option<&'a str>,
+    /// The detected issue this one is most likely a consequence of.
+    pub likely_cause: Option<&'a str>,
     pub severity: IssueTextSeverity,
     pub status: IssueTextStatus,
     pub title: &'a str,
@@ -264,8 +266,11 @@ pub fn detected_issues_text(
                     (None, Some(page)) => format!("in this app — {page}"),
                     (None, None) => "none vetted; follow the recommendation".to_string(),
                 };
+                let cause = issue
+                    .likely_cause
+                    .map_or_else(String::new, |cause| format!(" | Likely cause: {cause}"));
                 detected.push(format!(
-                    "Issue ID: {} | Remediation ID: {} | Fix: {fix} | Severity: {} | {} — {} | Recommendation: {}",
+                    "Issue ID: {} | Remediation ID: {} | Fix: {fix}{cause} | Severity: {} | {} — {} | Recommendation: {}",
                     issue.id,
                     issue.remediation_id.unwrap_or("none"),
                     issue.severity.as_str(),
@@ -518,6 +523,7 @@ mod tests {
             IssueText {
                 fix: None,
                 in_app: None,
+                likely_cause: None,
                 id: "low_disk_space",
                 remediation_id: Some("open_disk_cleanup"),
                 severity: IssueTextSeverity::Warning,
@@ -529,6 +535,7 @@ mod tests {
             IssueText {
                 fix: None,
                 in_app: None,
+                likely_cause: None,
                 id: "tpm_ready",
                 remediation_id: None,
                 severity: IssueTextSeverity::Info,
@@ -540,6 +547,7 @@ mod tests {
             IssueText {
                 fix: None,
                 in_app: None,
+                likely_cause: None,
                 id: "secure_boot",
                 remediation_id: None,
                 severity: IssueTextSeverity::Ok,
@@ -559,7 +567,7 @@ mod tests {
         assert!(text.contains("permission to run safe fixes is OFF"));
 
         // A described fix and the standing permission both reach the model.
-        let mut with_fix = issues.clone();
+        let mut with_fix = issues;
         with_fix[0].fix = Some(FixText {
             label: "Clean temp files",
             tier: FixTextTier::AutoSafe,

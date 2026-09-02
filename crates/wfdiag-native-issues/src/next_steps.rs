@@ -2,6 +2,7 @@
 //! by severity and by how directly the vetted remediation fixes them. Pure
 //! and deterministic — the same projection always yields the same list.
 
+use crate::correlation::likely_cause;
 use crate::issue_catalog::{Issue, IssueSeverity};
 use crate::projection::IssueProjection;
 use wfdiag_remediation_catalog::{RemediationSummary, RemediationTier};
@@ -52,6 +53,8 @@ pub struct NextStep {
     pub needs_admin: bool,
     /// Why it is on the list ("Critical · one-click safe fix").
     pub why: String,
+    /// The detected issue this one is most likely a consequence of.
+    pub likely_cause: Option<String>,
 }
 
 const fn severity_rank(severity: IssueSeverity) -> u8 {
@@ -71,8 +74,9 @@ const fn tier_rank(tier: RemediationTier) -> u8 {
     }
 }
 
-fn next_step(issue: &Issue) -> NextStep {
+fn next_step(issue: &Issue, detected: &[&Issue]) -> NextStep {
     let remediation = issue.remediation.clone();
+    let cause = likely_cause(&issue.id, detected);
     let needs_admin = remediation
         .as_ref()
         .is_some_and(|remediation| remediation.admin_required);
@@ -89,6 +93,9 @@ fn next_step(issue: &Issue) -> NextStep {
         None if in_app.is_some() => "see the culprits on the Processes page",
         None => "follow the recommendation",
     };
+    let consequence = cause.map_or_else(String::new, |(cause, _)| {
+        format!(" · likely a consequence of {}", cause.title)
+    });
     NextStep {
         issue_id: issue.id.clone(),
         title: issue.title.clone(),
@@ -96,13 +103,15 @@ fn next_step(issue: &Issue) -> NextStep {
         remediation,
         in_app,
         needs_admin,
-        why: format!("{severity} · {action}"),
+        why: format!("{severity} · {action}{consequence}"),
+        likely_cause: cause.map(|(cause, _)| cause.id.clone()),
     }
 }
 
 /// The detected issues a user should act on first, most valuable first:
-/// severity, then whether a vetted remediation exists, then built-in fixes
-/// before tool handoffs, then catalog order (the projection's order).
+/// severity, then root causes before their symptoms, then whether a vetted
+/// remediation exists, then built-in fixes before tool handoffs, then catalog
+/// order (the projection's order).
 #[must_use]
 pub fn do_this_first(projection: &IssueProjection<'_>, limit: usize) -> Vec<NextStep> {
     let mut ranked: Vec<(usize, &Issue)> =
@@ -110,6 +119,7 @@ pub fn do_this_first(projection: &IssueProjection<'_>, limit: usize) -> Vec<Next
     ranked.sort_by_key(|(position, issue)| {
         (
             severity_rank(issue.severity),
+            u8::from(likely_cause(&issue.id, &projection.detected).is_some()),
             u8::from(issue.remediation.is_none() && in_app_action(&issue.id).is_none()),
             issue
                 .remediation
@@ -121,7 +131,7 @@ pub fn do_this_first(projection: &IssueProjection<'_>, limit: usize) -> Vec<Next
     ranked
         .into_iter()
         .take(limit)
-        .map(|(_, issue)| next_step(issue))
+        .map(|(_, issue)| next_step(issue, &projection.detected))
         .collect()
 }
 
@@ -205,6 +215,27 @@ mod tests {
         assert_eq!(all.len(), 5, "clear checks are never steps");
         assert_eq!(all[3].issue_id, "warn");
         assert_eq!(all[4].why, "Worth a look · follow the recommendation");
+    }
+
+    #[test]
+    fn a_symptom_ranks_after_its_detected_cause_and_says_so() {
+        let issues = vec![
+            issue(
+                "dns_resolution_failing",
+                IssueSeverity::Warning,
+                IssueStatus::Detected,
+            ),
+            issue("no_internet", IssueSeverity::Warning, IssueStatus::Detected),
+        ];
+        let steps = do_this_first(&project_issues(&issues), DO_THIS_FIRST_LIMIT);
+        assert_eq!(steps[0].issue_id, "no_internet");
+        assert_eq!(steps[0].likely_cause, None);
+        assert_eq!(steps[1].likely_cause.as_deref(), Some("no_internet"));
+        assert!(
+            steps[1]
+                .why
+                .ends_with("likely a consequence of Issue no_internet")
+        );
     }
 
     #[test]

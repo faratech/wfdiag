@@ -42,7 +42,7 @@ with `[lints] workspace = true`, release/dev profiles at the root, one `Cargo.lo
 | --- | --- | --- |
 | `wfdiag-native-core` | error type, timestamps, atomic file writes, trusted-program command executor (`src/security.rs`), native WMI wrapper | yes |
 | `wfdiag-remediation-catalog` | read-only remediation metadata (`REMEDIATION_COUNT = 29`, tiers `OpenTool`/`AutoSafe`/`Repair`, 11 `maintenance` entries) | yes |
-| `wfdiag-native-issues` | issue catalog (37 `IssueSpec`s), pure detectors, UI projection, fix-plan validation, worker runtime | yes |
+| `wfdiag-native-issues` | issue catalog (37 `IssueSpec`s), pure detectors, UI projection, `next_steps` ranking, `auto_fix` safe-fix planner, `correlation` (root cause before symptom), fix-plan validation, worker runtime | yes |
 | `wfdiag-native-remediation` | remediation engine + `broker::ActionBroker` — the **only** execution path | yes |
 | `wfdiag-native-diagnostics` | task catalog (49 tasks), Windows collectors, scan orchestration runtime | yes |
 | `wfdiag-native-monitor` | live CPU/memory/disk/network/GPU/NPU telemetry, process inventory. `#![cfg(windows)]` — empty library elsewhere | Windows only |
@@ -273,6 +273,9 @@ Evidence comes from `scripts/validate-reactor.ps1 -Suite all` and the manual
   `assistant_may_run_safe_fixes` (an action the assistant staged, or the safe part of a fix
   plan). After any successful run the fixed issues' source tasks are re-collected with a
   targeted rerun and `ActionEvent::Verified` reports what cleared and what is still detected.
+  Every terminal run, automation decision and verification is appended to the audit trail
+  (`ports/audit.rs`; shipping sink `%LOCALAPPDATA%\WFDiag\logs\actions.jsonl`, one JSON line
+  each, rotated at 4 MiB; a plain path lookup, not a knob).
 * **AI chat tools are strictly read-only.** Exactly ten: `run_diagnostic`,
   `search_windows_knowledge`, `get_scan_summary`, `request_full_scan`, `get_detected_issues`,
   `compare_with_previous_scan`, `get_live_stats`, `list_remediations`, `list_scan_history`,

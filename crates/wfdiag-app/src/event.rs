@@ -700,6 +700,17 @@ pub enum SafeFixOrigin {
 }
 
 impl SafeFixOrigin {
+    /// The wire id used by the audit trail.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::AfterScan => "after_scan",
+            Self::Assistant => "assistant",
+            Self::FixPlan => "fix_plan",
+        }
+    }
+
     /// A short phrase for status lines.
     #[must_use]
     pub const fn label(self) -> &'static str {

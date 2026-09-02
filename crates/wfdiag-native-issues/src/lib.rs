@@ -7,6 +7,7 @@
 #![deny(unsafe_code)]
 
 pub mod auto_fix;
+pub mod correlation;
 mod diagnostics;
 pub mod evidence;
 mod fix_plan;

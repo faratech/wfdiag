@@ -6,6 +6,7 @@ mod support;
 
 use std::time::Duration;
 use support::{Harness, ai_mocks, boot_ai_with};
+use wfdiag_app::ports::AuditKind;
 use wfdiag_app::ports::mock::{ScriptedExecutor, TaskScript};
 use wfdiag_app::{
     ActionEvent, AppCommand, AppEvent, IssuesEvent, SafeFixOrigin, ScanEvent, SettingsEvent,
@@ -156,6 +157,29 @@ fn run_safe_fixes_runs_the_safe_fix_defers_the_repair_and_re_detects() {
     assert_eq!(
         verified,
         (vec!["defender_definitions_stale".to_string()], vec![])
+    );
+    // The audit trail has the plan, the run, its verification and the end.
+    let kinds: Vec<AuditKind> = harness
+        .mocks
+        .audit
+        .entries()
+        .iter()
+        .map(|entry| entry.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            AuditKind::SafeFixesPlanned,
+            AuditKind::RunFinished,
+            AuditKind::Verified,
+            AuditKind::SafeFixesFinished,
+        ]
+    );
+    let run = &harness.mocks.audit.entries()[1];
+    assert_eq!(run.origin, Some(SafeFixOrigin::User));
+    assert_eq!(
+        run.detail["run"]["actions"][0]["remediationId"],
+        "update_defender_signatures"
     );
     let issues = &harness.service.snapshot().issues;
     assert!(

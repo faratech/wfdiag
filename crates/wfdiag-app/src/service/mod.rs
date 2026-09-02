@@ -2457,6 +2457,14 @@ impl AppService {
             // re-collected evidence, so it says whether the fix worked.
             if let Some(pending) = self.verification.take() {
                 let (resolved, unresolved) = verification_result(&pending, &self.snapshot.issues);
+                self.audit(
+                    crate::ports::audit::AuditKind::Verified,
+                    serde_json::json!({
+                        "runId": pending.run_id,
+                        "resolved": resolved,
+                        "unresolved": unresolved,
+                    }),
+                );
                 self.queue.push(AppEvent::Action(ActionEvent::Verified {
                     run_id: pending.run_id,
                     resolved,

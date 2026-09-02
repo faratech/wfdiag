@@ -68,6 +68,7 @@ impl WfdiagShell {
                     self.navigate_to_page(Page::Processes, context);
                 }
                 Effect::BeginScan(kind) => self.begin_diagnostic_scan(kind),
+                Effect::BeginTargetedScan(task_ids) => self.begin_targeted_checks(task_ids),
                 Effect::AskAi { prompt } => {
                     self.transition_to_page(Page::Ai);
                     self.ai.mode = AiMode::Assistant;

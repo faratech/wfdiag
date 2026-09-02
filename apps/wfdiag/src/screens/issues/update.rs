@@ -12,7 +12,7 @@ use wfdiag_app::{
     ActionEvent, AppCommand, AppEvent, DispatchOutcome, FixPlanEvent, IssuesEvent,
     PrioritizationEvent, ScanEvent,
 };
-use wfdiag_native_issues::projection::project_issues;
+use wfdiag_native_issues::projection::{missing_check_tasks, project_issues};
 use wfdiag_native_remediation::broker::ActionRequest;
 use wfdiag_native_remediation::remediation;
 use wfdiag_native_remediation::runtime::ActionRunStatus;
@@ -22,6 +22,18 @@ impl IssuesScreen {
         match message {
             IssuesMsg::RunRemediation(remediation_id) => self.run_remediation(remediation_id, cx),
             IssuesMsg::RunSafeFixes => self.run_safe_fixes(cx),
+            IssuesMsg::RunMissingChecks => {
+                let projection = project_issues(&self.issues);
+                let tasks = missing_check_tasks(
+                    &projection.unknown,
+                    cx.shell.settings.network_tests_enabled,
+                );
+                if tasks.is_empty() {
+                    cx.status("Every check has been verified");
+                } else {
+                    cx.effect(Effect::BeginTargetedScan(tasks));
+                }
+            }
             IssuesMsg::ShowProcesses(action) => cx.effect(Effect::ShowProcesses(action)),
             IssuesMsg::AskAiAboutIssue(issue_id) => self.ask_ai_about_issue(&issue_id, cx),
             IssuesMsg::Prioritize => {

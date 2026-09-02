@@ -6,6 +6,7 @@
 //! integration tests run on Linux with no GUI.
 
 pub mod ai;
+pub mod audit;
 pub mod chat_tools;
 pub mod mock;
 pub mod mock_ai;
@@ -22,6 +23,7 @@ use wfdiag_native_settings::{CredentialStorage, SettingsStorage, SettingsValidat
 use wfdiag_native_system::SystemProvider;
 use wfdiag_native_update::{CurrentVersionProvider, ReleaseHttp, SignatureProvider};
 
+pub use audit::{AuditEntry, AuditKind, AuditSink, FileAuditSink, MemoryAuditSink, NoopAuditSink};
 pub use monitor::{MonitorPort, MonitorProfileKind, NoopMonitor};
 
 /// Clock and environment inputs that must be injectable for determinism.
@@ -140,6 +142,8 @@ pub struct AppPorts {
     pub update_throttle: Arc<dyn UpdateThrottlePort>,
     /// Every AI, remediation, and provider-setup seam.
     pub ai: ai::AiPorts,
+    /// Records every state-changing action and automation decision.
+    pub audit: Arc<dyn AuditSink>,
 }
 
 impl fmt::Debug for AppPorts {

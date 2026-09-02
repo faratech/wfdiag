@@ -86,6 +86,58 @@ impl WfdiagShell {
         }
     }
 
+    /// Re-collect the tasks behind the checks a scan could not verify. Tasks
+    /// that need administrator rights this process lacks are left out and
+    /// named in the status line.
+    pub(crate) fn begin_targeted_checks(&mut self, task_ids: Vec<String>) {
+        if self.shell.deterministic_visual {
+            self.shell.status = "Visual fixture mode · live scanning disabled".to_string();
+            return;
+        }
+        let mut skipped = Vec::new();
+        let runnable: Vec<String> = task_ids
+            .into_iter()
+            .filter(|task_id| {
+                let Some(task) = self
+                    .diagnostics
+                    .catalog
+                    .iter()
+                    .find(|task| &task.id == task_id)
+                else {
+                    return false;
+                };
+                if task.admin_required && !self.shell.is_admin {
+                    skipped.push(task.name.clone());
+                    return false;
+                }
+                true
+            })
+            .collect();
+        if runnable.is_empty() {
+            self.shell.status = if skipped.is_empty() {
+                "Nothing left to check".to_string()
+            } else {
+                format!("Restart as administrator to run: {}", skipped.join(", "))
+            };
+            return;
+        }
+        let count = runnable.len();
+        let plural = if count == 1 { "" } else { "s" };
+        match self.dispatch(AppCommand::StartTargetedScan { task_ids: runnable }) {
+            DispatchOutcome::Accepted { .. } => {
+                self.shell.status = if skipped.is_empty() {
+                    format!("Running {count} missing check{plural}…")
+                } else {
+                    format!(
+                        "Running {count} missing check{plural} · administrator needed for: {}",
+                        skipped.join(", ")
+                    )
+                };
+            }
+            outcome => self.report_rejection(&outcome),
+        }
+    }
+
     pub(crate) fn begin_targeted_diagnostic_scan(&mut self, task_id: &str) {
         if self.shell.deterministic_visual {
             self.shell.status = "Visual fixture mode · live scanning disabled".to_string();
