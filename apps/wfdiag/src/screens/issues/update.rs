@@ -12,6 +12,7 @@ use wfdiag_app::{
     ActionEvent, AppCommand, AppEvent, DispatchOutcome, FixPlanEvent, IssuesEvent,
     PrioritizationEvent, ScanEvent,
 };
+use wfdiag_native_issues::health::{health_score, health_tray_tooltip};
 use wfdiag_native_issues::projection::project_issues;
 use wfdiag_native_remediation::broker::ActionRequest;
 use wfdiag_native_remediation::remediation;
@@ -235,8 +236,13 @@ impl IssuesScreen {
             IssuesEvent::Updated { session_id, .. } => {
                 self.refreshing = false;
                 self.projected_session_id = Some(session_id.clone());
+                let projection = project_issues(&self.issues);
+                cx.tray_tooltip(health_tray_tooltip(
+                    health_score(&projection).as_ref(),
+                    projection.counts,
+                ));
                 if cx.shell.page == Page::Issues && !cx.scan.busy {
-                    cx.status(project_issues(&self.issues).counts.summary_text());
+                    cx.status(projection.counts.summary_text());
                 }
             }
             IssuesEvent::Failed { error } => {

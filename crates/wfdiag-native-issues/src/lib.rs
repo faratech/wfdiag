@@ -8,6 +8,7 @@
 
 mod diagnostics;
 mod fix_plan;
+pub mod health;
 #[allow(clippy::all, clippy::pedantic)]
 pub mod issue_catalog;
 #[allow(clippy::all, clippy::pedantic)]

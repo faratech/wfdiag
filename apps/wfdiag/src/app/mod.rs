@@ -86,6 +86,8 @@ use std::sync::Arc;
 use wfdiag_app::{AppCommand, AppEventReceiver, AppService, UiWakeHandler};
 use wfdiag_native_ai_provider::AIProvider;
 use wfdiag_native_diagnostics::{DiagnosticOutput, ScanKind};
+use wfdiag_native_issues::health::health_score;
+use wfdiag_native_issues::projection::project_issues;
 use wfdiag_native_settings::AppSettings;
 use wfdiag_ui_core::DiagnosticTaskResult;
 use windows_reactor::*;
@@ -530,6 +532,7 @@ impl Component for WfdiagShell {
         // Keep the user's expanded preference so the full pane returns when the
         // window grows again, but never let it consume the compact content area.
         let pane_expanded = self.shell.pane_open && !rail_forced_collapsed;
+        let health = health_score(&project_issues(&self.issues.issues));
         // One read-only bundle of chrome facts, handed to whichever page is
         // open. A screen never reaches back into the shell for these.
         let env = ShellEnv {
@@ -539,6 +542,7 @@ impl Component for WfdiagShell {
             compact: diagnostics_compact,
             pane_expanded,
             window_size: self.shell.window_size,
+            health: health.as_ref(),
             deterministic_visual: self.shell.deterministic_visual,
             visual_state: self.shell.visual_state,
             is_admin: self.shell.is_admin,

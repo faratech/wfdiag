@@ -13,6 +13,7 @@ use crate::app::state::{AiMode, Page};
 use crate::dialogs::action_review::state::ActionReviewMsg;
 use crate::dialogs::notice::state::{NoticeKind, NoticeRequest};
 use crate::platform::external::write_text_to_clipboard;
+use crate::platform::{instance, window};
 use crate::screens::ai::state::AiMsg;
 use crate::screens::diagnostics::state::DiagnosticsMsg;
 use crate::screens::history::state::HistoryMsg;
@@ -41,6 +42,11 @@ impl WfdiagShell {
                 }
                 Effect::Status(text) => self.shell.status = text,
                 Effect::Notice(request) => self.show_notice(request),
+                Effect::TrayTooltip(text) => {
+                    if let Some(window) = instance::main_window_hwnd() {
+                        window::update_tray_tooltip(window, &text);
+                    }
+                }
                 Effect::Transition(page) => {
                     self.transition_to_page(page);
                 }

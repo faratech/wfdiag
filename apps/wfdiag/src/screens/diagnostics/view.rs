@@ -21,6 +21,7 @@ use crate::widgets::palette_colors::Palette;
 use std::collections::HashMap;
 use wfdiag_native_ai_analysis::{GroundingTrace, GroundingTraceSource};
 use wfdiag_native_diagnostics::DiagnosticTask;
+use wfdiag_native_issues::health::{HealthBand, HealthScore};
 use wfdiag_native_projection::markdown::safe_markdown_link_target;
 use wfdiag_ui_core::{DiagnosticTaskResult, TaskProgressStatus};
 use windows_reactor::*;
@@ -259,6 +260,42 @@ pub(crate) fn diagnostics_scanning_page(
                 .padding(Thickness::new(0.0, 0.0, 0.0, 18.0))
                 .content(hero),
         ))
+}
+
+/// The health verdict beside COLLECTED, coloured by band; empty until the
+/// issue projection exists.
+pub(crate) fn health_statistic(palette: Palette, health: Option<&HealthScore>) -> View {
+    let Some(health) = health else {
+        return View::empty();
+    };
+    let color = match health.band {
+        HealthBand::Good => palette.ok,
+        HealthBand::Fair => palette.accent,
+        HealthBand::NeedsAttention => palette.warn,
+        HealthBand::Poor => palette.err,
+    };
+    StackPanel::new().spacing(1.0).children((
+        TextBlock::new()
+            .text("HEALTH")
+            .font_size(10.5)
+            .font_weight(FontWeight::SEMI_BOLD)
+            .foreground(palette.muted),
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(6.0)
+            .children((
+                TextBlock::new()
+                    .text(health.score.to_string())
+                    .font_size(21.0)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .foreground(color),
+                TextBlock::new()
+                    .text(health.band.label())
+                    .font_size(12.0)
+                    .foreground(palette.muted)
+                    .vertical_alignment(VerticalAlignment::Bottom),
+            )),
+    ))
 }
 
 pub(crate) fn live_collected_statistic(
@@ -847,6 +884,7 @@ pub(crate) fn diagnostics_live_results_page(
     palette: Palette,
     theme: WindowTheme,
     narrow: bool,
+    health: Option<&HealthScore>,
     results: &[DiagnosticTaskResult],
     catalog: &[DiagnosticTask],
     duration_ms: u64,
@@ -1422,6 +1460,7 @@ pub(crate) fn diagnostics_live_results_page(
         .spacing(28.0)
         .children((
             live_collected_statistic(palette, collected, results.len()),
+            health_statistic(palette, health),
             statistic(
                 "ERRORS",
                 &errors.to_string(),
@@ -1517,6 +1556,7 @@ impl DiagnosticsScreen {
             env.palette,
             env.theme,
             env.compact,
+            env.health,
             &self.results,
             &self.catalog,
             &self.expected_task_ids,
@@ -1552,6 +1592,7 @@ pub(crate) fn diagnostics_page(
     palette: Palette,
     theme: WindowTheme,
     narrow: bool,
+    health: Option<&HealthScore>,
     results: &[DiagnosticTaskResult],
     catalog: &[DiagnosticTask],
     expected_task_ids: &[String],
@@ -1603,6 +1644,7 @@ pub(crate) fn diagnostics_page(
             palette,
             theme,
             narrow,
+            health,
             results,
             catalog,
             duration_ms,

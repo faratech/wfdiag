@@ -25,6 +25,7 @@ use crate::fixtures::visual::VisualState;
 use crate::widgets::palette_colors::Palette;
 use wfdiag_app::{AppCommand, AppService, DispatchOutcome, RejectReason};
 use wfdiag_native_diagnostics::ScanKind;
+use wfdiag_native_issues::health::HealthScore;
 use wfdiag_native_settings::AppSettings;
 use windows_reactor::*;
 
@@ -43,6 +44,8 @@ pub(crate) enum Effect {
     Status(String),
     /// Raise a transient outcome notice (the Store shell's toast).
     Notice(NoticeRequest),
+    /// Replace the tray icon's hover text.
+    TrayTooltip(String),
     /// Change pages without the destination's entry work (workflow jumps that
     /// perform their own sequencing).
     Transition(Page),
@@ -124,6 +127,11 @@ impl<'a> ScreenCx<'a> {
         self.effects.push(Effect::Status(text.into()));
     }
 
+    /// Replace the tray icon's hover text (the health verdict).
+    pub(crate) fn tray_tooltip(&mut self, text: impl Into<String>) {
+        self.effects.push(Effect::TrayTooltip(text.into()));
+    }
+
     /// Raise a transient outcome notice beside the status line.
     pub(crate) fn notice(
         &mut self,
@@ -182,6 +190,9 @@ pub(crate) struct ShellEnv<'a> {
     pub(crate) compact: bool,
     pub(crate) pane_expanded: bool,
     pub(crate) window_size: WindowSize,
+    /// The deterministic health verdict for the current issue projection,
+    /// shared by the Issues hero, the Diagnostics statistics and the tray.
+    pub(crate) health: Option<&'a HealthScore>,
     pub(crate) deterministic_visual: bool,
     pub(crate) visual_state: VisualState,
     pub(crate) is_admin: bool,
