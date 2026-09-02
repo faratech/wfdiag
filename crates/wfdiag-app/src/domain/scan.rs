@@ -349,8 +349,32 @@ pub struct ScanState {
     policy: Option<ScanPolicy>,
     statuses: HashMap<String, TaskProgressStatus>,
     current_task: Option<String>,
+    /// The tasks still running, in start order: the label names them all, so a
+    /// slow task is never hidden behind the one that merely started last.
+    running: Vec<(String, String)>,
     cancel_requested: bool,
     started_at: Option<Instant>,
+}
+
+/// "Disk Fragmentation · BSOD Minidumps": every task still running, oldest
+/// first, at most three named.
+#[must_use]
+pub fn running_label(running: &[(String, String)]) -> Option<String> {
+    if running.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = running
+        .iter()
+        .take(3)
+        .map(|(_, name)| name.as_str())
+        .collect();
+    let rest = running.len().saturating_sub(3);
+    let label = names.join(" · ");
+    Some(if rest > 0 {
+        format!("{label} · +{rest} more")
+    } else {
+        label
+    })
 }
 
 impl ScanState {
@@ -443,6 +467,7 @@ impl ScanState {
         self.phase = ScanPhase::Starting;
         self.cancel_requested = false;
         self.current_task = None;
+        self.running.clear();
         self.started_at = Some(Instant::now());
         replacement
     }
@@ -467,6 +492,7 @@ impl ScanState {
         self.snapshot.duration_ms = 0;
         self.snapshot.session_id = Some(session_id);
         self.current_task = None;
+        self.running.clear();
         if self.overlay.is_none() {
             self.snapshot.results.clear();
         }
@@ -494,8 +520,13 @@ impl ScanState {
                     .find(|task| task.id == progress.task_id)
                     .map_or_else(|| progress.task_id.clone(), |task| task.name.clone())
             });
-            self.current_task = Some(name);
+            if !self.running.iter().any(|(id, _)| *id == progress.task_id) {
+                self.running.push((progress.task_id.clone(), name));
+            }
+        } else {
+            self.running.retain(|(id, _)| *id != progress.task_id);
         }
+        self.current_task = running_label(&self.running);
         self.update_counts();
         true
     }
@@ -518,6 +549,8 @@ impl ScanState {
                 TaskProgressStatus::Failed
             },
         );
+        self.running.retain(|(id, _)| *id != result.task_id);
+        self.current_task = running_label(&self.running);
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.stage(result);
             self.update_counts();
@@ -660,6 +693,7 @@ impl ScanState {
         self.phase = ScanPhase::Finalizing;
         self.cancel_requested = false;
         self.current_task = None;
+        self.running.clear();
         if !auto_save {
             self.reset();
         }
@@ -709,6 +743,7 @@ impl ScanState {
         self.overlay = None;
         self.statuses.clear();
         self.current_task = None;
+        self.running.clear();
         self.cancel_requested = false;
         self.started_at = None;
     }
@@ -734,12 +769,13 @@ impl ScanState {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunOutcome, ScanPhase, ScanPolicy, ScanState, TargetedOverlay};
+    use super::{RunOutcome, ScanPhase, ScanPolicy, ScanState, TargetedOverlay, running_label};
     use std::collections::HashMap;
     use std::sync::Arc;
     use wfdiag_native_diagnostics::{DiagnosticTask, ScanKind};
     use wfdiag_native_issues::TaskResult;
     use wfdiag_ui_core::DiagnosticTaskResult;
+    use wfdiag_ui_core::{TaskProgress, TaskProgressStatus};
 
     fn catalog() -> Vec<DiagnosticTask> {
         ["os_info", "processor", "logical_disk"]
@@ -815,6 +851,56 @@ mod tests {
         assert!(matches!(outcome, RunOutcome::Committed { .. }));
         assert!(state.finish_finalization("scan_1"));
         state
+    }
+
+    #[test]
+    fn the_running_label_names_every_task_still_running_not_the_last_started() {
+        let mut state = ScanState::new();
+        assert!(state.begin(
+            ScanKind::Quick,
+            vec![
+                "disk_fragmentation".to_string(),
+                "minidump".to_string(),
+                "os_info".to_string(),
+            ],
+            policy(),
+        ));
+        assert!(state.session_started("scan_1".to_string(), ScanKind::Quick, 3));
+        let progress = |task_id: &str, status: TaskProgressStatus| TaskProgress {
+            session_id: "scan_1".to_string(),
+            task_id: task_id.to_string(),
+            status,
+            task_name: Some(task_id.replace('_', " ")),
+            success: None,
+        };
+        let catalog = catalog();
+        state.apply_progress(
+            &progress("disk_fragmentation", TaskProgressStatus::Running),
+            &catalog,
+        );
+        state.apply_progress(&progress("minidump", TaskProgressStatus::Running), &catalog);
+        assert_eq!(state.current_task(), Some("disk fragmentation · minidump"));
+        // The last-started task finishes first: the label must fall back to
+        // the one that is actually still running.
+        state.apply_progress(
+            &progress("minidump", TaskProgressStatus::Completed),
+            &catalog,
+        );
+        assert_eq!(state.current_task(), Some("disk fragmentation"));
+        state.apply_progress(
+            &progress("disk_fragmentation", TaskProgressStatus::Completed),
+            &catalog,
+        );
+        assert_eq!(state.current_task(), None);
+        assert_eq!(
+            running_label(&[
+                ("a".to_string(), "A".to_string()),
+                ("b".to_string(), "B".to_string()),
+                ("c".to_string(), "C".to_string()),
+                ("d".to_string(), "D".to_string()),
+            ]),
+            Some("A · B · C · +1 more".to_string())
+        );
     }
 
     #[test]

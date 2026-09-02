@@ -22,6 +22,8 @@ pub(crate) struct DiagnosticsScreen {
     pub(crate) completed: usize,
     pub(crate) errors: usize,
     pub(crate) current_task: Option<String>,
+    /// The tasks still running (id, name), in start order.
+    pub(crate) running_tasks: Vec<(String, String)>,
     pub(crate) scan_phase: ScanPhase,
     pub(crate) selected_task_id: Option<String>,
     pub(crate) filter: String,

@@ -1561,21 +1561,35 @@ impl NativeDiagnostics {
     /// the faulting module). Never fails the task: a decode problem is
     /// reported as text beside the raw file facts.
     fn decode_minidump(path: &Path) -> (Option<Value>, Option<String>) {
-        use crate::bugcheck::{decode_bugcheck, faulting_module, format_code, parse_dump_header};
+        use crate::bugcheck::{
+            decode_bugcheck, faulting_module, format_code, layout, parse_dump_header,
+        };
         use std::io::Read;
 
+        // The header decides everything but the faulting module; only a
+        // 64-bit triage dump's driver list is worth the larger read.
         const MAX_READ: u64 = 1024 * 1024;
-        let mut bytes = Vec::new();
-        let read = fs::File::open(path)
-            .and_then(|file| file.take(MAX_READ).read_to_end(&mut bytes))
-            .map_err(|error| error.to_string());
-        if let Err(error) = read {
+        let mut file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) => return (None, Some(format!("could not read the dump: {error}"))),
+        };
+        let mut bytes = Vec::with_capacity(layout::HEADER_LEN);
+        if let Err(error) = (&mut file)
+            .take(layout::HEADER_LEN as u64)
+            .read_to_end(&mut bytes)
+        {
             return (None, Some(format!("could not read the dump: {error}")));
         }
         let header = match parse_dump_header(&bytes) {
             Ok(header) => header,
             Err(error) => return (None, Some(error.to_string())),
         };
+        if header.is_64 && header.dump_type == layout::DUMP_TYPE_TRIAGE {
+            // Best effort: a short read leaves `faulting_module` at `None`.
+            let _ = file
+                .take(MAX_READ - layout::HEADER_LEN as u64)
+                .read_to_end(&mut bytes);
+        }
         let info = decode_bugcheck(header.bugcheck_code);
         let module = faulting_module(&bytes, &header);
         let crash_time = header
@@ -1639,8 +1653,22 @@ impl NativeDiagnostics {
         }
         candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.2));
 
+        // Ten newest dumps, within a small budget: the check must never hold
+        // the scan for a slow disk.
+        let decode_budget = std::time::Duration::from_secs(5);
+        let started = std::time::Instant::now();
         for (entry, metadata, modified) in candidates.into_iter().take(10) {
-            let (bugcheck, decode_error) = Self::decode_minidump(&entry.path());
+            let (bugcheck, decode_error) = if started.elapsed() < decode_budget {
+                Self::decode_minidump(&entry.path())
+            } else {
+                (
+                    None,
+                    Some(
+                        "not decoded: the dump-reading budget was spent on earlier files"
+                            .to_string(),
+                    ),
+                )
+            };
             dumps.push(json!({
                 "filename": entry.file_name().to_string_lossy(),
                 "size": metadata.len(),

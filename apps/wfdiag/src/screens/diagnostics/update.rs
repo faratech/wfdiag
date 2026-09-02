@@ -8,6 +8,7 @@ use crate::app::policy::{
 use crate::app::screen::{Effect, ScreenCx};
 use crate::screens::diagnostics::state::{DiagnosticsMsg, DiagnosticsScreen};
 use crate::screens::diagnostics::view::diagnostic_matches_filter;
+use wfdiag_app::running_label;
 use wfdiag_app::{AnalysisEvent, AppCommand, AppEvent, DispatchOutcome, ScanEvent};
 use wfdiag_native_diagnostics::ScanKind;
 
@@ -106,6 +107,7 @@ impl DiagnosticsScreen {
             ScanEvent::Started { kind, .. } => {
                 self.task_statuses.clear();
                 self.current_task = None;
+                self.running_tasks.clear();
                 cx.status(format!("{} started", scan_kind_label(*kind)));
             }
             ScanEvent::StartFailed { error } => {
@@ -126,8 +128,15 @@ impl DiagnosticsScreen {
                 });
                 self.task_statuses.insert(task_id.clone(), *status);
                 if *status == wfdiag_ui_core::TaskProgressStatus::Running {
-                    self.current_task = Some(task_name.clone());
+                    if !self.running_tasks.iter().any(|(id, _)| id == task_id) {
+                        self.running_tasks
+                            .push((task_id.clone(), task_name.clone()));
+                    }
+                } else {
+                    self.running_tasks.retain(|(id, _)| id != task_id);
                 }
+                // Name what is still running, not what merely started last.
+                self.current_task = running_label(&self.running_tasks);
                 cx.status(scan_progress_text(
                     self.scan_label(),
                     self.cancelling(),
@@ -172,6 +181,7 @@ impl DiagnosticsScreen {
             }
             ScanEvent::Cancelled => {
                 self.current_task = None;
+                self.running_tasks.clear();
                 cx.status(format!(
                     "{} stopped · previous results restored",
                     self.scan_label()
@@ -188,6 +198,7 @@ impl DiagnosticsScreen {
             }
             ScanEvent::Failed { error, stopped } => {
                 self.current_task = None;
+                self.running_tasks.clear();
                 let label = self.scan_label();
                 cx.status(if *stopped {
                     format!("{label} stopped · previous results restored")
@@ -206,7 +217,10 @@ impl DiagnosticsScreen {
             }
             // The shell owns finalization: the completion toast, the history
             // reload, and the final status line all outlive this screen.
-            ScanEvent::Finalized { .. } => self.current_task = None,
+            ScanEvent::Finalized { .. } => {
+                self.current_task = None;
+                self.running_tasks.clear();
+            }
         }
     }
 

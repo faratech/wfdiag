@@ -67,6 +67,7 @@ pub use command::{
     UpdateCheckReason, WorkerKind,
 };
 pub use config::AppConfig;
+pub use domain::scan::running_label;
 pub use event::{
     ActionEvent, AnalysisEvent, AppEvent, AppEventReceiver, ChatEvent, ExportEvent, FixPlanEvent,
     HistoryEvent, HistoryRequest, IssuesEvent, ModelCatalogEvent, MonitorEvent,

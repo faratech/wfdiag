@@ -15,6 +15,7 @@ pub mod disk_usage;
 
 /// Portable blue-screen decoding (dump header parser, stop-code table).
 pub mod bugcheck;
+pub mod deadlines;
 
 /// Portable network-path verdict (probe constants, decision table).
 pub mod network_path;

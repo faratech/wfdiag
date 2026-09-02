@@ -410,9 +410,12 @@ pub fn run_diagnostic_task_sync(task_id: &str) -> Result<TaskResult, String> {
 pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
     let start = std::time::Instant::now();
 
-    // Run native diagnostics in a blocking task to avoid blocking the async runtime
+    // Run native diagnostics in a blocking task to avoid blocking the async
+    // runtime, and never wait past the task's deadline (`deadlines`): a stuck
+    // collector must not park the scan at N-1 of N.
     let task_id_owned = task_id.to_string();
-    let native_result = tokio::task::spawn_blocking(move || {
+    let deadline = crate::deadlines::task_deadline(task_id);
+    let collector = tokio::task::spawn_blocking(move || {
         let diagnostics = match NativeDiagnostics::new() {
             Ok(d) => d,
             Err(e) => return Err(e),
@@ -472,9 +475,22 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             "driver_verifier" => diagnostics.get_driver_verifier(),
             _ => Err(anyhow::anyhow!("Not implemented in native diagnostics")),
         }
-    })
-    .await
-    .unwrap_or_else(|_| Err(anyhow::anyhow!("Task panicked")));
+    });
+    let native_result = match tokio::time::timeout(deadline, collector).await {
+        Ok(joined) => joined.unwrap_or_else(|_| Err(anyhow::anyhow!("Task panicked"))),
+        Err(_elapsed) => {
+            let task_name = get_all_tasks()
+                .into_iter()
+                .find(|task| task.id == task_id)
+                .map_or_else(|| task_id.to_string(), |task| task.name);
+            return TaskResult {
+                success: false,
+                output: String::new(),
+                error: Some(crate::deadlines::deadline_error(&task_name, deadline)),
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
 
     let result = match native_result {
         Ok(json_value) => TaskResult {
