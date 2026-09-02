@@ -263,7 +263,7 @@ real backend through the framework-neutral crates:
   `wfdiag-native-remediation` engine only after an opaque, expiring, one-use action proposal is
   reviewed and revalidated against current issue/catalog fingerprints. Repair requires a second
   explicit confirmation and the engine's own tier gate re-checks. `stage_remediation` enters this
-  same broker and never executes directly. Ask AI immediately sends current issue evidence through
+  same broker and never executes directly. With the default-off setting "Let the assistant run safe fixes", the facade's automation layer approves a staged `AutoSafe` action with the plain review approval (the broker still refuses every Repair) and verifies it afterwards; see `CLAUDE.md` → Security model → "Automation never widens the gate". Ask AI immediately sends current issue evidence through
   native chat. Prioritize / Propose fix plan uses a cancellable native worker plus the shared strict
   catalog-ID parser; stale plans are discarded, provider/fallback attribution is visible, and each
   selected or batch action must still pass the normal fingerprinted review/confirmation broker.

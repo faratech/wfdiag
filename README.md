@@ -1,7 +1,7 @@
-# WF Diagnostics v2.5.9 - WindowsForum Diagnostic Tool
+# WF Diagnostics v2.6.0 - WindowsForum Diagnostic Tool
 
 [![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC_BY--NC--ND_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
-[![Version](https://img.shields.io/badge/version-2.5.9-blue.svg)](https://github.com/faratech/wfdiag/releases)
+[![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)](https://github.com/faratech/wfdiag/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightblue.svg)](https://github.com/faratech/wfdiag)
 [![Security](https://img.shields.io/badge/security-hardened-green.svg)](https://github.com/faratech/wfdiag)
 [![AI](https://img.shields.io/badge/AI-Hybrid-purple.svg)](https://github.com/faratech/wfdiag)
@@ -144,7 +144,16 @@ Auto routing is local-first: Phi Silica → Foundry Local → Ollama → custom 
 
 ## 🔄 Version History
 
-### **v2.5.9 (Current) - Live AI Model Discovery**
+### **v2.6.0 (Current) - Automation, Built-in Fixes, and an Assistant That Acts**
+- ✅ **Built-in fixes**: seven new one-click or confirm-once remediations (drive optimization, Windows temp cleanup, Defender definition update and quick scan, firewall on, network address renewal, memory test at next restart) replace opening Windows tools for most rules; CPU and memory rules point at the Processes page.
+- ✅ **Safe-fix automation** (opt-in): run every one-click safe fix after each scan or with "Fix safe issues now"; repairs always wait for your confirmation, and every fix is verified by re-collecting its evidence.
+- ✅ **Assistant that acts** (opt-in): the AI can run the safe fixes it stages or plans, sees each issue's fix, tier and likely root cause, and reports what changed.
+- ✅ **Root cause first**: symptoms rank below the issue they follow from and say so; "Run the missing checks" re-collects unverified rules in one click.
+- ✅ **Evidence-driven diagnosis**: disk-space breakdown, blue-screen decoding, Windows Update failure diagnosis, Defender health, an opt-in network connectivity test, and a "turned Critical since the last scan" notice.
+- ✅ **Audit trail**: every action and automation decision is appended to `%LOCALAPPDATA%\WFDiag\logs\actions.jsonl`.
+- ✅ **Processes**: the program path with "Open file location"; exports offer printable HTML instead of a silent PDF downgrade.
+
+### **v2.5.9 - Live AI Model Discovery**
 - ✅ **Always-current model catalogs**: Loads available models directly from provider APIs and the Codex/Claude CLI metadata instead of shipping static lists.
 - ✅ **Claude model clarity**: Shows Opus, Sonnet, Haiku, and Fable versions, exact IDs, and provider descriptions in an accessible searchable picker.
 - ✅ **Gemini freshness**: Ranks live compatible models semantically and dynamically selects the newest stable general-purpose model when no override is saved.
