@@ -61,6 +61,8 @@ pub(crate) fn settings_dialog(
     cloud_fallback_changed: Callback<Option<usize>>,
     network_grounding_changed: Callback<bool>,
     network_tests_changed: Callback<bool>,
+    auto_fix_changed: Callback<bool>,
+    assistant_fixes_changed: Callback<bool>,
     codex_cli_path_changed: Callback<String>,
     codex_model_changed: Callback<Option<usize>>,
     provider_setup_changed: Callback<Option<usize>>,
@@ -253,6 +255,8 @@ pub(crate) fn settings_dialog(
                                     cloud_fallback_changed,
                                     network_grounding_changed,
                                     network_tests_changed,
+                                    auto_fix_changed,
+                                    assistant_fixes_changed,
                                     codex_cli_path_changed,
                                     codex_model_changed,
                                     provider_setup_changed,
@@ -1128,6 +1132,8 @@ pub(crate) fn settings_content(
     cloud_fallback_changed: Callback<Option<usize>>,
     network_grounding_changed: Callback<bool>,
     network_tests_changed: Callback<bool>,
+    auto_fix_changed: Callback<bool>,
+    assistant_fixes_changed: Callback<bool>,
     codex_cli_path_changed: Callback<String>,
     codex_model_changed: Callback<Option<usize>>,
     provider_setup_changed: Callback<Option<usize>>,
@@ -1270,6 +1276,17 @@ pub(crate) fn settings_content(
                         .on_is_checked_changed(network_tests_changed),
                     59.0,
                 ),
+                settings_check_row(
+                    palette,
+                    "Let the assistant run safe fixes",
+                    Some("A one-click safe fix the assistant stages, or the safe part of a fix plan it proposes, runs without another click. Repairs and anything that opens a Windows tool still wait for you."),
+                    CheckBox::new()
+                        .is_checked(settings.assistant_may_run_safe_fixes)
+                        .is_enabled(editable)
+                        .automation_name("Let the assistant run safe fixes")
+                        .on_is_checked_changed(assistant_fixes_changed),
+                    59.0,
+                ),
                 settings_section(palette, "PROVIDER SETUP"),
                 Border::new()
                     .padding(Thickness::new(0.0, 8.0, 0.0, 5.0))
@@ -1410,6 +1427,17 @@ pub(crate) fn settings_content(
                         .automation_name("Scan on startup")
                         .on_is_checked_changed(scan_on_startup_changed),
                     52.0,
+                ),
+                    settings_check_row(
+                    palette,
+                    "Run safe fixes after each scan",
+                    Some("One-click safe fixes for detected issues run automatically when a scan finishes; repairs wait for you."),
+                    CheckBox::new()
+                        .is_checked(settings.auto_fix_safe_issues)
+                        .is_enabled(editable)
+                        .automation_name("Run safe fixes after each scan")
+                        .on_is_checked_changed(auto_fix_changed),
+                    59.0,
                 ),
                     settings_check_row(
                     palette,

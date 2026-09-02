@@ -164,6 +164,18 @@ impl SettingsDialog {
                 vc.callback(move |value| {
                     Message::Settings(SettingsMsg::Dialog {
                         epoch,
+                        action: SettingsDialogAction::AutoFixSafeIssuesChanged(value),
+                    })
+                }),
+                vc.callback(move |value| {
+                    Message::Settings(SettingsMsg::Dialog {
+                        epoch,
+                        action: SettingsDialogAction::AssistantMayRunSafeFixesChanged(value),
+                    })
+                }),
+                vc.callback(move |value| {
+                    Message::Settings(SettingsMsg::Dialog {
+                        epoch,
                         action: SettingsDialogAction::CodexCliPathChanged(value),
                     })
                 }),

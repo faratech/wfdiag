@@ -43,6 +43,8 @@ pub(crate) enum SettingsDialogAction {
     CloudFallbackSelectionChanged(Option<usize>),
     NetworkGroundingChanged(bool),
     NetworkTestsChanged(bool),
+    AutoFixSafeIssuesChanged(bool),
+    AssistantMayRunSafeFixesChanged(bool),
     CodexCliPathChanged(String),
     CodexModelSelectionChanged(Option<usize>),
     ProviderSetupSelectionChanged(Option<usize>),

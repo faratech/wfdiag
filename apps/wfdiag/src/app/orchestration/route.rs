@@ -177,7 +177,7 @@ impl WfdiagShell {
         route_screen!(
             self,
             context,
-            issues.prepare_remediation(remediation_id, issue_id)
+            issues.run_assistant_remediation(remediation_id, issue_id)
         );
     }
 

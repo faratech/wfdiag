@@ -22,6 +22,7 @@ use crate::widgets::markdown_render::{MarkdownStyle, render_markdown_lite};
 use crate::widgets::palette_colors::Palette;
 use std::collections::HashSet;
 use wfdiag_native_ai_analysis::ValidatedFixPlan;
+use wfdiag_native_issues::auto_fix::safe_fix_plan;
 use wfdiag_native_issues::next_steps::{
     DO_THIS_FIRST_LIMIT, InAppAction, NextStep, do_this_first, in_app_action,
 };
@@ -68,6 +69,7 @@ impl IssuesScreen {
             vc.message(Message::Diagnostics(DiagnosticsMsg::RequestQuickScan)),
             vc.callback(|value| Message::Issues(IssuesMsg::RunRemediation(value))),
             vc.callback(|value| Message::Issues(IssuesMsg::ShowProcesses(value))),
+            vc.message(Message::Issues(IssuesMsg::RunSafeFixes)),
             vc.callback(|value| Message::Issues(IssuesMsg::AskAiAboutIssue(value))),
             vc.message(Message::Issues(IssuesMsg::Prioritize)),
             vc.message(Message::Issues(IssuesMsg::CancelPrioritization)),
@@ -107,6 +109,7 @@ pub(crate) fn issues_page(
     quick_scan: Callback<()>,
     run_remediation: Callback<String>,
     show_processes: Callback<InAppAction>,
+    run_safe_fixes: Callback<()>,
     ask_ai: Callback<String>,
     prioritize_issues: Callback<()>,
     cancel_issue_prioritization: Callback<()>,
@@ -168,8 +171,14 @@ pub(crate) fn issues_page(
                 theme,
                 &do_this_first(&projection, DO_THIS_FIRST_LIMIT),
                 is_admin,
+                if action_busy {
+                    0
+                } else {
+                    safe_fix_plan(issues, is_admin, MAX_BATCH_ACTIONS).action_count()
+                },
                 run_remediation.clone(),
                 show_processes.clone(),
+                run_safe_fixes,
             ),
         ),
     ];
@@ -1597,17 +1606,46 @@ pub(crate) fn issue_check_group(
 /// "Do this first": the three most actionable detected issues, each with its
 /// vetted remediation running through the normal broker path. Empty when
 /// nothing is detected.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn next_steps_card(
     palette: Palette,
     theme: WindowTheme,
     steps: &[NextStep],
     is_admin: bool,
+    safe_fix_count: usize,
     run_remediation: Callback<String>,
     show_processes: Callback<InAppAction>,
+    run_safe_fixes: Callback<()>,
 ) -> View {
     if steps.is_empty() {
         return View::empty();
     }
+    let fix_all: View = if safe_fix_count == 0 {
+        View::empty()
+    } else {
+        Button::new()
+            .grid_column(1)
+            .height(30.0)
+            .on_click(run_safe_fixes)
+            .automation_name("Fix safe issues now")
+            .resource_overrides(
+                ResourceOverrides::new()
+                    .set("ButtonBackground", palette.accent)
+                    .set("ButtonBackgroundPointerOver", palette.accent)
+                    .set("ButtonBackgroundPressed", palette.accent)
+                    .set("ButtonForeground", Color::rgb(255, 255, 255))
+                    .set("ButtonForegroundPointerOver", Color::rgb(255, 255, 255))
+                    .set("ButtonForegroundPressed", Color::rgb(255, 255, 255))
+                    .set("ButtonBorderThemeThickness", Thickness::uniform(0.0)),
+            )
+            .content(fa_icon_label(
+                FaIcon::WandMagicSparkles,
+                format!(
+                    "Fix {safe_fix_count} safe issue{} now",
+                    if safe_fix_count == 1 { "" } else { "s" }
+                ),
+            ))
+    };
     let rows: Vec<KeyedView> = steps
         .iter()
         .map(|step| {
@@ -1696,11 +1734,18 @@ pub(crate) fn next_steps_card(
         .automation_name("Do this first")
         .content(
             StackPanel::new().spacing(10.0).children((
-                TextBlock::new()
-                    .text("DO THIS FIRST")
-                    .font_size(10.5)
-                    .font_weight(FontWeight::SEMI_BOLD)
-                    .foreground(palette.muted),
+                Grid::new()
+                    .columns([GridLength::Star(1.0), GridLength::Auto])
+                    .column_spacing(10.0)
+                    .children((
+                        TextBlock::new()
+                            .text("DO THIS FIRST")
+                            .font_size(10.5)
+                            .font_weight(FontWeight::SEMI_BOLD)
+                            .foreground(palette.muted)
+                            .vertical_alignment(VerticalAlignment::Center),
+                        fix_all,
+                    )),
                 StackPanel::new().spacing(8.0).keyed_children(rows),
             )),
         )

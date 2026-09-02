@@ -21,6 +21,7 @@ impl IssuesScreen {
     pub(crate) fn update(&mut self, message: IssuesMsg, cx: &mut ScreenCx<'_>) {
         match message {
             IssuesMsg::RunRemediation(remediation_id) => self.run_remediation(remediation_id, cx),
+            IssuesMsg::RunSafeFixes => self.run_safe_fixes(cx),
             IssuesMsg::ShowProcesses(action) => cx.effect(Effect::ShowProcesses(action)),
             IssuesMsg::AskAiAboutIssue(issue_id) => self.ask_ai_about_issue(&issue_id, cx),
             IssuesMsg::Prioritize => {
@@ -176,6 +177,58 @@ impl IssuesScreen {
             }
             outcome => cx.report_rejection(&outcome),
         }
+    }
+
+    /// The assistant staged a remediation: the facade runs it when the user
+    /// allows the assistant to run safe fixes and it qualifies, else stages
+    /// it for the normal review.
+    pub(crate) fn run_assistant_remediation(
+        &mut self,
+        remediation_id: String,
+        issue_id: Option<String>,
+        cx: &mut ScreenCx<'_>,
+    ) {
+        if cx.shell.live_test_fixture.is_some_and(|fixture| {
+            !fixture.permits_actions(std::slice::from_ref(&ActionRequest {
+                remediation_id: remediation_id.clone(),
+                issue_id: issue_id.clone(),
+            }))
+        }) {
+            cx.status("The validation fixture rejected an action outside its closed allowlist");
+            return;
+        }
+        match cx.dispatch(AppCommand::RunAssistantRemediation {
+            remediation_id,
+            issue_id,
+        }) {
+            DispatchOutcome::Accepted { .. } => {
+                cx.status("The assistant staged 1 vetted action…");
+            }
+            outcome => cx.report_rejection(&outcome),
+        }
+    }
+
+    /// Run every one-click safe fix now (no review; the broker still refuses
+    /// anything above the `AutoSafe` tier).
+    fn run_safe_fixes(&mut self, cx: &mut ScreenCx<'_>) {
+        if cx.shell.deterministic_visual || cx.shell.live_test_fixture.is_some() {
+            cx.status("Visual fixture mode · automation is disabled");
+            return;
+        }
+        match cx.dispatch(AppCommand::RunSafeFixes) {
+            DispatchOutcome::Accepted { .. } => cx.status("Running the safe fixes…"),
+            DispatchOutcome::Ignored { .. } => {
+                cx.status("Nothing to fix automatically · the remaining issues need you");
+            }
+            outcome => cx.report_rejection(&outcome),
+        }
+    }
+
+    fn issue_title(&self, issue_id: &str) -> String {
+        self.issues
+            .iter()
+            .find(|issue| issue.id == issue_id)
+            .map_or_else(|| issue_id.to_string(), |issue| issue.title.clone())
     }
 
     fn prepare_selection(&mut self, selection: FixPlanActionSelection, cx: &mut ScreenCx<'_>) {
@@ -355,6 +408,86 @@ impl IssuesScreen {
                 }
             }
             ActionEvent::Rejected { message } => cx.status(message.clone()),
+            ActionEvent::SafeFixesPlanned {
+                origin,
+                actions,
+                deferred,
+            } => {
+                let waiting = if deferred.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {} waiting for you", deferred.len())
+                };
+                if actions.is_empty() {
+                    cx.status(format!(
+                        "{}: no one-click safe fix applies{waiting}",
+                        origin.label()
+                    ));
+                } else {
+                    cx.status(format!(
+                        "{}: running {} safe fix{}{waiting}",
+                        origin.label(),
+                        actions.len(),
+                        if actions.len() == 1 { "" } else { "es" }
+                    ));
+                }
+            }
+            ActionEvent::SafeFixesFinished {
+                origin,
+                runs,
+                succeeded,
+            } => {
+                if *runs > 0 {
+                    let (kind, title) = if succeeded == runs {
+                        (NoticeKind::Success, "Safe fixes applied")
+                    } else if *succeeded > 0 {
+                        (NoticeKind::Warning, "Safe fixes partly applied")
+                    } else {
+                        (NoticeKind::Error, "Safe fixes failed")
+                    };
+                    cx.notice(
+                        kind,
+                        title,
+                        format!(
+                            "{}: {succeeded} of {runs} run{} succeeded",
+                            origin.label(),
+                            if *runs == 1 { "" } else { "s" }
+                        ),
+                    );
+                }
+            }
+            ActionEvent::Verified {
+                resolved,
+                unresolved,
+                ..
+            } => {
+                let titles = |ids: &[String]| {
+                    ids.iter()
+                        .map(|id| self.issue_title(id))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                if !resolved.is_empty() {
+                    cx.notice(
+                        NoticeKind::Success,
+                        "Verified",
+                        format!("Fresh evidence no longer shows: {}", titles(resolved)),
+                    );
+                }
+                if !unresolved.is_empty() {
+                    let next_step = unresolved
+                        .first()
+                        .and_then(|id| self.issues.iter().find(|issue| &issue.id == id))
+                        .map(|issue| issue.recommendation.clone())
+                        .filter(|text| !text.is_empty())
+                        .map_or_else(String::new, |text| format!(" · Next: {text}"));
+                    cx.notice(
+                        NoticeKind::Warning,
+                        "Still detected after the fix",
+                        format!("{}{next_step}", titles(unresolved)),
+                    );
+                }
+            }
             _ => {}
         }
     }

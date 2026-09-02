@@ -231,6 +231,12 @@ impl WfdiagShell {
             SettingsDialogAction::NetworkTestsChanged(value) => {
                 self.settings.draft.network_tests_enabled = value;
             }
+            SettingsDialogAction::AutoFixSafeIssuesChanged(value) => {
+                self.settings.draft.auto_fix_safe_issues = value;
+            }
+            SettingsDialogAction::AssistantMayRunSafeFixesChanged(value) => {
+                self.settings.draft.assistant_may_run_safe_fixes = value;
+            }
             SettingsDialogAction::CodexCliPathChanged(value) => {
                 self.settings.draft.codex_cli_path =
                     if value.is_empty() { None } else { Some(value) };

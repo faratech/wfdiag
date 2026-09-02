@@ -45,6 +45,8 @@ impl IssuesScreen {
 #[derive(Clone)]
 pub(crate) enum IssuesMsg {
     RunRemediation(String),
+    /// Run every one-click safe fix for the detected issues now.
+    RunSafeFixes,
     /// Jump to the Processes page sorted for this rule's culprits.
     ShowProcesses(InAppAction),
     AskAiAboutIssue(String),
