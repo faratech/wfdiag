@@ -7,12 +7,18 @@
 //! only through explicit `sign_in` / `sign_out` calls.
 
 use crate::cli_bridge;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessSession;
+use process_wrap::tokio::{CommandWrap, KillOnDrop};
+#[cfg(windows)]
+use process_wrap::tokio::{CreationFlags, JobObject};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -20,8 +26,12 @@ use wfdiag_native_ai_provider::{
     CliObstacle, CliProbeSnapshot, ProcessSubscriptionCliStatusSource, SubscriptionCli,
     SubscriptionCliSpec, SubscriptionCliStatusSource, is_batch_shim, subscription_cli_spec,
 };
+#[cfg(windows)]
+use windows::Win32::System::Threading::CREATE_NEW_CONSOLE;
 
-const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(180);
+/// The vendor's sign-in runs in its own console window; a user reading a
+/// device code or a browser page needs minutes, not seconds.
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(600);
 const SIGN_OUT_TIMEOUT: Duration = Duration::from_secs(15);
 
 type AuthFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -277,6 +287,22 @@ struct ProcessOutput {
     stderr: Vec<u8>,
 }
 
+/// How an interactive (console) child ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExitOutcome {
+    success: bool,
+}
+
+/// Why an interactive child did not end normally. No child output exists
+/// for these: the console is the user's, not ours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractiveFailure {
+    Spawn,
+    Cancelled,
+    TimedOut,
+    Wait,
+}
+
 trait AuthProcess: Send + Sync + 'static {
     fn resolve(
         &self,
@@ -284,7 +310,16 @@ trait AuthProcess: Send + Sync + 'static {
         draft_path: Option<String>,
     ) -> AuthFuture<'_, Result<PathBuf, ResolveFailure>>;
 
+    /// A hidden, output-capturing child (sign-out).
     fn run(&self, request: ProcessRequest) -> AuthFuture<'_, Result<ProcessOutput, ()>>;
+
+    /// A visible child in its own console the user interacts with (sign-in);
+    /// only its exit matters. Cancelling kills the whole process tree.
+    fn run_interactive(
+        &self,
+        request: ProcessRequest,
+        cancellation: CancellationToken,
+    ) -> AuthFuture<'_, Result<ExitOutcome, InteractiveFailure>>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,6 +373,74 @@ impl AuthProcess for TokioAuthProcess {
             .map_err(|_| ())
         })
     }
+
+    fn run_interactive(
+        &self,
+        request: ProcessRequest,
+        cancellation: CancellationToken,
+    ) -> AuthFuture<'_, Result<ExitOutcome, InteractiveFailure>> {
+        Box::pin(async move { run_console_process(request, cancellation).await })
+    }
+}
+
+/// Run the vendor CLI in a console window of its own and wait for it to
+/// exit. This is the one deliberately visible child: `codex login` prints a
+/// URL or device code and `claude auth login` is interactive, so a hidden
+/// process with no stdin could never finish. Inherited standard handles are
+/// all null in a GUI parent, so the child attaches to the new console. The
+/// Job Object (Windows) / session (Unix) plus `KillOnDrop` terminate the
+/// whole tree when the future is dropped by a cancel or the cap.
+async fn run_console_process(
+    request: ProcessRequest,
+    cancellation: CancellationToken,
+) -> Result<ExitOutcome, InteractiveFailure> {
+    let mut command = tokio::process::Command::new(request.program);
+    command.args(request.args);
+    for variable in cli_bridge::SUBSCRIPTION_OVERRIDE_ENV_VARS {
+        command.env_remove(variable);
+    }
+    let workdir = std::env::temp_dir();
+    if workdir.is_dir() {
+        command.current_dir(workdir);
+    }
+    #[cfg(windows)]
+    {
+        command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+    }
+    #[cfg(not(windows))]
+    {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+    }
+    let mut wrapped = CommandWrap::from(command);
+    wrapped.wrap(KillOnDrop);
+    #[cfg(windows)]
+    {
+        wrapped.wrap(CreationFlags(CREATE_NEW_CONSOLE));
+        wrapped.wrap(JobObject);
+    }
+    #[cfg(unix)]
+    wrapped.wrap(ProcessSession);
+
+    let mut child = wrapped.spawn().map_err(|_| InteractiveFailure::Spawn)?;
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(InteractiveFailure::Cancelled),
+        waited = tokio::time::timeout(request.action.timeout(), child.wait()) => {
+            match waited {
+                Ok(Ok(status)) => Ok(ExitOutcome { success: status.success() }),
+                Ok(Err(_)) => Err(InteractiveFailure::Wait),
+                Err(_elapsed) => Err(InteractiveFailure::TimedOut),
+            }
+        }
+    }
+    // `child` drops here on every path; the job / session and KillOnDrop
+    // take the rest of the tree with it.
 }
 
 /// Concrete account controller shared by desktop shells.
@@ -345,8 +448,9 @@ impl AuthProcess for TokioAuthProcess {
 /// `new` is side-effect-free. There is intentionally no installation method:
 /// the UI may explain how to install a vendor CLI, but this boundary cannot do
 /// so implicitly (or explicitly). API-key override variables are scrubbed,
-/// child processes are hidden on Windows, time bounded, and killed when a
-/// cancelled future is dropped by [`cli_bridge::run_headless`].
+/// the sign-out child is hidden and output-capturing while the sign-in child
+/// is the one deliberately visible console window; both are time bounded and
+/// killed (with their process tree) when a cancelled future is dropped.
 #[derive(Clone)]
 pub struct SubscriptionAuthController {
     /// The shared, cached status probe (credential-store fast path included).
@@ -495,24 +599,51 @@ impl SubscriptionAuthController {
             ProcessAction::SignIn => spec.sign_in_args,
             ProcessAction::SignOut => spec.sign_out_args,
         };
-        let output = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => {
-                return Err(SubscriptionAuthError::Cancelled { provider, operation });
+        let request = ProcessRequest {
+            program: path,
+            args: args.to_vec(),
+            action,
+        };
+        match action {
+            ProcessAction::SignIn => {
+                // The vendor's own flow, in its own console; we only learn
+                // whether it ended well.
+                let outcome = self
+                    .process
+                    .run_interactive(request, cancellation)
+                    .await
+                    .map_err(|failure| match failure {
+                        InteractiveFailure::Cancelled => SubscriptionAuthError::Cancelled {
+                            provider,
+                            operation,
+                        },
+                        InteractiveFailure::TimedOut => {
+                            SubscriptionAuthError::SignInTimedOut { provider }
+                        }
+                        InteractiveFailure::Spawn | InteractiveFailure::Wait => {
+                            SubscriptionAuthError::OperationUnavailable {
+                                provider,
+                                operation,
+                            }
+                        }
+                    })?;
+                if !outcome.success {
+                    return Err(SubscriptionAuthError::SignInFailed { provider });
+                }
             }
-            result = self.process.run(ProcessRequest {
-                program: path,
-                args: args.to_vec(),
-                action,
-            }) => result,
-        }
-        .map_err(|()| SubscriptionAuthError::OperationUnavailable {
-            provider,
-            operation,
-        })?;
-
-        if action == ProcessAction::SignIn && !output.success {
-            return Err(SubscriptionAuthError::SignInFailed { provider });
+            ProcessAction::SignOut => {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {
+                        return Err(SubscriptionAuthError::Cancelled { provider, operation });
+                    }
+                    result = self.process.run(request) => result,
+                }
+                .map_err(|()| SubscriptionAuthError::OperationUnavailable {
+                    provider,
+                    operation,
+                })?;
+            }
         }
         // The vendor child completing is the mutation's commit point. A late
         // UI cancellation must not report the already-committed credential
@@ -612,6 +743,11 @@ mod tests {
         resolutions: Mutex<VecDeque<Result<PathBuf, ResolveFailure>>>,
         outputs: Mutex<VecDeque<Result<ProcessOutput, ()>>>,
         requests: Mutex<Vec<ProcessRequest>>,
+        /// Requests that ran in the visible console (sign-in).
+        interactive: Mutex<Vec<ProcessRequest>>,
+        /// Scripted answers for `run_interactive` when set; otherwise the
+        /// next `outputs` entry is turned into an exit outcome.
+        interactive_failures: Mutex<VecDeque<InteractiveFailure>>,
         resolve_calls: Mutex<Vec<(&'static str, Option<String>)>>,
         cancel_after_next_run: Mutex<Option<CancellationToken>>,
     }
@@ -625,6 +761,8 @@ mod tests {
                 resolutions: Mutex::new(resolutions.into_iter().collect()),
                 outputs: Mutex::new(outputs.into_iter().collect()),
                 requests: Mutex::new(Vec::new()),
+                interactive: Mutex::new(Vec::new()),
+                interactive_failures: Mutex::new(VecDeque::new()),
                 resolve_calls: Mutex::new(Vec::new()),
                 cancel_after_next_run: Mutex::new(None),
             }
@@ -636,6 +774,14 @@ mod tests {
 
         fn cancel_after_next_run(&self, cancellation: CancellationToken) {
             *self.cancel_after_next_run.lock().unwrap() = Some(cancellation);
+        }
+
+        fn interactive_requests(&self) -> Vec<ProcessRequest> {
+            self.interactive.lock().unwrap().clone()
+        }
+
+        fn fail_interactive(&self, failure: InteractiveFailure) {
+            self.interactive_failures.lock().unwrap().push_back(failure);
         }
     }
 
@@ -671,6 +817,34 @@ mod tests {
                     cancellation.cancel();
                 }
                 output
+            })
+        }
+
+        fn run_interactive(
+            &self,
+            request: ProcessRequest,
+            _cancellation: CancellationToken,
+        ) -> AuthFuture<'_, Result<ExitOutcome, InteractiveFailure>> {
+            Box::pin(async move {
+                self.requests.lock().unwrap().push(request.clone());
+                self.interactive.lock().unwrap().push(request);
+                if let Some(failure) = self.interactive_failures.lock().unwrap().pop_front() {
+                    return Err(failure);
+                }
+                let output = self
+                    .outputs
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("fake output exhausted");
+                if let Some(cancellation) = self.cancel_after_next_run.lock().unwrap().take() {
+                    cancellation.cancel();
+                }
+                output
+                    .map(|output| ExitOutcome {
+                        success: output.success,
+                    })
+                    .map_err(|()| InteractiveFailure::Spawn)
             })
         }
     }
@@ -1012,6 +1186,94 @@ mod tests {
         ));
         assert!(process.resolve_calls.lock().unwrap().is_empty());
         assert!(probe.calls().is_empty(), "rejected before the probe ran");
+    }
+
+    #[tokio::test]
+    async fn sign_in_runs_interactively_and_reprobes_on_exit() {
+        let probe = FakeProbe::answering(installed(true, None));
+        let process = Arc::new(FakeProcess::scripted(
+            [Ok(PathBuf::from("/opt/claude"))],
+            [Ok(output(true, "", ""))],
+        ));
+        let status = controller(&probe, &process)
+            .sign_in(
+                SubscriptionAuthProvider::ClaudeCode,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.state, SubscriptionAuthState::SignedIn);
+        let interactive = process.interactive_requests();
+        assert_eq!(interactive.len(), 1, "sign-in is the console child");
+        assert_eq!(interactive[0].args, ["auth", "login"]);
+        assert_eq!(interactive[0].action, ProcessAction::SignIn);
+        assert_eq!(interactive[0].action.timeout(), Duration::from_secs(600));
+    }
+
+    #[tokio::test]
+    async fn sign_in_timeout_is_reported_as_a_typed_timeout() {
+        let probe = FakeProbe::answering(installed(false, Some(CliObstacle::NoStoredLogin)));
+        let process = Arc::new(FakeProcess::scripted([Ok(PathBuf::from("/opt/codex"))], []));
+        process.fail_interactive(InteractiveFailure::TimedOut);
+        let error = controller(&probe, &process)
+            .sign_in(
+                SubscriptionAuthProvider::Codex,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            SubscriptionAuthError::SignInTimedOut {
+                provider: SubscriptionAuthProvider::Codex
+            }
+        );
+        assert!(error.to_string().contains("10 minutes"));
+        assert!(probe.calls().is_empty(), "no status after a failed sign-in");
+    }
+
+    #[tokio::test]
+    async fn sign_out_remains_headless() {
+        let probe = FakeProbe::answering(installed(false, Some(CliObstacle::SignedOut)));
+        let process = Arc::new(FakeProcess::scripted(
+            [Ok(PathBuf::from("/opt/codex"))],
+            [Ok(output(true, "logged out", ""))],
+        ));
+        controller(&probe, &process)
+            .sign_out(
+                SubscriptionAuthProvider::Codex,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(process.interactive_requests().is_empty());
+        assert_eq!(process.requests()[0].action, ProcessAction::SignOut);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_an_interactive_sign_in_kills_the_child() {
+        let request = ProcessRequest {
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c", "sleep 30"],
+            action: ProcessAction::SignIn,
+        };
+        let cancellation = CancellationToken::new();
+        let canceller = cancellation.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            canceller.cancel();
+        });
+        let started = std::time::Instant::now();
+        let result = run_console_process(request, cancellation).await;
+        assert_eq!(result, Err(InteractiveFailure::Cancelled));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the cancel must not wait for the 30 s child"
+        );
     }
 
     #[tokio::test]
