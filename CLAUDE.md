@@ -42,9 +42,9 @@ with `[lints] workspace = true`, release/dev profiles at the root, one `Cargo.lo
 | --- | --- | --- |
 | `wfdiag-native-core` | error type, timestamps, atomic file writes, trusted-program command executor (`src/security.rs`), native WMI wrapper | yes |
 | `wfdiag-remediation-catalog` | read-only remediation metadata (`REMEDIATION_COUNT = 22`, tiers `OpenTool`/`AutoSafe`/`Repair`, 8 `maintenance` entries) | yes |
-| `wfdiag-native-issues` | issue catalog (28 `IssueSpec`s), pure detectors, UI projection, fix-plan validation, worker runtime | yes |
+| `wfdiag-native-issues` | issue catalog (30 `IssueSpec`s), pure detectors, UI projection, fix-plan validation, worker runtime | yes |
 | `wfdiag-native-remediation` | remediation engine + `broker::ActionBroker` — the **only** execution path | yes |
-| `wfdiag-native-diagnostics` | task catalog (45 tasks), Windows collectors, scan orchestration runtime | yes |
+| `wfdiag-native-diagnostics` | task catalog (46 tasks), Windows collectors, scan orchestration runtime | yes |
 | `wfdiag-native-monitor` | live CPU/memory/disk/network/GPU/NPU telemetry, process inventory. `#![cfg(windows)]` — empty library elsewhere | Windows only |
 | `wfdiag-native-history` | encrypted scan history (DPAPI envelope `VERSION = 2`), comparison, tags, trends | yes |
 | `wfdiag-native-export` | report renderers, `src/path_policy.rs` (save-destination policy), `src/external.rs` (closed URL set) | yes |

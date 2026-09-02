@@ -175,6 +175,69 @@ pub fn detect_pending_windows_updates(ctx: &DetectCtx) -> Option<Detection> {
     None
 }
 
+/// Fires when an update failed in the window and nothing installed after it;
+/// the newest failure's error family picks the remediation.
+pub fn detect_windows_update_failing(ctx: &DetectCtx) -> Option<Detection> {
+    use crate::evidence::windows_update::{decode_hresult, format_code, parse_error_code};
+
+    let events = task_object(ctx, "windows_update_events")?;
+    let failures = events["failures"].as_array()?;
+    if failures.is_empty() || json_u64(&events["successes_after_last_failure"])? > 0 {
+        return None;
+    }
+    let newest = failures
+        .iter()
+        .max_by_key(|failure| failure["time_secs"].as_i64().unwrap_or(i64::MIN))?;
+    let raw_code = newest["error_code"].as_str().unwrap_or_default();
+    let decoded = parse_error_code(raw_code).map(decode_hresult);
+    let title = newest["update_title"]
+        .as_str()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or("an update");
+    let window_days = json_u64(&events["window_days"]).unwrap_or(30);
+    let description = match decoded {
+        Some(info) => format!(
+            "Windows Update failed to install {title} with {} ({}): {} Cause: {}. {} failure(s) in the last {window_days} days and nothing installed since.",
+            format_code(info.code),
+            info.name,
+            info.plain,
+            info.family.label(),
+            failures.len()
+        ),
+        None => format!(
+            "Windows Update failed to install {title} ({}). {} failure(s) in the last {window_days} days and nothing installed since.",
+            if raw_code.is_empty() {
+                "no error code"
+            } else {
+                raw_code
+            },
+            failures.len()
+        ),
+    };
+    let detection = Detection::new(description);
+    Some(match decoded {
+        Some(info) => detection.with_remediation(info.family.remediation()),
+        None => detection,
+    })
+}
+
+pub fn detect_windows_update_service_disabled(ctx: &DetectCtx) -> Option<Detection> {
+    let services = task_array(ctx, "services")?;
+    let disabled = services.iter().any(|service| {
+        service["Name"]
+            .as_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case("wuauserv"))
+            && service["StartMode"]
+                .as_str()
+                .is_some_and(|mode| mode.eq_ignore_ascii_case("Disabled"))
+    });
+    disabled.then(|| {
+        Detection::new(
+            "The Windows Update service (wuauserv) is set to Disabled, so Windows cannot download or install updates.",
+        )
+    })
+}
+
 pub fn detect_firewall_disabled(ctx: &DetectCtx) -> Option<Detection> {
     let mut disabled_products = Vec::new();
     let mut enabled_seen = false;
@@ -746,6 +809,64 @@ mod tests {
         );
         let detection = detect_low_disk_space(&ctx(&results)).expect("should detect");
         assert!(detection.description.contains("C:"));
+    }
+
+    #[test]
+    fn windows_update_failing_uses_the_newest_failure_family() {
+        let results = results_with(
+            "windows_update_events",
+            r#"{"window_days": 30, "successes_after_last_failure": 0, "failures": [
+                {"event_id": 20, "time_secs": 100, "error_code": "0x80070002", "update_title": "Old"},
+                {"event_id": 20, "time_secs": 200, "error_code": "0x80070422", "update_title": "2026-08 Cumulative Update"}
+            ]}"#,
+        );
+        let detection = detect_windows_update_failing(&ctx(&results)).expect("should detect");
+        assert!(detection.description.contains("0x80070422"));
+        assert!(detection.description.contains("2026-08 Cumulative Update"));
+        assert_eq!(
+            detection.remediation_id,
+            Some("enable_windows_update_service")
+        );
+
+        let unknown = results_with(
+            "windows_update_events",
+            r#"{"window_days": 30, "successes_after_last_failure": 0, "failures": [
+                {"event_id": 20, "time_secs": 100, "error_code": "0xDEADBEEF", "update_title": ""}
+            ]}"#,
+        );
+        let detection = detect_windows_update_failing(&ctx(&unknown)).expect("should detect");
+        assert!(detection.description.contains("an update"));
+        assert_eq!(detection.remediation_id, Some("windows_update_reset"));
+    }
+
+    #[test]
+    fn windows_update_failing_clears_after_a_later_success() {
+        let results = results_with(
+            "windows_update_events",
+            r#"{"window_days": 30, "successes_after_last_failure": 1, "failures": [
+                {"event_id": 20, "time_secs": 100, "error_code": "0x80070002", "update_title": "Old"}
+            ]}"#,
+        );
+        assert!(detect_windows_update_failing(&ctx(&results)).is_none());
+        let none = results_with(
+            "windows_update_events",
+            r#"{"window_days": 30, "successes_after_last_failure": 0, "failures": []}"#,
+        );
+        assert!(detect_windows_update_failing(&ctx(&none)).is_none());
+    }
+
+    #[test]
+    fn windows_update_service_disabled_reads_the_services_start_mode() {
+        let disabled = results_with(
+            "services",
+            r#"[{"Name": "wuauserv", "StartMode": "Disabled", "State": "Stopped"}]"#,
+        );
+        assert!(detect_windows_update_service_disabled(&ctx(&disabled)).is_some());
+        let manual = results_with(
+            "services",
+            r#"[{"Name": "wuauserv", "StartMode": "Manual", "State": "Stopped"}]"#,
+        );
+        assert!(detect_windows_update_service_disabled(&ctx(&manual)).is_none());
     }
 
     #[test]

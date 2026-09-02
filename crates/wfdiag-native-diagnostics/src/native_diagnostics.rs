@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use wfdiag_native_core::wmi::WmiConnection;
@@ -1916,6 +1916,106 @@ impl NativeDiagnostics {
         }
 
         Ok(update_info)
+    }
+
+    /// Windows Update client failures from the operational channel, each
+    /// error code decoded, plus whether anything installed after the newest
+    /// failure. Event IDs are not load-bearing: any Error/Critical record
+    /// carrying an `errorCode` counts, and ID 19 ("Installation Successful")
+    /// is the success marker.
+    pub fn get_windows_update_events(&self) -> Result<Value> {
+        use wfdiag_native_issues::evidence::windows_update::{
+            decode_hresult, format_code, parse_error_code,
+        };
+        const WINDOW_DAYS: i64 = 30;
+        const ROW_CAP: usize = 100;
+        const CHANNEL: &str = "Microsoft-Windows-WindowsUpdateClient/Operational";
+        const PROVIDER: &str = "Provider[@Name='Microsoft-Windows-WindowsUpdateClient']";
+
+        let failure_records = Self::query_channel_events(
+            CHANNEL,
+            &[
+                PROVIDER.to_string(),
+                "(Level=1 or Level=2 or EventID=20 or EventID=25 or EventID=31 or EventID=34)"
+                    .to_string(),
+            ],
+            WINDOW_DAYS,
+            ROW_CAP,
+        )?;
+        let success_records = Self::query_channel_events(
+            CHANNEL,
+            &[PROVIDER.to_string(), "(EventID=19)".to_string()],
+            WINDOW_DAYS,
+            ROW_CAP,
+        )
+        .unwrap_or_default();
+
+        let data_text = |record: &EventRecord, key: &str| {
+            record
+                .event_data
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        };
+        let mut failures: Vec<Value> = Vec::new();
+        let mut titles: HashSet<String> = HashSet::new();
+        let mut latest_failure: Option<i64> = None;
+        for record in &failure_records {
+            let error_code = data_text(record, "errorCode");
+            let is_error_level = record.level.is_some_and(|level| level <= 2);
+            if error_code.is_none() && !is_error_level {
+                continue;
+            }
+            let update_title = data_text(record, "updateTitle");
+            if let Some(title) = &update_title {
+                titles.insert(title.clone());
+            }
+            latest_failure = Some(
+                latest_failure.map_or(record.time_secs, |latest| latest.max(record.time_secs)),
+            );
+            let decoded = error_code
+                .as_deref()
+                .and_then(parse_error_code)
+                .map(decode_hresult)
+                .map(|info| {
+                    json!({
+                        "code": format_code(info.code),
+                        "name": info.name,
+                        "plain": info.plain,
+                        "family": info.family,
+                        "remediation": info.family.remediation(),
+                    })
+                });
+            failures.push(json!({
+                "event_id": record.code,
+                "time": record.time_iso,
+                "time_secs": record.time_secs,
+                "error_code": error_code.unwrap_or_default(),
+                "update_title": update_title.unwrap_or_default(),
+                "update_guid": data_text(record, "updateGuid").unwrap_or_default(),
+                "decoded": decoded,
+            }));
+        }
+        let successes_after_last_failure = latest_failure.map_or(0, |latest| {
+            success_records
+                .iter()
+                .filter(|record| record.time_secs > latest)
+                .count()
+        });
+
+        Ok(json!({
+            "window_days": WINDOW_DAYS,
+            "channel": CHANNEL,
+            "failure_count": failures.len(),
+            "distinct_updates": titles.len(),
+            "latest_failure_time": latest_failure
+                .map(|secs| wfdiag_native_core::timestamp::Timestamp::from_secs(secs).to_iso_string()),
+            "successes_after_last_failure": successes_after_last_failure,
+            "success_count": success_records.len(),
+            "failures": failures,
+        }))
     }
 
     fn windows_update_hotfix_summary(hotfixes: &[Value]) -> Value {

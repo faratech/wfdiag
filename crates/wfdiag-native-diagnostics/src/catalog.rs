@@ -282,6 +282,13 @@ pub fn get_all_tasks() -> Vec<DiagnosticTask> {
             admin_required: false,
         },
         DiagnosticTask {
+            id: "windows_update_events".to_string(),
+            name: "Windows Update Failures".to_string(),
+            description: "Windows Update install and download failures from the last 30 days, with each error code decoded".to_string(),
+            category: "Logs".to_string(),
+            admin_required: false,
+        },
+        DiagnosticTask {
             id: "event_codes_critical".to_string(),
             name: "Critical Event Codes".to_string(),
             description: "Crash, disk and hardware error events (7 days)".to_string(),
@@ -427,6 +434,7 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             "hosts_file" => diagnostics.read_hosts_file(),
             "dsregcmd" => diagnostics.run_dsregcmd(),
             "windows_update" => diagnostics.get_windows_update_history(),
+            "windows_update_events" => diagnostics.get_windows_update_events(),
             "event_codes_critical" => diagnostics.get_critical_event_codes(),
             "pending_reboot" => diagnostics.get_pending_reboot(),
             "device_errors" => diagnostics.get_device_errors(),

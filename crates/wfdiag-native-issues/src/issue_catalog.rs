@@ -244,6 +244,38 @@ pub fn catalog() -> &'static [IssueSpec] {
             detect: det::detect_pending_windows_updates,
         },
         IssueSpec {
+            id: "windows_update_failing",
+            category: "System",
+            default_severity: IssueSeverity::Warning,
+            title: "Windows Update Keeps Failing",
+            ok_title: "Windows Update Installs",
+            ok_description: "No Windows Update installation failed in the last 30 days without a later success.",
+            recommendation: "Run the suggested fix, then open Windows Update and check for updates again. If the same code returns, note it when asking for help.",
+            source_tasks: &["windows_update_events"],
+            remediation_id: Some("windows_update_reset"),
+            alternate_remediations: &[
+                "dism_restorehealth",
+                "enable_windows_update_service",
+                "open_disk_cleanup",
+                "open_network_settings",
+                "restart_system",
+            ],
+            detect: det::detect_windows_update_failing,
+        },
+        IssueSpec {
+            id: "windows_update_service_disabled",
+            category: "Services",
+            default_severity: IssueSeverity::Warning,
+            title: "Windows Update Service Is Disabled",
+            ok_title: "Windows Update Service",
+            ok_description: "The Windows Update service (wuauserv) is allowed to start.",
+            recommendation: "Enable the Windows Update service so security updates can install again; some 'update blocker' tools disable it silently.",
+            source_tasks: &["services"],
+            remediation_id: Some("enable_windows_update_service"),
+            alternate_remediations: &[],
+            detect: det::detect_windows_update_service_disabled,
+        },
+        IssueSpec {
             id: "firewall_disabled",
             category: "Security",
             default_severity: IssueSeverity::Critical,
@@ -743,6 +775,34 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
             .get("installed_updates")
             .and_then(serde_json::Value::as_array)
             .is_some(),
+        "windows_update_failing" => {
+            let events = object("windows_update_events")?;
+            events
+                .get("failures")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|failures| {
+                    failures.iter().all(|failure| {
+                        failure
+                            .get("error_code")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some()
+                            && failure.get("time_secs").is_some_and(&numeric)
+                    })
+                })
+                && events
+                    .get("successes_after_last_failure")
+                    .is_some_and(&numeric)
+        }
+        "windows_update_service_disabled" => nonempty_array("services")?.iter().any(|service| {
+            service
+                .get("Name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| name.eq_ignore_ascii_case("wuauserv"))
+                && service
+                    .get("StartMode")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+        }),
         "firewall_disabled" | "defender_disabled" => nonempty_array(spec.source_tasks[0])?
             .iter()
             .all(|product| product.get("productState").is_some_and(&numeric)),

@@ -7,6 +7,7 @@
 #![deny(unsafe_code)]
 
 mod diagnostics;
+pub mod evidence;
 mod fix_plan;
 pub mod health;
 #[allow(clippy::all, clippy::pedantic)]

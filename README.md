@@ -13,10 +13,10 @@ The shipping UI is a **native WinUI 3 shell** (`apps/wfdiag`, binary `wfdiag.exe
 ## 🚀 Key Features
 
 ### **Core Capabilities**
-- **45 Diagnostic Tasks** across system, hardware, storage, network, security, software, logs, graphics, drivers, performance, and debugging
+- **46 Diagnostic Tasks** across system, hardware, storage, network, security, software, logs, graphics, drivers, performance, and debugging
 - **Real-time System Monitoring** with live CPU, memory, disk, and network visualization (Non-blocking)
 - **Encrypted Scan History** protected for the current Windows user with DPAPI
-- **28 Deterministic Issue Rules** with explicit verified, detected, and unknown outcomes
+- **30 Deterministic Issue Rules** with explicit verified, detected, and unknown outcomes
 - **Tiered Remediation** with backend-enforced confirmation for repair operations
 - **Scan History & Comparison** with intelligent change detection
 - **Process Explorer** with backend filtering, sorting, pagination, pause, and detail lookup
@@ -39,7 +39,7 @@ The shipping UI is a **native WinUI 3 shell** (`apps/wfdiag`, binary `wfdiag.exe
 
 ## 📋 Diagnostic Categories
 
-The registry currently contains 45 checks. `crates/wfdiag-native-diagnostics/src/catalog.rs` is the authoritative task catalog; both shells derive their category counts from that registry instead of maintaining a second list.
+The registry currently contains 46 checks. `crates/wfdiag-native-diagnostics/src/catalog.rs` is the authoritative task catalog; both shells derive their category counts from that registry instead of maintaining a second list.
 
 ## 🛠️ Architecture
 

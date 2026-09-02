@@ -7,8 +7,10 @@
 use wfdiag_native_issues::projection::canonical_issue_metadata_snapshot;
 use wfdiag_native_issues::{Issue, IssueSeverity, IssueStatus, catalog};
 
-const FIXTURE_258_UNKNOWN_IDS: [&str; 11] = [
+const FIXTURE_258_UNKNOWN_IDS: [&str; 13] = [
     "disk_fragmentation",
+    "windows_update_failing",
+    "windows_update_service_disabled",
     "unsigned_drivers",
     "event_log_errors",
     "pending_windows_updates",
@@ -50,7 +52,7 @@ fn source_tasks(source_tasks: &[&str]) -> Option<Vec<String>> {
 
 /// Derive the populated Store 2.5.8 visual state from the shipping issue and
 /// remediation catalogs. This keeps ids, titles, recommendations, source-task
-/// links, action metadata, ordering, and the 28-item total synchronized with
+/// links, action metadata, ordering, and the item total synchronized with
 /// production while pinning only the screenshot-specific outcomes.
 #[must_use]
 pub(crate) fn fixture_258_issues() -> Vec<Issue> {
@@ -153,12 +155,12 @@ mod tests {
         assert_eq!(
             projection.counts,
             IssueCounts {
-                total: 28,
+                total: 30,
                 detected: 3,
                 critical: 0,
                 warnings: 2,
                 passed: 14,
-                unknown: 11,
+                unknown: 13,
             }
         );
         assert_eq!(projection.counts.nav_badge_count(), Some(3));
