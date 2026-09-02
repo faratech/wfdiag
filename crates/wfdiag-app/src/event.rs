@@ -26,8 +26,10 @@ use wfdiag_native_history::{
     ComparisonResult, ComparisonSummary, ScanRecord, ScanSummary, TaskDiffDetail, TaskTrend,
 };
 use wfdiag_native_issues::Issue;
+use wfdiag_native_issues::auto_fix::DeferredFix;
 use wfdiag_native_issues::projection::NewCriticalIssue;
 use wfdiag_native_remediation::broker::ActionProposal;
+use wfdiag_native_remediation::broker::ActionRequest;
 use wfdiag_native_remediation::runtime::ActionRunSummary;
 use wfdiag_native_settings::AppSettings;
 use wfdiag_native_system::{ArchitectureSnapshot, SystemInfo};
@@ -650,6 +652,64 @@ pub enum ActionEvent {
         /// The preview that is gone.
         proposal_id: String,
     },
+    /// The automation layer decided what to run without asking. Empty
+    /// `actions` means nothing qualified; `deferred` lists what waits for
+    /// the user and why.
+    SafeFixesPlanned {
+        /// Who asked.
+        origin: SafeFixOrigin,
+        /// The fixes about to run, in order.
+        actions: Vec<ActionRequest>,
+        /// Detected issues left for the user.
+        deferred: Vec<DeferredFix>,
+    },
+    /// A finished run's fixed issues were re-checked against freshly
+    /// collected evidence (a targeted rerun of their source tasks).
+    Verified {
+        /// The run.
+        run_id: String,
+        /// Issues the fresh evidence no longer detects.
+        resolved: Vec<String>,
+        /// Issues still detected; the user needs the next step.
+        unresolved: Vec<String>,
+    },
+    /// The automation layer is done (every qualifying fix ran, or it stopped
+    /// on a refusal).
+    SafeFixesFinished {
+        /// Who asked.
+        origin: SafeFixOrigin,
+        /// Proposals that ran.
+        runs: usize,
+        /// Proposals in which at least one action succeeded.
+        succeeded: usize,
+    },
+}
+
+/// Who asked the automation layer to run safe fixes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SafeFixOrigin {
+    /// The "Fix safe issues" control.
+    User,
+    /// The "run safe fixes after each scan" setting, after a new scan.
+    AfterScan,
+    /// A remediation the AI assistant staged, with the user's standing
+    /// permission for the assistant to run safe fixes.
+    Assistant,
+    /// The safe part of an AI fix plan, with that same permission.
+    FixPlan,
+}
+
+impl SafeFixOrigin {
+    /// A short phrase for status lines.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::User => "Fix safe issues",
+            Self::AfterScan => "After-scan safe fixes",
+            Self::Assistant => "Assistant",
+            Self::FixPlan => "Fix plan",
+        }
+    }
 }
 
 /// Live model-catalog facts.

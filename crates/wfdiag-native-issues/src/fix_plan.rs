@@ -45,7 +45,22 @@ pub fn build_fix_plan_prompt(
         .map(|issue| {
             let remediation_note = issue.remediation.as_ref().map_or_else(
                 || "no vetted remediation available for this issue".to_string(),
-                |remediation| format!("allowed remediation id: {}", remediation.id),
+                |remediation| {
+                    let how = match remediation.tier {
+                        RemediationTier::AutoSafe => "one-click safe fix",
+                        RemediationTier::Repair => "built-in repair, user confirms",
+                        RemediationTier::OpenTool => "opens a Windows tool",
+                    };
+                    format!(
+                        "allowed remediation id: {} — {how}{}",
+                        remediation.id,
+                        if remediation.admin_required {
+                            ", administrator"
+                        } else {
+                            ""
+                        }
+                    )
+                },
             );
             format!(
                 "- {} [{:?}] {}: {} ({})",
@@ -89,7 +104,7 @@ pub fn build_fix_plan_prompt(
          Rules:\n\
          - For each issue, use ONLY the exact remediation id listed as its \"allowed remediation id\" above — never a different catalog id, even one that looks relevant.\n\
          - If an issue has no vetted remediation available, leave it out and mention it in notes.\n\
-         - Order entries most-important-first.\n\
+         - Order entries most-important-first; among equals, put one-click safe fixes and built-in repairs before entries that only open a Windows tool.\n\
          - At most {MAX_FIX_PLAN_ENTRIES} entries."
     )
 }

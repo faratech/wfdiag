@@ -67,6 +67,16 @@ pub struct AppSettings {
     /// nothing in a scan leaves the PC.
     #[serde(default)]
     pub network_tests_enabled: bool,
+    /// Run the one-click safe fixes (`AutoSafe` tier, no restart) for
+    /// detected issues automatically after every scan (2.6). Off by default.
+    /// Repairs and tool handoffs are never run this way.
+    #[serde(default)]
+    pub auto_fix_safe_issues: bool,
+    /// Let the AI assistant run a safe fix it stages, and run the safe part
+    /// of a fix plan it proposed, without a further click (2.6). Off by
+    /// default; Repair-tier actions still wait for the user's confirmation.
+    #[serde(default)]
+    pub assistant_may_run_safe_fixes: bool,
     /// Whether the one-time "connect an AI provider" offer was shown (#32).
     /// Only a fresh, nothing-configured profile is offered, and dismissing
     /// or connecting sets this so the offer never nags.
@@ -147,6 +157,8 @@ impl Default for AppSettings {
             preferred_ai_provider: default_ai_provider(),
             network_grounding_enabled: false,
             network_tests_enabled: false,
+            auto_fix_safe_issues: false,
+            assistant_may_run_safe_fixes: false,
             ai_onboarding_seen: false,
             cloud_fallback_policy: CloudFallbackPolicy::Ask,
             open_ai_api_key: None,
@@ -550,6 +562,8 @@ pub enum SettingsUpdate {
     PreferredAiProvider(String),
     NetworkGrounding(bool),
     NetworkTests(bool),
+    AutoFixSafeIssues(bool),
+    AssistantMayRunSafeFixes(bool),
     CloudFallbackPolicy(CloudFallbackPolicy),
     AiOnboardingSeen(bool),
 }
@@ -567,6 +581,8 @@ impl SettingsUpdate {
             Self::PreferredAiProvider(value) => settings.preferred_ai_provider = value,
             Self::NetworkGrounding(value) => settings.network_grounding_enabled = value,
             Self::NetworkTests(value) => settings.network_tests_enabled = value,
+            Self::AutoFixSafeIssues(value) => settings.auto_fix_safe_issues = value,
+            Self::AssistantMayRunSafeFixes(value) => settings.assistant_may_run_safe_fixes = value,
             Self::AiOnboardingSeen(value) => settings.ai_onboarding_seen = value,
             Self::CloudFallbackPolicy(value) => settings.cloud_fallback_policy = value,
         }

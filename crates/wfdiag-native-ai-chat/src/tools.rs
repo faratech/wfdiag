@@ -190,6 +190,10 @@ pub enum IssueTextStatus {
 pub struct IssueText<'a> {
     pub id: &'a str,
     pub remediation_id: Option<&'a str>,
+    /// The vetted fix, when the issue has one.
+    pub fix: Option<FixText<'a>>,
+    /// The in-app destination when the fix is a page of this app.
+    pub in_app: Option<&'a str>,
     pub severity: IssueTextSeverity,
     pub status: IssueTextStatus,
     pub title: &'a str,
@@ -197,27 +201,79 @@ pub struct IssueText<'a> {
     pub recommendation: &'a str,
 }
 
+/// How a fix runs, in the model's terms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FixTextTier {
+    AutoSafe,
+    Repair,
+    OpenTool,
+}
+
+/// A detected issue's vetted fix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixText<'a> {
+    pub label: &'a str,
+    pub tier: FixTextTier,
+    pub admin_required: bool,
+}
+
+impl FixText<'_> {
+    fn describe(self) -> String {
+        let how = match self.tier {
+            FixTextTier::AutoSafe => "one-click safe fix",
+            FixTextTier::Repair => "built-in repair, the user confirms once",
+            FixTextTier::OpenTool => "opens a Windows tool for the user",
+        };
+        format!(
+            "{} ({how}{})",
+            self.label,
+            if self.admin_required {
+                ", administrator required"
+            } else {
+                ""
+            }
+        )
+    }
+}
+
 /// Rule-based issue evidence: detected issues first, then the checks that
 /// could not be verified. Healthy checks are omitted entirely.
 #[must_use]
-pub fn detected_issues_text(issues: &[IssueText<'_>]) -> String {
+pub fn detected_issues_text(
+    issues: &[IssueText<'_>],
+    assistant_may_run_safe_fixes: bool,
+) -> String {
     if issues.is_empty() {
         return "Detected issues: none. No rule-based issue evidence is available for this scan."
             .to_string();
     }
     let mut detected = Vec::new();
     let mut unknown = Vec::new();
+    let mut safe_fixes = 0usize;
     for issue in issues {
         match issue.status {
-            IssueTextStatus::Detected => detected.push(format!(
-                "Issue ID: {} | Remediation ID: {} | Severity: {} | {} — {} | Recommendation: {}",
-                issue.id,
-                issue.remediation_id.unwrap_or("none"),
-                issue.severity.as_str(),
-                issue.title,
-                issue.description,
-                issue.recommendation,
-            )),
+            IssueTextStatus::Detected => {
+                if issue
+                    .fix
+                    .is_some_and(|fix| fix.tier == FixTextTier::AutoSafe && !fix.admin_required)
+                {
+                    safe_fixes += 1;
+                }
+                let fix = match (issue.fix, issue.in_app) {
+                    (Some(fix), _) => fix.describe(),
+                    (None, Some(page)) => format!("in this app — {page}"),
+                    (None, None) => "none vetted; follow the recommendation".to_string(),
+                };
+                detected.push(format!(
+                    "Issue ID: {} | Remediation ID: {} | Fix: {fix} | Severity: {} | {} — {} | Recommendation: {}",
+                    issue.id,
+                    issue.remediation_id.unwrap_or("none"),
+                    issue.severity.as_str(),
+                    issue.title,
+                    issue.description,
+                    issue.recommendation,
+                ));
+            }
             IssueTextStatus::Unverified => unknown.push(format!(
                 "Issue ID: {} | Status: UNKNOWN | {} — {}",
                 issue.id, issue.title, issue.description
@@ -234,6 +290,18 @@ pub fn detected_issues_text(issues: &[IssueText<'_>]) -> String {
             detected.join("\n")
         )
     }];
+    if !detected.is_empty() {
+        sections.push(format!(
+            "SAFE FIXES: {safe_fixes} of these have a one-click safe fix. The assistant's \
+             permission to run safe fixes is {}. Repairs always wait for the user's confirmation; \
+             tool handoffs open a Windows tool for the user.",
+            if assistant_may_run_safe_fixes {
+                "ON: staging a safe fix with stage_remediation runs it right away"
+            } else {
+                "OFF: stage_remediation only asks the user to approve"
+            }
+        ));
+    }
     if !unknown.is_empty() {
         sections.push(format!(
             "{} check(s) could not be verified:\n{}",
@@ -274,6 +342,9 @@ pub struct StageableRemediation<'a> {
     pub label: &'a str,
     /// Always-available maintenance entries may be staged without an issue.
     pub maintenance: bool,
+    /// `AutoSafe` without a restart: the automation layer may run it when
+    /// the user allowed the assistant to.
+    pub auto_safe: bool,
 }
 
 /// One *detected* issue and the remediation the catalog maps it to.
@@ -294,6 +365,7 @@ pub fn stage_remediation_envelope(
     detected_issues: &[StageableIssue<'_>],
     remediation_id: &str,
     issue_id: Option<&str>,
+    assistant_may_run_safe_fixes: bool,
 ) -> Result<String, String> {
     let remediation = remediations
         .iter()
@@ -314,6 +386,7 @@ pub fn stage_remediation_envelope(
             "Remediation '{remediation_id}' requires its detected issue id"
         ));
     }
+    let runs_now = assistant_may_run_safe_fixes && remediation.auto_safe;
     serde_json::to_string(&json!({
         "kind": "staged_action_proposal",
         "proposal": {
@@ -321,7 +394,12 @@ pub fn stage_remediation_envelope(
             "issueId": issue_id,
             "label": remediation.label,
         },
-        "notice": "Staged only. Awaiting the user's exact approval; nothing was executed."
+        "autoRun": runs_now,
+        "notice": if runs_now {
+            "Staged; the user allows the assistant to run safe fixes, so the app runs this one now through its remediation broker. Nothing executed inside this tool call."
+        } else {
+            "Staged only. Awaiting the user's exact approval; nothing was executed."
+        }
     }))
     .map_err(|error| format!("Could not serialize staged proposal: {error}"))
 }
@@ -438,6 +516,8 @@ mod tests {
     fn issue_text_separates_detected_from_unverified_and_hides_healthy() {
         let issues = [
             IssueText {
+                fix: None,
+                in_app: None,
                 id: "low_disk_space",
                 remediation_id: Some("open_disk_cleanup"),
                 severity: IssueTextSeverity::Warning,
@@ -447,6 +527,8 @@ mod tests {
                 recommendation: "Review Disk Cleanup",
             },
             IssueText {
+                fix: None,
+                in_app: None,
                 id: "tpm_ready",
                 remediation_id: None,
                 severity: IssueTextSeverity::Info,
@@ -456,6 +538,8 @@ mod tests {
                 recommendation: "Retry",
             },
             IssueText {
+                fix: None,
+                in_app: None,
                 id: "secure_boot",
                 remediation_id: None,
                 severity: IssueTextSeverity::Ok,
@@ -465,15 +549,33 @@ mod tests {
                 recommendation: "None",
             },
         ];
-        let text = detected_issues_text(&issues);
+        let text = detected_issues_text(&issues, false);
 
         assert!(text.starts_with("1 issue(s) detected:"));
-        assert!(text.contains("Remediation ID: open_disk_cleanup | Severity: WARNING"));
+        assert!(text.contains(
+            "Remediation ID: open_disk_cleanup | Fix: none vetted; follow the recommendation | Severity: WARNING"
+        ));
+        assert!(text.contains("SAFE FIXES: 0 of these have a one-click safe fix."));
+        assert!(text.contains("permission to run safe fixes is OFF"));
+
+        // A described fix and the standing permission both reach the model.
+        let mut with_fix = issues.clone();
+        with_fix[0].fix = Some(FixText {
+            label: "Clean temp files",
+            tier: FixTextTier::AutoSafe,
+            admin_required: false,
+        });
+        let text = detected_issues_text(&with_fix, true);
+        assert!(text.contains("Fix: Clean temp files (one-click safe fix)"));
+        assert!(text.contains("SAFE FIXES: 1 of these"));
+        assert!(
+            text.contains("is ON: staging a safe fix with stage_remediation runs it right away")
+        );
         assert!(text.contains("1 check(s) could not be verified:"));
         assert!(text.contains("Issue ID: tpm_ready | Status: UNKNOWN"));
         assert!(!text.contains("secure_boot"));
         assert_eq!(
-            detected_issues_text(&[]),
+            detected_issues_text(&[], false),
             "Detected issues: none. No rule-based issue evidence is available for this scan."
         );
     }
@@ -509,11 +611,13 @@ mod tests {
                 id: "open_disk_cleanup",
                 label: "Open Disk Cleanup",
                 maintenance: false,
+                auto_safe: false,
             },
             StageableRemediation {
                 id: "run_sfc",
                 label: "Run System File Checker",
                 maintenance: true,
+                auto_safe: false,
             },
         ];
         let issues = [StageableIssue {
@@ -526,6 +630,7 @@ mod tests {
             &issues,
             "open_disk_cleanup",
             Some("low_disk_space"),
+            false,
         )
         .expect("mapped remediation should stage");
         let staged = serde_json::from_str::<Value>(&staged).unwrap();
@@ -540,23 +645,35 @@ mod tests {
         );
 
         assert!(
-            stage_remediation_envelope(&remediations, &issues, "run_sfc", None).is_ok(),
+            stage_remediation_envelope(&remediations, &issues, "run_sfc", None, false).is_ok(),
             "maintenance entries stage without an issue"
         );
         assert_eq!(
-            stage_remediation_envelope(&remediations, &issues, "powershell", None),
+            stage_remediation_envelope(&remediations, &issues, "powershell", None, false),
             Err("Unknown remediation 'powershell'".to_string())
         );
         assert_eq!(
-            stage_remediation_envelope(&remediations, &issues, "open_disk_cleanup", None),
+            stage_remediation_envelope(&remediations, &issues, "open_disk_cleanup", None, false),
             Err("Remediation 'open_disk_cleanup' requires its detected issue id".to_string())
         );
         assert_eq!(
-            stage_remediation_envelope(&remediations, &issues, "open_disk_cleanup", Some("absent")),
+            stage_remediation_envelope(
+                &remediations,
+                &issues,
+                "open_disk_cleanup",
+                Some("absent"),
+                false
+            ),
             Err("Detected issue 'absent' is not present".to_string())
         );
         assert_eq!(
-            stage_remediation_envelope(&remediations, &issues, "run_sfc", Some("low_disk_space")),
+            stage_remediation_envelope(
+                &remediations,
+                &issues,
+                "run_sfc",
+                Some("low_disk_space"),
+                false
+            ),
             Err("Remediation 'run_sfc' is not mapped to issue 'low_disk_space'".to_string())
         );
     }

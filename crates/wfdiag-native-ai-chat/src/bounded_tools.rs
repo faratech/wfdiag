@@ -171,9 +171,12 @@ impl BoundedToolCatalog {
             },
             ToolSpec {
                 name: "stage_remediation".into(),
-                description: "Stage exactly one vetted remediation-catalog action for the user to \
-                              review. This creates an expiring preview only: it never approves or \
-                              runs the action. Use only after a detected issue or explicit \
+                description: "Stage exactly one vetted remediation-catalog action. This creates an \
+                              expiring preview for the user's review; it never runs anything \
+                              itself. When the user has allowed the assistant to run safe fixes \
+                              (see get_detected_issues), the app runs a one-click safe (AutoSafe) \
+                              action right after staging; repairs and tool handoffs always wait \
+                              for the user. Use only after a detected issue or explicit \
                               maintenance request identifies the exact catalog ID."
                     .into(),
                 parameters: json!({

@@ -70,8 +70,8 @@ pub use config::AppConfig;
 pub use event::{
     ActionEvent, AnalysisEvent, AppEvent, AppEventReceiver, ChatEvent, ExportEvent, FixPlanEvent,
     HistoryEvent, HistoryRequest, IssuesEvent, ModelCatalogEvent, MonitorEvent,
-    PrioritizationEvent, ProviderEvent, ReportEvent, ScanEvent, SettingsEvent, SubscriptionEvent,
-    SystemEvent, UpdateEvent,
+    PrioritizationEvent, ProviderEvent, ReportEvent, SafeFixOrigin, ScanEvent, SettingsEvent,
+    SubscriptionEvent, SystemEvent, UpdateEvent,
 };
 pub use ids::{Epoch, RequestId};
 pub use ports::{AppPorts, ElevationPort, EnvironmentPort, UpdateThrottlePort};

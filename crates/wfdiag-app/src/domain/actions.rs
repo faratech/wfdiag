@@ -129,6 +129,46 @@ pub fn proposal_matches(proposal: &ActionProposal, snapshot: &ActionSnapshot) ->
         })
 }
 
+/// A finished run whose effect is being checked by re-collecting the fixed
+/// issues' evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingVerification {
+    /// The run.
+    pub run_id: String,
+    /// The detected issues the run's actions were bound to.
+    pub issue_ids: Vec<String>,
+}
+
+/// The diagnostic tasks whose fresh output decides whether `issue_ids` are
+/// still detected: each issue's source tasks, deduplicated, catalog order.
+#[must_use]
+pub fn verification_tasks(issue_ids: &[String], issues: &[Issue]) -> Vec<String> {
+    let mut tasks: Vec<String> = Vec::new();
+    for issue in issues.iter().filter(|issue| issue_ids.contains(&issue.id)) {
+        for task in issue.source_tasks.iter().flatten() {
+            if !tasks.contains(task) {
+                tasks.push(task.clone());
+            }
+        }
+    }
+    tasks
+}
+
+/// Split a verification's issues into the ones the fresh projection no
+/// longer detects and the ones it still does. An issue the projection no
+/// longer knows at all (removed rule) counts as resolved.
+#[must_use]
+pub fn verification_result(
+    pending: &PendingVerification,
+    issues: &[Issue],
+) -> (Vec<String>, Vec<String>) {
+    pending.issue_ids.iter().cloned().partition(|issue_id| {
+        !issues
+            .iter()
+            .any(|issue| &issue.id == issue_id && issue.status == IssueStatus::Detected)
+    })
+}
+
 /// Whether any action in a preview is Repair-tier, and therefore needs the
 /// second, repair-specific confirmation.
 #[must_use]
@@ -186,8 +226,9 @@ pub fn stale_reviews(
 #[cfg(test)]
 mod tests {
     use super::{
-        ReviewSurface, StagedReview, admin_blocked, build_snapshot, contains_repair,
-        detected_issue_remediations, proposal_matches, scan_fingerprint, stale_reviews,
+        PendingVerification, ReviewSurface, StagedReview, admin_blocked, build_snapshot,
+        contains_repair, detected_issue_remediations, proposal_matches, scan_fingerprint,
+        stale_reviews, verification_result, verification_tasks,
     };
     use std::sync::Arc;
     use wfdiag_native_issues::{Issue, IssueSeverity, IssueStatus, TaskResult};
@@ -361,5 +402,50 @@ mod tests {
             surface: ReviewSurface::RepairConfirmation,
         };
         assert_eq!(review.surface, ReviewSurface::RepairConfirmation);
+    }
+
+    #[test]
+    fn verification_reruns_only_the_fixed_issues_source_tasks_and_reads_the_result() {
+        let issue = |id: &str, detected: bool, tasks: &[&str]| Issue {
+            id: id.to_string(),
+            category: "Test".to_string(),
+            severity: wfdiag_native_issues::IssueSeverity::Warning,
+            status: if detected {
+                IssueStatus::Detected
+            } else {
+                IssueStatus::Ok
+            },
+            title: id.to_string(),
+            description: String::new(),
+            recommendation: String::new(),
+            detected,
+            source_tasks: Some(tasks.iter().map(|task| (*task).to_string()).collect()),
+            remediation: None,
+        };
+        let before = vec![
+            issue("low_disk_space", true, &["logical_disk"]),
+            issue("space_consumers", true, &["disk_usage", "logical_disk"]),
+            issue("unrelated", true, &["services"]),
+        ];
+        let ids = vec!["low_disk_space".to_string(), "space_consumers".to_string()];
+        assert_eq!(
+            verification_tasks(&ids, &before),
+            ["logical_disk", "disk_usage"]
+        );
+        let pending = PendingVerification {
+            run_id: "run-1".to_string(),
+            issue_ids: ids,
+        };
+        let after = vec![
+            issue("low_disk_space", false, &["logical_disk"]),
+            issue("space_consumers", true, &["disk_usage", "logical_disk"]),
+        ];
+        assert_eq!(
+            verification_result(&pending, &after),
+            (
+                vec!["low_disk_space".to_string()],
+                vec!["space_consumers".to_string()]
+            )
+        );
     }
 }

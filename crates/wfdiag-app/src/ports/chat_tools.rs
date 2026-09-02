@@ -16,9 +16,10 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tokio_util::sync::CancellationToken;
 use wfdiag_native_ai_chat::tools::{
-    IssueText, IssueTextSeverity, IssueTextStatus, ScanText, ScanTextKind, StageableIssue,
-    StageableRemediation, TaskResultText, detected_issues_text, request_full_scan_envelope,
-    scan_coverage, scan_summary_text, stage_remediation_envelope, tool_catalog,
+    FixText, FixTextTier, IssueText, IssueTextSeverity, IssueTextStatus, ScanText, ScanTextKind,
+    StageableIssue, StageableRemediation, TaskResultText, detected_issues_text,
+    request_full_scan_envelope, scan_coverage, scan_summary_text, stage_remediation_envelope,
+    tool_catalog,
 };
 use wfdiag_native_ai_chat::{
     BoundedToolBackend, BoundedToolCatalog, BoundedToolOperation, ChatTurnTools, ScanCoverage,
@@ -26,6 +27,8 @@ use wfdiag_native_ai_chat::{
 };
 use wfdiag_native_diagnostics::{DiagnosticExecutor, ScanKind};
 use wfdiag_native_history::{NativeHistoryRuntime, ScanRecord, ScanSummary, TaskChange};
+use wfdiag_native_issues::RemediationTier;
+use wfdiag_native_issues::next_steps::{InAppAction, in_app_action};
 use wfdiag_native_issues::{Issue, IssueSeverity, IssueStatus, RemediationSummary};
 use wfdiag_ui_core::{DiagnosticTaskResult, SystemStats};
 
@@ -69,6 +72,9 @@ pub struct ChatToolSnapshot {
     /// Whether scans may send connectivity probes off the machine; gates the
     /// `run_diagnostic` tool exactly like every other scan path.
     pub network_tests_enabled: bool,
+    /// Whether the user lets the assistant run `AutoSafe` fixes it stages
+    /// (the facade's automation layer approves them; nothing runs here).
+    pub assistant_may_run_safe_fixes: bool,
 }
 
 /// The read-only platform ports the tools reach through.
@@ -273,6 +279,7 @@ impl BoundedToolBackend for AppChatToolBackend {
                     &stageable_detected_issues(&self.snapshot.issues),
                     &remediation_id,
                     issue_id.as_deref(),
+                    self.snapshot.assistant_may_run_safe_fixes,
                 ),
             }
         })
@@ -385,7 +392,10 @@ fn snapshot_scan_summary_text(snapshot: &ChatToolSnapshot) -> String {
 }
 
 fn snapshot_detected_issues_text(snapshot: &ChatToolSnapshot) -> String {
-    detected_issues_text(&issue_texts(&snapshot.issues))
+    detected_issues_text(
+        &issue_texts(&snapshot.issues),
+        snapshot.assistant_may_run_safe_fixes,
+    )
 }
 
 fn issue_texts(issues: &[Issue]) -> Vec<IssueText<'_>> {
@@ -397,6 +407,16 @@ fn issue_texts(issues: &[Issue]) -> Vec<IssueText<'_>> {
                 .remediation
                 .as_ref()
                 .map(|remediation| remediation.id.as_str()),
+            fix: issue.remediation.as_ref().map(|remediation| FixText {
+                label: &remediation.label,
+                tier: match remediation.tier {
+                    RemediationTier::AutoSafe => FixTextTier::AutoSafe,
+                    RemediationTier::Repair => FixTextTier::Repair,
+                    RemediationTier::OpenTool => FixTextTier::OpenTool,
+                },
+                admin_required: remediation.admin_required,
+            }),
+            in_app: in_app_action(&issue.id).map(InAppAction::label),
             severity: match issue.severity {
                 IssueSeverity::Critical => IssueTextSeverity::Critical,
                 IssueSeverity::Warning => IssueTextSeverity::Warning,
@@ -422,6 +442,8 @@ fn stageable_remediations(remediations: &[RemediationSummary]) -> Vec<StageableR
             id: &remediation.id,
             label: &remediation.label,
             maintenance: remediation.maintenance,
+            auto_safe: remediation.tier == RemediationTier::AutoSafe
+                && !remediation.requires_restart,
         })
         .collect()
 }

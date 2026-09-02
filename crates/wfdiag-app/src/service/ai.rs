@@ -19,11 +19,13 @@
 use super::{AppService, Internal};
 use crate::command::{DispatchOutcome, RejectReason, SubscriptionOperation};
 use crate::domain::actions::{
-    ReviewSurface, StagedReview, admin_blocked, build_snapshot, proposal_matches, stale_reviews,
+    PendingVerification, ReviewSurface, StagedReview, admin_blocked, build_snapshot,
+    proposal_matches, stale_reviews, verification_tasks,
 };
 use crate::domain::ai_intent::{
     IntentAction, IntentReadiness, PendingAiIntent, requires_scan_data,
 };
+use crate::domain::automation::{AutomationMode, fixed_groups};
 use crate::domain::catalog::{RefreshDecision, auto_discovery_allowed};
 use crate::domain::consent::{
     ChatAttempt, ConsentAnswer, FallbackDecision, PendingConsent, PendingPolicyWrite,
@@ -36,6 +38,7 @@ use crate::domain::subscriptions::{
     AuthAdmission, InstallAdmission, InstallPrompt, admit_auth, admit_install,
     completion_refreshes_models, progress_label, verified_install_path,
 };
+use crate::event::SafeFixOrigin;
 use crate::event::{
     ActionEvent, AnalysisEvent, AppEvent, ChatEvent, FixPlanEvent, ModelCatalogEvent,
     PrioritizationEvent, ProviderEvent, ReportEvent, SubscriptionEvent,
@@ -63,10 +66,12 @@ use wfdiag_native_ai_provider::{
 use wfdiag_native_ai_report::{ReportGeneration, ReportScan, ReportWorkerEvent};
 use wfdiag_native_history::ComparisonResult;
 use wfdiag_native_issues::IssueStatus;
+use wfdiag_native_issues::auto_fix::safe_fix_plan;
 use wfdiag_native_remediation::broker::{
     ActionApproval, ActionPrepareInput, ActionRequest, ActionSnapshot,
 };
-use wfdiag_native_remediation::runtime::{ActionRunEvent, ActionWorkerEvent};
+use wfdiag_native_remediation::broker::{ActionProposal, MAX_BATCH_ACTIONS};
+use wfdiag_native_remediation::runtime::{ActionExecution, ActionRunEvent, ActionWorkerEvent};
 use wfdiag_native_settings::SettingsUpdate;
 use wfdiag_native_system::SystemInfo;
 
@@ -753,6 +758,7 @@ impl AppService {
             remediations: self.snapshot.remediations.clone(),
             network_grounding_enabled: self.snapshot.settings.network_grounding_enabled,
             network_tests_enabled: self.snapshot.settings.network_tests_enabled,
+            assistant_may_run_safe_fixes: self.snapshot.settings.assistant_may_run_safe_fixes,
         }
     }
 
@@ -1341,6 +1347,22 @@ impl AppService {
                 detail: "that action preview is not staged for review".to_string(),
             });
         };
+        let approval = if confirm_repair {
+            ActionApproval::RepairConfirmed
+        } else {
+            ActionApproval::Reviewed
+        };
+        self.submit_approval(proposal, surface, approval)
+    }
+
+    /// Hand an owned preview to the broker for approval. On any refusal the
+    /// preview goes back to `surface` so the user can still act on it.
+    fn submit_approval(
+        &mut self,
+        proposal: ActionProposal,
+        surface: ReviewSurface,
+        approval: ActionApproval,
+    ) -> DispatchOutcome {
         let snapshot = self.action_snapshot();
         if admin_blocked(&proposal, snapshot.is_admin) {
             let review = StagedReview { proposal, surface };
@@ -1349,11 +1371,6 @@ impl AppService {
                 detail: "This action requires administrator rights".to_string(),
             });
         }
-        let approval = if confirm_repair {
-            ActionApproval::RepairConfirmed
-        } else {
-            ActionApproval::Reviewed
-        };
         let Some(runtime) = self.workers.actions.as_ref() else {
             let review = StagedReview { proposal, surface };
             self.restore_review(review);
@@ -1382,6 +1399,270 @@ impl AppService {
         self.action_pending = Some(request);
         self.action_pending_review = Some(StagedReview { proposal, surface });
         DispatchOutcome::accepted_request(request)
+    }
+
+    // ---- automation: safe fixes without a review ---------------------------
+
+    /// Run every one-click safe fix for the current projection.
+    pub(super) fn run_safe_fixes(&mut self, origin: SafeFixOrigin) -> DispatchOutcome {
+        if self.automation.active() {
+            return DispatchOutcome::Rejected(RejectReason::Busy {
+                detail: "safe fixes are already running".to_string(),
+            });
+        }
+        if self.action_pending.is_some() {
+            return DispatchOutcome::Rejected(RejectReason::Busy {
+                detail: "a remediation request is already active".to_string(),
+            });
+        }
+        let plan = safe_fix_plan(
+            &self.snapshot.issues,
+            self.snapshot.is_admin(),
+            MAX_BATCH_ACTIONS,
+        );
+        let actions: Vec<ActionRequest> = plan
+            .actions()
+            .map(|action| ActionRequest {
+                remediation_id: action.remediation_id.clone(),
+                issue_id: Some(action.issue_id.clone()),
+            })
+            .collect();
+        self.queue
+            .push(AppEvent::Action(ActionEvent::SafeFixesPlanned {
+                origin,
+                actions: actions.clone(),
+                deferred: plan.deferred.clone(),
+            }));
+        if actions.is_empty() {
+            self.queue
+                .push(AppEvent::Action(ActionEvent::SafeFixesFinished {
+                    origin,
+                    runs: 0,
+                    succeeded: 0,
+                }));
+            return DispatchOutcome::Ignored {
+                detail: "no detected issue has a one-click safe fix",
+            };
+        }
+        self.automation.start(origin, AutomationMode::Replan);
+        self.continue_automation();
+        DispatchOutcome::accepted()
+    }
+
+    /// Run a decided list of actions (the assistant's, a fix plan's safe
+    /// part) without a review; `deferred` is reported, not run.
+    fn run_fixed_safe_fixes(
+        &mut self,
+        origin: SafeFixOrigin,
+        groups: std::collections::VecDeque<Vec<ActionRequest>>,
+        deferred: Vec<wfdiag_native_issues::auto_fix::DeferredFix>,
+    ) -> DispatchOutcome {
+        let actions: Vec<ActionRequest> = groups.iter().flatten().cloned().collect();
+        self.queue
+            .push(AppEvent::Action(ActionEvent::SafeFixesPlanned {
+                origin,
+                actions,
+                deferred,
+            }));
+        if groups.is_empty() {
+            self.queue
+                .push(AppEvent::Action(ActionEvent::SafeFixesFinished {
+                    origin,
+                    runs: 0,
+                    succeeded: 0,
+                }));
+            return DispatchOutcome::Ignored {
+                detail: "none of the requested actions is a one-click safe fix",
+            };
+        }
+        self.automation.start(origin, AutomationMode::Fixed(groups));
+        self.continue_automation();
+        DispatchOutcome::accepted()
+    }
+
+    /// A remediation the assistant staged: run it when the user allows the
+    /// assistant to run safe fixes and it qualifies, else stage it for the
+    /// normal review.
+    pub(super) fn run_assistant_remediation(
+        &mut self,
+        remediation_id: String,
+        issue_id: Option<String>,
+    ) -> DispatchOutcome {
+        let request = ActionRequest {
+            remediation_id,
+            issue_id,
+        };
+        if self.snapshot.settings.assistant_may_run_safe_fixes
+            && !self.automation.active()
+            && self.action_pending.is_none()
+        {
+            let (groups, deferred) = fixed_groups(
+                std::slice::from_ref(&request),
+                &self.snapshot.issues,
+                &self.snapshot.remediations,
+                self.snapshot.is_admin(),
+                MAX_BATCH_ACTIONS,
+            );
+            if !groups.is_empty() {
+                return self.run_fixed_safe_fixes(SafeFixOrigin::Assistant, groups, deferred);
+            }
+        }
+        self.prepare_remediation(request.remediation_id, request.issue_id)
+    }
+
+    /// Stage the next group of the active automation session, or finish it.
+    pub(super) fn continue_automation(&mut self) {
+        if !self.automation.active() || self.automation.pending {
+            return;
+        }
+        let plan = safe_fix_plan(
+            &self.snapshot.issues,
+            self.snapshot.is_admin(),
+            MAX_BATCH_ACTIONS,
+        );
+        let Some(group) = self.automation.next_group(&plan) else {
+            self.finish_automation();
+            return;
+        };
+        match self.prepare_remediations(group, None, None) {
+            DispatchOutcome::Accepted { .. } => self.automation.pending = true,
+            DispatchOutcome::Ignored { detail } => {
+                self.queue.push(AppEvent::Action(ActionEvent::Rejected {
+                    message: detail.to_string(),
+                }));
+                self.finish_automation();
+            }
+            DispatchOutcome::Rejected(reason) => {
+                self.queue.push(AppEvent::Action(ActionEvent::Rejected {
+                    message: format!("Safe fixes stopped: {reason}"),
+                }));
+                self.finish_automation();
+            }
+        }
+    }
+
+    /// Re-collect the evidence behind `issue_ids` with a targeted rerun so
+    /// the next projection verifies the fix; fall back to re-detection over
+    /// the existing evidence when a rerun cannot start. Returns whether a
+    /// projection update is now expected.
+    fn begin_verification(&mut self, run_id: String, issue_ids: Vec<String>) -> bool {
+        let tasks = verification_tasks(&issue_ids, &self.snapshot.issues);
+        if !tasks.is_empty()
+            && self
+                .start_scan(wfdiag_native_diagnostics::ScanKind::Targeted, Some(tasks))
+                .is_accepted()
+        {
+            self.verification = Some(PendingVerification { run_id, issue_ids });
+            return true;
+        }
+        self.refresh_issues().is_accepted()
+    }
+
+    /// A run reached its terminal state: record it, verify the fix, and let
+    /// the automation layer continue.
+    fn finish_action_run(&mut self, execution: ActionExecution, automated: bool) {
+        self.action_pending = None;
+        // The issues the run's actions were bound to, for verification.
+        let fixed_issue_ids: Vec<String> = self
+            .action_pending_review
+            .take()
+            .map(|review| {
+                review
+                    .proposal
+                    .actions
+                    .iter()
+                    .filter_map(|action| action.issue_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let succeeded = execution
+            .summary
+            .actions
+            .iter()
+            .any(|item| item.result.as_ref().is_some_and(|result| result.success));
+        let already_final = self
+            .snapshot
+            .actions
+            .history
+            .iter()
+            .any(|run| run.run_id == execution.summary.run_id);
+        let run_id = execution.summary.run_id.clone();
+        if !already_final {
+            self.apply_run_summary(execution.summary);
+        }
+        let refreshing = if succeeded {
+            // Verify the fix: re-collect the fixed issues' evidence
+            // so the next projection says whether they cleared. When
+            // that cannot run, at least never show the known-stale,
+            // pre-repair projection.
+            self.begin_verification(run_id, fixed_issue_ids)
+        } else {
+            false
+        };
+        if automated {
+            self.automation.pending = false;
+            self.automation.runs += 1;
+            if succeeded {
+                self.automation.succeeded += 1;
+            }
+            if refreshing {
+                // The next group is planned against the refreshed
+                // projection, so a cleared issue is not fixed twice.
+                self.automation.await_projection = true;
+            } else {
+                self.continue_automation();
+            }
+        }
+    }
+
+    fn finish_automation(&mut self) {
+        let runs = self.automation.runs;
+        let succeeded = self.automation.succeeded;
+        if let Some(origin) = self.automation.finish() {
+            self.queue
+                .push(AppEvent::Action(ActionEvent::SafeFixesFinished {
+                    origin,
+                    runs,
+                    succeeded,
+                }));
+        }
+    }
+
+    /// The broker prepared a preview the automation asked for: approve it
+    /// with the plain review approval. The broker refuses anything above the
+    /// `AutoSafe` tier with that approval, so a Repair can only ever land on
+    /// the user's confirmation surface, never run.
+    fn approve_automation_proposal(&mut self, proposal: ActionProposal) {
+        self.automation.pending = false;
+        if !proposal_matches(&proposal, &self.action_snapshot()) {
+            if let Some(runtime) = self.workers.actions.as_ref() {
+                let _ = runtime.discard(proposal.proposal_id);
+            }
+            self.queue.push(AppEvent::Action(ActionEvent::Rejected {
+                message: "Safe fixes stopped: the evidence changed while a fix was being prepared"
+                    .to_string(),
+            }));
+            self.finish_automation();
+            return;
+        }
+        match self.submit_approval(proposal, ReviewSurface::Review, ActionApproval::Reviewed) {
+            DispatchOutcome::Accepted { .. } => self.automation.pending = true,
+            outcome => {
+                // The preview was put back on the review surface for the user.
+                if let Some(proposal) = self.snapshot.actions.review.clone() {
+                    self.queue.push(AppEvent::Action(ActionEvent::Proposal {
+                        proposal: Box::new(proposal),
+                    }));
+                }
+                let message = match outcome {
+                    DispatchOutcome::Rejected(reason) => format!("Safe fixes stopped: {reason}"),
+                    _ => "Safe fixes stopped".to_string(),
+                };
+                self.queue
+                    .push(AppEvent::Action(ActionEvent::Rejected { message }));
+                self.finish_automation();
+            }
+        }
     }
 
     fn restore_review(&mut self, review: StagedReview) {
@@ -2271,8 +2552,34 @@ impl AppService {
                 self.snapshot.ai.fix_plan.plan = Some(plan.clone());
                 self.snapshot.ai.fix_plan.error = None;
                 self.queue.push(AppEvent::FixPlan(FixPlanEvent::Completed {
-                    plan: Box::new(plan),
+                    plan: Box::new(plan.clone()),
                 }));
+                if self.snapshot.settings.assistant_may_run_safe_fixes
+                    && !self.automation.active()
+                    && self.action_pending.is_none()
+                {
+                    // The user let the assistant act: run the plan's safe
+                    // part now. Its Repair entries stay in the plan for the
+                    // user's own review.
+                    let requests: Vec<ActionRequest> = plan
+                        .entries
+                        .iter()
+                        .map(|entry| ActionRequest {
+                            remediation_id: entry.remediation_id.clone(),
+                            issue_id: Some(entry.issue_id.clone()),
+                        })
+                        .collect();
+                    let (groups, deferred) = fixed_groups(
+                        &requests,
+                        &self.snapshot.issues,
+                        &self.snapshot.remediations,
+                        self.snapshot.is_admin(),
+                        MAX_BATCH_ACTIONS,
+                    );
+                    if !groups.is_empty() {
+                        let _ = self.run_fixed_safe_fixes(SafeFixOrigin::FixPlan, groups, deferred);
+                    }
+                }
             }
             FixPlanWorkerEvent::Failed {
                 message, retryable, ..
@@ -2300,7 +2607,13 @@ impl AppService {
         if pending.get() != event.request_id() {
             return;
         }
+        let automated = self.automation.active() && self.automation.pending;
         match event {
+            ActionWorkerEvent::Prepared { proposal, .. } if automated => {
+                self.action_pending = None;
+                self.action_pending_review = None;
+                self.approve_automation_proposal(proposal);
+            }
             ActionWorkerEvent::Prepared { proposal, .. } => {
                 self.action_pending = None;
                 self.action_pending_review = None;
@@ -2325,6 +2638,12 @@ impl AppService {
             ActionWorkerEvent::NeedsRepairConfirmation { proposal, .. } => {
                 self.action_pending = None;
                 self.action_pending_review = None;
+                if automated {
+                    // Never reached for a planner-chosen action; kept as the
+                    // hard stop should one ever be Repair-tier.
+                    self.automation.pending = false;
+                    self.finish_automation();
+                }
                 // The broker did NOT consume the preview: it is still
                 // reviewable, and nothing ran.
                 let review = StagedReview {
@@ -2344,30 +2663,18 @@ impl AppService {
                 }
             }
             ActionWorkerEvent::Done { execution, .. } => {
-                self.action_pending = None;
-                self.action_pending_review = None;
-                let succeeded = execution
-                    .summary
-                    .actions
-                    .iter()
-                    .any(|item| item.result.as_ref().is_some_and(|result| result.success));
-                let already_final = self
-                    .snapshot
-                    .actions
-                    .history
-                    .iter()
-                    .any(|run| run.run_id == execution.summary.run_id);
-                if !already_final {
-                    self.apply_run_summary(execution.summary);
-                }
-                if succeeded {
-                    // Returning to the Issues view must never show a known
-                    // stale, pre-repair projection.
-                    let _ = self.refresh_issues();
-                }
+                self.finish_action_run(execution, automated);
             }
             ActionWorkerEvent::Failed { message, .. } => {
                 self.action_pending = None;
+                if automated {
+                    self.automation.pending = false;
+                    self.queue.push(AppEvent::Action(ActionEvent::Rejected {
+                        message: format!("Safe fixes stopped: {message}"),
+                    }));
+                    self.finish_automation();
+                    return;
+                }
                 let restored = self
                     .action_pending_review
                     .take()

@@ -6,6 +6,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod auto_fix;
 mod diagnostics;
 pub mod evidence;
 mod fix_plan;

@@ -26,8 +26,9 @@ use crate::command::{
     WorkerKind,
 };
 use crate::config::AppConfig;
-use crate::domain::actions::StagedReview;
+use crate::domain::actions::{PendingVerification, StagedReview, verification_result};
 use crate::domain::ai_intent::PendingAiIntent;
+use crate::domain::automation::Automation;
 use crate::domain::catalog::RefreshThrottle;
 use crate::domain::consent::{ChatAttempt, PendingConsent, PendingPolicyWrite};
 use crate::domain::history::{
@@ -41,10 +42,11 @@ use crate::domain::scan::{
 };
 use crate::domain::startup::{StartupReadiness, StartupScanGate};
 use crate::domain::update::{START_DELAY, UpdateSchedule, schedule};
+use crate::event::SafeFixOrigin;
 use crate::event::{
-    AppEvent, AppEventReceiver, EventQueue, ExportEvent, HistoryEvent, HistoryRequest, IssuesEvent,
-    MonitorEvent, ProviderEvent, ScanEvent, SettingsEvent as SettingsFact, SystemEvent,
-    UpdateEvent,
+    ActionEvent, AppEvent, AppEventReceiver, EventQueue, ExportEvent, HistoryEvent, HistoryRequest,
+    IssuesEvent, MonitorEvent, ProviderEvent, ScanEvent, SettingsEvent as SettingsFact,
+    SystemEvent, UpdateEvent,
 };
 use crate::ids::{Generation, Generations, RequestId, RequestIds};
 use crate::ports::AppPorts;
@@ -273,6 +275,10 @@ pub struct AppService {
     fix_plan_pending: Option<RequestId>,
     action_pending: Option<RequestId>,
     action_pending_review: Option<StagedReview>,
+    /// The safe-fix automation layer (see `domain::automation`).
+    automation: Automation,
+    /// A finished run whose fixed issues are being re-checked.
+    verification: Option<PendingVerification>,
     catalog_pending: Option<(RequestId, String)>,
     catalog_throttle: RefreshThrottle,
     catalog_retry: Option<(String, CatalogDraft)>,
@@ -390,6 +396,8 @@ impl AppService {
             fix_plan_pending: None,
             action_pending: None,
             action_pending_review: None,
+            automation: Automation::default(),
+            verification: None,
             catalog_pending: None,
             catalog_throttle: RefreshThrottle::new(),
             catalog_retry: None,
@@ -503,6 +511,11 @@ impl AppService {
                 expected_scan_fingerprint,
                 expected_catalog_fingerprint,
             ),
+            AppCommand::RunSafeFixes => self.run_safe_fixes(SafeFixOrigin::User),
+            AppCommand::RunAssistantRemediation {
+                remediation_id,
+                issue_id,
+            } => self.run_assistant_remediation(remediation_id, issue_id),
             AppCommand::ApproveAction {
                 proposal_id,
                 confirm_repair,
@@ -2429,6 +2442,7 @@ impl AppService {
             self.apply_derived_invalidation(Invalidation::on_issue_projection());
             self.advance_evidence_generation();
             self.reconcile_staged_reviews();
+            let new_session = previous_session.as_deref() != Some(pending.session_id.as_str());
             self.queue.push(AppEvent::Issues(IssuesEvent::Updated {
                 session_id: pending.session_id.clone(),
                 issues: completion.issues,
@@ -2438,6 +2452,28 @@ impl AppService {
                     session_id: pending.session_id,
                     issues: escalated,
                 }));
+            }
+            // Post-fix verification: this projection was built from the
+            // re-collected evidence, so it says whether the fix worked.
+            if let Some(pending) = self.verification.take() {
+                let (resolved, unresolved) = verification_result(&pending, &self.snapshot.issues);
+                self.queue.push(AppEvent::Action(ActionEvent::Verified {
+                    run_id: pending.run_id,
+                    resolved,
+                    unresolved,
+                }));
+            }
+            // The automation layer: continue a session that waited for this
+            // projection, or start one after a new scan when the user asked
+            // for that. A refresh of the same scan never starts one.
+            if self.automation.await_projection {
+                self.automation.await_projection = false;
+                self.continue_automation();
+            } else if new_session
+                && self.snapshot.settings.auto_fix_safe_issues
+                && !self.automation.active()
+            {
+                let _ = self.run_safe_fixes(SafeFixOrigin::AfterScan);
             }
         }
         if stopped && !self.terminating {

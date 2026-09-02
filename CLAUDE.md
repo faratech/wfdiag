@@ -263,11 +263,22 @@ Evidence comes from `scripts/validate-reactor.ps1 -Suite all` and the manual
   the broker, **not in the UI**. Grants are opaque, expiring, one-use, and revalidated
   against current issue/catalog fingerprints. Every command is a compile-time constant run
   through an injectable `CommandRunner`.
+* **Automation never widens the gate.** The facade's safe-fix automation
+  (`crates/wfdiag-app/src/domain/automation.rs`; `AppCommand::RunSafeFixes`,
+  `RunAssistantRemediation`, the after-scan hook and the fix-plan hook) is the only path that
+  approves a proposal without a click, and it approves with `ActionApproval::Reviewed` only —
+  so the broker still refuses every Repair, and the planner
+  (`wfdiag_native_issues::auto_fix`) selects `AutoSafe`, no-restart actions only. It acts only
+  under two persisted, default-off settings: `auto_fix_safe_issues` (after each new scan) and
+  `assistant_may_run_safe_fixes` (an action the assistant staged, or the safe part of a fix
+  plan). After any successful run the fixed issues' source tasks are re-collected with a
+  targeted rerun and `ActionEvent::Verified` reports what cleared and what is still detected.
 * **AI chat tools are strictly read-only.** Exactly ten: `run_diagnostic`,
   `search_windows_knowledge`, `get_scan_summary`, `request_full_scan`, `get_detected_issues`,
   `compare_with_previous_scan`, `get_live_stats`, `list_remediations`, `list_scan_history`,
   `stage_remediation`. `request_full_scan` and `stage_remediation` only emit typed UI
-  requests — they never execute. The loop is bounded: `MAX_TOOL_ITERATIONS = 4`,
+  requests — they never execute (with `assistant_may_run_safe_fixes` on, the facade runs a
+  staged `AutoSafe` action through the automation path above; the tool itself still only asks). The loop is bounded: `MAX_TOOL_ITERATIONS = 4`,
   `MAX_TOOL_CALLS_PER_TURN = 8`, `TOOL_TIMEOUT_SECS = 45`, `TOOL_CONCURRENCY = 3`,
   `TURN_TIMEOUT_SECS = 180`, then a forced final answer. Chat-triggered scans are never
   written into the scan session.

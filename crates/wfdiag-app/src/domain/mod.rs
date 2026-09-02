@@ -7,6 +7,7 @@
 
 pub mod actions;
 pub mod ai_intent;
+pub mod automation;
 pub mod catalog;
 pub mod consent;
 pub mod history;

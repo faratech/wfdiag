@@ -307,6 +307,22 @@ pub enum AppCommand {
         /// The catalog fingerprint the selection was made against.
         expected_catalog_fingerprint: Option<String>,
     },
+    /// Run every one-click safe fix for the detected issues now, without a
+    /// review: the automation layer stages each through the broker and
+    /// approves it with the ordinary review approval, so nothing above the
+    /// `AutoSafe` tier can run this way. Repairs and tool handoffs are
+    /// reported as deferred.
+    RunSafeFixes,
+    /// The assistant staged one remediation. When the user has allowed the
+    /// assistant to run safe fixes and this one is `AutoSafe`, it runs like
+    /// [`AppCommand::RunSafeFixes`]; otherwise it is prepared for the normal
+    /// review exactly like [`AppCommand::PrepareRemediation`].
+    RunAssistantRemediation {
+        /// The remediation catalog id.
+        remediation_id: String,
+        /// The detected issue authorising it, when issue-bound.
+        issue_id: Option<String>,
+    },
     /// Approve a prepared action proposal.
     ///
     /// `confirm_repair` carries the **second**, repair-specific confirmation.
