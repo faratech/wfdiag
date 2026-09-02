@@ -13,6 +13,7 @@ use crate::app::state::{AiMode, Page};
 use crate::dialogs::action_review::state::ActionReviewMsg;
 use crate::dialogs::notice::state::{NoticeKind, NoticeRequest};
 use crate::platform::external::write_text_to_clipboard;
+use crate::platform::notifications;
 use crate::platform::{instance, window};
 use crate::screens::ai::state::AiMsg;
 use crate::screens::diagnostics::state::DiagnosticsMsg;
@@ -45,6 +46,14 @@ impl WfdiagShell {
                 Effect::TrayTooltip(text) => {
                     if let Some(window) = instance::main_window_hwnd() {
                         window::update_tray_tooltip(window, &text);
+                    }
+                }
+                Effect::NewCriticalToast { title, count } => {
+                    if !self.shell.deterministic_visual
+                        && self.shell.settings.show_notifications
+                        && let Err(error) = notifications::request_new_critical_toast(&title, count)
+                    {
+                        self.report_notification_failure(error);
                     }
                 }
                 Effect::Transition(page) => {

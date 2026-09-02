@@ -251,6 +251,24 @@ impl IssuesScreen {
                     cx.status(error.clone());
                 }
             }
+            IssuesEvent::NewCritical { issues, .. } => {
+                let Some(first) = issues.first() else {
+                    return;
+                };
+                let count = issues.len();
+                let title = if count == 1 {
+                    "New critical issue since your last scan".to_string()
+                } else {
+                    format!("{count} new critical issues since your last scan")
+                };
+                let detail = if count == 1 {
+                    format!("{} — open Issues to fix it", first.title)
+                } else {
+                    format!("{} and {} more — open Issues", first.title, count - 1)
+                };
+                cx.notice(NoticeKind::Error, title, detail);
+                cx.new_critical_toast(first.title.clone(), count);
+            }
         }
     }
 

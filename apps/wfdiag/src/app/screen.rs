@@ -46,6 +46,9 @@ pub(crate) enum Effect {
     Notice(NoticeRequest),
     /// Replace the tray icon's hover text.
     TrayTooltip(String),
+    /// Raise the Windows toast for a check that turned Critical since the
+    /// previous scan (honours the notifications setting in the shell).
+    NewCriticalToast { title: String, count: usize },
     /// Change pages without the destination's entry work (workflow jumps that
     /// perform their own sequencing).
     Transition(Page),
@@ -125,6 +128,14 @@ impl<'a> ScreenCx<'a> {
     /// Replace the status line.
     pub(crate) fn status(&mut self, text: impl Into<String>) {
         self.effects.push(Effect::Status(text.into()));
+    }
+
+    /// Ask the shell for the new-critical Windows toast.
+    pub(crate) fn new_critical_toast(&mut self, title: impl Into<String>, count: usize) {
+        self.effects.push(Effect::NewCriticalToast {
+            title: title.into(),
+            count,
+        });
     }
 
     /// Replace the tray icon's hover text (the health verdict).

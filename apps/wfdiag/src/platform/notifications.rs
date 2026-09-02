@@ -20,9 +20,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 
 /// One queued toast.
-struct ToastRequest {
-    collected: usize,
-    errors: usize,
+enum ToastRequest {
+    ScanComplete { collected: usize, errors: usize },
+    NewCritical { title: String, count: usize },
 }
 
 /// The worker's inbox, or the reason it could not be started.
@@ -50,7 +50,30 @@ const TOAST_QUEUE_DEPTH: usize = 4;
 pub fn request_scan_complete_toast(collected: usize, errors: usize) -> Result<(), String> {
     match TOAST_QUEUE.get_or_init(start_toast_worker) {
         Ok(sender) => sender
-            .try_send(ToastRequest { collected, errors })
+            .try_send(ToastRequest::ScanComplete { collected, errors })
+            .map_err(|error| match error {
+                TrySendError::Full(_) => {
+                    "Notifications are backing up and this one was dropped".to_string()
+                }
+                TrySendError::Disconnected(_) => {
+                    "The notification worker stopped unexpectedly".to_string()
+                }
+            }),
+        Err(error) => Err(error.clone()),
+    }
+}
+
+/// Queue the "a check turned Critical since your last scan" toast.
+///
+/// # Errors
+/// As [`request_scan_complete_toast`].
+pub fn request_new_critical_toast(title: &str, count: usize) -> Result<(), String> {
+    match TOAST_QUEUE.get_or_init(start_toast_worker) {
+        Ok(sender) => sender
+            .try_send(ToastRequest::NewCritical {
+                title: title.to_string(),
+                count,
+            })
             .map_err(|error| match error {
                 TrySendError::Full(_) => {
                     "Notifications are backing up and this one was dropped".to_string()
@@ -84,7 +107,28 @@ fn start_toast_worker() -> Result<SyncSender<ToastRequest>, String> {
             // Parks on the channel between scans; the process exiting is what
             // ends it, exactly as the per-scan detached threads ended before.
             for request in receiver {
-                if let Err(error) = show_scan_complete_toast(request.collected, request.errors) {
+                let outcome = match request {
+                    ToastRequest::ScanComplete { collected, errors } => {
+                        show_scan_complete_toast(collected, errors)
+                    }
+                    ToastRequest::NewCritical { title, count } => {
+                        let heading = if count == 1 {
+                            "New critical issue".to_string()
+                        } else {
+                            format!("{count} new critical issues")
+                        };
+                        let body = if count == 1 {
+                            format!("{title} — open WindowsForum Diagnostics to fix it")
+                        } else {
+                            format!(
+                                "{title} and {} more — open WindowsForum Diagnostics",
+                                count - 1
+                            )
+                        };
+                        show_toast(&heading, &body)
+                    }
+                };
+                if let Err(error) = outcome {
                     record_failure(error);
                 }
             }
@@ -114,6 +158,19 @@ fn record_failure(error: String) {
 /// # Errors
 /// When WinRT activation or the notifier call fails (reported, never fatal).
 fn show_scan_complete_toast(collected: usize, errors: usize) -> Result<(), String> {
+    let body = if errors > 0 {
+        format!("{collected} diagnostics collected, {errors} errors")
+    } else {
+        format!("{collected} diagnostics collected with no collection errors")
+    };
+    show_toast("Diagnostics complete", &body)
+}
+
+/// Show one two-line toast under the Store package identity.
+///
+/// # Errors
+/// When WinRT activation or the notifier call fails (reported, never fatal).
+fn show_toast(heading: &str, body: &str) -> Result<(), String> {
     use windows::UI::Notifications::{
         ToastNotification, ToastNotificationManager, ToastTemplateType,
     };
@@ -139,21 +196,12 @@ fn show_scan_complete_toast(collected: usize, errors: usize) -> Result<(), Strin
         text_nodes
             .Item(0)
             .map_err(|e| format!("Could not build the notification: {e}"))?
-            .SetInnerText(&HSTRING::from("Diagnostics complete"))
+            .SetInnerText(&HSTRING::from(heading))
             .map_err(|e| format!("Could not build the notification: {e}"))?;
-        let body: HSTRING = if errors > 0 {
-            HSTRING::from(format!(
-                "{collected} diagnostics collected, {errors} errors"
-            ))
-        } else {
-            HSTRING::from(format!(
-                "{collected} diagnostics collected with no collection errors"
-            ))
-        };
         text_nodes
             .Item(1)
             .map_err(|e| format!("Could not build the notification: {e}"))?
-            .SetInnerText(&body)
+            .SetInnerText(&HSTRING::from(body))
             .map_err(|e| format!("Could not build the notification: {e}"))?;
 
         let toast = ToastNotification::CreateToastNotification(&xml)

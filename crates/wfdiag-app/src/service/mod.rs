@@ -64,6 +64,7 @@ use wfdiag_native_history::{
     ComparisonResult, ComparisonSummary, ScanRecord, ScanSummary, TaskDiffDetail, TaskTrend,
 };
 use wfdiag_native_issues::SharedScanEvidence;
+use wfdiag_native_issues::projection::newly_critical;
 use wfdiag_native_settings::{
     AppSettings, ProviderKeyId, SettingsCommand, SettingsEvent, SettingsService, SettingsUpdate,
 };
@@ -242,6 +243,9 @@ pub struct AppService {
     process_page_request: Option<RequestId>,
     network_request_id: Option<RequestId>,
     issue_outstanding: bool,
+    /// The scan whose issues are currently projected; a projection for a
+    /// different scan compares against the previous one for escalations.
+    projected_issue_session: Option<String>,
     update_startup_due: Option<Instant>,
     started: bool,
     terminating: bool,
@@ -360,6 +364,7 @@ impl AppService {
             process_page_request: None,
             network_request_id: None,
             issue_outstanding: false,
+            projected_issue_session: None,
             update_startup_due: None,
             started: false,
             terminating: false,
@@ -2358,6 +2363,16 @@ impl AppService {
                 continue;
             };
             self.issue_outstanding = false;
+            // A projection for a *new* scan is compared with the previous
+            // scan's projection; a refresh of the same scan never announces.
+            let previous_session = self
+                .projected_issue_session
+                .replace(pending.session_id.clone());
+            let escalated = if previous_session.as_deref() == Some(pending.session_id.as_str()) {
+                Vec::new()
+            } else {
+                newly_critical(&self.snapshot.issues, &completion.issues)
+            };
             self.snapshot.issues.clone_from(&completion.issues);
             self.snapshot.issue_error = None;
             self.snapshot.derived_invalidated = Invalidation::on_issue_projection();
@@ -2365,9 +2380,15 @@ impl AppService {
             self.advance_evidence_generation();
             self.reconcile_staged_reviews();
             self.queue.push(AppEvent::Issues(IssuesEvent::Updated {
-                session_id: pending.session_id,
+                session_id: pending.session_id.clone(),
                 issues: completion.issues,
             }));
+            if !escalated.is_empty() {
+                self.queue.push(AppEvent::Issues(IssuesEvent::NewCritical {
+                    session_id: pending.session_id,
+                    issues: escalated,
+                }));
+            }
         }
         if stopped && !self.terminating {
             self.workers.issue_replies = None;

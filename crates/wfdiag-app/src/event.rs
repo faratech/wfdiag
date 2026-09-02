@@ -25,6 +25,7 @@ use wfdiag_native_history::{
     ComparisonResult, ComparisonSummary, ScanRecord, ScanSummary, TaskDiffDetail, TaskTrend,
 };
 use wfdiag_native_issues::Issue;
+use wfdiag_native_issues::projection::NewCriticalIssue;
 use wfdiag_native_remediation::broker::ActionProposal;
 use wfdiag_native_remediation::runtime::ActionRunSummary;
 use wfdiag_native_settings::AppSettings;
@@ -146,6 +147,15 @@ pub enum IssuesEvent {
     Failed {
         /// The diagnostic.
         error: String,
+    },
+    /// A new scan's projection turned checks Critical that the previous
+    /// scan's projection had explicitly cleared (or held at a lower
+    /// severity). Emitted after `Updated`, at most once per new session.
+    NewCritical {
+        /// The scan whose projection escalated them.
+        session_id: String,
+        /// The escalated issues, in catalog order.
+        issues: Vec<NewCriticalIssue>,
     },
 }
 

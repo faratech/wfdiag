@@ -192,6 +192,43 @@ pub struct IssueProjection<'a> {
     pub counts: IssueCounts,
 }
 
+/// One issue that became Critical since the previous projection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewCriticalIssue {
+    pub id: String,
+    pub title: String,
+}
+
+/// The issues that are Critical now and were explicitly *not* Critical in
+/// the baseline: a clear check, or a detected Warning/Info that escalated.
+/// A baseline that could not decide (Unknown, Skipped, missing) stays silent,
+/// so the first Full Scan after Quick Scans never announces the admin-only
+/// rules it merely turned on.
+#[must_use]
+pub fn newly_critical(baseline: &[Issue], current: &[Issue]) -> Vec<NewCriticalIssue> {
+    current
+        .iter()
+        .filter(|issue| {
+            (issue.detected || issue.status == IssueStatus::Detected)
+                && issue.severity == IssueSeverity::Critical
+        })
+        .filter(|issue| {
+            baseline
+                .iter()
+                .find(|previous| previous.id == issue.id)
+                .is_some_and(|previous| match previous.status {
+                    IssueStatus::Ok => true,
+                    IssueStatus::Detected => previous.severity != IssueSeverity::Critical,
+                    IssueStatus::Unknown | IssueStatus::Skipped => false,
+                })
+        })
+        .map(|issue| NewCriticalIssue {
+            id: issue.id.clone(),
+            title: issue.title.clone(),
+        })
+        .collect()
+}
+
 /// A friendlier reason for an Unknown check whose source is the opt-in
 /// connectivity test: "not run" only because the user has not turned it on.
 #[must_use]
@@ -273,13 +310,13 @@ pub fn canonical_issue_metadata_snapshot() -> IssueMetadataSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::unknown_check_hint;
     use super::{
         IssueCounts, PendingIssueDetection, advance_nonzero_generation,
         canonical_issue_metadata_snapshot, issue_projection_matches_evidence,
         pending_issue_preparation_is_current, prepare_issue_detection, project_issues,
         take_current_issue_completion,
     };
+    use super::{newly_critical, unknown_check_hint};
     use crate::{
         Issue, IssueDetectionCompleted, IssueSeverity, IssueStatus, TaskResult, Timestamp,
         remediation_summaries,
@@ -641,6 +678,60 @@ mod tests {
                 .iter()
                 .any(|summary| summary.requires_restart && summary.cancellable)
         );
+    }
+
+    #[test]
+    fn newly_critical_counts_escalations_and_ignores_undecided_baselines() {
+        let issue = |id: &str, severity: IssueSeverity, status: IssueStatus| Issue {
+            id: id.to_string(),
+            category: "Test".to_string(),
+            severity,
+            status,
+            title: format!("Issue {id}"),
+            description: String::new(),
+            recommendation: String::new(),
+            detected: status == IssueStatus::Detected,
+            source_tasks: None,
+            remediation: None,
+        };
+        let baseline = vec![
+            issue("was_ok", IssueSeverity::Ok, IssueStatus::Ok),
+            issue("was_warning", IssueSeverity::Warning, IssueStatus::Detected),
+            issue("was_unknown", IssueSeverity::Info, IssueStatus::Unknown),
+            issue(
+                "was_critical",
+                IssueSeverity::Critical,
+                IssueStatus::Detected,
+            ),
+        ];
+        let current = vec![
+            issue("was_ok", IssueSeverity::Critical, IssueStatus::Detected),
+            issue(
+                "was_warning",
+                IssueSeverity::Critical,
+                IssueStatus::Detected,
+            ),
+            issue(
+                "was_unknown",
+                IssueSeverity::Critical,
+                IssueStatus::Detected,
+            ),
+            issue(
+                "was_critical",
+                IssueSeverity::Critical,
+                IssueStatus::Detected,
+            ),
+            issue("brand_new", IssueSeverity::Critical, IssueStatus::Detected),
+            issue("warning_now", IssueSeverity::Warning, IssueStatus::Detected),
+        ];
+        assert_eq!(
+            newly_critical(&baseline, &current)
+                .iter()
+                .map(|issue| issue.id.as_str())
+                .collect::<Vec<_>>(),
+            ["was_ok", "was_warning"]
+        );
+        assert!(newly_critical(&[], &current).is_empty());
     }
 
     #[test]

@@ -372,3 +372,118 @@ fn network_probes_are_refused_until_connectivity_tests_are_on() {
     );
     harness.shutdown(Duration::from_secs(2));
 }
+
+const DISK_HEALTHY: &str =
+    r#"[{"Name": "C:", "FreeSpace": "50000000000", "Size": "100000000000"}]"#;
+const DISK_CRITICAL: &str =
+    r#"[{"Name": "C:", "FreeSpace": "3000000000", "Size": "100000000000"}]"#;
+
+fn new_critical_ids(events: &[AppEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AppEvent::Issues(IssuesEvent::NewCritical { issues, .. }) => Some(
+                issues
+                    .iter()
+                    .map(|issue| issue.id.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// A check that was clear in the previous scan and is Critical in this one is
+/// announced once; a refresh of the same scan and a repeat of the same
+/// verdict stay quiet.
+#[test]
+fn a_new_critical_issue_is_announced_once_between_scans() {
+    let mut harness = boot("new critical");
+    harness
+        .mocks
+        .executor
+        .script("logical_disk", TaskScript::ok(DISK_HEALTHY));
+    harness.service.dispatch(AppCommand::StartScan {
+        kind: ScanKind::Quick,
+    });
+    let events = harness.pump_for("the first projection", |event| {
+        matches!(event, AppEvent::Issues(IssuesEvent::Updated { .. }))
+    });
+    assert!(
+        new_critical_ids(&events).is_empty(),
+        "nothing to compare with yet"
+    );
+
+    harness
+        .mocks
+        .executor
+        .script("logical_disk", TaskScript::ok(DISK_CRITICAL));
+    harness.service.dispatch(AppCommand::StartScan {
+        kind: ScanKind::Quick,
+    });
+    let events = harness.pump_for("the escalation", |event| {
+        matches!(event, AppEvent::Issues(IssuesEvent::NewCritical { .. }))
+    });
+    assert_eq!(new_critical_ids(&events), ["low_disk_space"]);
+
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::RefreshIssues)
+            .is_accepted()
+    );
+    let events = harness.pump_for("the refresh", |event| {
+        matches!(event, AppEvent::Issues(IssuesEvent::Updated { .. }))
+    });
+    assert!(
+        new_critical_ids(&events).is_empty(),
+        "a refresh never announces"
+    );
+
+    harness.service.dispatch(AppCommand::StartScan {
+        kind: ScanKind::Quick,
+    });
+    let events = harness.pump_for("the repeat scan", |event| {
+        matches!(event, AppEvent::Issues(IssuesEvent::Updated { .. }))
+    });
+    assert!(
+        new_critical_ids(&events).is_empty(),
+        "still Critical is not new"
+    );
+    harness.shutdown(Duration::from_secs(2));
+}
+
+/// A baseline that could not decide (the task was not run) never turns into
+/// an announcement when the next scan does decide.
+#[test]
+fn an_undecided_baseline_never_announces_a_new_critical_issue() {
+    let mut harness = boot("unknown baseline");
+    // A failed collector leaves `low_disk_space` Unknown, not clear.
+    harness
+        .mocks
+        .executor
+        .script("logical_disk", TaskScript::failed("WMI unavailable"));
+    harness.service.dispatch(AppCommand::StartScan {
+        kind: ScanKind::Quick,
+    });
+    harness.pump_for("the undecided projection", |event| {
+        matches!(event, AppEvent::Issues(IssuesEvent::Updated { .. }))
+    });
+
+    harness
+        .mocks
+        .executor
+        .script("logical_disk", TaskScript::ok(DISK_CRITICAL));
+    harness.service.dispatch(AppCommand::StartScan {
+        kind: ScanKind::Quick,
+    });
+    let events = harness.pump_for("the decided projection", |event| {
+        matches!(event, AppEvent::Issues(IssuesEvent::Updated { .. }))
+    });
+    assert!(
+        new_critical_ids(&events).is_empty(),
+        "Unknown -> Critical is silent"
+    );
+    harness.shutdown(Duration::from_secs(2));
+}
