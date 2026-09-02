@@ -8,6 +8,7 @@ use crate::app::consts::{
 use crate::app::policy::{
     PhiPreferenceGate, codex_model_options, provider_selector_caption, provider_selector_labels,
     provider_setup_model, provider_setup_provider, selected_setting_index,
+    subscription_account_detail, subscription_account_offers_sign_in, subscription_account_pill,
     subscription_auth_provider_for_setup, subscription_install_progress_label,
 };
 use crate::screens::ai::view::primary_button_resources;
@@ -18,9 +19,9 @@ use crate::widgets::icons::FaIcon;
 use crate::widgets::palette_colors::Palette;
 use wfdiag_app::domain::catalog::CatalogState as ProviderCatalogUiState;
 use wfdiag_app::domain::subscriptions::AccountState as SubscriptionAuthUiState;
+use wfdiag_native_ai_chat::SubscriptionAuthProvider;
 use wfdiag_native_ai_chat::workers::subscription_auth::SubscriptionAuthState;
 use wfdiag_native_ai_chat::workers::subscription_install::SubscriptionInstallProgress;
-use wfdiag_native_ai_chat::{SubscriptionAuthOperation, SubscriptionAuthProvider};
 use wfdiag_native_ai_provider::AIProvider;
 use wfdiag_native_ai_provider::AIProviderStatus;
 use wfdiag_native_diagnostics::DiagnosticTask;
@@ -660,38 +661,9 @@ pub(crate) fn subscription_auth_row(
         ),
     };
     let effective_error = state.error.as_deref().or(runtime_error);
-    let status = match state.operation {
-        Some(SubscriptionAuthOperation::Status) => "Checking…",
-        Some(SubscriptionAuthOperation::SignIn) => "Waiting for browser…",
-        Some(SubscriptionAuthOperation::SignOut) => "Signing out…",
-        None => match state.status.as_ref().map(|status| status.state) {
-            Some(SubscriptionAuthState::NotInstalled) => "CLI not detected",
-            Some(SubscriptionAuthState::SignedOut) => "Signed out",
-            Some(SubscriptionAuthState::SignedIn) => "Signed in",
-            Some(SubscriptionAuthState::Unknown) => "Status unclear",
-            None => "Not checked",
-        },
-    };
-    let detail = if let Some(error) = effective_error {
-        error.to_string()
-    } else if state.operation == Some(SubscriptionAuthOperation::SignIn) {
-        "Complete sign-in in the browser window opened by the vendor CLI.".to_string()
-    } else {
-        match state.status.as_ref() {
-            Some(status) if status.state == SubscriptionAuthState::NotInstalled => format!(
-                "Install the official {} CLI, then check again. WFDiag never installs command-line tools silently.",
-                status.provider
-            ),
-            Some(status) if status.state == SubscriptionAuthState::Unknown => {
-                "The CLI was found, but its account status could not be confirmed.".to_string()
-            }
-            Some(status) => status.path.as_ref().map_or_else(
-                || "Account status was reported by the vendor CLI.".to_string(),
-                |path| format!("CLI: {}", path.display()),
-            ),
-            None => "Check the locally installed vendor CLI account status.".to_string(),
-        }
-    };
+    let status = subscription_account_pill(&state);
+    let detail =
+        effective_error.map_or_else(|| subscription_account_detail(&state), ToString::to_string);
     let action: View = if state.operation.is_some() {
         Button::new()
             .height(32.0)
@@ -707,7 +679,9 @@ pub(crate) fn subscription_auth_row(
                 .is_enabled(editable)
                 .on_click(sign_out)
                 .content("Sign out"),
-            Some(SubscriptionAuthState::SignedOut | SubscriptionAuthState::Unknown) => {
+            Some(SubscriptionAuthState::SignedOut | SubscriptionAuthState::Unknown)
+                if subscription_account_offers_sign_in(&state) =>
+            {
                 Button::new()
                     .height(32.0)
                     .width(82.0)
@@ -763,19 +737,25 @@ pub(crate) fn subscription_install_row(
     let Some(provider) = subscription_auth_provider_for_setup(setup_index) else {
         return View::empty();
     };
-    let not_installed = auth_state
-        .and_then(|state| state.status.as_ref())
-        .is_some_and(|status| status.state == SubscriptionAuthState::NotInstalled);
-    if !not_installed && !active && error.is_none() {
+    let status = auth_state.and_then(|state| state.status.as_ref());
+    let not_installed =
+        status.is_some_and(|status| status.state == SubscriptionAuthState::NotInstalled);
+    // An npm shim resolves but cannot be run: the native installer is the fix.
+    let shim_only = status.is_some_and(|status| {
+        status.obstacle == Some(wfdiag_native_ai_chat::CliObstacle::BatchShimOnly)
+    });
+    if !not_installed && !shim_only && !active && error.is_none() {
         return View::empty();
     }
     let provider_label = match provider {
         SubscriptionAuthProvider::Codex => "Codex CLI",
         SubscriptionAuthProvider::ClaudeCode => "Claude Code CLI",
     };
-    let install_label = match provider {
-        SubscriptionAuthProvider::Codex => "Install Codex CLI",
-        SubscriptionAuthProvider::ClaudeCode => "Install Claude Code CLI",
+    let install_label = match (provider, shim_only) {
+        (SubscriptionAuthProvider::Codex, false) => "Install Codex CLI",
+        (SubscriptionAuthProvider::ClaudeCode, false) => "Install Claude Code CLI",
+        (SubscriptionAuthProvider::Codex, true) => "Install native Codex CLI",
+        (SubscriptionAuthProvider::ClaudeCode, true) => "Install native Claude Code CLI",
     };
     let detail = if active {
         progress.map_or_else(
@@ -784,6 +764,9 @@ pub(crate) fn subscription_install_row(
         )
     } else if let Some(error) = error {
         error.to_string()
+    } else if shim_only {
+        "Only the npm script shim was found. winget installs the native executable; if winget cannot finish, WFDiag asks again before running the vendor's PowerShell installer. Installation never signs in automatically."
+            .to_string()
     } else {
         "Uses winget first. If winget cannot finish, WFDiag asks again before running the vendor's PowerShell installer. Installation never signs in automatically."
             .to_string()

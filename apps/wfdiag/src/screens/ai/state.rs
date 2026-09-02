@@ -3,7 +3,9 @@
 #![deny(unsafe_code)]
 
 use crate::app::policy::OnboardingAction;
+use crate::app::policy::SignInBannerAction;
 use crate::app::state::{AiMode, ChatDisplayMessage, CloudFallbackConsent, FullScanConsent};
+use wfdiag_app::SignInRequirement;
 use wfdiag_app::domain::ai_intent::PendingAiIntent;
 use wfdiag_native_ai_chat::ProviderUse;
 use wfdiag_native_ai_provider::AIProviderStatus;
@@ -45,6 +47,10 @@ pub(crate) struct AiScreen {
     pub(crate) provider_status: Option<AIProviderStatus>,
     pub(crate) status_loading: bool,
     pub(crate) status_error: Option<String>,
+    /// An installed subscription CLI that is the reason nothing routes.
+    pub(crate) sign_in_required: Option<SignInRequirement>,
+    /// The requirement the user dismissed ("Not now"); a changed one returns.
+    pub(crate) sign_in_banner_dismissed: Option<SignInRequirement>,
 }
 
 impl AiScreen {
@@ -81,6 +87,11 @@ pub(crate) enum AiMsg {
     OnboardingAction(OnboardingAction),
     /// #32: never show the connect offer again.
     DismissOnboarding,
+    /// Act on the sign-in banner: run the vendor sign-in or offer the
+    /// native install.
+    SignInBannerAction(SignInBannerAction),
+    /// Hide the banner for this exact requirement.
+    DismissSignInBanner,
 }
 
 #[cfg(test)]

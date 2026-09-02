@@ -34,6 +34,7 @@ use wfdiag_app::{
     AppCommand, DispatchOutcome, ModelCatalogEvent, ProviderCredentialCommand, ProviderEvent,
     SettingsEvent, SubscriptionEvent, SubscriptionOperation,
 };
+use wfdiag_native_ai_chat::SubscriptionAuthOperation;
 use wfdiag_native_ai_chat::SubscriptionAuthProvider;
 use wfdiag_native_ai_provider::{AIProvider, AIProviderPreference, parse_provider_preference};
 use wfdiag_native_settings::{
@@ -662,11 +663,55 @@ impl WfdiagShell {
     fn apply_subscription_event(&mut self, event: SubscriptionEvent) {
         use wfdiag_native_ai_chat::workers::subscription_auth::SubscriptionAuthState;
         match event {
+            SubscriptionEvent::Started {
+                operation: SubscriptionAuthOperation::SignIn,
+                provider,
+            } => {
+                self.shell.status = format!(
+                    "A {provider} sign-in window opened · finish there and this page updates when it closes"
+                );
+            }
             SubscriptionEvent::Started { .. } | SubscriptionEvent::InstallStarted { .. } => {}
+            SubscriptionEvent::SignInRequired { provider, .. } => {
+                if self.settings.open {
+                    self.shell.status = format!("{provider} is installed · sign in to use it");
+                }
+            }
+            SubscriptionEvent::SignInOffered { provider } => {
+                self.show_notice(NoticeRequest::new(
+                    NoticeKind::Info,
+                    "Sign in to finish setup",
+                    format!(
+                        "{provider} is installed. Sign in from the AI page or Settings; WFDiag never signs in for you."
+                    ),
+                ));
+                if self.settings.open
+                    && let Some(index) = provider_setup_index_for_provider(match provider {
+                        wfdiag_native_ai_chat::SubscriptionAuthProvider::Codex => {
+                            wfdiag_native_ai_provider::AIProvider::CodexCli
+                        }
+                        wfdiag_native_ai_chat::SubscriptionAuthProvider::ClaudeCode => {
+                            wfdiag_native_ai_provider::AIProvider::ClaudeCode
+                        }
+                    })
+                {
+                    // Put the Sign in button in front of the user.
+                    self.settings.provider_setup_index = index;
+                }
+            }
             SubscriptionEvent::Status { status } | SubscriptionEvent::Completed { status, .. } => {
                 self.shell.status = match status.state {
                     SubscriptionAuthState::NotInstalled => {
                         format!("{} CLI was not detected", status.provider)
+                    }
+                    SubscriptionAuthState::SignedOut
+                        if status.obstacle
+                            == Some(wfdiag_native_ai_chat::CliObstacle::NoStoredLogin) =>
+                    {
+                        format!(
+                            "{} is installed but has never been signed in here · sign-in required",
+                            status.provider
+                        )
                     }
                     SubscriptionAuthState::SignedOut => {
                         format!("{} is installed · sign-in required", status.provider)
@@ -715,7 +760,7 @@ impl WfdiagShell {
                     self.request_provider_model_refresh(false);
                 }
                 self.shell.status = format!(
-                    "{} CLI installed · account sign-in was not started",
+                    "{} CLI installed · sign in to finish setup",
                     status.provider
                 );
             }

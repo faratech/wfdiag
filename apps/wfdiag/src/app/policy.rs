@@ -19,10 +19,16 @@ use crate::app::state::{HistoryTrendBadge, Page};
 use crate::platform::window;
 use std::sync::Arc;
 use std::time::Duration;
+use wfdiag_app::SignInRequirement;
+use wfdiag_app::domain::subscriptions::AccountState;
 use wfdiag_native_ai_chat::SubscriptionAuthProvider;
 use wfdiag_native_ai_chat::workers::subscription_install::{
     SubscriptionInstallProgress, SubscriptionInstallStage,
 };
+use wfdiag_native_ai_chat::{
+    CliObstacle, SubscriptionAuthOperation, SubscriptionAuthState, SubscriptionAuthStatus,
+};
+use wfdiag_native_ai_provider::subscription_cli_spec;
 use wfdiag_native_ai_provider::{
     AIProvider, AIProviderPreference, AIProviderStatus, FoundryCliEndpointSource,
     PackageIdentitySource, ProcessSubscriptionCliStatusSource, ProviderInfo,
@@ -302,8 +308,13 @@ fn provider_row_suffix(
     }
     match id {
         // Subscription CLIs: configured means installed, available means
-        // signed in.
-        "codex_cli" | "claude_code" if row.configured => " — signed out".to_string(),
+        // signed in, and the row says why not.
+        "codex_cli" | "claude_code" if row.configured => match row.obstacle {
+            Some(CliObstacle::NoStoredLogin) => " — no stored login".to_string(),
+            Some(CliObstacle::BatchShimOnly) => " — npm shim only".to_string(),
+            Some(CliObstacle::StatusUnclear) => " — status unclear".to_string(),
+            Some(CliObstacle::SignedOut) | None => " — signed out".to_string(),
+        },
         "codex_cli" | "claude_code" => " — not installed".to_string(),
         // Ollama's `configured` is always true; reachability is the fact.
         _ => {
@@ -326,6 +337,147 @@ pub(crate) fn validate_phi_preference(
         return Err(reason.to_string());
     }
     Ok(())
+}
+
+/// What the AI page asks the user to do about an installed subscription CLI
+/// that is the reason no provider is ready.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SignInBanner {
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) action: SignInBannerAction,
+    pub(crate) action_label: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SignInBannerAction {
+    /// Run the vendor CLI's sign-in; the payload is the wire id.
+    SignIn(&'static str),
+    /// Offer the native installer; the payload is the wire id.
+    InstallNative(&'static str),
+}
+
+const fn subscription_wire_id(provider: SubscriptionAuthProvider) -> &'static str {
+    match provider {
+        SubscriptionAuthProvider::Codex => "codex_cli",
+        SubscriptionAuthProvider::ClaudeCode => "claude_code",
+    }
+}
+
+/// The banner for `requirement`, unless the user dismissed exactly this
+/// requirement already (a changed obstacle brings it back).
+pub(crate) fn sign_in_banner(
+    requirement: Option<&SignInRequirement>,
+    dismissed: Option<&SignInRequirement>,
+) -> Option<SignInBanner> {
+    let requirement = requirement?;
+    if dismissed == Some(requirement) {
+        return None;
+    }
+    let spec = subscription_cli_spec(requirement.provider.into());
+    let wire = subscription_wire_id(requirement.provider);
+    let console = format!(
+        "Signing in opens a {} window; finish there and this page updates when it closes.",
+        spec.label
+    );
+    Some(match requirement.obstacle {
+        CliObstacle::NoStoredLogin => SignInBanner {
+            title: format!("Sign in to {} to use {}", spec.account_label, spec.label),
+            body: format!(
+                "{} is installed but has no stored login, so AI requests would fail. {console}",
+                spec.label
+            ),
+            action: SignInBannerAction::SignIn(wire),
+            action_label: "Sign in",
+        },
+        CliObstacle::SignedOut => SignInBanner {
+            title: format!("Sign in to {} to use {}", spec.account_label, spec.label),
+            body: format!("{} is installed but signed out. {console}", spec.label),
+            action: SignInBannerAction::SignIn(wire),
+            action_label: "Sign in",
+        },
+        CliObstacle::StatusUnclear => SignInBanner {
+            title: format!("Check your {} sign-in", spec.account_label),
+            body: format!(
+                "{} is installed but WFDiag could not confirm its account. {console}",
+                spec.label
+            ),
+            action: SignInBannerAction::SignIn(wire),
+            action_label: "Sign in",
+        },
+        CliObstacle::BatchShimOnly => SignInBanner {
+            title: format!("Install the native {}", spec.label),
+            body: format!(
+                "Only the npm script shim of {} was found and WFDiag cannot run it. The native \
+                 installer replaces it; nothing runs without your confirmation.",
+                spec.label
+            ),
+            action: SignInBannerAction::InstallNative(wire),
+            action_label: "Install",
+        },
+    })
+}
+
+/// The Settings account row's pill.
+pub(crate) fn subscription_account_pill(state: &AccountState) -> &'static str {
+    match state.operation {
+        Some(SubscriptionAuthOperation::Status) => return "Checking…",
+        Some(SubscriptionAuthOperation::SignIn) => return "Sign-in window open",
+        Some(SubscriptionAuthOperation::SignOut) => return "Signing out…",
+        None => {}
+    }
+    let Some(status) = state.status.as_ref() else {
+        return "Not checked";
+    };
+    match (status.state, status.obstacle) {
+        (SubscriptionAuthState::NotInstalled, _) => "CLI not detected",
+        (SubscriptionAuthState::SignedIn, _) => "Signed in",
+        (SubscriptionAuthState::SignedOut, Some(CliObstacle::NoStoredLogin)) => "No stored login",
+        (SubscriptionAuthState::SignedOut, _) => "Signed out",
+        (SubscriptionAuthState::Unknown, Some(CliObstacle::BatchShimOnly)) => "Native CLI required",
+        (SubscriptionAuthState::Unknown, _) => "Status unclear",
+    }
+}
+
+/// The Settings account row's detail line (no error case).
+pub(crate) fn subscription_account_detail(state: &AccountState) -> String {
+    if state.operation == Some(SubscriptionAuthOperation::SignIn) {
+        return "A sign-in window opened. Finish there; this page updates when it closes."
+            .to_string();
+    }
+    let Some(status) = state.status.as_ref() else {
+        return "Check the locally installed vendor CLI account status.".to_string();
+    };
+    let path = status
+        .path
+        .as_ref()
+        .map_or_else(String::new, |path| format!("CLI: {}", path.display()));
+    match (status.state, status.obstacle) {
+        (SubscriptionAuthState::NotInstalled, _) => format!(
+            "Install the official {} CLI, then check again. WFDiag never installs command-line tools silently.",
+            status.provider
+        ),
+        (SubscriptionAuthState::Unknown, Some(CliObstacle::BatchShimOnly)) => format!(
+            "Only the npm script shim was found and WFDiag cannot run it. Install the native CLI below. {path}"
+        ),
+        (SubscriptionAuthState::Unknown, _) => {
+            "The CLI was found, but its account status could not be confirmed.".to_string()
+        }
+        (SubscriptionAuthState::SignedOut, Some(CliObstacle::NoStoredLogin)) => {
+            format!("{path} · never signed in on this PC")
+        }
+        _ if path.is_empty() => "Account status was reported by the vendor CLI.".to_string(),
+        _ => path,
+    }
+}
+
+/// Whether the account row's button signs in (vs. checks again). A shim-only
+/// install is fixed by the install row, not by signing in.
+pub(crate) fn subscription_account_offers_sign_in(state: &AccountState) -> bool {
+    state
+        .status
+        .as_ref()
+        .is_some_and(SubscriptionAuthStatus::needs_sign_in)
 }
 
 pub(crate) fn subscription_auth_provider_for_setup(
@@ -1689,6 +1841,106 @@ pub(crate) mod tests {
         assert_eq!(candidates[2].action, OnboardingAction::OpenSettings);
         // Without a probe there is nothing to offer but also nothing to say.
         assert!(onboarding_candidates(None).is_empty());
+    }
+
+    #[test]
+    fn sign_in_banner_shows_for_an_installed_signed_out_cli_when_nothing_else_is_usable() {
+        let requirement = SignInRequirement {
+            provider: SubscriptionAuthProvider::Codex,
+            obstacle: CliObstacle::NoStoredLogin,
+            reason: wfdiag_app::SignInRequiredReason::OnlyCandidate,
+        };
+        let banner = sign_in_banner(Some(&requirement), None).unwrap();
+        assert_eq!(banner.title, "Sign in to ChatGPT to use Codex CLI");
+        assert!(banner.body.contains("no stored login"));
+        assert_eq!(banner.action, SignInBannerAction::SignIn("codex_cli"));
+        assert!(
+            sign_in_banner(None, None).is_none(),
+            "nothing required, no banner"
+        );
+    }
+
+    #[test]
+    fn sign_in_banner_returns_after_dismissal_when_the_obstacle_changes() {
+        let no_login = SignInRequirement {
+            provider: SubscriptionAuthProvider::ClaudeCode,
+            obstacle: CliObstacle::NoStoredLogin,
+            reason: wfdiag_app::SignInRequiredReason::OnlyCandidate,
+        };
+        assert!(sign_in_banner(Some(&no_login), Some(&no_login)).is_none());
+        let signed_out = SignInRequirement {
+            obstacle: CliObstacle::SignedOut,
+            ..no_login
+        };
+        let banner = sign_in_banner(Some(&signed_out), Some(&no_login)).unwrap();
+        assert_eq!(banner.action, SignInBannerAction::SignIn("claude_code"));
+        assert!(banner.body.contains("signed out"));
+    }
+
+    #[test]
+    fn shim_only_install_offers_the_native_installer_not_sign_in() {
+        let shim = SignInRequirement {
+            provider: SubscriptionAuthProvider::Codex,
+            obstacle: CliObstacle::BatchShimOnly,
+            reason: wfdiag_app::SignInRequiredReason::ExplicitPreference,
+        };
+        let banner = sign_in_banner(Some(&shim), None).unwrap();
+        assert_eq!(
+            banner.action,
+            SignInBannerAction::InstallNative("codex_cli")
+        );
+        assert_eq!(banner.title, "Install the native Codex CLI");
+        let mut row = selector_row(AIProvider::CodexCli, false, true);
+        row.obstacle = Some(CliObstacle::BatchShimOnly);
+        let status = {
+            let mut status = provider_status(AIProvider::None);
+            status.providers = vec![row];
+            status
+        };
+        assert_eq!(
+            provider_row_suffix(Some(&status), false, "codex_cli"),
+            " — npm shim only"
+        );
+    }
+
+    #[test]
+    fn account_row_copy_names_the_obstacle() {
+        let account = |state: SubscriptionAuthState, obstacle: Option<CliObstacle>| AccountState {
+            status: Some(SubscriptionAuthStatus {
+                provider: SubscriptionAuthProvider::Codex,
+                state,
+                path: Some(std::path::PathBuf::from("C:/tools/codex.exe")),
+                obstacle,
+            }),
+            operation: None,
+            error: None,
+        };
+        let no_login = account(
+            SubscriptionAuthState::SignedOut,
+            Some(CliObstacle::NoStoredLogin),
+        );
+        assert_eq!(subscription_account_pill(&no_login), "No stored login");
+        assert!(subscription_account_detail(&no_login).ends_with("never signed in on this PC"));
+        assert!(subscription_account_offers_sign_in(&no_login));
+        let shim = account(
+            SubscriptionAuthState::Unknown,
+            Some(CliObstacle::BatchShimOnly),
+        );
+        assert_eq!(subscription_account_pill(&shim), "Native CLI required");
+        assert!(!subscription_account_offers_sign_in(&shim));
+        let signing_in = AccountState {
+            operation: Some(SubscriptionAuthOperation::SignIn),
+            ..no_login.clone()
+        };
+        assert_eq!(
+            subscription_account_pill(&signing_in),
+            "Sign-in window open"
+        );
+        assert!(subscription_account_detail(&signing_in).starts_with("A sign-in window opened"));
+        assert_eq!(
+            subscription_account_pill(&AccountState::default()),
+            "Not checked"
+        );
     }
 
     #[test]

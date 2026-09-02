@@ -189,6 +189,13 @@ impl WfdiagShell {
         {
             let _ = self.dispatch(AppCommand::RequestProviderStatus);
         }
+        // The subscription CLIs' accounts, at startup, for every AI-enabled
+        // profile: a credential-cache look and, only when a cache exists,
+        // the vendor status command. No other provider is probed.
+        if !self.shell.deterministic_visual && self.shell.settings.ai_enabled && self.app.is_some()
+        {
+            let _ = self.dispatch(AppCommand::RequestSubscriptionAccounts);
+        }
     }
 
     pub(crate) fn apply_window_lifecycle(

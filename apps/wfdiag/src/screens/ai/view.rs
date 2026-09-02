@@ -6,8 +6,9 @@ use crate::app::WfdiagShell;
 use crate::app::consts::{BOT_AVATAR, ISSUE_WARN_DARK};
 use crate::app::message::Message;
 use crate::app::policy::{
-    OnboardingAction, OnboardingCandidate, ai_runtime_pill_compact, ai_workspace_height,
-    onboarding_candidates, provider_display_name, shell_uses_short_layout,
+    OnboardingAction, OnboardingCandidate, SignInBanner, SignInBannerAction,
+    ai_runtime_pill_compact, ai_workspace_height, onboarding_candidates, provider_display_name,
+    shell_uses_short_layout, sign_in_banner,
 };
 use crate::app::screen::ShellEnv;
 use crate::app::state::{
@@ -172,6 +173,12 @@ impl AiScreen {
             env.settings.ai_onboarding_seen,
             vc.callback(|action| Message::Ai(AiMsg::OnboardingAction(action))),
             vc.message(Message::Ai(AiMsg::DismissOnboarding)),
+            sign_in_banner(
+                self.sign_in_required.as_ref(),
+                self.sign_in_banner_dismissed.as_ref(),
+            ),
+            vc.callback(|action| Message::Ai(AiMsg::SignInBannerAction(action))),
+            vc.message(Message::Ai(AiMsg::DismissSignInBanner)),
         )
     }
 }
@@ -225,6 +232,9 @@ pub(crate) fn ai_page(
     ai_onboarding_seen: bool,
     onboarding_action: Callback<OnboardingAction>,
     dismiss_onboarding: Callback<()>,
+    sign_in_banner: Option<SignInBanner>,
+    sign_in_banner_action: Callback<SignInBannerAction>,
+    dismiss_sign_in_banner: Callback<()>,
 ) -> View {
     // #32: the one-time connect offer, derived from the probed rows. It only
     // applies to an enabled profile that has not dismissed it before.
@@ -482,11 +492,97 @@ pub(crate) fn ai_page(
         )
     };
 
+    // The sign-in banner: the one thing between the user and a working
+    // assistant, with its one action, above the mode bar in both modes.
+    let banner: View = match sign_in_banner {
+        Some(banner) if ai_enabled && !deterministic_visual => sign_in_banner_card(
+            palette,
+            &banner,
+            sign_in_banner_action,
+            dismiss_sign_in_banner,
+        ),
+        _ => View::empty(),
+    };
+
     StackPanel::new().spacing(16.0).children((
         page_header(palette, Page::Ai, View::empty()),
+        banner,
         mode_bar,
         workspace,
     ))
+}
+
+fn sign_in_banner_card(
+    palette: Palette,
+    banner: &SignInBanner,
+    action: Callback<SignInBannerAction>,
+    dismiss: Callback<()>,
+) -> View {
+    let act = {
+        let action = action.clone();
+        let banner_action = banner.action;
+        move || {
+            let _ = action.call(banner_action);
+        }
+    };
+    Border::new()
+        .background(palette.card_strong)
+        .border_brush(palette.accent)
+        .border_thickness(1.0)
+        .corner_radius(9.0)
+        .padding(Thickness::new(16.0, 12.0, 16.0, 12.0))
+        .automation_name(banner.title.clone())
+        .content(
+            Grid::new()
+                .columns([GridLength::Star(1.0), GridLength::Auto])
+                .column_spacing(12.0)
+                .children((
+                    StackPanel::new().spacing(3.0).children((
+                        TextBlock::new()
+                            .text(banner.title.clone())
+                            .font_size(13.5)
+                            .font_weight(FontWeight::SEMI_BOLD),
+                        TextBlock::new()
+                            .text(banner.body.clone())
+                            .font_size(11.5)
+                            .foreground(palette.muted)
+                            .text_wrapping(TextWrapping::Wrap),
+                    )),
+                    StackPanel::new()
+                        .grid_column(1)
+                        .orientation(Orientation::Horizontal)
+                        .spacing(8.0)
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .children((
+                            Button::new()
+                                .height(30.0)
+                                .resource_overrides(
+                                    ResourceOverrides::new()
+                                        .set("ButtonBackground", palette.accent)
+                                        .set("ButtonBackgroundPointerOver", palette.accent)
+                                        .set("ButtonBackgroundPressed", palette.accent)
+                                        .set("ButtonForeground", Color::rgb(255, 255, 255))
+                                        .set(
+                                            "ButtonForegroundPointerOver",
+                                            Color::rgb(255, 255, 255),
+                                        )
+                                        .set("ButtonForegroundPressed", Color::rgb(255, 255, 255))
+                                        .set("ButtonBorderThemeThickness", Thickness::uniform(0.0)),
+                                )
+                                .automation_name(format!(
+                                    "{} · {}",
+                                    banner.action_label, banner.title
+                                ))
+                                .on_click(act)
+                                .content(banner.action_label),
+                            Button::new()
+                                .height(30.0)
+                                .automation_name("Not now")
+                                .on_click(dismiss)
+                                .content("Not now"),
+                        )),
+                )),
+        )
 }
 
 pub(crate) fn ai_mode_button(

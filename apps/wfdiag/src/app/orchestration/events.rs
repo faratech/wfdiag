@@ -141,6 +141,7 @@ impl WfdiagShell {
             // ---- providers -----------------------------------------------
             self.ai.provider_status = snapshot.provider_status.clone();
             self.ai.status_loading = snapshot.provider_loading;
+            self.ai.sign_in_required = snapshot.provider_setup.sign_in_required;
             for (index, state) in self.settings.provider_catalogs.iter_mut().enumerate() {
                 if let Some(provider) = crate::app::policy::provider_setup_provider(index)
                     && let Some(engine) =

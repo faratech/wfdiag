@@ -2,12 +2,14 @@
 
 #![deny(unsafe_code)]
 
+use crate::app::policy::SignInBannerAction;
 use crate::app::policy::{
     OnboardingAction, provider_display_name, provider_from_wire, rejection_text,
 };
 use crate::app::screen::{Effect, ScreenCx};
 use crate::app::state::{AiMode, ChatDisplayMessage, ChatDisplayRole, FullScanConsent, Page};
 use crate::screens::ai::state::{AiMsg, AiScreen};
+use wfdiag_app::SubscriptionEvent;
 use wfdiag_app::{
     AppCommand, AppEvent, ChatEvent, DispatchOutcome, ProviderEvent, ReportEvent,
     SubscriptionOperation,
@@ -63,6 +65,11 @@ impl AiScreen {
                 self.begin_report_generation(false, cx);
             }
             AiMsg::OnboardingAction(action) => self.onboarding_action(action, cx),
+            AiMsg::SignInBannerAction(action) => self.sign_in_banner_action(action, cx),
+            AiMsg::DismissSignInBanner => {
+                self.sign_in_banner_dismissed = self.sign_in_required;
+                cx.status("You can sign in anytime from Settings");
+            }
             AiMsg::DismissOnboarding => {
                 match cx.dispatch(AppCommand::UpdateSetting(SettingsUpdate::AiOnboardingSeen(
                     true,
@@ -107,6 +114,37 @@ impl AiScreen {
         let _ = cx.dispatch(AppCommand::UpdateSetting(SettingsUpdate::AiOnboardingSeen(
             true,
         )));
+    }
+
+    /// The sign-in banner's one action. Signing in opens the vendor CLI's
+    /// own console window; the native install raises the usual confirmation.
+    fn sign_in_banner_action(&mut self, action: SignInBannerAction, cx: &mut ScreenCx<'_>) {
+        if cx.shell.deterministic_visual {
+            return;
+        }
+        let outcome = match action {
+            SignInBannerAction::SignIn(wire) => cx.dispatch(AppCommand::SubscriptionAuth {
+                provider: wire.to_string(),
+                operation: SubscriptionOperation::SignIn,
+            }),
+            SignInBannerAction::InstallNative(wire) => {
+                cx.dispatch(AppCommand::InstallSubscriptionCli {
+                    provider: wire.to_string(),
+                })
+            }
+        };
+        match outcome {
+            DispatchOutcome::Accepted { .. } => match action {
+                SignInBannerAction::SignIn(_) => cx.status(
+                    "A sign-in window opened · finish there and this page updates when it closes",
+                ),
+                SignInBannerAction::InstallNative(_) => {
+                    cx.status("Confirm the installer to replace the npm shim");
+                }
+            },
+            DispatchOutcome::Rejected(reason) => cx.status(rejection_text(&reason)),
+            DispatchOutcome::Ignored { .. } => {}
+        }
     }
 
     pub(crate) fn begin_chat_send(&mut self, prompt: String, cx: &mut ScreenCx<'_>) {
@@ -500,6 +538,15 @@ impl AiScreen {
                 self.status_error = Some(error.clone());
                 if cx.shell.page == Page::Ai {
                     cx.status(format!("AI provider check failed · {error}"));
+                }
+            }
+            ProviderEvent::Subscription(event) => {
+                if let SubscriptionEvent::SignInRequired { provider, .. } = event.as_ref() {
+                    // A raised requirement is news: a dismissal no longer applies.
+                    self.sign_in_banner_dismissed = None;
+                    if cx.shell.page == Page::Ai {
+                        cx.status(format!("Sign in to use {provider} · see the banner above"));
+                    }
                 }
             }
             _ => {}
