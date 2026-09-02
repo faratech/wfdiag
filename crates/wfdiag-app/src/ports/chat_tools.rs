@@ -29,7 +29,8 @@ use wfdiag_native_diagnostics::{DiagnosticExecutor, ScanKind};
 use wfdiag_native_history::{NativeHistoryRuntime, ScanRecord, ScanSummary, TaskChange};
 use wfdiag_native_issues::RemediationTier;
 use wfdiag_native_issues::correlation::likely_cause;
-use wfdiag_native_issues::next_steps::{InAppAction, in_app_action};
+use wfdiag_native_issues::next_steps::{InAppAction, do_this_first, in_app_action};
+use wfdiag_native_issues::projection::project_issues;
 use wfdiag_native_issues::{Issue, IssueSeverity, IssueStatus, RemediationSummary};
 use wfdiag_ui_core::{DiagnosticTaskResult, SystemStats};
 
@@ -404,8 +405,21 @@ fn issue_texts(issues: &[Issue]) -> Vec<IssueText<'_>> {
         .iter()
         .filter(|issue| issue.status == IssueStatus::Detected)
         .collect();
-    issues
-        .iter()
+    // Detected issues in "do this first" order (severity, root cause before
+    // symptom, fixable first), then everything else in catalog order.
+    let ranked: Vec<String> = do_this_first(&project_issues(issues), usize::MAX)
+        .into_iter()
+        .map(|step| step.issue_id)
+        .collect();
+    let mut ordered: Vec<&Issue> = issues.iter().collect();
+    ordered.sort_by_key(|issue| {
+        ranked
+            .iter()
+            .position(|id| id == &issue.id)
+            .unwrap_or(usize::MAX)
+    });
+    ordered
+        .into_iter()
         .map(|issue| IssueText {
             likely_cause: likely_cause(&issue.id, &detected).map(|(cause, _)| cause.id.as_str()),
             id: &issue.id,

@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fmt::Write as _;
+use wfdiag_native_issues::RemediationTier;
+use wfdiag_native_issues::correlation::likely_cause;
 
 pub const EVIDENCE_SCHEMA_VERSION: &str = "wfdiag-evidence-v1";
 
@@ -314,11 +316,32 @@ where
         .map(|spec| (spec.id, spec.default_severity))
         .collect();
     let mut candidates = Vec::new();
+    let detected: Vec<&Issue> = request
+        .issues
+        .iter()
+        .filter(|issue| issue.status == IssueStatus::Detected)
+        .collect();
 
     for issue in request.issues {
         if issue.status == IssueStatus::Ok {
             continue;
         }
+        // The report names the fix and the likely root cause, so the model
+        // can recommend the action the app can actually take.
+        let fix = issue
+            .remediation
+            .as_ref()
+            .map_or_else(String::new, |remediation| {
+                let how = match remediation.tier {
+                    RemediationTier::AutoSafe => "one-click safe fix",
+                    RemediationTier::Repair => "built-in repair, user confirms",
+                    RemediationTier::OpenTool => "opens a Windows tool",
+                };
+                format!(" Fix: {} ({how}).", remediation.label)
+            });
+        let cause = likely_cause(&issue.id, &detected).map_or_else(String::new, |(cause, _)| {
+            format!(" Likely cause: {}.", cause.title)
+        });
         let mut source_tasks = issue.source_tasks.clone().unwrap_or_default();
         source_tasks.sort();
         source_tasks.dedup();
@@ -364,7 +387,7 @@ where
         };
         let value = compact_plain_text(
             &format!(
-                "{} Recommendation: {}",
+                "{} Recommendation: {}{fix}{cause}",
                 issue.description, issue.recommendation
             ),
             policy.max_record_chars,
@@ -1046,6 +1069,37 @@ mod tests {
         let left = build("What failed?", &first, &[], 900).unwrap();
         let right = build("What failed?", &second, &[], 900).unwrap();
         assert_eq!(left, right);
+    }
+
+    #[test]
+    fn detected_issues_name_their_fix_and_likely_cause() {
+        let results = HashMap::from([(
+            "network_path".to_string(),
+            result(true, r#"{"verdict":"dns_resolution_failing"}"#, None),
+        )]);
+        let mut dns = issue(
+            "dns_resolution_failing",
+            IssueSeverity::Warning,
+            IssueStatus::Detected,
+            "network_path",
+        );
+        dns.remediation = wfdiag_native_issues::remediation_summaries()
+            .into_iter()
+            .find(|summary| summary.id == "flush_dns");
+        let no_internet = issue(
+            "no_internet",
+            IssueSeverity::Warning,
+            IssueStatus::Detected,
+            "network_path",
+        );
+        let packet = build("Why is the web slow?", &results, &[dns, no_internet], 2000).unwrap();
+        assert!(
+            packet.rendered.contains("Fix: Flush DNS"),
+            "{}",
+            packet.rendered
+        );
+        assert!(packet.rendered.contains("one-click safe fix"));
+        assert!(packet.rendered.contains("Likely cause: no internet"));
     }
 
     #[test]

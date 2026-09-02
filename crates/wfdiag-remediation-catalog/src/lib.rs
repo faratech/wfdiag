@@ -338,7 +338,7 @@ pub static REMEDIATIONS: [RemediationMetadata; REMEDIATION_COUNT] = [
         requires_restart: false,
         long_running: true,
         maintenance: true,
-        cancellable: false,
+        cancellable: true,
     },
     RemediationMetadata {
         id: "clear_windows_temp",
@@ -371,7 +371,7 @@ pub static REMEDIATIONS: [RemediationMetadata; REMEDIATION_COUNT] = [
         requires_restart: false,
         long_running: true,
         maintenance: true,
-        cancellable: false,
+        cancellable: true,
     },
     RemediationMetadata {
         id: "enable_firewall",
@@ -554,10 +554,10 @@ mod tests {
                 {"id":"open_network_settings","label":"Open Network settings","description":"Opens Settings > Network & internet (ms-settings:network-status) to check the connection and run the Windows network troubleshooter.","tier":"open_tool","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
                 {"id":"open_memory_diagnostic","label":"Run Windows Memory Diagnostic","description":"Opens Windows Memory Diagnostic (mdsched.exe), which tests your RAM during the next restart.","tier":"open_tool","admin_required":true,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
                 {"id":"enable_windows_update_service","label":"Enable Windows Update service","description":"Runs 'sc config wuauserv start= demand' and 'sc start wuauserv' so Windows Update can run again.","tier":"auto_safe","admin_required":true,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":true},
-                {"id":"optimize_drives","label":"Optimize drives","description":"Runs 'defrag /C /O' to defragment hard drives and trim SSDs, the same weekly optimization Windows schedules.","tier":"repair","admin_required":true,"requires_restart":false,"long_running":true,"maintenance":true,"batch_eligible":false,"cancellable":false},
+                {"id":"optimize_drives","label":"Optimize drives","description":"Runs 'defrag /C /O' to defragment hard drives and trim SSDs, the same weekly optimization Windows schedules.","tier":"repair","admin_required":true,"requires_restart":false,"long_running":true,"maintenance":true,"batch_eligible":false,"cancellable":true},
                 {"id":"clear_windows_temp","label":"Clear Windows temp folder","description":"Permanently deletes files and folders in the Windows temp directory (needs administrator); locked items are skipped.","tier":"repair","admin_required":true,"requires_restart":false,"long_running":false,"maintenance":true,"batch_eligible":false,"cancellable":true},
                 {"id":"update_defender_signatures","label":"Update Defender definitions","description":"Runs 'MpCmdRun -SignatureUpdate' so Microsoft Defender downloads its latest protection definitions.","tier":"auto_safe","admin_required":false,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":true,"cancellable":true},
-                {"id":"defender_quick_scan","label":"Run Defender quick scan","description":"Runs 'MpCmdRun -Scan -ScanType 1', a Microsoft Defender quick scan of the places malware usually hides. Takes a few minutes.","tier":"auto_safe","admin_required":false,"requires_restart":false,"long_running":true,"maintenance":true,"batch_eligible":false,"cancellable":false},
+                {"id":"defender_quick_scan","label":"Run Defender quick scan","description":"Runs 'MpCmdRun -Scan -ScanType 1', a Microsoft Defender quick scan of the places malware usually hides. Takes a few minutes.","tier":"auto_safe","admin_required":false,"requires_restart":false,"long_running":true,"maintenance":true,"batch_eligible":false,"cancellable":true},
                 {"id":"enable_firewall","label":"Turn on Windows Firewall","description":"Runs 'netsh advfirewall set allprofiles state on' so the firewall protects every network profile.","tier":"auto_safe","admin_required":true,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":true},
                 {"id":"renew_ip_lease","label":"Renew network address","description":"Runs 'ipconfig /release', 'ipconfig /renew' and 'ipconfig /flushdns' to get a fresh address from the router. The connection drops for a few seconds.","tier":"repair","admin_required":true,"requires_restart":false,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":false},
                 {"id":"schedule_memory_diagnostic","label":"Test memory at next restart","description":"Runs 'bcdedit /bootsequence {memdiag}' so Windows Memory Diagnostic tests your RAM once at the next restart, then Windows starts normally.","tier":"repair","admin_required":true,"requires_restart":true,"long_running":false,"maintenance":false,"batch_eligible":false,"cancellable":true}

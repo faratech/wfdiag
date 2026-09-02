@@ -118,9 +118,11 @@ impl RemediationSpec {
     pub fn cancellable(&self) -> bool {
         match &self.run {
             // Do not terminate integrity-repair tools midway through a write,
-            // and never leave an adapter between `release` and `renew`.
+            // and never leave an adapter between `release` and `renew`. A
+            // drive optimization or a Defender scan is safe to interrupt.
             RunKind::Steps { .. } => {
-                !self.long_running && !matches!(self.id, "restart_system" | "renew_ip_lease")
+                (!self.long_running || matches!(self.id, "optimize_drives" | "defender_quick_scan"))
+                    && !matches!(self.id, "restart_system" | "renew_ip_lease")
             }
             RunKind::Custom { .. } => matches!(
                 self.id,
