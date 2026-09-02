@@ -57,7 +57,8 @@ use wfdiag_native_ai_chat::{
     ChatWorkerEvent, SubscriptionAuthOperation, SubscriptionAuthProvider, SubscriptionInstallMethod,
 };
 use wfdiag_native_ai_provider::{
-    AIProvider, AIProviderStatus, ModelCatalogRequest, parse_provider_preference,
+    AIProvider, AIProviderPreference, AIProviderStatus, ModelCatalogRequest,
+    parse_provider_preference,
 };
 use wfdiag_native_ai_report::{ReportGeneration, ReportScan, ReportWorkerEvent};
 use wfdiag_native_history::ComparisonResult;
@@ -827,6 +828,23 @@ impl AppService {
         self.begin_report(force_refresh)
     }
 
+    fn effective_ai_provider(&self, status: &AIProviderStatus) -> AIProvider {
+        let explicit = parse_provider_preference(&self.snapshot.settings.preferred_ai_provider);
+        match explicit {
+            AIProviderPreference::CodexCli => AIProvider::CodexCli,
+            AIProviderPreference::ClaudeCode => AIProvider::ClaudeCode,
+            AIProviderPreference::OpenAI => AIProvider::OpenAI,
+            AIProviderPreference::Anthropic => AIProvider::Anthropic,
+            AIProviderPreference::Gemini => AIProvider::Gemini,
+            AIProviderPreference::DeepSeek => AIProvider::DeepSeek,
+            AIProviderPreference::CustomOpenAI => AIProvider::CustomOpenAI,
+            AIProviderPreference::Ollama => AIProvider::Ollama,
+            AIProviderPreference::FoundryLocal => AIProvider::FoundryLocal,
+            AIProviderPreference::PhiSilica => AIProvider::PhiSilica,
+            AIProviderPreference::Auto => status.active_provider,
+        }
+    }
+
     fn begin_report(&mut self, force_refresh: bool) -> DispatchOutcome {
         let Some(status) = self.provider_status().cloned() else {
             return DispatchOutcome::Rejected(RejectReason::NotReady {
@@ -841,12 +859,13 @@ impl AppService {
         let Some(request) = self.requests.issue() else {
             return DispatchOutcome::Rejected(RejectReason::IdentityExhausted);
         };
+        let provider = self.effective_ai_provider(&status);
         let generation = ReportGeneration {
             scan: ReportScan {
                 session_id: session_id.clone(),
                 results: self.scan.snapshot().evidence(),
             },
-            provider: status.active_provider,
+            provider,
             availability: status.availability(),
             comparison: None,
             force_refresh,
@@ -958,9 +977,10 @@ impl AppService {
             detail: "Set up an available AI provider before interpreting".to_string(),
         })?;
         let preference = parse_provider_preference(&self.snapshot.settings.preferred_ai_provider);
+        let provider = self.effective_ai_provider(status);
         Ok(AnalysisRoute {
             preference,
-            provider: status.active_provider,
+            provider,
             availability: status.availability(),
             fallback_from: None,
         })

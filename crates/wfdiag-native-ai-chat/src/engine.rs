@@ -23,8 +23,13 @@ pub const MAX_DISPLAY_CHARS: usize = 2_000;
 pub const MAX_CONTEXT_REFS: usize = 8;
 pub const SESSION_MAX_AGE_SECS: u64 = 6 * 60 * 60;
 
-const FLUSH_CHARS: usize = 120;
-const FLUSH_INTERVAL_MS: u64 = 60;
+/// Streaming deltas are frame-paced: the ticker below flushes whatever has
+/// arrived every `FLUSH_INTERVAL_MS` (one 60 Hz frame), so a host repaints at
+/// most once per frame instead of once per provider token, and
+/// `FLUSH_CHARS` only bounds how much text one delta may carry when a
+/// provider bursts faster than the frame cadence.
+const FLUSH_CHARS: usize = 256;
+const FLUSH_INTERVAL_MS: u64 = 16;
 /// Streaming cap for one turn. Well above any sane answer and above the
 /// stored-session budget's typical share, but small enough that a runaway
 /// provider response cannot grow memory without bound while streaming.
