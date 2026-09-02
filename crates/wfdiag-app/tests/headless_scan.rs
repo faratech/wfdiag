@@ -4,7 +4,7 @@
 mod support;
 
 use std::time::Duration;
-use support::{boot, boot_with};
+use support::{Harness, boot, boot_with};
 use wfdiag_app::ports::mock::{MockPorts, ScriptedExecutor, TaskScript};
 use wfdiag_app::{AppCommand, AppEvent, IssuesEvent, ScanEvent, SettingsEvent};
 use wfdiag_native_diagnostics::ScanKind;
@@ -394,6 +394,23 @@ fn new_critical_ids(events: &[AppEvent]) -> Vec<String> {
         .collect()
 }
 
+/// Pump until a scan has both gone idle (`Finalized`) and published its issue
+/// projection, so the next `StartScan` cannot be refused as busy: the
+/// projection can arrive while the scan is still finalizing.
+fn pump_scan_settled(harness: &mut Harness, what: &str) -> Vec<AppEvent> {
+    harness.pump_until(
+        |_, events| {
+            events
+                .iter()
+                .any(|event| matches!(event, AppEvent::Scan(ScanEvent::Finalized { .. })))
+                && events
+                    .iter()
+                    .any(|event| matches!(event, AppEvent::Issues(IssuesEvent::Updated { .. })))
+        },
+        what,
+    )
+}
+
 /// A check that was clear in the previous scan and is Critical in this one is
 /// announced once; a refresh of the same scan and a repeat of the same
 /// verdict stay quiet.
@@ -404,12 +421,15 @@ fn a_new_critical_issue_is_announced_once_between_scans() {
         .mocks
         .executor
         .script("logical_disk", TaskScript::ok(DISK_HEALTHY));
-    harness.service.dispatch(AppCommand::StartScan {
-        kind: ScanKind::Quick,
-    });
-    let events = harness.pump_for("the first projection", |event| {
-        matches!(event, AppEvent::Issues(IssuesEvent::Updated { .. }))
-    });
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::StartScan {
+                kind: ScanKind::Quick,
+            })
+            .is_accepted()
+    );
+    let events = pump_scan_settled(&mut harness, "the first projection");
     assert!(
         new_critical_ids(&events).is_empty(),
         "nothing to compare with yet"
@@ -419,12 +439,15 @@ fn a_new_critical_issue_is_announced_once_between_scans() {
         .mocks
         .executor
         .script("logical_disk", TaskScript::ok(DISK_CRITICAL));
-    harness.service.dispatch(AppCommand::StartScan {
-        kind: ScanKind::Quick,
-    });
-    let events = harness.pump_for("the escalation", |event| {
-        matches!(event, AppEvent::Issues(IssuesEvent::NewCritical { .. }))
-    });
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::StartScan {
+                kind: ScanKind::Quick,
+            })
+            .is_accepted()
+    );
+    let events = pump_scan_settled(&mut harness, "the escalation");
     assert_eq!(new_critical_ids(&events), ["low_disk_space"]);
 
     assert!(
@@ -441,12 +464,15 @@ fn a_new_critical_issue_is_announced_once_between_scans() {
         "a refresh never announces"
     );
 
-    harness.service.dispatch(AppCommand::StartScan {
-        kind: ScanKind::Quick,
-    });
-    let events = harness.pump_for("the repeat scan", |event| {
-        matches!(event, AppEvent::Issues(IssuesEvent::Updated { .. }))
-    });
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::StartScan {
+                kind: ScanKind::Quick,
+            })
+            .is_accepted()
+    );
+    let events = pump_scan_settled(&mut harness, "the repeat scan");
     assert!(
         new_critical_ids(&events).is_empty(),
         "still Critical is not new"
@@ -464,23 +490,29 @@ fn an_undecided_baseline_never_announces_a_new_critical_issue() {
         .mocks
         .executor
         .script("logical_disk", TaskScript::failed("WMI unavailable"));
-    harness.service.dispatch(AppCommand::StartScan {
-        kind: ScanKind::Quick,
-    });
-    harness.pump_for("the undecided projection", |event| {
-        matches!(event, AppEvent::Issues(IssuesEvent::Updated { .. }))
-    });
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::StartScan {
+                kind: ScanKind::Quick,
+            })
+            .is_accepted()
+    );
+    pump_scan_settled(&mut harness, "the undecided projection");
 
     harness
         .mocks
         .executor
         .script("logical_disk", TaskScript::ok(DISK_CRITICAL));
-    harness.service.dispatch(AppCommand::StartScan {
-        kind: ScanKind::Quick,
-    });
-    let events = harness.pump_for("the decided projection", |event| {
-        matches!(event, AppEvent::Issues(IssuesEvent::Updated { .. }))
-    });
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::StartScan {
+                kind: ScanKind::Quick,
+            })
+            .is_accepted()
+    );
+    let events = pump_scan_settled(&mut harness, "the decided projection");
     assert!(
         new_critical_ids(&events).is_empty(),
         "Unknown -> Critical is silent"
