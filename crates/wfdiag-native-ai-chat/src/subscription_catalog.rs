@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use wfdiag_native_ai_provider::{
-    BackendFuture, ModelCatalog, ModelCatalogEntry, SubscriptionCli, SubscriptionModelCatalogSource,
+    BackendFuture, ModelCatalog, ModelCatalogEntry, SubscriptionCli,
+    SubscriptionModelCatalogSource, subscription_cli_spec,
 };
 
 const CODEX_MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -100,10 +101,7 @@ impl ProcessSubscriptionModelCatalogSource {
         // Resolution deliberately precedes the cache lookup. Otherwise an
         // executable removed (or a now-invalid explicit path) could keep
         // returning a successful account catalog for the entire TTL.
-        let binary = match provider {
-            SubscriptionCli::Codex => "codex",
-            SubscriptionCli::ClaudeCode => "claude",
-        };
+        let binary = subscription_cli_spec(provider).binary;
         let resolved_path = cli_bridge::resolve_cli(binary, configured_path.as_deref()).await?;
         let cache_key = catalog_cache_key(provider, &resolved_path);
         if let Some(catalog) = self.cached_catalog(&cache_key) {
@@ -147,10 +145,7 @@ impl SubscriptionModelCatalogSource for ProcessSubscriptionModelCatalogSource {
 }
 
 const fn provider_key(provider: SubscriptionCli) -> &'static str {
-    match provider {
-        SubscriptionCli::Codex => "codex",
-        SubscriptionCli::ClaudeCode => "claude",
-    }
+    subscription_cli_spec(provider).binary
 }
 
 fn catalog_cache_key(provider: SubscriptionCli, resolved_path: &Path) -> String {

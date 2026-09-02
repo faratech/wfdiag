@@ -668,6 +668,10 @@ impl SubscriptionCliStatusSource for ProcessSubscriptionCliStatusSource {
     ) -> BackendFuture<'_, CliProbeSnapshot> {
         Box::pin(async move { self.probe_inner(provider, configured_path).await })
     }
+
+    fn invalidate(&self, provider: SubscriptionCli) {
+        Self::invalidate(self, provider);
+    }
 }
 
 #[cfg(test)]

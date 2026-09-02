@@ -59,7 +59,7 @@ pub use fallback::{
 };
 pub use local_probes::{
     FoundryCliEndpointSource, ProcessSubscriptionCliStatusSource, SUBSCRIPTION_OVERRIDE_ENV_VARS,
-    extract_http_base, foundry_service_is_healthy, valid_foundry_status_body,
+    extract_http_base, foundry_service_is_healthy, is_batch_shim, valid_foundry_status_body,
 };
 pub use model_catalog::{
     GEMINI_API_BASE, GEMINI_DEFAULT_MODEL, ModelCatalogEntry, ModelCatalogMetadata,

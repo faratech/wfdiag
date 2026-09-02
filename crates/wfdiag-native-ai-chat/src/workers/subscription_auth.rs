@@ -104,6 +104,10 @@ impl WorkerState {
         );
         let settings = self.settings.load_nonsecret_settings().unwrap_or_default();
         let path = effective_cli_path(provider, draft_cli_path, &settings);
+        if operation == SubscriptionAuthOperation::Status {
+            // An explicit check must not answer from the 30 s probe cache.
+            ProcessSubscriptionCliStatusSource::new().invalidate(provider.into());
+        }
         let result = match operation {
             SubscriptionAuthOperation::Status => {
                 self.controller

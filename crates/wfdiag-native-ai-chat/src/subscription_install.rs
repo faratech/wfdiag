@@ -27,6 +27,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncRead;
 use tokio_util::sync::CancellationToken;
+use wfdiag_native_ai_provider::{
+    CliObstacle, StatusVerdict, SubscriptionCliSpec, is_batch_shim, parse_status_output,
+};
 
 #[cfg(unix)]
 use process_wrap::tokio::ProcessSession;
@@ -130,6 +133,9 @@ pub struct SubscriptionInstallStatus {
     pub provider: SubscriptionAuthProvider,
     pub path: PathBuf,
     pub state: SubscriptionAuthState,
+    /// Why the freshly installed CLI is not usable yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obstacle: Option<CliObstacle>,
 }
 
 impl SubscriptionInstallStatus {
@@ -139,6 +145,7 @@ impl SubscriptionInstallStatus {
             provider: self.provider,
             state: self.state,
             path: Some(self.path.clone()),
+            obstacle: self.obstacle,
         }
     }
 }
@@ -244,35 +251,8 @@ impl fmt::Display for SubscriptionInstallError {
 
 impl std::error::Error for SubscriptionInstallError {}
 
-struct InstallSpec {
-    binary: &'static str,
-    winget_package: &'static str,
-    vendor_script: &'static str,
-    status_args: &'static [&'static str],
-    signed_out_markers: &'static [&'static str],
-}
-
-const CODEX_SPEC: InstallSpec = InstallSpec {
-    binary: "codex",
-    winget_package: "OpenAI.Codex",
-    vendor_script: "$env:CODEX_NON_INTERACTIVE = '1'; irm https://chatgpt.com/codex/install.ps1 | iex",
-    status_args: &["login", "status"],
-    signed_out_markers: &["not logged in"],
-};
-
-const CLAUDE_SPEC: InstallSpec = InstallSpec {
-    binary: "claude",
-    winget_package: "Anthropic.ClaudeCode",
-    vendor_script: "irm https://claude.ai/install.ps1 | iex",
-    status_args: &["auth", "status"],
-    signed_out_markers: &["not logged in", "please run /login"],
-};
-
-fn spec(provider: SubscriptionAuthProvider) -> &'static InstallSpec {
-    match provider {
-        SubscriptionAuthProvider::Codex => &CODEX_SPEC,
-        SubscriptionAuthProvider::ClaudeCode => &CLAUDE_SPEC,
-    }
+fn spec(provider: SubscriptionAuthProvider) -> &'static SubscriptionCliSpec {
+    provider.spec()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -578,6 +558,16 @@ impl SubscriptionInstallController {
             return Ok(None);
         };
         let install_spec = spec(provider);
+        if is_batch_shim(&path) {
+            // The shim resolves but cannot be run; verification would only
+            // fail. Report the obstacle so the UI offers the native install.
+            return Ok(Some(SubscriptionInstallStatus {
+                provider,
+                path,
+                state: SubscriptionAuthState::Unknown,
+                obstacle: Some(CliObstacle::BatchShimOnly),
+            }));
+        }
         let plan = ProcessPlan {
             program: path.clone(),
             args: install_spec.status_args.to_vec(),
@@ -598,11 +588,12 @@ impl SubscriptionInstallController {
                     SubscriptionInstallError::VerificationFailed { provider }
                 }
             })?;
-        let state = parse_auth_state(install_spec, &output);
+        let (state, obstacle) = parse_auth_state(install_spec, &output);
         Ok(Some(SubscriptionInstallStatus {
             provider,
             path,
             state,
+            obstacle,
         }))
     }
 
@@ -759,19 +750,25 @@ fn install_plan(request: SubscriptionInstallRequest, program: PathBuf) -> Proces
     }
 }
 
-fn parse_auth_state(spec: &InstallSpec, output: &ProcessOutput) -> SubscriptionAuthState {
-    let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-    if spec
-        .signed_out_markers
-        .iter()
-        .any(|marker| stdout.contains(marker) || stderr.contains(marker))
-    {
-        SubscriptionAuthState::SignedOut
-    } else if output.success {
-        SubscriptionAuthState::SignedIn
-    } else {
-        SubscriptionAuthState::Unknown
+fn parse_auth_state(
+    spec: &SubscriptionCliSpec,
+    output: &ProcessOutput,
+) -> (SubscriptionAuthState, Option<CliObstacle>) {
+    match parse_status_output(
+        spec,
+        output.success,
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    ) {
+        StatusVerdict::SignedIn => (SubscriptionAuthState::SignedIn, None),
+        StatusVerdict::SignedOut => (
+            SubscriptionAuthState::SignedOut,
+            Some(CliObstacle::SignedOut),
+        ),
+        StatusVerdict::Unclear => (
+            SubscriptionAuthState::Unknown,
+            Some(CliObstacle::StatusUnclear),
+        ),
     }
 }
 

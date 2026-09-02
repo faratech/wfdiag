@@ -158,6 +158,11 @@ pub trait SubscriptionCliStatusSource: Send + Sync + 'static {
         provider: SubscriptionCli,
         configured_path: Option<String>,
     ) -> BackendFuture<'_, CliProbeSnapshot>;
+
+    /// Forget any cached answer for `provider` (after a sign-in, sign-out or
+    /// installation, or before an explicit check). Sources without a cache
+    /// need not override this.
+    fn invalidate(&self, _provider: SubscriptionCli) {}
 }
 
 pub trait OllamaSource: Send + Sync + 'static {

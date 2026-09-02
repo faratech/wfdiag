@@ -16,9 +16,11 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use wfdiag_native_ai_provider::SubscriptionCli;
+use wfdiag_native_ai_provider::{
+    CliObstacle, CliProbeSnapshot, ProcessSubscriptionCliStatusSource, SubscriptionCli,
+    SubscriptionCliSpec, SubscriptionCliStatusSource, is_batch_shim, subscription_cli_spec,
+};
 
-const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(180);
 const SIGN_OUT_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -33,11 +35,13 @@ pub enum SubscriptionAuthProvider {
 }
 
 impl SubscriptionAuthProvider {
-    const fn spec(self) -> &'static AuthSpec {
-        match self {
-            Self::Codex => &CODEX_SPEC,
-            Self::ClaudeCode => &CLAUDE_SPEC,
-        }
+    /// The one shared description of this CLI.
+    #[must_use]
+    pub const fn spec(self) -> &'static SubscriptionCliSpec {
+        subscription_cli_spec(match self {
+            Self::Codex => SubscriptionCli::Codex,
+            Self::ClaudeCode => SubscriptionCli::ClaudeCode,
+        })
     }
 }
 
@@ -89,12 +93,29 @@ pub struct SubscriptionAuthStatus {
     pub state: SubscriptionAuthState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
+    /// Why an installed CLI is not usable (the probe's finding).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obstacle: Option<CliObstacle>,
 }
 
 impl SubscriptionAuthStatus {
     #[must_use]
     pub const fn installed(&self) -> bool {
         self.path.is_some()
+    }
+
+    /// Whether signing in is the next step: signed out, or unclear for a
+    /// reason sign-in can fix. A shim-only install needs the native CLI first.
+    #[must_use]
+    pub const fn needs_sign_in(&self) -> bool {
+        match self.state {
+            SubscriptionAuthState::SignedOut => true,
+            SubscriptionAuthState::Unknown => match self.obstacle {
+                Some(obstacle) => obstacle.needs_sign_in(),
+                None => true,
+            },
+            SubscriptionAuthState::NotInstalled | SubscriptionAuthState::SignedIn => false,
+        }
     }
 
     #[must_use]
@@ -139,6 +160,14 @@ pub enum SubscriptionAuthError {
         provider: SubscriptionAuthProvider,
         operation: SubscriptionAuthOperation,
     },
+    /// Only an npm script shim of the CLI exists; `WFDiag` cannot run it.
+    BatchShimOnly {
+        provider: SubscriptionAuthProvider,
+    },
+    /// The vendor's sign-in window stayed open past the cap and was closed.
+    SignInTimedOut {
+        provider: SubscriptionAuthProvider,
+    },
 }
 
 impl fmt::Display for SubscriptionAuthError {
@@ -180,6 +209,14 @@ impl fmt::Display for SubscriptionAuthError {
                 "{} for {provider} could not be completed.",
                 operation.noun()
             ),
+            Self::BatchShimOnly { provider } => write!(
+                formatter,
+                "Only the npm script shim of the {provider} CLI was found; WFDiag cannot run it. Install the native CLI from Settings."
+            ),
+            Self::SignInTimedOut { provider } => write!(
+                formatter,
+                "The {provider} sign-in window was still open after 10 minutes and was closed. Try again."
+            ),
         }
     }
 }
@@ -204,33 +241,8 @@ impl SubscriptionAuthOperation {
     }
 }
 
-struct AuthSpec {
-    binary: &'static str,
-    sign_in_args: &'static [&'static str],
-    sign_out_args: &'static [&'static str],
-    status_args: &'static [&'static str],
-    signed_out_markers: &'static [&'static str],
-}
-
-const CODEX_SPEC: AuthSpec = AuthSpec {
-    binary: "codex",
-    sign_in_args: &["login"],
-    sign_out_args: &["logout"],
-    status_args: &["login", "status"],
-    signed_out_markers: &["not logged in"],
-};
-
-const CLAUDE_SPEC: AuthSpec = AuthSpec {
-    binary: "claude",
-    sign_in_args: &["auth", "login"],
-    sign_out_args: &["auth", "logout"],
-    status_args: &["auth", "status"],
-    signed_out_markers: &["not logged in", "please run /login"],
-};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProcessAction {
-    Status,
     SignIn,
     SignOut,
 }
@@ -238,7 +250,6 @@ enum ProcessAction {
 impl ProcessAction {
     const fn timeout(self) -> Duration {
         match self {
-            Self::Status => STATUS_TIMEOUT,
             Self::SignIn => SIGN_IN_TIMEOUT,
             Self::SignOut => SIGN_OUT_TIMEOUT,
         }
@@ -246,7 +257,6 @@ impl ProcessAction {
 
     const fn safe_label(self) -> &'static str {
         match self {
-            Self::Status => "subscription status",
             Self::SignIn => "subscription sign-in",
             Self::SignOut => "subscription sign-out",
         }
@@ -339,6 +349,8 @@ impl AuthProcess for TokioAuthProcess {
 /// cancelled future is dropped by [`cli_bridge::run_headless`].
 #[derive(Clone)]
 pub struct SubscriptionAuthController {
+    /// The shared, cached status probe (credential-store fast path included).
+    probe: Arc<dyn SubscriptionCliStatusSource>,
     process: Arc<dyn AuthProcess>,
     active_mutations: Arc<Mutex<HashSet<SubscriptionAuthProvider>>>,
 }
@@ -361,24 +373,31 @@ impl SubscriptionAuthController {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            probe: Arc::new(ProcessSubscriptionCliStatusSource::new()),
             process: Arc::new(TokioAuthProcess),
             active_mutations: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
     #[cfg(test)]
-    fn with_process(process: Arc<dyn AuthProcess>) -> Self {
+    fn with_dependencies(
+        probe: Arc<dyn SubscriptionCliStatusSource>,
+        process: Arc<dyn AuthProcess>,
+    ) -> Self {
         Self {
+            probe,
             process,
             active_mutations: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
-    /// Resolve the selected CLI and run only its documented status command.
-    ///
-    /// A non-blank draft path always wins and must be absolute. A missing CLI
-    /// is a normal `NotInstalled` state; a present CLI whose status cannot be
+    /// The account state, from the shared probe: a missing CLI is a normal
+    /// `NotInstalled`; a missing credential cache or a shim-only install is
+    /// decided without spawning; a present CLI whose status cannot be
     /// established is `Unknown`, never falsely reported as signed out.
+    ///
+    /// A non-blank draft path always wins and must be an absolute path to an
+    /// existing file.
     pub async fn status(
         &self,
         provider: SubscriptionAuthProvider,
@@ -386,8 +405,13 @@ impl SubscriptionAuthController {
         cancellation: CancellationToken,
     ) -> Result<SubscriptionAuthStatus, SubscriptionAuthError> {
         let draft = normalized_absolute_draft(provider, draft_cli_path)?;
-        let spec = provider.spec();
-        let resolved = tokio::select! {
+        if draft
+            .as_deref()
+            .is_some_and(|path| !Path::new(path).is_file())
+        {
+            return Err(SubscriptionAuthError::InvalidCliPath { provider });
+        }
+        let probe = tokio::select! {
             biased;
             () = cancellation.cancelled() => {
                 return Err(SubscriptionAuthError::Cancelled {
@@ -395,52 +419,9 @@ impl SubscriptionAuthController {
                     operation: SubscriptionAuthOperation::Status,
                 });
             }
-            result = self.process.resolve(spec.binary, draft.clone()) => result,
+            probe = self.probe.probe(provider.into(), draft) => probe,
         };
-        let path = match resolved {
-            Ok(path) => path,
-            Err(ResolveFailure::InvalidDraft) => {
-                return Err(SubscriptionAuthError::InvalidCliPath { provider });
-            }
-            Err(ResolveFailure::NotFound) => {
-                return Ok(SubscriptionAuthStatus {
-                    provider,
-                    state: SubscriptionAuthState::NotInstalled,
-                    path: None,
-                });
-            }
-            Err(ResolveFailure::Unknown) => {
-                return Ok(SubscriptionAuthStatus {
-                    provider,
-                    state: SubscriptionAuthState::Unknown,
-                    path: None,
-                });
-            }
-        };
-
-        let request = ProcessRequest {
-            program: path.clone(),
-            args: spec.status_args.to_vec(),
-            action: ProcessAction::Status,
-        };
-        let output = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => {
-                return Err(SubscriptionAuthError::Cancelled {
-                    provider,
-                    operation: SubscriptionAuthOperation::Status,
-                });
-            }
-            result = self.process.run(request) => result,
-        };
-        let state = output.map_or(SubscriptionAuthState::Unknown, |output| {
-            parse_status(spec, &output)
-        });
-        Ok(SubscriptionAuthStatus {
-            provider,
-            state,
-            path: Some(path),
-        })
+        Ok(auth_status_from_probe(provider, &probe))
     }
 
     /// Explicitly run the vendor CLI's own browser-based sign-in flow.
@@ -487,7 +468,6 @@ impl SubscriptionAuthController {
     ) -> Result<SubscriptionAuthStatus, SubscriptionAuthError> {
         let draft = normalized_absolute_draft(provider, draft_cli_path)?;
         let operation = match action {
-            ProcessAction::Status => SubscriptionAuthOperation::Status,
             ProcessAction::SignIn => SubscriptionAuthOperation::SignIn,
             ProcessAction::SignOut => SubscriptionAuthOperation::SignOut,
         };
@@ -508,8 +488,10 @@ impl SubscriptionAuthController {
                 operation,
             },
         })?;
+        if is_batch_shim(&path) {
+            return Err(SubscriptionAuthError::BatchShimOnly { provider });
+        }
         let args = match action {
-            ProcessAction::Status => spec.status_args,
             ProcessAction::SignIn => spec.sign_in_args,
             ProcessAction::SignOut => spec.sign_out_args,
         };
@@ -535,11 +517,43 @@ impl SubscriptionAuthController {
         // The vendor child completing is the mutation's commit point. A late
         // UI cancellation must not report the already-committed credential
         // change as cancelled. The truthful follow-up probe remains bounded by
-        // STATUS_TIMEOUT, but intentionally gets a fresh token.
+        // the probe's own timeout, but intentionally gets a fresh token.
         // Logout on an already signed-out CLI may exit non-zero, so this fresh
-        // status remains the source of truth.
+        // status remains the source of truth — fresh, so the probe's cached
+        // answer from before the change is dropped first.
+        self.probe.invalidate(provider.into());
         self.status(provider, draft.as_deref(), CancellationToken::new())
             .await
+    }
+}
+
+/// The account state a probe result means.
+#[must_use]
+pub fn auth_status_from_probe(
+    provider: SubscriptionAuthProvider,
+    probe: &CliProbeSnapshot,
+) -> SubscriptionAuthStatus {
+    let state = if !probe.installed {
+        SubscriptionAuthState::NotInstalled
+    } else if probe.usable {
+        SubscriptionAuthState::SignedIn
+    } else {
+        match probe.obstacle {
+            Some(CliObstacle::NoStoredLogin | CliObstacle::SignedOut) => {
+                SubscriptionAuthState::SignedOut
+            }
+            Some(CliObstacle::BatchShimOnly | CliObstacle::StatusUnclear) | None => {
+                SubscriptionAuthState::Unknown
+            }
+        }
+    };
+    SubscriptionAuthStatus {
+        provider,
+        state,
+        path: probe
+            .installed
+            .then(|| PathBuf::from(probe.path.as_deref().unwrap_or_default())),
+        obstacle: if probe.usable { None } else { probe.obstacle },
     }
 }
 
@@ -557,21 +571,6 @@ fn normalized_absolute_draft(
         Ok(Some(path.to_string()))
     } else {
         Ok(None)
-    }
-}
-
-fn parse_status(spec: &AuthSpec, output: &ProcessOutput) -> SubscriptionAuthState {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let signed_out = spec.signed_out_markers.iter().any(|marker| {
-        stdout.to_ascii_lowercase().contains(marker) || stderr.to_ascii_lowercase().contains(marker)
-    });
-    if signed_out {
-        SubscriptionAuthState::SignedOut
-    } else if output.success {
-        SubscriptionAuthState::SignedIn
-    } else {
-        SubscriptionAuthState::Unknown
     }
 }
 
@@ -684,61 +683,112 @@ mod tests {
         }
     }
 
-    #[test]
-    fn status_parser_is_conservative_and_case_insensitive() {
-        assert_eq!(
-            parse_status(&CLAUDE_SPEC, &output(true, "Logged in", "")),
-            SubscriptionAuthState::SignedIn
-        );
-        assert_eq!(
-            parse_status(
-                &CLAUDE_SPEC,
-                &output(true, "NOT LOGGED IN", "Please run /LOGIN")
-            ),
-            SubscriptionAuthState::SignedOut
-        );
-        assert_eq!(
-            parse_status(&CODEX_SPEC, &output(false, "", "unexpected failure")),
-            SubscriptionAuthState::Unknown
-        );
+    /// A shared probe with a scripted answer that records its calls.
+    struct FakeProbe {
+        snapshot: Mutex<CliProbeSnapshot>,
+        calls: Mutex<Vec<(SubscriptionCli, Option<String>)>>,
+        invalidations: Mutex<Vec<SubscriptionCli>>,
+    }
+
+    impl FakeProbe {
+        fn answering(snapshot: CliProbeSnapshot) -> Arc<Self> {
+            Arc::new(Self {
+                snapshot: Mutex::new(snapshot),
+                calls: Mutex::new(Vec::new()),
+                invalidations: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn calls(&self) -> Vec<(SubscriptionCli, Option<String>)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl SubscriptionCliStatusSource for FakeProbe {
+        fn probe(
+            &self,
+            provider: SubscriptionCli,
+            configured_path: Option<String>,
+        ) -> wfdiag_native_ai_provider::BackendFuture<'_, CliProbeSnapshot> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push((provider, configured_path));
+                self.snapshot.lock().unwrap().clone()
+            })
+        }
+
+        fn invalidate(&self, provider: SubscriptionCli) {
+            self.invalidations.lock().unwrap().push(provider);
+        }
+    }
+
+    fn installed(usable: bool, obstacle: Option<CliObstacle>) -> CliProbeSnapshot {
+        CliProbeSnapshot {
+            usable,
+            installed: true,
+            path: Some("/opt/vendor".to_string()),
+            obstacle,
+        }
+    }
+
+    fn controller(
+        probe: &Arc<FakeProbe>,
+        process: &Arc<FakeProcess>,
+    ) -> SubscriptionAuthController {
+        SubscriptionAuthController::with_dependencies(probe.clone(), process.clone())
     }
 
     #[tokio::test]
-    async fn status_is_read_only_and_uses_the_shipping_vendor_commands() {
-        for (provider, expected_args) in [
-            (SubscriptionAuthProvider::Codex, vec!["login", "status"]),
-            (SubscriptionAuthProvider::ClaudeCode, vec!["auth", "status"]),
-        ] {
-            let process = Arc::new(FakeProcess::scripted(
-                [Ok(PathBuf::from("/opt/vendor"))],
-                [Ok(output(true, "signed in", ""))],
-            ));
-            let controller = SubscriptionAuthController::with_process(process.clone());
-
-            let status = controller
-                .status(provider, None, CancellationToken::new())
+    async fn status_delegates_to_the_shared_probe_and_maps_every_obstacle() {
+        let cases = [
+            (installed(true, None), SubscriptionAuthState::SignedIn, None),
+            (
+                installed(false, Some(CliObstacle::NoStoredLogin)),
+                SubscriptionAuthState::SignedOut,
+                Some(CliObstacle::NoStoredLogin),
+            ),
+            (
+                installed(false, Some(CliObstacle::SignedOut)),
+                SubscriptionAuthState::SignedOut,
+                Some(CliObstacle::SignedOut),
+            ),
+            (
+                installed(false, Some(CliObstacle::StatusUnclear)),
+                SubscriptionAuthState::Unknown,
+                Some(CliObstacle::StatusUnclear),
+            ),
+            (
+                installed(false, Some(CliObstacle::BatchShimOnly)),
+                SubscriptionAuthState::Unknown,
+                Some(CliObstacle::BatchShimOnly),
+            ),
+        ];
+        for (snapshot, expected_state, expected_obstacle) in cases {
+            let probe = FakeProbe::answering(snapshot);
+            let process = Arc::new(FakeProcess::default());
+            let status = controller(&probe, &process)
+                .status(
+                    SubscriptionAuthProvider::ClaudeCode,
+                    None,
+                    CancellationToken::new(),
+                )
                 .await
                 .unwrap();
-
-            assert_eq!(status.state, SubscriptionAuthState::SignedIn);
-            let requests = process.requests();
-            assert_eq!(requests.len(), 1);
-            assert_eq!(requests[0].args, expected_args);
-            assert_eq!(requests[0].action, ProcessAction::Status);
+            assert_eq!(status.state, expected_state);
+            assert_eq!(status.obstacle, expected_obstacle);
+            assert_eq!(status.path.as_deref(), Some(Path::new("/opt/vendor")));
+            assert_eq!(probe.calls(), [(SubscriptionCli::ClaudeCode, None)]);
+            assert!(
+                process.requests().is_empty(),
+                "status never spawns the CLI itself"
+            );
         }
     }
 
     #[tokio::test]
-    async fn missing_cli_is_a_normal_not_installed_status() {
-        let process = Arc::new(FakeProcess::scripted([], []));
-        process
-            .resolutions
-            .lock()
-            .unwrap()
-            .push_back(Err(ResolveFailure::NotFound));
-        let controller = SubscriptionAuthController::with_process(process.clone());
-
-        let status = controller
+    async fn no_stored_login_status_never_spawns_the_cli() {
+        let probe = FakeProbe::answering(installed(false, Some(CliObstacle::NoStoredLogin)));
+        let process = Arc::new(FakeProcess::default());
+        let status = controller(&probe, &process)
             .status(
                 SubscriptionAuthProvider::Codex,
                 None,
@@ -746,44 +796,100 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(status.state, SubscriptionAuthState::SignedOut);
+        assert!(status.needs_sign_in());
+        assert!(process.requests().is_empty());
+        assert!(process.resolve_calls.lock().unwrap().is_empty());
+    }
 
+    #[tokio::test]
+    async fn batch_shim_only_is_reported_as_its_own_obstacle_not_a_bare_unknown() {
+        let probe = FakeProbe::answering(installed(false, Some(CliObstacle::BatchShimOnly)));
+        let process = Arc::new(FakeProcess::default());
+        let status = controller(&probe, &process)
+            .status(
+                SubscriptionAuthProvider::Codex,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.state, SubscriptionAuthState::Unknown);
+        assert_eq!(status.obstacle, Some(CliObstacle::BatchShimOnly));
+        assert!(status.installed());
+        assert!(!status.needs_sign_in(), "the fix is the native install");
+    }
+
+    #[tokio::test]
+    async fn missing_cli_is_a_normal_not_installed_status() {
+        let probe = FakeProbe::answering(CliProbeSnapshot::default());
+        let process = Arc::new(FakeProcess::default());
+        let status = controller(&probe, &process)
+            .status(
+                SubscriptionAuthProvider::Codex,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         assert_eq!(status.state, SubscriptionAuthState::NotInstalled);
         assert!(status.path.is_none());
+        assert!(!status.needs_sign_in());
+    }
+
+    #[tokio::test]
+    async fn inconclusive_probe_is_unknown_not_signed_out() {
+        let probe = FakeProbe::answering(installed(false, Some(CliObstacle::StatusUnclear)));
+        let process = Arc::new(FakeProcess::default());
+        let status = controller(&probe, &process)
+            .status(
+                SubscriptionAuthProvider::Codex,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.state, SubscriptionAuthState::Unknown);
+        assert!(status.installed());
+        assert!(!status.signed_in());
+        assert!(status.needs_sign_in(), "unclear is worth a sign-in attempt");
+    }
+
+    #[tokio::test]
+    async fn sign_in_refuses_a_batch_shim_with_a_typed_error_before_spawning() {
+        let probe = FakeProbe::answering(installed(false, Some(CliObstacle::BatchShimOnly)));
+        let process = Arc::new(FakeProcess::scripted(
+            [Ok(PathBuf::from(
+                "C:/Users/mike/AppData/Roaming/npm/codex.cmd",
+            ))],
+            [Ok(output(true, "", ""))],
+        ));
+        let error = controller(&probe, &process)
+            .sign_in(
+                SubscriptionAuthProvider::Codex,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            SubscriptionAuthError::BatchShimOnly {
+                provider: SubscriptionAuthProvider::Codex
+            }
+        );
+        assert!(error.to_string().contains("npm script shim"));
         assert!(process.requests().is_empty());
     }
 
     #[tokio::test]
-    async fn inconclusive_lookup_is_unknown_not_signed_out() {
-        let process = Arc::new(FakeProcess::scripted([Err(ResolveFailure::Unknown)], []));
-        let controller = SubscriptionAuthController::with_process(process);
-
-        let status = controller
-            .status(
-                SubscriptionAuthProvider::Codex,
-                None,
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(status.state, SubscriptionAuthState::Unknown);
-        assert!(!status.installed());
-        assert!(!status.signed_in());
-    }
-
-    #[tokio::test]
     async fn sign_in_is_explicit_and_refreshes_status_after_success() {
+        let probe = FakeProbe::answering(installed(true, None));
         let process = Arc::new(FakeProcess::scripted(
-            [
-                Ok(PathBuf::from("/opt/codex")),
-                Ok(PathBuf::from("/opt/codex")),
-            ],
-            [
-                Ok(output(true, "browser complete", "")),
-                Ok(output(true, "Logged in using ChatGPT", "")),
-            ],
+            [Ok(PathBuf::from("/opt/codex"))],
+            [Ok(output(true, "browser complete", ""))],
         ));
-        let controller = SubscriptionAuthController::with_process(process.clone());
+        let controller = controller(&probe, &process);
 
         let status = controller
             .sign_in(
@@ -796,26 +902,29 @@ mod tests {
 
         assert_eq!(status.state, SubscriptionAuthState::SignedIn);
         let requests = process.requests();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests.len(),
+            1,
+            "sign-in only; the fresh status is the probe's"
+        );
         assert_eq!(requests[0].args, ["login"]);
         assert_eq!(requests[0].action, ProcessAction::SignIn);
-        assert_eq!(requests[1].args, ["login", "status"]);
-        assert_eq!(requests[1].action, ProcessAction::Status);
+        assert_eq!(
+            probe.invalidations.lock().unwrap().as_slice(),
+            [SubscriptionCli::Codex],
+            "the cached pre-sign-in answer is dropped before the fresh status"
+        );
+        assert_eq!(probe.calls().len(), 1);
     }
 
     #[tokio::test]
     async fn sign_out_uses_vendor_command_and_truthful_fresh_status() {
+        let probe = FakeProbe::answering(installed(false, Some(CliObstacle::SignedOut)));
         let process = Arc::new(FakeProcess::scripted(
-            [
-                Ok(PathBuf::from("/opt/claude")),
-                Ok(PathBuf::from("/opt/claude")),
-            ],
-            [
-                Ok(output(false, "already logged out", "")),
-                Ok(output(false, "", "Not logged in; please run /login")),
-            ],
+            [Ok(PathBuf::from("/opt/claude"))],
+            [Ok(output(false, "already logged out", ""))],
         ));
-        let controller = SubscriptionAuthController::with_process(process.clone());
+        let controller = controller(&probe, &process);
 
         let status = controller
             .sign_out(
@@ -828,25 +937,20 @@ mod tests {
 
         assert_eq!(status.state, SubscriptionAuthState::SignedOut);
         let requests = process.requests();
+        assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].args, ["auth", "logout"]);
-        assert_eq!(requests[1].args, ["auth", "status"]);
     }
 
     #[tokio::test]
     async fn late_cancel_after_vendor_commit_does_not_relabel_success() {
+        let probe = FakeProbe::answering(installed(true, None));
         let process = Arc::new(FakeProcess::scripted(
-            [
-                Ok(PathBuf::from("/opt/codex")),
-                Ok(PathBuf::from("/opt/codex")),
-            ],
-            [
-                Ok(output(true, "browser complete", "")),
-                Ok(output(true, "Logged in using ChatGPT", "")),
-            ],
+            [Ok(PathBuf::from("/opt/codex"))],
+            [Ok(output(true, "browser complete", ""))],
         ));
         let cancellation = CancellationToken::new();
         process.cancel_after_next_run(cancellation.clone());
-        let controller = SubscriptionAuthController::with_process(process.clone());
+        let controller = controller(&probe, &process);
 
         let status = controller
             .sign_in(SubscriptionAuthProvider::Codex, None, cancellation.clone())
@@ -855,7 +959,7 @@ mod tests {
 
         assert!(cancellation.is_cancelled());
         assert_eq!(status.state, SubscriptionAuthState::SignedIn);
-        assert_eq!(process.requests().len(), 2);
+        assert_eq!(process.requests().len(), 1);
     }
 
     #[tokio::test]
@@ -864,7 +968,8 @@ mod tests {
             [Ok(PathBuf::from("/opt/codex"))],
             [Ok(output(true, "", ""))],
         ));
-        let controller = SubscriptionAuthController::with_process(process.clone());
+        let probe = FakeProbe::answering(CliProbeSnapshot::default());
+        let controller = controller(&probe, &process);
         let token = CancellationToken::new();
         token.cancel();
 
@@ -887,7 +992,8 @@ mod tests {
     #[tokio::test]
     async fn relative_draft_path_is_rejected_before_resolution() {
         let process = Arc::new(FakeProcess::default());
-        let controller = SubscriptionAuthController::with_process(process.clone());
+        let probe = FakeProbe::answering(installed(true, None));
+        let controller = controller(&probe, &process);
 
         let error = controller
             .status(
@@ -905,6 +1011,7 @@ mod tests {
             }
         ));
         assert!(process.resolve_calls.lock().unwrap().is_empty());
+        assert!(probe.calls().is_empty(), "rejected before the probe ran");
     }
 
     #[tokio::test]
@@ -914,7 +1021,8 @@ mod tests {
             [Ok(PathBuf::from("/opt/codex"))],
             [Ok(output(false, "", secret))],
         ));
-        let controller = SubscriptionAuthController::with_process(process);
+        let probe = FakeProbe::answering(installed(false, Some(CliObstacle::SignedOut)));
+        let controller = controller(&probe, &process);
 
         let error = controller
             .sign_in(

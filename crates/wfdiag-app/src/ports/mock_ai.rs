@@ -1237,14 +1237,17 @@ impl ScriptedAuthHandle {
         // non-reentrant mutex, because the first temporary outlives the second.
         let status = {
             let state = lock(&self.state);
+            let current = state
+                .states
+                .get(&provider)
+                .copied()
+                .unwrap_or(SubscriptionAuthState::NotInstalled);
             SubscriptionAuthStatus {
                 provider,
-                state: state
-                    .states
-                    .get(&provider)
-                    .copied()
-                    .unwrap_or(SubscriptionAuthState::NotInstalled),
+                state: current,
                 path: state.install_path.clone(),
+                obstacle: (current == SubscriptionAuthState::SignedOut)
+                    .then_some(wfdiag_native_ai_chat::CliObstacle::SignedOut),
             }
         };
         if operation == SubscriptionAuthOperation::Status {
@@ -1406,6 +1409,7 @@ impl ScriptedInstallHandle {
                 provider,
                 path,
                 state: SubscriptionAuthState::SignedOut,
+                obstacle: Some(wfdiag_native_ai_chat::CliObstacle::NoStoredLogin),
             },
         });
         true

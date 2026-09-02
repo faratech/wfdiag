@@ -425,6 +425,7 @@ mod tests {
             provider,
             path,
             state: SubscriptionAuthState::SignedOut,
+            obstacle: None,
         }
     }
 

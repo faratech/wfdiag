@@ -75,6 +75,7 @@ pub use runtime::{
 pub use subscription_auth::{
     SubscriptionAuthController, SubscriptionAuthError, SubscriptionAuthOperation,
     SubscriptionAuthProvider, SubscriptionAuthState, SubscriptionAuthStatus,
+    auth_status_from_probe,
 };
 pub use subscription_catalog::ProcessSubscriptionModelCatalogSource;
 pub use subscription_install::{
@@ -82,6 +83,7 @@ pub use subscription_install::{
     SubscriptionInstallMethod, SubscriptionInstallProgress, SubscriptionInstallRequest,
     SubscriptionInstallStage, SubscriptionInstallStatus,
 };
+pub use wfdiag_native_ai_provider::CliObstacle;
 pub use workers::{
     ActiveRequestSlot, WorkerWake, build_worker_runtime, no_wake, reap_worker, send_worker_event,
 };
