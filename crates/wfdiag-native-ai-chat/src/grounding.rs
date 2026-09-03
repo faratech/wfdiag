@@ -21,6 +21,8 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 const WINDOWSFORUM_MCP_URL: &str = "https://mcp.windowsforum.com/";
+/// Hard cap on a grounding response body; a broken endpoint must not grow memory.
+const MAX_MCP_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 const CLIENT_NAME: &str = "wfdiag";
 /// MCP `clientInfo.version` and user agent version.
@@ -948,12 +950,23 @@ async fn parse_response(response: reqwest::Response) -> Result<Value, String> {
         ));
     }
     if content_type.contains("text/event-stream") {
+        // Accumulate raw bytes and decode once: converting each network chunk
+        // separately corrupts a multi-byte character that straddles a chunk
+        // boundary into U+FFFD and breaks the JSON frame it sits in. The cap
+        // bounds what a hostile or broken endpoint can grow in memory.
         let mut stream = response.bytes_stream();
-        let mut body = String::new();
+        let mut body = Vec::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|error| format!("MCP SSE read failed: {error}"))?;
-            body.push_str(&String::from_utf8_lossy(&chunk));
+            if body.len() + chunk.len() > MAX_MCP_RESPONSE_BYTES {
+                return Err(format!(
+                    "MCP SSE response exceeds {MAX_MCP_RESPONSE_BYTES} bytes"
+                ));
+            }
+            body.extend_from_slice(&chunk);
         }
+        let body = String::from_utf8(body)
+            .map_err(|_| "MCP SSE response is not valid UTF-8".to_string())?;
         parse_sse_response(&body)
     } else {
         let value = response
