@@ -108,46 +108,40 @@ fn is_process_elevated() -> bool {
 }
 
 /// The machine's DNS hostname — the full, current name — instead of the
-/// <=15-character NetBIOS name captured at logon that `COMPUTERNAME`
+/// <=15-character `NetBIOS` name captured at logon that `COMPUTERNAME`
 /// carries (2026-09-03 audit). Falls back to the env var when the API is
 /// unavailable.
 #[cfg(windows)]
+#[allow(unsafe_code)] // narrow FFI exception: two straight-line Win32 calls, no pointers retained
 fn dns_computer_name() -> Option<String> {
     use windows::Win32::System::SystemInformation::{
         ComputerNamePhysicalDnsHostname, GetComputerNameExW,
     };
 
     let mut size = 0_u32;
-    // First call reports the required character count (including the NUL).
     unsafe {
+        // First call reports the required character count (including the NUL).
+        GetComputerNameExW(ComputerNamePhysicalDnsHostname, None, &raw mut size).ok()?;
+        if size == 0 {
+            return None;
+        }
+        let mut buffer = vec![0_u16; size as usize];
         GetComputerNameExW(
             ComputerNamePhysicalDnsHostname,
-            windows::core::PWSTR::null(),
-            &mut size,
+            Some(windows::core::PWSTR(buffer.as_mut_ptr())),
+            &raw mut size,
         )
-        .ok()
         .ok()?;
+        // SAFETY-free extraction: the API NUL-terminates and `size` counts
+        // the buffer it required, so the lossy decode stays in bounds.
+        let length = (size as usize).min(buffer.len());
+        let trimmed = &buffer[..length];
+        let trimmed = match trimmed.iter().position(|unit| *unit == 0) {
+            Some(nul) => &trimmed[..nul],
+            None => trimmed,
+        };
+        Some(String::from_utf16_lossy(trimmed))
     }
-    if size == 0 {
-        return None;
-    }
-    let mut buffer = vec![0_u16; size as usize];
-    unsafe {
-        GetComputerNameExW(
-            ComputerNamePhysicalDnsHostname,
-            windows::core::PWSTR(buffer.as_mut_ptr()),
-            &mut size,
-        )
-        .ok()
-        .ok()?;
-    }
-    let length = (size as usize).min(buffer.len());
-    let trimmed = &buffer[..length];
-    let trimmed = match trimmed.iter().position(|unit| *unit == 0) {
-        Some(nul) => &trimmed[..nul],
-        None => trimmed,
-    };
-    Some(String::from_utf16_lossy(trimmed))
 }
 
 #[cfg(not(windows))]
