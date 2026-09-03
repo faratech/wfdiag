@@ -653,7 +653,7 @@ pub fn process_stats(processes: &[(u32, u64)], enabled: bool) -> HashMap<u32, Pr
         let mut sampled_running_time = false;
 
         for adapter in adapters.iter() {
-            sampled_running_time |= sample_process_nodes(
+            let adapter_answered = sample_process_nodes(
                 adapter,
                 handle,
                 prev,
@@ -662,7 +662,15 @@ pub fn process_stats(processes: &[(u32, u64)], enabled: bool) -> HashMap<u32, Pr
                 fresh,
                 &mut entry,
             );
-            sample_process_segments(adapter, handle, &mut entry);
+            sampled_running_time |= adapter_answered;
+            // When the running-time query answered, the process is visible
+            // to this adapter's statistics and the segment sweep is worth
+            // its calls; when it did not, segment queries will fail the
+            // same way - skip them (2026-09-03 audit, second half of the
+            // per-process sweep cost).
+            if adapter_answered {
+                sample_process_segments(adapter, handle, &mut entry);
+            }
         }
 
         unsafe {
