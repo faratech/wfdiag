@@ -17,6 +17,7 @@ use windows::Win32::System::EventLog::{
     EvtRender, EvtRenderEventXml,
 };
 use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+use windows::Win32::System::TaskScheduler::{ITaskFolder, ITaskService};
 use windows::core::HRESULT;
 use windows::core::PCWSTR;
 // Performance counter imports removed - not used in current implementation
@@ -135,6 +136,13 @@ fn pending_reboot_output(
         }
     })
 }
+
+/// Bound on scheduled tasks visited per scan: every task still gets its
+/// Name/Path/State reads so the enabled-only filter sees the whole tree.
+const SCHEDULED_TASK_VISIT_CAP: usize = 4000;
+/// How many enabled rows get the four extra property reads (the output cap
+/// is 200 rows, so later enabled rows ship with identity fields only).
+const ENABLED_FULL_ROWS: usize = 200;
 
 impl NativeDiagnostics {
     pub fn new() -> Result<Self> {
@@ -2025,31 +2033,49 @@ impl NativeDiagnostics {
 
     /// Enumerate the scheduled-task tree (depth 3, budgeted) over one COM
     /// session.
-    #[allow(clippy::items_after_statements)] // the recursive walker beside its call site
     fn walk_scheduled_task_folders() -> Result<Vec<Value>> {
+        use windows::core::BSTR;
+
+        // Every task gets Name/Path/State (three reads - State drives
+        // the enabled-only filter, so the whole tree must be seen:
+        // capping before the filter hid enabled tasks behind disabled
+        // ones, 2026-09-03 audit). The four expensive per-task property
+        // reads are spent only on the first ENABLED_FULL_ROWS enabled
+        // tasks; later ones run fine with the three identity fields the
+        // consumer shows.
+        let task_service = Self::connect_task_service()?;
+        let root_folder: ITaskFolder = unsafe {
+            task_service
+                .GetFolder(&BSTR::from("\\"))
+                .map_err(|e| anyhow::anyhow!("Failed to get root folder: {e}"))?
+        };
+
+        let mut tasks = Vec::new();
+        let mut budget = SCHEDULED_TASK_VISIT_CAP;
+        let mut enabled_full_used = 0_usize;
+
+        unsafe {
+            Self::enumerate_folder(
+                &root_folder,
+                &mut tasks,
+                0,
+                &mut budget,
+                &mut enabled_full_used,
+            );
+        }
+
+        Ok(tasks)
+    }
+
+    /// One COM session against the local task scheduler.
+    fn connect_task_service() -> Result<ITaskService> {
         use windows::Win32::System::Com::{
             CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
         };
-        use windows::Win32::System::TaskScheduler::{
-            ITaskFolder, ITaskService, TASK_STATE_DISABLED, TASK_STATE_QUEUED, TASK_STATE_READY,
-            TASK_STATE_RUNNING, TaskScheduler,
-        };
+        use windows::Win32::System::TaskScheduler::TaskScheduler;
         use windows::Win32::System::Variant::VARIANT;
-        use windows::core::BSTR;
-
-        let mut tasks = Vec::new();
 
         unsafe {
-            // Every task gets Name/Path/State (three reads - State drives
-            // the enabled-only filter, so the whole tree must be seen:
-            // capping before the filter hid enabled tasks behind disabled
-            // ones, 2026-09-03 audit). The four expensive per-task property
-            // reads are spent only on the first ENABLED_FULL_ROWS enabled
-            // tasks; later ones run fine with the three identity fields the
-            // consumer shows.
-            const SCHEDULED_TASK_VISIT_CAP: usize = 4000;
-            const ENABLED_FULL_ROWS: usize = 200;
-
             // Initialize COM
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
@@ -2063,125 +2089,102 @@ impl NativeDiagnostics {
             task_service
                 .Connect(&empty_var, &empty_var, &empty_var, &empty_var)
                 .map_err(|e| anyhow::anyhow!("Failed to connect to TaskScheduler: {e}"))?;
+            Ok(task_service)
+        }
+    }
 
-            // Get root folder
-            let root_folder: ITaskFolder = task_service
-                .GetFolder(&BSTR::from("\\"))
-                .map_err(|e| anyhow::anyhow!("Failed to get root folder: {e}"))?;
+    // Recursive task-tree walker. Every task gets Name/Path/State; the
+    // four expensive property reads go only to the first ENABLED_FULL_ROWS
+    // enabled rows (see walk_scheduled_task_folders).
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn enumerate_folder(
+        folder: &ITaskFolder,
+        tasks: &mut Vec<Value>,
+        depth: u32,
+        budget: &mut usize,
+        enabled_full_used: &mut usize,
+    ) {
+        use windows::Win32::System::TaskScheduler::{
+            TASK_STATE_DISABLED, TASK_STATE_QUEUED, TASK_STATE_READY, TASK_STATE_RUNNING,
+        };
+        use windows::Win32::System::Variant::VARIANT;
+        if depth > 3 || *budget == 0 {
+            return;
+        } // Limit recursion depth and total visited tasks
 
-            // Recursive function to enumerate tasks
-            #[allow(clippy::too_many_arguments)]
-            fn enumerate_folder(
-                folder: &ITaskFolder,
-                tasks: &mut Vec<Value>,
-                depth: u32,
-                budget: &mut usize,
-                enabled_full_used: &mut usize,
-            ) {
-                if depth > 3 || *budget == 0 {
-                    return;
-                } // Limit recursion depth and total visited tasks
+        unsafe {
+            // Get tasks in this folder
+            if let Ok(task_collection) = folder.GetTasks(0)
+                && let Ok(count) = task_collection.Count()
+            {
+                for i in 1..=count {
+                    if *budget == 0 {
+                        break;
+                    }
+                    *budget -= 1;
+                    let idx = VARIANT::from(i);
+                    if let Ok(task) = task_collection.get_Item(&idx) {
+                        let mut task_info = serde_json::Map::new();
 
-                unsafe {
-                    // Get tasks in this folder
-                    if let Ok(task_collection) = folder.GetTasks(0)
-                        && let Ok(count) = task_collection.Count()
-                    {
-                        for i in 1..=count {
-                            if *budget == 0 {
-                                break;
+                        if let Ok(name) = task.Name() {
+                            task_info.insert("TaskName".to_string(), json!(name.to_string()));
+                        }
+                        if let Ok(path) = task.Path() {
+                            task_info.insert("TaskPath".to_string(), json!(path.to_string()));
+                        }
+                        let mut state_str = "Unknown";
+                        if let Ok(state) = task.State() {
+                            state_str = match state {
+                                TASK_STATE_DISABLED => "Disabled",
+                                TASK_STATE_QUEUED => "Queued",
+                                TASK_STATE_READY => "Ready",
+                                TASK_STATE_RUNNING => "Running",
+                                _ => "Unknown",
+                            };
+                            task_info.insert("State".to_string(), json!(state_str));
+                        }
+                        // The expensive optional reads go only to the
+                        // first enabled rows the output will keep.
+                        let wants_extras =
+                            state_str != "Disabled" && *enabled_full_used < ENABLED_FULL_ROWS;
+                        if wants_extras {
+                            *enabled_full_used += 1;
+                            if let Ok(enabled) = task.Enabled() {
+                                task_info.insert("Enabled".to_string(), json!(enabled.as_bool()));
                             }
-                            *budget -= 1;
-                            let idx = VARIANT::from(i);
-                            if let Ok(task) = task_collection.get_Item(&idx) {
-                                let mut task_info = serde_json::Map::new();
-
-                                if let Ok(name) = task.Name() {
-                                    task_info
-                                        .insert("TaskName".to_string(), json!(name.to_string()));
-                                }
-                                if let Ok(path) = task.Path() {
-                                    task_info
-                                        .insert("TaskPath".to_string(), json!(path.to_string()));
-                                }
-                                let mut state_str = "Unknown";
-                                if let Ok(state) = task.State() {
-                                    state_str = match state {
-                                        TASK_STATE_DISABLED => "Disabled",
-                                        TASK_STATE_QUEUED => "Queued",
-                                        TASK_STATE_READY => "Ready",
-                                        TASK_STATE_RUNNING => "Running",
-                                        _ => "Unknown",
-                                    };
-                                    task_info.insert("State".to_string(), json!(state_str));
-                                }
-                                // The expensive optional reads go only to the
-                                // first enabled rows the output will keep.
-                                let wants_extras = state_str != "Disabled"
-                                    && *enabled_full_used < ENABLED_FULL_ROWS;
-                                if wants_extras {
-                                    *enabled_full_used += 1;
-                                }
-                                if wants_extras {
-                                    if let Ok(enabled) = task.Enabled() {
-                                        task_info.insert(
-                                            "Enabled".to_string(),
-                                            json!(enabled.as_bool()),
-                                        );
-                                    }
-                                    if let Ok(last_run) = task.LastRunTime() {
-                                        task_info
-                                            .insert("LastRunTime".to_string(), json!(last_run));
-                                    }
-                                    if let Ok(next_run) = task.NextRunTime() {
-                                        task_info
-                                            .insert("NextRunTime".to_string(), json!(next_run));
-                                    }
-                                }
-
-                                if task_info.contains_key("TaskName") {
-                                    tasks.push(Value::Object(task_info));
-                                }
+                            if let Ok(last_run) = task.LastRunTime() {
+                                task_info.insert("LastRunTime".to_string(), json!(last_run));
+                            }
+                            if let Ok(next_run) = task.NextRunTime() {
+                                task_info.insert("NextRunTime".to_string(), json!(next_run));
                             }
                         }
-                    }
 
-                    // Enumerate subfolders
-                    if let Ok(folders) = folder.GetFolders(0)
-                        && let Ok(count) = folders.Count()
-                    {
-                        for i in 1..=count {
-                            let idx = VARIANT::from(i);
-                            if let Ok(subfolder) = folders.get_Item(&idx) {
-                                enumerate_folder(
-                                    &subfolder,
-                                    tasks,
-                                    depth + 1,
-                                    budget,
-                                    enabled_full_used,
-                                );
-                            }
+                        if task_info.contains_key("TaskName") {
+                            tasks.push(Value::Object(task_info));
                         }
                     }
                 }
             }
 
-            // Visit at most this many tasks: seven COM round-trips each used
-            // to be paid for the whole tree before .take(200) discarded the
-            // rest (2026-09-03 audit). The cap sits above the 200-row output
-            // cap so enabled tasks are not crowded out by disabled ones.
-            let mut budget = SCHEDULED_TASK_VISIT_CAP;
-            let mut enabled_full_used = 0_usize;
-            enumerate_folder(
-                &root_folder,
-                &mut tasks,
-                0,
-                &mut budget,
-                &mut enabled_full_used,
-            );
+            // Enumerate subfolders
+            if let Ok(folders) = folder.GetFolders(0)
+                && let Ok(count) = folders.Count()
+            {
+                for i in 1..=count {
+                    let idx = VARIANT::from(i);
+                    if let Ok(subfolder) = folders.get_Item(&idx) {
+                        Self::enumerate_folder(
+                            &subfolder,
+                            tasks,
+                            depth + 1,
+                            budget,
+                            enabled_full_used,
+                        );
+                    }
+                }
+            }
         }
-
-        Ok(tasks)
     }
 
     pub fn get_windows_update_history(&self) -> Result<Value> {
