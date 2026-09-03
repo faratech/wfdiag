@@ -1630,8 +1630,20 @@ impl AppService {
     }
 
     fn settings_save(&mut self, settings: Box<AppSettings>) -> DispatchOutcome {
-        let echo = settings.clone();
-        self.send_settings(SettingsRequestKind::Save(echo), move |request_id| {
+        // The echo feeds the snapshot and the `Saved` fact, so it must carry
+        // the availability flags the staged actions imply but never the
+        // plaintext the dialog put in the document's secret fields: the
+        // drafts were wiped on save, and re-injecting them here kept every
+        // key in shell state for the rest of the session (2026-09-03
+        // audit). The document itself (moved into the command below) still
+        // drives the engine's transactional save.
+        let mut echo = (*settings).clone();
+        echo.open_ai_api_key = None;
+        echo.anthropic_api_key = None;
+        echo.gemini_api_key = None;
+        echo.deepseek_api_key = None;
+        echo.custom_api_key = None;
+        self.send_settings(SettingsRequestKind::Save(Box::new(echo)), move |request_id| {
             SettingsCommand::Save {
                 request_id,
                 settings,
