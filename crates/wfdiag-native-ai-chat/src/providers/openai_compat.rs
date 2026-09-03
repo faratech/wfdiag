@@ -401,7 +401,10 @@ pub async fn chat_stream(
             && !content.is_empty()
         {
             text.push_str(&content);
-            let _ = tx.send(content).await;
+            // try_send keeps SSE consumption non-blocking like the other
+            // transports: a blocking send would park this future forever if
+            // the engine ever stops draining mid-turn (see sse.rs).
+            let _ = tx.try_send(content);
         }
         if let Some(delta) = choice.delta.refusal
             && !delta.is_empty()

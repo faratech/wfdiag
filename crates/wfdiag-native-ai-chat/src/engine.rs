@@ -362,6 +362,7 @@ async fn stream_one_turn(
     tokio::pin!(future);
 
     let mut streamed = String::new();
+    let mut streamed_chars = 0_usize;
     let mut pending = String::new();
     let mut receiver_open = true;
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(FLUSH_INTERVAL_MS));
@@ -404,16 +405,19 @@ async fn stream_one_turn(
                         // to stored sessions afterwards, so without this a
                         // runaway provider response grows memory unchecked
                         // while the turn is still streaming. Deltas past the
-                        // cap are dropped (the stream is truncated, not the
-                        // session) and the receiver is closed.
-                        if streamed.chars().count() >= MAX_STREAM_CHARS {
-                            receiver_open = false;
-                            continue;
-                        }
-                        streamed.push_str(&delta);
-                        pending.push_str(&delta);
-                        if pending.chars().count() >= FLUSH_CHARS {
-                            flush!();
+                        // cap are discarded (the stream is truncated, not the
+                        // session), but the channel keeps draining so a
+                        // transport that blocks on a full channel can still
+                        // finish instead of stalling the turn to its timeout.
+                        // The running count replaces a per-delta
+                        // `streamed.chars().count()`, which was O(n^2).
+                        if streamed_chars < MAX_STREAM_CHARS {
+                            streamed_chars += delta.chars().count();
+                            streamed.push_str(&delta);
+                            pending.push_str(&delta);
+                            if pending.chars().count() >= FLUSH_CHARS {
+                                flush!();
+                            }
                         }
                     }
                     None => receiver_open = false,
