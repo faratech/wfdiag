@@ -53,35 +53,12 @@ impl EnvironmentPort for SystemEnvironment {
     }
 
     fn temp_file_count(&self) -> Option<usize> {
-        // Issue detection only needs the approximate magnitude, but this
-        // walk ran synchronously inside `drain` on every scan commit and
-        // RefreshIssues - an unbounded directory walk on the UI thread on
-        // machines with a huge %TEMP% (2026-09-03 audit). Detection is a
-        // pure function of the count, so amortize it: recompute at most
-        // once a minute.
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static CACHED_AT: AtomicU64 = AtomicU64::new(0);
-        // `count + 1`; 0 means the directory was unreadable.
-        static CACHED_VALUE: AtomicU64 = AtomicU64::new(0);
-        const CACHE_TTL_MILLIS: u64 = 60_000;
-
-        let now = wfdiag_native_update::policy::unix_time_millis();
-        let cached_at = CACHED_AT.load(Ordering::Relaxed);
-        if cached_at != 0 && now.saturating_sub(cached_at) < CACHE_TTL_MILLIS {
-            return match CACHED_VALUE.load(Ordering::Relaxed) {
-                0 => None,
-                value => usize::try_from(value - 1).ok(),
-            };
-        }
-        let fresh = std::fs::read_dir(std::env::temp_dir())
-            .ok()
-            .map(Iterator::count);
-        CACHED_VALUE.store(
-            fresh.map_or(0, |count| u64::try_from(count).map_or(0, |c| c + 1)),
-            Ordering::Relaxed,
-        );
-        CACHED_AT.store(now, Ordering::Relaxed);
-        fresh
+        // Deliberately uncached (2026-09-03 audit #283): this count is
+        // evidence for issue detection, and a cached value read before a
+        // remediation ran made the post-fix verification re-detect the very
+        // issue the fix had cleared. The detection path pays the walk; the
+        // perf concern behind #272 only matters for non-evidence callers.
+        std::fs::read_dir(std::env::temp_dir()).ok().map(Iterator::count)
     }
 }
 
