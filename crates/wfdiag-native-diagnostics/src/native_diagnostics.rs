@@ -2040,10 +2040,15 @@ impl NativeDiagnostics {
         let mut tasks = Vec::new();
 
         unsafe {
-            // Bound on scheduled tasks visited per scan (see the call site):
-            // seven COM round-trips each used to be paid for the whole tree
-            // before .take(200) discarded the rest.
-            const SCHEDULED_TASK_VISIT_CAP: usize = 400;
+            // Every task gets Name/Path/State (three reads - State drives
+            // the enabled-only filter, so the whole tree must be seen:
+            // capping before the filter hid enabled tasks behind disabled
+            // ones, 2026-09-03 audit). The four expensive per-task property
+            // reads are spent only on the first ENABLED_FULL_ROWS enabled
+            // tasks; later ones run fine with the three identity fields the
+            // consumer shows.
+            const SCHEDULED_TASK_VISIT_CAP: usize = 4000;
+            const ENABLED_FULL_ROWS: usize = 200;
 
             // Initialize COM
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -2065,11 +2070,13 @@ impl NativeDiagnostics {
                 .map_err(|e| anyhow::anyhow!("Failed to get root folder: {e}"))?;
 
             // Recursive function to enumerate tasks
+            #[allow(clippy::too_many_arguments)]
             fn enumerate_folder(
                 folder: &ITaskFolder,
                 tasks: &mut Vec<Value>,
                 depth: u32,
                 budget: &mut usize,
+                enabled_full_used: &mut usize,
             ) {
                 if depth > 3 || *budget == 0 {
                     return;
@@ -2084,6 +2091,7 @@ impl NativeDiagnostics {
                             if *budget == 0 {
                                 break;
                             }
+                            *budget -= 1;
                             let idx = VARIANT::from(i);
                             if let Ok(task) = task_collection.get_Item(&idx) {
                                 let mut task_info = serde_json::Map::new();
@@ -2096,8 +2104,9 @@ impl NativeDiagnostics {
                                     task_info
                                         .insert("TaskPath".to_string(), json!(path.to_string()));
                                 }
+                                let mut state_str = "Unknown";
                                 if let Ok(state) = task.State() {
-                                    let state_str = match state {
+                                    state_str = match state {
                                         TASK_STATE_DISABLED => "Disabled",
                                         TASK_STATE_QUEUED => "Queued",
                                         TASK_STATE_READY => "Ready",
@@ -2106,20 +2115,32 @@ impl NativeDiagnostics {
                                     };
                                     task_info.insert("State".to_string(), json!(state_str));
                                 }
-                                if let Ok(enabled) = task.Enabled() {
-                                    task_info
-                                        .insert("Enabled".to_string(), json!(enabled.as_bool()));
+                                // The expensive optional reads go only to the
+                                // first enabled rows the output will keep.
+                                let wants_extras = state_str != "Disabled"
+                                    && *enabled_full_used < ENABLED_FULL_ROWS;
+                                if wants_extras {
+                                    *enabled_full_used += 1;
                                 }
-                                if let Ok(last_run) = task.LastRunTime() {
-                                    task_info.insert("LastRunTime".to_string(), json!(last_run));
-                                }
-                                if let Ok(next_run) = task.NextRunTime() {
-                                    task_info.insert("NextRunTime".to_string(), json!(next_run));
+                                if wants_extras {
+                                    if let Ok(enabled) = task.Enabled() {
+                                        task_info.insert(
+                                            "Enabled".to_string(),
+                                            json!(enabled.as_bool()),
+                                        );
+                                    }
+                                    if let Ok(last_run) = task.LastRunTime() {
+                                        task_info
+                                            .insert("LastRunTime".to_string(), json!(last_run));
+                                    }
+                                    if let Ok(next_run) = task.NextRunTime() {
+                                        task_info
+                                            .insert("NextRunTime".to_string(), json!(next_run));
+                                    }
                                 }
 
                                 if task_info.contains_key("TaskName") {
                                     tasks.push(Value::Object(task_info));
-                                    *budget -= 1;
                                 }
                             }
                         }
@@ -2132,7 +2153,13 @@ impl NativeDiagnostics {
                         for i in 1..=count {
                             let idx = VARIANT::from(i);
                             if let Ok(subfolder) = folders.get_Item(&idx) {
-                                enumerate_folder(&subfolder, tasks, depth + 1, budget);
+                                enumerate_folder(
+                                    &subfolder,
+                                    tasks,
+                                    depth + 1,
+                                    budget,
+                                    enabled_full_used,
+                                );
                             }
                         }
                     }
@@ -2144,7 +2171,14 @@ impl NativeDiagnostics {
             // rest (2026-09-03 audit). The cap sits above the 200-row output
             // cap so enabled tasks are not crowded out by disabled ones.
             let mut budget = SCHEDULED_TASK_VISIT_CAP;
-            enumerate_folder(&root_folder, &mut tasks, 0, &mut budget);
+            let mut enabled_full_used = 0_usize;
+            enumerate_folder(
+                &root_folder,
+                &mut tasks,
+                0,
+                &mut budget,
+                &mut enabled_full_used,
+            );
         }
 
         Ok(tasks)
