@@ -58,14 +58,11 @@ impl AiResponseCache {
     fn insert(&mut self, key: String, value: String) {
         self.cleanup_expired();
         let entry_bytes = key.len().saturating_add(value.len());
-        if self.max_entries == 0 || entry_bytes > self.max_bytes {
-            self.remove(&key);
-            return;
-        }
-        if entry_bytes > self.max_entry_bytes {
-            // The oversized value cannot be cached, but an existing (smaller)
-            // entry for this key is still valid — keep it instead of evicting
-            // a perfectly good response.
+        // An oversized value can never be cached, but an existing (smaller)
+        // entry for this key is still valid — keep it instead of evicting a
+        // perfectly good response. The two oversized checks used to behave
+        // oppositely at the total-budget boundary (2026-09-03 audit #320).
+        if self.max_entries == 0 || entry_bytes > self.max_entry_bytes {
             return;
         }
         self.remove(&key);
