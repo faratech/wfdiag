@@ -902,8 +902,12 @@ pub fn detect_page_file_pressure(ctx: &DetectCtx) -> Option<Detection> {
     }
     let available_percent = (available as f64 / total as f64) * 100.0;
     if available_percent < 10.0 {
+        // ullTotalPageFile/ullAvailPageFile report the commit LIMIT and
+        // remaining COMMIT CHARGE (RAM + page file combined), not file
+        // occupancy - the text must say what is actually measured
+        // (2026-09-03 audit).
         return Some(Detection::new(format!(
-            "Page file nearly exhausted: {:.1}% of {} MB available.",
+            "Commit charge is high: only {:.1}% of the {} MB commit limit (RAM + page file) remains available.",
             available_percent, total
         )));
     }
