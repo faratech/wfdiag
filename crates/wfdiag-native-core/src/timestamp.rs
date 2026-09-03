@@ -112,6 +112,12 @@ impl Timestamp {
 
     /// Parse from ISO 8601 string
     ///
+    /// A trailing `Z` and a trailing numeric UTC offset (`[+-]HH:MM`,
+    /// `[+-]HHMM` or `[+-]HH`) are both honoured: the stored instant is UTC,
+    /// so the offset is subtracted (`+02:00` means the local time is two
+    /// hours ahead of UTC). Fractional seconds and anything after the time
+    /// field are ignored.
+    ///
     /// # Errors
     /// Returns a JSON-serialized [`DiagError::Internal`] when the string is
     /// shorter than `YYYY-MM-DDTHH:MM:SS` or any field fails to parse.
@@ -119,16 +125,9 @@ impl Timestamp {
         // Parse format: YYYY-MM-DDTHH:MM:SS or YYYY-MM-DDTHH:MM:SSZ or with timezone
         let s = s.trim();
 
-        // Remove trailing Z or timezone
+        // Remove trailing Z, then split off a trailing timezone offset.
         let s = s.trim_end_matches('Z');
-        let s = if let Some(idx) = s.rfind('+') {
-            &s[..idx]
-        } else if let Some(idx) = s.rfind('-') {
-            // Check if it's the date separator or timezone
-            if idx > 10 { &s[..idx] } else { s }
-        } else {
-            s
-        };
+        let (s, offset_seconds) = split_utc_offset(s);
 
         // Parse components. Fields are cut from the byte view so a multi-byte
         // character in the input becomes the documented `Err` instead of a
@@ -161,8 +160,48 @@ impl Timestamp {
         let secs =
             days * 86_400 + i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second);
 
-        Ok(Self { secs })
+        Ok(Self {
+            secs: secs - offset_seconds,
+        })
     }
+}
+
+/// Split a trailing numeric UTC offset (`[+-]HH:MM`, `[+-]HHMM` or `[+-]HH`)
+/// off an ISO timestamp, returning the input without it and the offset in
+/// seconds. A '-' at or before index 10 is the date separator, not an offset
+/// delimiter. A sign that introduces something else is still stripped — the
+/// fields are read by position, so that trailing text never mattered — but it
+/// contributes no shift.
+fn split_utc_offset(s: &str) -> (&str, i64) {
+    let Some(idx) = s.rfind(['+', '-']) else {
+        return (s, 0);
+    };
+    let sign_byte = s.as_bytes()[idx];
+    if sign_byte == b'-' && idx <= 10 {
+        return (s, 0);
+    }
+    let (kept, tail) = s.split_at(idx);
+    // The sign rides through: `-05:00` means the local clock is five hours
+    // BEHIND UTC, so the stored instant is local minus (-5h).
+    let sign = if sign_byte == b'-' { -1 } else { 1 };
+    (kept, sign * offset_seconds(&tail[1..]).unwrap_or_default())
+}
+
+/// Seconds in an offset body without its sign: `HH`, `HH:MM` or `HHMM`.
+/// Returns None when the body is not a well-formed offset.
+fn offset_seconds(body: &str) -> Option<i64> {
+    let (hours, minutes) = match body.as_bytes() {
+        [h1, h2] => ([*h1, *h2], *b"00"),
+        [h1, h2, b':', m1, m2] | [h1, h2, m1, m2] => ([*h1, *h2], [*m1, *m2]),
+        _ => return None,
+    };
+    let pair = |digits: [u8; 2]| {
+        digits
+            .iter()
+            .all(u8::is_ascii_digit)
+            .then(|| i64::from(digits[0] - b'0') * 10 + i64::from(digits[1] - b'0'))
+    };
+    Some(pair(hours)? * 3600 + pair(minutes)? * 60)
 }
 
 /// Convert year/month/day to days since Unix epoch
@@ -280,6 +319,61 @@ mod tests {
     fn test_epoch() {
         let ts = Timestamp::from_secs(0);
         assert_eq!(ts.to_iso_string(), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn numeric_utc_offset_is_subtracted() {
+        // +02:00 means the local clock is two hours ahead of UTC.
+        let positive = Timestamp::from_iso_string("2026-06-12T12:00:00+02:00").unwrap();
+        assert_eq!(
+            positive,
+            Timestamp::from_iso_string("2026-06-12T10:00:00Z").unwrap()
+        );
+        assert_eq!(positive.to_iso_string(), "2026-06-12T10:00:00Z");
+
+        // A negative offset shifts the other way.
+        let negative = Timestamp::from_iso_string("2026-06-12T12:00:00-05:00").unwrap();
+        assert_eq!(negative.to_iso_string(), "2026-06-12T17:00:00Z");
+
+        // Compact spellings of the same offset agree with the colon form.
+        assert_eq!(
+            Timestamp::from_iso_string("2026-06-12T12:00:00+0200").unwrap(),
+            positive
+        );
+        assert_eq!(
+            Timestamp::from_iso_string("2026-06-12T12:00:00+02").unwrap(),
+            positive
+        );
+
+        // Fractional seconds ride along and are dropped, offset or not.
+        assert_eq!(
+            Timestamp::from_iso_string("2026-06-12T15:30:45.1234567-07:00").unwrap(),
+            Timestamp::from_iso_string("2026-06-12T22:30:45Z").unwrap()
+        );
+    }
+
+    #[test]
+    fn z_and_offsetless_input_stay_utc() {
+        let zulu = Timestamp::from_iso_string("2024-01-15T12:30:45Z").unwrap();
+        // An absent designator is UTC, and the YYYY-MM-DD separators must not
+        // be mistaken for a negative offset.
+        assert_eq!(
+            zulu,
+            Timestamp::from_iso_string("2024-01-15T12:30:45").unwrap()
+        );
+        assert_eq!(
+            zulu,
+            Timestamp::from_iso_string("2024-01-15 12:30:45").unwrap()
+        );
+    }
+
+    #[test]
+    fn malformed_offset_is_ignored_not_invented() {
+        // A sign followed by text that is not an offset shifts nothing.
+        assert_eq!(
+            Timestamp::from_iso_string("2026-06-12T12:00:00+junk").unwrap(),
+            Timestamp::from_iso_string("2026-06-12T12:00:00Z").unwrap()
+        );
     }
 
     #[test]
