@@ -361,7 +361,20 @@ pub(crate) fn history_retention() -> (bool, u32) {
 /// loading or rewriting secret material.
 pub(crate) fn persist_cloud_fallback_policy(policy: CloudFallbackPolicy) -> Result<(), String> {
     let path = get_settings_path()?;
-    let mut settings = read_settings_from_disk().unwrap_or_default();
+    // Absent means "start from defaults"; present-but-unparsable must REFUSE,
+    // not silently rewrite the user's whole settings document from defaults
+    // (2026-09-03 audit).
+    let path_exists = path.is_file();
+    let mut settings = match read_settings_from_disk() {
+        Some(settings) => settings,
+        None if path_exists => {
+            return Err(DiagError::serialization(
+                "settings.json exists but could not be parsed; fix or remove it before changing the cloud fallback policy",
+            )
+            .to_string());
+        }
+        None => AppSettings::default(),
+    };
     settings.cloud_fallback_policy = policy;
     let json = serde_json::to_string_pretty(&settings_for_disk(&settings))
         .map_err(|e| DiagError::serialization(e.to_string()))?;
