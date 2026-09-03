@@ -303,29 +303,36 @@ pub async fn next_auto_provider(
     if let Some(local) = next_auto_local_provider(pref, tried).await {
         return Some(local);
     }
-    let untried = |p: AIProvider| !tried.contains(&p);
-    if untried(AIProvider::CustomOpenAI) && check_custom_available().await.is_some() {
-        return Some(AIProvider::CustomOpenAI);
-    }
-    if untried(AIProvider::CodexCli) && check_codex_available().await {
-        return Some(AIProvider::CodexCli);
-    }
-    if untried(AIProvider::ClaudeCode) && check_claude_code_available().await {
-        return Some(AIProvider::ClaudeCode);
-    }
-    if untried(AIProvider::OpenAI) && check_openai_available().await {
-        return Some(AIProvider::OpenAI);
-    }
-    if untried(AIProvider::Anthropic) && check_anthropic_available().await {
-        return Some(AIProvider::Anthropic);
-    }
-    if untried(AIProvider::Gemini) && check_gemini_available().await {
-        return Some(AIProvider::Gemini);
-    }
-    if untried(AIProvider::DeepSeek) && check_deepseek_available().await {
-        return Some(AIProvider::DeepSeek);
+    // Walk the crate's single-sourced ordering (2026-09-03 audit: this used
+    // to be a hand-written chain that silently drifted from
+    // AUTO_FALLBACK_ORDER whenever the table gained a provider or reordered).
+    // The exhaustive match makes a new provider a compile error here, so the
+    // probe chain cannot fall out of sync again.
+    for provider in wfdiag_native_ai_provider::AUTO_FALLBACK_ORDER {
+        if tried.contains(&provider) || !provider_is_available(provider).await {
+            continue;
+        }
+        return Some(provider);
     }
     None
+}
+
+/// Probe one provider through the shell's availability checks, in the
+/// crate's fallback order.
+async fn provider_is_available(provider: AIProvider) -> bool {
+    match provider {
+        AIProvider::PhiSilica => check_phi_silica_available().await.1,
+        AIProvider::FoundryLocal => check_foundry_local_available().await.is_some(),
+        AIProvider::Ollama => check_ollama_available().await.is_some(),
+        AIProvider::CustomOpenAI => check_custom_available().await.is_some(),
+        AIProvider::CodexCli => check_codex_available().await,
+        AIProvider::ClaudeCode => check_claude_code_available().await,
+        AIProvider::OpenAI => check_openai_available().await,
+        AIProvider::Anthropic => check_anthropic_available().await,
+        AIProvider::Gemini => check_gemini_available().await,
+        AIProvider::DeepSeek => check_deepseek_available().await,
+        AIProvider::None => false,
+    }
 }
 
 /// The next private Auto provider only. This deliberately stops before any
@@ -338,15 +345,19 @@ pub async fn next_auto_local_provider(
     if pref != AIProviderPreference::Auto {
         return None;
     }
-    let untried = |provider: AIProvider| !tried.contains(&provider);
-    if untried(AIProvider::PhiSilica) && check_phi_silica_available().await.1 {
-        return Some(AIProvider::PhiSilica);
-    }
-    if untried(AIProvider::FoundryLocal) && check_foundry_local_available().await.is_some() {
-        return Some(AIProvider::FoundryLocal);
-    }
-    if untried(AIProvider::Ollama) && check_ollama_available().await.is_some() {
-        return Some(AIProvider::Ollama);
+    // The local-only prefix of the single-sourced order: deliberately stops
+    // before any custom/subscription/API-cloud probe so surfaces without a
+    // typed consent flow never touch the cloud fallback path (2026-09-03
+    // audit: this was a second hand-written copy of the ordering).
+    for provider in wfdiag_native_ai_provider::AUTO_FALLBACK_ORDER {
+        if wfdiag_native_ai_provider::provider_trust_zone(provider)
+            != Some(wfdiag_native_ai_provider::ProviderTrustZone::Local)
+        {
+            break;
+        }
+        if !tried.contains(&provider) && provider_is_available(provider).await {
+            return Some(provider);
+        }
     }
     None
 }
