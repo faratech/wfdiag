@@ -69,6 +69,26 @@ fn subscription_events(events: &[AppEvent]) -> Vec<&SubscriptionEvent> {
         .collect()
 }
 
+/// Wait for the codex account row to reach `state`: the projection lands in
+/// a drain batch after the operation's own Completed event, so a one-shot
+/// snapshot read races it under load (2026-09-03 audit #316).
+fn wait_for_account_state(harness: &mut Harness, state: SubscriptionAuthState, what: &str) {
+    harness.pump_until(
+        |harness, _| {
+            harness
+                .service
+                .snapshot()
+                .provider_setup
+                .accounts
+                .get(CODEX)
+                .and_then(|account| account.status.as_ref())
+                .map(|status| status.state)
+                == Some(state)
+        },
+        what,
+    );
+}
+
 #[test]
 fn status_then_sign_in_then_sign_out_walk_the_account_state_machine() {
     let mut harness = boot_ai("subscription_auth");
@@ -128,16 +148,12 @@ fn status_then_sign_in_then_sign_out_walk_the_account_state_machine() {
                 if matches!(**event, SubscriptionEvent::Completed { operation: SubscriptionAuthOperation::SignIn, .. })
         )
     });
-    assert_eq!(
-        harness
-            .service
-            .snapshot()
-            .provider_setup
-            .accounts
-            .get(CODEX)
-            .and_then(|account| account.status.as_ref())
-            .map(|status| status.state),
-        Some(SubscriptionAuthState::SignedIn)
+    // The account row flips when the post-operation status projection is
+    // drained, which can be a later batch than Completed itself.
+    wait_for_account_state(
+        &mut harness,
+        SubscriptionAuthState::SignedIn,
+        "the signed-in projection",
     );
 
     assert!(
@@ -156,6 +172,11 @@ fn status_then_sign_in_then_sign_out_walk_the_account_state_machine() {
                 if matches!(**event, SubscriptionEvent::Completed { operation: SubscriptionAuthOperation::SignOut, .. })
         )
     });
+    wait_for_account_state(
+        &mut harness,
+        SubscriptionAuthState::SignedOut,
+        "the signed-out projection",
+    );
     assert_eq!(
         harness.mocks.ai.subscriptions.operations(),
         [

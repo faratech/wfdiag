@@ -1128,6 +1128,16 @@ impl ScriptedSubscriptions {
         lock(&self.state).states.insert(provider, state);
     }
 
+    /// A live reader over the scripted account states, for the provider
+    /// backend's probe snapshot to mirror (2026-09-03 audit).
+    pub fn auth_state_reader(
+        &self,
+    ) -> impl Fn(SubscriptionAuthProvider) -> Option<SubscriptionAuthState> + Send + Sync + 'static
+    {
+        let state = Arc::clone(&self.state);
+        move |provider| lock(&state).states.get(&provider).copied()
+    }
+
     /// Make every account operation fail.
     pub fn fail_auth(&self, message: &str) {
         lock(&self.state).auth_failure = Some(message.to_string());

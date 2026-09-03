@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use tokio::sync::oneshot;
+use wfdiag_native_ai_chat::{SubscriptionAuthProvider, SubscriptionAuthState};
 use wfdiag_native_ai_provider::{
     AIProviderPreference, ANTHROPIC_DEFAULT_MODEL, BackendFuture, DEEPSEEK_DEFAULT_MODEL,
     FOUNDRY_DEFAULT_MODEL, GEMINI_DEFAULT_MODEL, OPENAI_DEFAULT_MODEL, ProviderManagementBackend,
@@ -419,10 +420,22 @@ impl SignatureProvider for MockSignatureProvider {
     }
 }
 
+/// A live reader over the scripted account states.
+type AuthStateReader = Arc<
+    Mutex<
+        Option<
+            Box<dyn Fn(SubscriptionAuthProvider) -> Option<SubscriptionAuthState> + Send + Sync>,
+        >,
+    >,
+>;
+
 /// A provider-management backend with a scripted probe snapshot.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MockProviderBackend {
     probes: Arc<Mutex<ProviderProbeSnapshot>>,
+    /// Live reader over the AI mock's scripted account states, so probe
+    /// snapshots reflect what the auth script did.
+    auth_states: AuthStateReader,
     settings: Arc<Mutex<ProviderSettingsSnapshot>>,
     preference: Arc<Mutex<AIProviderPreference>>,
     identity: Arc<Mutex<bool>>,
@@ -434,6 +447,7 @@ impl Default for MockProviderBackend {
     fn default() -> Self {
         Self {
             probes: Arc::new(Mutex::new(ProviderProbeSnapshot::default())),
+            auth_states: Arc::new(Mutex::new(None)),
             settings: Arc::new(Mutex::new(ProviderSettingsSnapshot::default())),
             preference: Arc::new(Mutex::new(AIProviderPreference::default())),
             identity: Arc::new(Mutex::new(false)),
@@ -481,10 +495,38 @@ impl MockProviderBackend {
 impl ProviderManagementBackend for MockProviderBackend {
     fn status_input(&self) -> BackendFuture<'_, ProviderStatusInput> {
         Box::pin(async move {
+            let mut probes = lock(&self.probes).clone();
+            // Mirror the scripted account truth into the CLI probe snapshot,
+            // like the real invalidated probe source does after an auth
+            // operation (2026-09-03 audit): without this, the post-operation
+            // refresh overwrote the recorded state with the stale scripted
+            // probe.
+            let reader = lock(&self.auth_states);
+            if let Some(reader) = reader.as_ref() {
+                for (provider, snapshot) in [
+                    (SubscriptionAuthProvider::Codex, &mut probes.codex),
+                    (SubscriptionAuthProvider::ClaudeCode, &mut probes.claude),
+                ] {
+                    match reader(provider) {
+                        Some(SubscriptionAuthState::SignedIn) => {
+                            snapshot.usable = true;
+                            snapshot.installed = true;
+                            snapshot.obstacle = None;
+                        }
+                        Some(SubscriptionAuthState::SignedOut) => {
+                            snapshot.usable = false;
+                            snapshot.installed = true;
+                            snapshot.obstacle =
+                                Some(wfdiag_native_ai_chat::CliObstacle::NoStoredLogin);
+                        }
+                        _ => {}
+                    }
+                }
+            }
             ProviderStatusInput {
                 preference: *lock(&self.preference),
                 settings: lock(&self.settings).clone(),
-                probes: lock(&self.probes).clone(),
+                probes,
                 defaults: ProviderModelDefaults {
                     foundry: FOUNDRY_DEFAULT_MODEL.to_string(),
                     openai: OPENAI_DEFAULT_MODEL.to_string(),
@@ -514,7 +556,33 @@ impl ProviderManagementBackend for MockProviderBackend {
 
     fn subscription_probes(&self) -> BackendFuture<'_, SubscriptionProbes> {
         Box::pin(async move {
-            let probes = lock(&self.probes).clone();
+            let mut probes = lock(&self.probes).clone();
+            // Mirror the scripted account truth into the probe snapshot: the
+            // real source invalidates its cache after every auth operation,
+            // so its next answer observes the new state instead of a stale
+            // pre-operation one (2026-09-03 audit).
+            let reader = lock(&self.auth_states);
+            if let Some(reader) = reader.as_ref() {
+                for (provider, snapshot) in [
+                    (SubscriptionAuthProvider::Codex, &mut probes.codex),
+                    (SubscriptionAuthProvider::ClaudeCode, &mut probes.claude),
+                ] {
+                    match reader(provider) {
+                        Some(SubscriptionAuthState::SignedIn) => {
+                            snapshot.usable = true;
+                            snapshot.installed = true;
+                            snapshot.obstacle = None;
+                        }
+                        Some(SubscriptionAuthState::SignedOut) => {
+                            snapshot.usable = false;
+                            snapshot.installed = true;
+                            snapshot.obstacle =
+                                Some(wfdiag_native_ai_chat::CliObstacle::NoStoredLogin);
+                        }
+                        _ => {}
+                    }
+                }
+            }
             SubscriptionProbes {
                 codex: probes.codex,
                 claude: probes.claude,
@@ -779,7 +847,7 @@ impl ElevationPort for MockElevation {
 }
 
 /// Every mock, with the handles a test needs to script and inspect them.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MockPorts {
     /// The scripted diagnostic executor.
     pub executor: ScriptedExecutor,
@@ -821,7 +889,7 @@ impl MockPorts {
     /// A fresh bundle with sensible defaults.
     #[must_use]
     pub fn new() -> Self {
-        Self {
+        let bundle = Self {
             executor: ScriptedExecutor::default(),
             system: MockSystemProvider::default(),
             settings_storage: MemorySettingsStorage::default(),
@@ -836,7 +904,12 @@ impl MockPorts {
             elevation: MockElevation::default(),
             ai: MockAiPorts::new(),
             current_version: "2.5.8".to_string(),
-        }
+        };
+        // The provider backend's probe snapshot mirrors the AI mock's
+        // scripted account states (2026-09-03 audit).
+        *lock(&bundle.provider_backend.auth_states) =
+            Some(Box::new(bundle.ai.subscriptions.auth_state_reader()));
+        bundle
     }
 
     /// Build the port bundle the service consumes.

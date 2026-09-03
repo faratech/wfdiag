@@ -141,6 +141,17 @@ fn parse_provider(wire: &str) -> Result<AIProvider, RejectReason> {
         })
 }
 
+fn subscription_cli(
+    provider: SubscriptionAuthProvider,
+) -> wfdiag_native_ai_provider::SubscriptionCli {
+    match provider {
+        SubscriptionAuthProvider::Codex => wfdiag_native_ai_provider::SubscriptionCli::Codex,
+        SubscriptionAuthProvider::ClaudeCode => {
+            wfdiag_native_ai_provider::SubscriptionCli::ClaudeCode
+        }
+    }
+}
+
 fn parse_subscription_provider(wire: &str) -> Result<SubscriptionAuthProvider, RejectReason> {
     match parse_provider(wire)? {
         AIProvider::CodexCli => Ok(SubscriptionAuthProvider::Codex),
@@ -3043,6 +3054,12 @@ impl AppService {
             } => {
                 self.subscription_auth_pending = None;
                 self.record_account(status.provider, Some(status.clone()), None);
+                // The refresh below must observe the CLI's NEW state, not the
+                // TTL-cached pre-operation probe: without this invalidation
+                // the stale answer re-overwrote the recorded state for the
+                // cache's whole TTL (2026-09-03 audit).
+                wfdiag_native_ai_provider::ProcessSubscriptionCliStatusSource::new()
+                    .invalidate(subscription_cli(status.provider));
                 self.queue
                     .push(AppEvent::Provider(ProviderEvent::Subscription(Box::new(
                         SubscriptionEvent::Completed {
