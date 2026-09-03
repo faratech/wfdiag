@@ -1003,10 +1003,30 @@ pub fn detect_hosts_file_hijack(ctx: &DetectCtx) -> Option<Detection> {
             hostname_lower == *domain || hostname_lower.ends_with(&format!(".{}", domain))
         });
         if watched {
-            return Some(Detection::new(format!(
-                "hosts file redirects '{}' to {}. Security-sensitive domains should normally resolve through DNS; review this entry before trusting any login page.",
-                hostname, ip
-            )));
+            // Classify by target: loopback entries block a domain (the most
+            // common ad/telemetry tweak, and not itself a hijack); an
+            // entry pointing at a real remote address is the redirect
+            // signature worth a Critical (2026-09-03 audit).
+            let loopback = ip == "0.0.0.0"
+                || ip == "::"
+                || ip == "127.0.0.1"
+                || ip.starts_with("127.")
+                || ip == "[::1]";
+            return if loopback {
+                Some(Detection::with_severity(
+                    format!(
+                        "hosts file blocks '{hostname}' (points to {ip}). Blocking entries are common for ads and telemetry; remove the line if this domain should resolve normally."
+                    ),
+                    IssueSeverity::Warning,
+                ))
+            } else {
+                Some(Detection::with_severity(
+                    format!(
+                        "hosts file redirects '{hostname}' to {ip}. Security-sensitive domains should normally resolve through DNS; review this entry before trusting any login page."
+                    ),
+                    IssueSeverity::Critical,
+                ))
+            };
         }
     }
     None
