@@ -1207,7 +1207,11 @@ fn check_phi_silica_safe_for_identity(
                 // Never block here: the generation path holds this guard for
                 // the whole response, so a status probe used to wait minutes.
                 // Contention itself is evidence a model exists and is busy —
-                // report that instead of queuing behind it.
+                // report that instead of queuing behind it. Creation is also
+                // bounded: a probe must never pay the full uncancellable
+                // model creation (up to 2 minutes) inside a provider status
+                // refresh (2026-09-03 audit); a cold machine reports
+                // not-ready and the next probe tries again.
                 let Some(mut cached) = try_cached_model_guard() else {
                     return (
                         true,
@@ -1219,7 +1223,10 @@ fn check_phi_silica_safe_for_identity(
                         None,
                     );
                 };
-                match ensure_cached_model_locked(&mut cached, &|| false) {
+                let probe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                match ensure_cached_model_locked(&mut cached, &move || {
+                    std::time::Instant::now() > probe_deadline
+                }) {
                     Ok(()) => {
                         log_phi_silica("Direct DLL activation succeeded — Phi Silica IS available");
                         return (
