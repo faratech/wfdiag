@@ -705,6 +705,13 @@ pub(crate) async fn execute_authorized(
                 let mut step_results = Vec::new();
                 let timeout = Duration::from_secs(*timeout_secs);
                 let mut failures = Vec::new();
+                // `timeout_secs` budgets the whole sequence, not each step:
+                // healthy steps finish in seconds, so a sequence still
+                // running at the budget boundary is wedged and must not
+                // start further work. Handing every step a fresh timeout
+                // gave this AutoSafe action an N x budget worst case
+                // (2026-09-03 audit).
+                let sequence_started = std::time::Instant::now();
                 for step in *steps {
                     if cancel.is_cancelled() {
                         step_results.push(RemediationStepResult {
@@ -714,7 +721,16 @@ pub(crate) async fn execute_authorized(
                         });
                         break;
                     }
-                    match runner.run(step.program, step.args, timeout, cancel).await {
+                    let Some(step_timeout) = timeout.checked_sub(sequence_started.elapsed())
+                    else {
+                        step_results.push(RemediationStepResult {
+                            action: step.action_label.to_string(),
+                            status: RemediationStepStatus::Cancelled,
+                            detail: Some("Sequence budget exhausted".to_string()),
+                        });
+                        break;
+                    };
+                    match runner.run(step.program, step.args, step_timeout, cancel).await {
                         Ok(output) if output.success => {
                             actions_taken.push(step.action_label.to_string());
                             step_results.push(RemediationStepResult {
