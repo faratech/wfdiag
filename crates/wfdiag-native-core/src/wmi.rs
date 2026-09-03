@@ -95,6 +95,9 @@ fn ensure_com_initialized() -> Result<()> {
 /// and dropped on the same thread it was created on.
 pub struct WmiConnection {
     services: IWbemServices,
+    /// The namespace this handle came from, so a failed query can evict the
+    /// per-thread cache entry that produced it (2026-09-03 audit).
+    namespace: Option<String>,
     // PhantomData to prevent Send/Sync auto-implementation
     _marker: std::marker::PhantomData<*const ()>,
 }
@@ -119,13 +122,16 @@ impl WmiConnection {
 
         // Cache hit: hand out another handle to the shared connection.
         if let Some(services) = REUSED_SERVICES.with(|slot| {
-            slot.borrow().as_ref().and_then(|(cached, services, created)| {
-                (cached == namespace && created.elapsed() < WMI_CACHE_TTL)
-                    .then(|| services.clone())
-            })
+            slot.borrow()
+                .as_ref()
+                .and_then(|(cached, services, created)| {
+                    (cached == namespace && created.elapsed() < WMI_CACHE_TTL)
+                        .then(|| services.clone())
+                })
         }) {
             return Ok(Self {
                 services,
+                namespace: Some(namespace.to_string()),
                 _marker: std::marker::PhantomData,
             });
         }
@@ -174,6 +180,7 @@ impl WmiConnection {
 
             Ok(Self {
                 services,
+                namespace: Some(namespace.to_string()),
                 _marker: std::marker::PhantomData,
             })
         }
@@ -195,7 +202,26 @@ impl WmiConnection {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.query_internal(wql)));
 
         match result {
-            Ok(r) => r,
+            Ok(r) => {
+                // A failed query on a cached connection is most plausibly a
+                // dead connection (service restart, RPC reset): evict the
+                // cache entry so the next call reconnects instead of
+                // failing for the rest of the TTL (2026-09-03 audit).
+                if r.is_err()
+                    && let Some(namespace) = &self.namespace
+                {
+                    REUSED_SERVICES.with(|slot| {
+                        if slot
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|(cached, _, _)| cached == namespace)
+                        {
+                            *slot.borrow_mut() = None;
+                        }
+                    });
+                }
+                r
+            }
             Err(_) => Err(anyhow!("WMI query panicked")),
         }
     }
