@@ -109,15 +109,59 @@ async fn run_headless(request: ProcessRequest) -> Result<ProcessOutput, String> 
 
     let timeout = request.timeout;
     let what = request.what;
-    let output = tokio::time::timeout(timeout, command.output())
-        .await
-        .map_err(|_| format!("{what} did not answer within {} seconds", timeout.as_secs()))?
+    // #204-class cap (2026-09-03 audit): `command.output()` collected both
+    // pipes into unbounded Vecs, so the 10 s timeout bounded time but not
+    // memory. Drain to EOF with a retained-bytes cap instead, like the
+    // bridge and installer runners.
+    let mut child = command
+        .spawn()
         .map_err(|error| format!("Could not start {what}: {error}"))?;
-    Ok(ProcessOutput {
-        success: output.status.success(),
-        stdout: output.stdout,
-        stderr: output.stderr,
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let outcome = tokio::time::timeout(timeout, async {
+        let (stdout, stderr) = tokio::try_join!(
+            drain_bounded(stdout_pipe, PROBE_STDOUT_LIMIT),
+            drain_bounded(stderr_pipe, PROBE_STDERR_LIMIT),
+        )
+        .map_err(|error| format!("{what} pipe reader failed: {error}"))?;
+        let status = child
+            .wait()
+            .await
+            .map_err(|error| format!("{what} failed to run: {error}"))?;
+        Result::<_, String>::Ok((status, stdout, stderr))
     })
+    .await
+    .map_err(|_| format!("{what} did not answer within {} seconds", timeout.as_secs()))??;
+    Ok(ProcessOutput {
+        success: outcome.0.success(),
+        stdout: outcome.1,
+        stderr: outcome.2,
+    })
+}
+
+/// Retained-bytes cap for probe pipes; draining continues to EOF so the
+/// child never blocks on a full pipe.
+const PROBE_STDOUT_LIMIT: usize = 8 * 1024 * 1024;
+const PROBE_STDERR_LIMIT: usize = 256 * 1024;
+
+async fn drain_bounded<R: tokio::io::AsyncRead + Unpin>(
+    reader: Option<R>,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut retained = Vec::new();
+    let Some(mut reader) = reader else {
+        return Ok(retained);
+    };
+    let mut buffer = vec![0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(retained);
+        }
+        let remaining = limit.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..read.min(remaining)]);
+    }
 }
 
 #[cfg(windows)]
