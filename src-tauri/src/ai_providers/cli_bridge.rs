@@ -194,9 +194,7 @@ pub fn invalidate(provider: AIProvider) {
 
 /// The engine crate's CLI identity for a bridge provider, so the fork
 /// consumes the single-sourced vendor spec instead of its own copy.
-fn engine_cli(
-    provider: AIProvider,
-) -> Option<wfdiag_native_ai_provider::SubscriptionCli> {
+fn engine_cli(provider: AIProvider) -> Option<wfdiag_native_ai_provider::SubscriptionCli> {
     match provider {
         AIProvider::CodexCli => Some(wfdiag_native_ai_provider::SubscriptionCli::Codex),
         AIProvider::ClaudeCode => Some(wfdiag_native_ai_provider::SubscriptionCli::ClaudeCode),
@@ -1262,10 +1260,9 @@ mod tests {
     #[test]
     fn an_unclear_probe_is_never_signed_out_and_never_cached() {
         use wfdiag_native_ai_provider::{StatusVerdict, parse_status_output};
-        let spec = wfdiag_native_ai_provider::subscription_cli_spec(engine_cli(
-            AIProvider::ClaudeCode,
-        )
-        .expect("claude is a bridge provider"));
+        let spec = wfdiag_native_ai_provider::subscription_cli_spec(
+            engine_cli(AIProvider::ClaudeCode).expect("claude is a bridge provider"),
+        );
         // A signed-out marker wins even over a zero exit code.
         assert_eq!(
             parse_status_output(spec, true, "Not logged in · Please run /login", ""),
