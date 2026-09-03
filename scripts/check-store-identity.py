@@ -18,6 +18,11 @@ The six sources checked:
                                       sparse manifests)
   - src-tauri/windows-app.manifest  (loose executable's sparse association)
   - .github/workflows/build-and-publish-store.yml (CI's inline manifest)
+  - apps/wfdiag/src/platform/notifications.rs (toast AUMID, pinned to the
+                                      package family name recorded in
+                                      reactor-baselines/manifest.json so a
+                                      rebrand cannot silently drop every
+                                      toast; 2026-09-03 audit)
 
 The sparse-identity package must use the Store identity because the LAF token
 is bound to the full Store package family name.
@@ -90,6 +95,36 @@ ci_text = ci_manifest_path.read_text()
 find_all(f"{ci_manifest_path.name} PUBLISHER env", r"^\s*PUBLISHER:\s*(\S+)", ci_text, EXPECTED_PUBLISHER_CN)
 find_all(f"{ci_manifest_path.name} PublisherDisplayName", r"<PublisherDisplayName>([^<]+)</PublisherDisplayName>", ci_text, EXPECTED_PUBLISHER_DISPLAY_NAME)
 find_all(f"{ci_manifest_path.name} Identity Name", r'<Identity\b[^>]*\bName="([^"]+)"', ci_text, EXPECTED_IDENTITY_NAME)
+
+# --- apps/wfdiag/src/platform/notifications.rs (toast AUMID) ---
+# The AUMID embeds the package family name; the baseline records it, and
+# the shell constant must match or Windows silently drops every toast
+# (2026-09-03 audit: no script checked the Rust constant).
+baseline_path = ROOT / "reactor-baselines" / "manifest.json"
+try:
+    baseline_pfn = json.loads(baseline_path.read_text())["baseline"][
+        "source_package"
+    ]["package_family_name"]
+except (OSError, json.JSONDecodeError, KeyError) as error:
+    baseline_pfn = None
+    errors.append(f"{baseline_path.name}: cannot read package_family_name ({error})")
+notifications_path = ROOT / "apps/wfdiag/src/platform/notifications.rs"
+notifications = notifications_path.read_text()
+aumid_matches = re.findall(r'const AUMID: &str = "([^"]+)"', notifications)
+if not aumid_matches:
+    errors.append(f"{notifications_path.name}: AUMID constant not found")
+elif baseline_pfn is not None:
+    for i, aumid in enumerate(aumid_matches):
+        label = (
+            f"{notifications_path.name} AUMID [{i}]"
+            if len(aumid_matches) > 1
+            else f"{notifications_path.name} AUMID"
+        )
+        if not aumid.startswith(f"{baseline_pfn}!"):
+            errors.append(
+                f"{label}: expected the toast AUMID to start with "
+                f"{baseline_pfn!r} + '!', got {aumid!r}"
+            )
 
 if errors:
     print("Store package-identity mismatch detected:\n")
