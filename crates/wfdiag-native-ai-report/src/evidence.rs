@@ -706,35 +706,37 @@ fn compact_diagnostic_output(
     if fields.is_empty() {
         return compact_plain_text(output, max_chars);
     }
-    fields.sort_by(|(left_path, left_value), (right_path, right_value)| {
-        let left_text = format!("{left_path} {left_value}");
-        let right_text = format!("{right_path} {right_value}");
-        (
-            Reverse(anomaly_score(&left_text)),
-            Reverse(relevance_score(question_terms, &left_text)),
-            Reverse(important_field_score(left_path)),
-            left_path,
-            left_value,
-        )
-            .cmp(&(
-                Reverse(anomaly_score(&right_text)),
-                Reverse(relevance_score(question_terms, &right_text)),
-                Reverse(important_field_score(right_path)),
-                right_path,
-                right_value,
-            ))
-    });
+    // Decorate-sort-undecorate: the comparator used to format + lowercase
+    // both sides and build a fresh BTreeSet per comparison (~9k allocations
+    // per 512-field sort). Keys are computed once per field; the fitting
+    // loop pushes/pops through the real renderer instead of cloning the
+    // whole included vector per candidate (2026-09-03 audit).
+    let mut decorated: Vec<Decorated<'_>> = fields
+        .iter()
+        .map(|(path, value)| {
+            let text = format!("{path} {value}");
+            (
+                (
+                    Reverse(anomaly_score(&text)),
+                    Reverse(relevance_score(question_terms, &text)),
+                    Reverse(important_field_score(path)),
+                    path.as_str(),
+                    value.as_str(),
+                ),
+                format!("{path}={value}"),
+            )
+        })
+        .collect();
+    decorated.sort_by(|left, right| left.0.cmp(&right.0));
 
-    let total = fields.len();
-    let mut included = Vec::new();
-    for (path, value) in &fields {
-        let fragment = compact_plain_text(&format!("{path}={value}"), max_chars);
-        let mut trial = included.clone();
-        trial.push(fragment);
-        let omitted = total.saturating_sub(trial.len());
-        let rendered = render_field_fragments(&trial, omitted);
-        if char_count(&rendered) <= max_chars {
-            included = trial;
+    let total = decorated.len();
+    let mut included: Vec<String> = Vec::new();
+    for (_, fragment) in &decorated {
+        included.push(fragment.clone());
+        let omitted = total.saturating_sub(included.len());
+        let rendered = render_field_fragments(&included, omitted);
+        if char_count(&rendered) > max_chars {
+            included.pop();
         }
     }
     if included.is_empty() {
@@ -743,6 +745,19 @@ fn compact_diagnostic_output(
         render_field_fragments(&included, total.saturating_sub(included.len()))
     }
 }
+
+/// Sort key for compact field selection: anomaly, question relevance,
+/// well-known-field importance, then path/value order.
+type Decorated<'a> = (
+    (
+        std::cmp::Reverse<usize>,
+        std::cmp::Reverse<usize>,
+        std::cmp::Reverse<usize>,
+        &'a str,
+        &'a str,
+    ),
+    String,
+);
 
 fn render_field_fragments(included: &[String], omitted: usize) -> String {
     let mut rendered = included.join("; ");
