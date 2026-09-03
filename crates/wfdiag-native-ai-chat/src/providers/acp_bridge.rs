@@ -16,12 +16,23 @@
 
 use agent_client_protocol as acp;
 use agent_client_protocol::schema::v1;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+#[cfg(windows)]
+use process_wrap::tokio::{CommandWrap, CreationFlags, JobObject, KillOnDrop};
+#[cfg(unix)]
+use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessSession};
+use process_wrap::tokio::ChildWrapper;
+
+#[cfg(windows)]
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use super::cli_bridge;
 
@@ -41,6 +52,12 @@ const PROMPT_TIMEOUT: Duration = Duration::from_secs(170);
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(100);
 const MODEL_LIST_STDOUT_LIMIT: u64 = 2 * 1024 * 1024;
 const MODEL_LIST_STDERR_LIMIT: u64 = 32 * 1024;
+/// Byte cap on the prompt path's adapter stdout (the model-list path caps
+/// via `MODEL_LIST_STDOUT_LIMIT`; the prompt path read unbounded until the
+/// 170 s timeout — 2026-09-03 audit).
+const PROMPT_STDOUT_LIMIT: u64 = 2 * 1024 * 1024;
+/// Cap on the accumulated answer text retained for the terminal payload.
+const COLLECTED_ANSWER_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Adapter package for Claude Code (renamed from the deprecated
 /// `@zed-industries/claude-code-acp` — same registry entry Intelligent
@@ -66,8 +83,7 @@ fn adapter_command(npx: &Path, workdir: &Path, claude_path: &Path) -> tokio::pro
     cmd.current_dir(workdir);
     #[cfg(windows)]
     {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(CREATE_NO_WINDOW.0);
     }
     cmd.env_remove("CLAUDECODE");
     for var in cli_bridge::SUBSCRIPTION_OVERRIDE_ENV_VARS {
@@ -99,12 +115,41 @@ fn spawn_stderr_reader(
 }
 
 /// Kill the adapter and collect what it wrote to stderr.
+/// What the reaper needs from either child flavour (`tokio Child` on the
+/// model-list path, the job-wrapped wrapper on the prompt path).
+trait KillAndReap {
+    fn kill_then_wait(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<std::process::ExitStatus>> + Send + '_>>;
+}
+
+impl KillAndReap for tokio::process::Child {
+    fn kill_then_wait(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<std::process::ExitStatus>> + Send + '_>> {
+        Box::pin(async move {
+            let _ = self.start_kill();
+            self.wait().await
+        })
+    }
+}
+
+impl KillAndReap for Box<dyn ChildWrapper> {
+    fn kill_then_wait(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<std::process::ExitStatus>> + Send + '_>> {
+        Box::pin(async move {
+            let _ = self.start_kill();
+            self.wait().await
+        })
+    }
+}
+
 async fn reap_adapter(
-    child: &mut tokio::process::Child,
+    child: &mut impl KillAndReap,
     stderr_task: Option<tokio::task::JoinHandle<String>>,
 ) -> String {
-    let _ = child.start_kill();
-    let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), child.kill_then_wait()).await;
     match stderr_task {
         Some(task) => tokio::time::timeout(Duration::from_secs(1), task)
             .await
@@ -341,15 +386,35 @@ pub async fn claude_prompt(
         cmd.env("ANTHROPIC_MODEL", model);
     }
 
-    let mut child = match cmd.spawn() {
+    // Job-wrapped like the installer's children (2026-09-03 audit):
+    // `kill_on_drop` alone covers only the direct child, so the claude CLI
+    // grandchild the adapter spawns could survive a cancel on Windows.
+    let mut wrapped = CommandWrap::from(cmd);
+    wrapped.wrap(KillOnDrop);
+    #[cfg(windows)]
+    {
+        // JobObject temporarily adds CREATE_SUSPENDED, assigns the child,
+        // then resumes it. KillOnDrop enables KILL_ON_JOB_CLOSE for
+        // descendants.
+        wrapped.wrap(CreationFlags(CREATE_NO_WINDOW));
+        wrapped.wrap(JobObject);
+    }
+    #[cfg(unix)]
+    wrapped.wrap(ProcessSession);
+    let mut child = match wrapped.spawn() {
         Ok(child) => child,
         Err(e) => return AdapterOutcome::Failed(format!("Could not start the ACP adapter: {e}")),
     };
-    let outgoing = child.stdin.take().expect("stdin piped").compat_write();
-    let incoming = child.stdout.take().expect("stdout piped").compat();
+    let outgoing = child.stdin().take().expect("stdin piped").compat_write();
+    let incoming = child
+        .stdout()
+        .take()
+        .expect("stdout piped")
+        .take(PROMPT_STDOUT_LIMIT)
+        .compat();
     // Capture stderr for error messages (npx banners, adapter panics) and
     // keep the pipe drained so the adapter can't block on it.
-    let stderr_task = spawn_stderr_reader(child.stderr.take());
+    let stderr_task = spawn_stderr_reader(child.stderr().take());
 
     let collected: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
@@ -393,7 +458,9 @@ pub async fn claude_prompt(
                             && let v1::SessionUpdate::AgentMessageChunk(chunk) = n.update
                             && let v1::ContentBlock::Text(text) = chunk.content
                         {
-                            if let Ok(mut collected) = collected.lock() {
+                            if let Ok(mut collected) = collected.lock()
+                                && collected.len() < COLLECTED_ANSWER_LIMIT
+                            {
                                 collected.push_str(&text.text);
                             }
                             if let Some(tx) = delta_tx {
