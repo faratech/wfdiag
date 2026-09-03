@@ -40,8 +40,11 @@ const PROBE_TTL: Duration = Duration::from_secs(30);
 /// Executable resolution / status probes are quick CLI calls — but a
 /// cold Node-based CLI can take several seconds to boot on Windows.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-/// The login command waits for the user to finish a browser flow.
-const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(180);
+/// The login command waits for the user to finish a browser flow - in a
+/// visible console with inherited standard handles, like the engine's
+/// subscription auth (2026-09-03 audit: the hidden, stdin-closed, 180 s
+/// variant could never complete an interactive vendor flow).
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(600);
 const SIGN_OUT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Outer safety net for Codex model discovery. The app-server has no
 /// per-step timeouts underneath, and a cold Node-based CLI boot alone can
@@ -884,6 +887,40 @@ Install the native executable (for example via the official installer) and retry
     .map_err(|_| format!("{what} did not answer within {} seconds", timeout.as_secs()))?
 }
 
+/// Run an INTERACTIVE vendor sign-in: visible console window, inherited
+/// standard handles (the vendor prints its own URL/code and reads
+/// confirmation there), environment scrubbed, bounded by SIGN_IN_TIMEOUT.
+/// Returns whether the vendor CLI exited successfully. The hidden
+/// `run_headless` variant could never complete an interactive flow
+/// (2026-09-03 audit).
+async fn run_sign_in_flow(mut cmd: tokio::process::Command, what: &str) -> Result<bool, String> {
+    for var in SUBSCRIPTION_OVERRIDE_ENV_VARS {
+        cmd.env_remove(var);
+    }
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        cmd.creation_flags(CREATE_NEW_CONSOLE);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Could not start {what}: {e}"))?;
+    let status = tokio::time::timeout(SIGN_IN_TIMEOUT, child.wait())
+        .await
+        .map_err(|_| {
+            format!(
+                "{what} did not finish within {} seconds",
+                SIGN_IN_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|e| format!("{what} failed to run: {e}"))?;
+    Ok(status.success())
+}
+
 /// Retained-bytes caps for bridge child pipes (#204 discipline).
 const BRIDGE_STDOUT_LIMIT: usize = 8 * 1024 * 1024;
 const BRIDGE_STDERR_LIMIT: usize = 256 * 1024;
@@ -1108,11 +1145,11 @@ pub async fn ai_bridge_sign_in(provider: String) -> Result<BridgeStatus, String>
     cmd.args(spec.login_args);
     let result = tokio::select! {
         _ = token.cancelled() => Err("Sign-in cancelled".to_string()),
-        run = run_headless(cmd, None, SIGN_IN_TIMEOUT, "sign-in") => match run {
-            Ok(output) if output.status.success() => Ok(()),
-            Ok(output) => Err(format!(
-                "Sign-in failed: {}",
-                tail(String::from_utf8_lossy(&output.stderr).trim(), 400)
+        run = run_sign_in_flow(cmd, spec.binary) => match run {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!(
+                "Sign-in did not complete; finish the flow in the {} window and try again",
+                spec.binary
             )),
             Err(e) => Err(e),
         },
