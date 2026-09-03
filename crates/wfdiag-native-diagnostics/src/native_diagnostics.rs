@@ -11,7 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use wfdiag_native_core::wmi::WmiConnection;
-use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_TIMEOUT, HRESULT_FROM_WIN32};
+use windows::core::HRESULT;
+use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_TIMEOUT};
 use windows::Win32::System::EventLog::{
     EVT_HANDLE, EvtClose, EvtNext, EvtQuery, EvtQueryChannelPath, EvtQueryReverseDirection,
     EvtRender, EvtRenderEventXml,
@@ -331,8 +332,8 @@ impl NativeDiagnostics {
                 // results", reporting a prefix of the window as if it were
                 // complete - fail the query instead (2026-09-03 audit).
                 let code = error.code();
-                if code != HRESULT_FROM_WIN32(ERROR_NO_MORE_ITEMS)
-                    && code != HRESULT_FROM_WIN32(ERROR_TIMEOUT)
+                if code != HRESULT::from_win32(ERROR_NO_MORE_ITEMS.0)
+                    && code != HRESULT::from_win32(ERROR_TIMEOUT.0)
                 {
                     anyhow::bail!("EvtNext failed while reading '{channel}': {code:?}");
                 }
