@@ -501,6 +501,13 @@ def _check_native_ui(
                 relative = str(member_manifest.relative_to(root))
                 if relative == relative_manifest:
                     continue
+                if relative == str(Path("src-tauri") / "Cargo.toml"):
+                    # The rollback shell keeps its Tauri dependencies by
+                    # design (CLAUDE.md: kept buildable; deletion is a later
+                    # release). Rule 3 bans web UI in apps/wfdiag and
+                    # crates/, not in the rollback shell; counting it here
+                    # would block ui.native forever and bury real hits.
+                    continue
                 try:
                     document = tomllib.loads(
                         member_manifest.read_text(encoding="utf-8")
