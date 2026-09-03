@@ -58,7 +58,9 @@ impl EnvironmentPort for SystemEnvironment {
         // remediation ran made the post-fix verification re-detect the very
         // issue the fix had cleared. The detection path pays the walk; the
         // perf concern behind #272 only matters for non-evidence callers.
-        std::fs::read_dir(std::env::temp_dir()).ok().map(Iterator::count)
+        std::fs::read_dir(std::env::temp_dir())
+            .ok()
+            .map(Iterator::count)
     }
 }
 
