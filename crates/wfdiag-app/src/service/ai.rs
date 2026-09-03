@@ -2475,6 +2475,10 @@ impl AppService {
                 provider_use,
                 ..
             } => {
+                // A previous report's body must not bleed into the new
+                // stream: the shell syncs this field before it applies the
+                // queued Started/Delta events (2026-09-03 audit).
+                self.snapshot.ai.report.text = None;
                 self.snapshot.ai.report.provider = Some(provider.clone());
                 self.snapshot.ai.report.provider_use = Some(provider_use);
                 self.queue

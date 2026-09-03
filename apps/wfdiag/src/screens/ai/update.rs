@@ -489,11 +489,14 @@ impl AiScreen {
                     provider_display_name(provider_from_wire(provider))
                 ));
             }
-            ReportEvent::Delta { text } => {
+            ReportEvent::Delta { .. } => {
                 self.report_generating = true;
-                self.report_text
-                    .get_or_insert_with(String::new)
-                    .push_str(text);
+                // The chunk body is owned by the snapshot: the facade
+                // appends every delta to `snapshot.ai.report.text` before
+                // queuing the event, and `sync_from_snapshot` runs before
+                // this handler in the same batch. Appending here as well
+                // doubled every chunk after the first (2026-09-03 audit);
+                // only the flags are event-driven now.
             }
             ReportEvent::Deferred { reason } => cx.status(reason.clone()),
             ReportEvent::Cached {
