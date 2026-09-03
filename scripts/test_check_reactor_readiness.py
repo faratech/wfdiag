@@ -299,6 +299,26 @@ class ReactorReadinessTests(unittest.TestCase):
         self.assertEqual(finding.details["store_min_version"], "0.0.0.0")
         self.assertEqual(finding.details["baseline_min_version"], "2.4.0.0")
 
+    def test_duplicate_gate_id_is_an_error_not_a_silent_overwrite(self):
+        # A dict comprehension used to let a later duplicate "passed" entry
+        # overwrite the real blocked gate and green the cutover
+        # (2026-09-03 audit).
+        self.fixture.manifest["cutover_gates"].append(
+            {
+                "id": "store_packaging_validation",
+                "status": "passed",
+                "evidence": ["forged.json"],
+            }
+        )
+        self.fixture.save_manifest()
+
+        report = self.fixture.report()
+
+        self.assertFalse(report.ready)
+        self.assertIn("cutover.contract", codes(report, "error"))
+        finding = next(f for f in report.findings if f.code == "cutover.contract")
+        self.assertEqual(finding.details["duplicates"], ["store_packaging_validation"])
+
     def test_store_identity_and_capability_drift_are_blockers(self):
         changed = appx_manifest(readiness.EXPECTED_REACTOR_FRAMEWORK)
         changed = changed.replace(

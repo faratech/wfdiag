@@ -1115,11 +1115,26 @@ def _check_named_gates(
             f"{field_name} must be a list",
         )
         return
-    gates = {
-        gate.get("id"): gate
-        for gate in raw_gates
-        if isinstance(gate, dict) and isinstance(gate.get("id"), str)
-    }
+    gates: dict[str, dict[str, Any]] = {}
+    duplicates: set[str] = set()
+    for gate in raw_gates:
+        if not isinstance(gate, dict) or not isinstance(gate.get("id"), str):
+            continue
+        gate_id = gate["id"]
+        if gate_id in gates:
+            duplicates.add(gate_id)
+        gates[gate_id] = gate
+    if duplicates:
+        # A later duplicate silently overwrote the earlier entry in the old
+        # dict comprehension, so an appended "passed" twin could green a
+        # hardware-evidence gate (2026-09-03 audit) - the surfaces path has
+        # rejected duplicates all along; the gate path does too now.
+        report.add(
+            f"{code_prefix}.contract",
+            "error",
+            "Readiness gates declare duplicate ids; the later entry would win",
+            duplicates=sorted(duplicates),
+        )
     missing = sorted(required_ids - set(gates))
     if missing:
         report.add(
