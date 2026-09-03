@@ -481,7 +481,10 @@ pub fn format_code(code: u32) -> String {
 /// codes whose documentation says so.
 const fn address_parameter(code: u32) -> Option<usize> {
     match code {
-        0x0000_000A | 0x0000_00D1 | 0x0000_0050 => Some(3),
+        // 0x50 (PAGE_FAULT_IN_NONPAGED_AREA): Arg4 is reserved; the referenced
+            // address lives in Arg1 (2026-09-03 audit).
+            0x0000_000A | 0x0000_00D1 => Some(3),
+            0x0000_0050 => Some(0),
         0x0000_001E | 0x0000_003B | 0x0000_007E => Some(1),
         _ => None,
     }
