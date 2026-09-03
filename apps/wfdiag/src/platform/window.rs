@@ -430,6 +430,7 @@ pub fn remove_tray_icon(window: HWND) {
     unsafe {
         let _ = Shell_NotifyIconW(NIM_DELETE, &data);
     }
+    TRAY_ICON_OWNER.store(0, std::sync::atomic::Ordering::Release);
     set_lifecycle_flag(FLAG_TRAY_PRESENT, false);
 }
 
@@ -776,6 +777,10 @@ fn add_tray_icon(window: HWND, tooltip: &str) -> Result<(), String> {
     // SAFETY: data is fully initialized for NIM_ADD.
     let ok = unsafe { Shell_NotifyIconW(NIM_ADD, &data) };
     if ok.as_bool() {
+        TRAY_ICON_OWNER.store(
+            window.0 as isize,
+            std::sync::atomic::Ordering::Release,
+        );
         set_lifecycle_flag(FLAG_TRAY_PRESENT, true);
         Ok(())
     } else {
@@ -816,6 +821,20 @@ fn tray_icon() -> windows::Win32::UI::WindowsAndMessaging::HICON {
 }
 
 static TRAY_TOOLTIP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The HWND that added the live tray icon (`0` when none). The icon is bound
+/// to that HWND in the notification area, so a superseded window must still
+/// take it down when it is destroyed (2026-09-03 audit).
+static TRAY_ICON_OWNER: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+
+/// Remove the tray icon only when `window` owns the live one.
+fn remove_tray_icon_owned_by(window: HWND) {
+    let owner = TRAY_ICON_OWNER.load(std::sync::atomic::Ordering::Acquire);
+    if owner != 0 && owner == window.0 as isize {
+        remove_tray_icon(window);
+    }
+}
 
 /// `TaskbarCreated` is broadcast whenever the shell restarts (Explorer crash,
 /// shell relaunch, some DPI changes). Without re-adding the icon,
@@ -940,9 +959,9 @@ unsafe extern "system" fn tray_subclass_proc(
             // A replaced top-level HWND can finish destroying after its
             // successor is registered. Only the current generation owns the
             // shared hook, tray, wake handler, shortcut queue, and lifecycle.
+            remove_tray_icon_owned_by(window);
             if instance::is_registered_main_window(window) {
                 remove_keyboard_hook(window);
-                remove_tray_icon(window);
                 instance::unregister_main_window(window);
                 clear_global_shortcuts();
                 clear_ui_wake_handler();

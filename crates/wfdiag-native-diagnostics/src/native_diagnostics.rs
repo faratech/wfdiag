@@ -1150,18 +1150,16 @@ impl NativeDiagnostics {
     }
 
     pub fn get_disk_fragmentation(&self) -> Result<Value> {
-        let wmi_con = WmiConnection::new()?;
-        let disks = wmi_con.query("SELECT Name FROM Win32_LogicalDisk WHERE DriveType=3")?;
-
-        let mut fragmentation_results = Vec::new();
-
         // The task deadline bounds the whole collector, but an abandoned
         // blocking thread kept spawning one 300 s-capped `defrag /A` per
         // remaining drive after the scan had already moved on (2026-09-03
         // audit). Share one budget across the loop instead, leaving margin
         // under the 240 s task deadline.
-        let started = std::time::Instant::now();
         const FRAGMENTATION_BUDGET: std::time::Duration = std::time::Duration::from_secs(200);
+        let started = std::time::Instant::now();
+        let wmi_con = WmiConnection::new()?;
+        let disks = wmi_con.query("SELECT Name FROM Win32_LogicalDisk WHERE DriveType=3")?;
+        let mut fragmentation_results = Vec::new();
 
         for disk in disks {
             if let Some(drive_letter) = disk.get("Name").and_then(|v| v.as_str()) {
@@ -1178,39 +1176,45 @@ impl NativeDiagnostics {
                     continue;
                 }
 
-                match Self::execute_secure_command("defrag", &[drive_letter, "/A"]) {
-                    Ok(output) => {
-                        // Use the OEM-codepage decoder like every other command consumer
-                        // in this file; defrag emits OEM text, which from_utf8_lossy would
-                        // corrupt to U+FFFD on non-English systems.
-                        let output_str =
-                            wfdiag_native_core::security::decode_windows_output(&output.stdout);
-                        result_info["raw_output"] = json!(output_str.clone());
-
-                        if output.status.success() {
-                            if let Some(percent) = self.parse_defrag_output(&output_str) {
-                                result_info["fragmentation_percent"] = json!(percent);
-                                result_info["status"] = json!("Analyzed");
-                            } else {
-                                result_info["status"] =
-                                    json!("Analysis failed: Could not parse output");
-                            }
-                        } else {
-                            let error_str =
-                                wfdiag_native_core::security::decode_windows_output(&output.stderr);
-                            result_info["status"] =
-                                json!(format!("Analysis failed: {}", error_str));
-                        }
-                    }
-                    Err(e) => {
-                        result_info["status"] = json!(format!("Execution failed: {}", e));
-                    }
-                }
+                self.analyse_drive(drive_letter, &mut result_info);
                 fragmentation_results.push(result_info);
             }
         }
 
         Ok(json!(fragmentation_results))
+    }
+
+    /// Run one `defrag /A` for `drive_letter` and fold its outcome into
+    /// `result_info`.
+    fn analyse_drive(&self, drive_letter: &str, result_info: &mut Value) {
+        match Self::execute_secure_command("defrag", &[drive_letter, "/A"]) {
+            Ok(output) => {
+                // Use the OEM-codepage decoder like every other command consumer
+                // in this file; defrag emits OEM text, which from_utf8_lossy would
+                // corrupt to U+FFFD on non-English systems.
+                let output_str =
+                    wfdiag_native_core::security::decode_windows_output(&output.stdout);
+                result_info["raw_output"] = json!(output_str.clone());
+
+                if output.status.success() {
+                    if let Some(percent) = self.parse_defrag_output(&output_str) {
+                        result_info["fragmentation_percent"] = json!(percent);
+                        result_info["status"] = json!("Analyzed");
+                    } else {
+                        result_info["status"] =
+                            json!("Analysis failed: Could not parse output");
+                    }
+                } else {
+                    let error_str =
+                        wfdiag_native_core::security::decode_windows_output(&output.stderr);
+                    result_info["status"] =
+                        json!(format!("Analysis failed: {}", error_str));
+                }
+            }
+            Err(e) => {
+                result_info["status"] = json!(format!("Execution failed: {}", e));
+            }
+        }
     }
 
     // Method form keeps every collector reachable through `NativeDiagnostics`.
@@ -1996,6 +2000,31 @@ impl NativeDiagnostics {
     // The recursive folder walker is kept beside its only call site.
     #[allow(clippy::items_after_statements)]
     pub fn get_scheduled_tasks(&self) -> Result<Value> {
+        let tasks = Self::walk_scheduled_task_folders()?;
+
+        // Filter and limit
+        let filtered: Vec<Value> = tasks
+            .into_iter()
+            .filter(|t| {
+                // Exclude disabled tasks and some noisy system tasks
+                if let Some(state) = t.get("State").and_then(|s| s.as_str()) {
+                    state != "Disabled"
+                } else {
+                    true
+                }
+            })
+            .take(200)
+            .collect();
+
+        // Every task disabled (or none at all) is a legitimate machine
+        // state, not a failed diagnostic (2026-09-03 audit).
+        Ok(json!(filtered))
+    }
+
+    /// Enumerate the scheduled-task tree (depth 3, budgeted) over one COM
+    /// session.
+    #[allow(clippy::items_after_statements)] // the recursive walker beside its call site
+    fn walk_scheduled_task_folders() -> Result<Vec<Value>> {
         use windows::Win32::System::Com::{
             CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
         };
@@ -2009,6 +2038,11 @@ impl NativeDiagnostics {
         let mut tasks = Vec::new();
 
         unsafe {
+            // Bound on scheduled tasks visited per scan (see the call site):
+            // seven COM round-trips each used to be paid for the whole tree
+            // before .take(200) discarded the rest.
+            const SCHEDULED_TASK_VISIT_CAP: usize = 400;
+
             // Initialize COM
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
@@ -2029,9 +2063,6 @@ impl NativeDiagnostics {
                 .map_err(|e| anyhow::anyhow!("Failed to get root folder: {e}"))?;
 
             // Recursive function to enumerate tasks
-            // Bound on scheduled tasks visited per scan (see call site).
-            const SCHEDULED_TASK_VISIT_CAP: usize = 400;
-
             fn enumerate_folder(
                 folder: &ITaskFolder,
                 tasks: &mut Vec<Value>,
@@ -2114,23 +2145,7 @@ impl NativeDiagnostics {
             enumerate_folder(&root_folder, &mut tasks, 0, &mut budget);
         }
 
-        // Filter and limit
-        let filtered: Vec<Value> = tasks
-            .into_iter()
-            .filter(|t| {
-                // Exclude disabled tasks and some noisy system tasks
-                if let Some(state) = t.get("State").and_then(|s| s.as_str()) {
-                    state != "Disabled"
-                } else {
-                    true
-                }
-            })
-            .take(200)
-            .collect();
-
-        // Every task disabled (or none at all) is a legitimate machine
-        // state, not a failed diagnostic (2026-09-03 audit).
-        Ok(json!(filtered))
+        Ok(tasks)
     }
 
     pub fn get_windows_update_history(&self) -> Result<Value> {
