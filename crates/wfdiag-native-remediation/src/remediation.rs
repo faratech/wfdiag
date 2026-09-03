@@ -1129,6 +1129,23 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
         let mut child = cmd.spawn()?;
         let timeout = Duration::from_secs(60);
         let deadline = std::time::Instant::now() + timeout;
+        // Drain both pipes on threads while the child runs: reading them
+        // only after exit assumed the output fits the OS pipe buffer, and a
+        // child that filled one would block forever on write and get
+        // misreported as a timeout (2026-09-03 audit).
+        fn drain<R: std::io::Read + Send + 'static>(
+            pipe: Option<R>,
+        ) -> std::thread::JoinHandle<Vec<u8>> {
+            std::thread::spawn(move || {
+                let mut buffer = Vec::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = std::io::Read::read_to_end(&mut pipe, &mut buffer);
+                }
+                buffer
+            })
+        }
+        let stdout_reader = drain(child.stdout.take());
+        let stderr_reader = drain(child.stderr.take());
         let status = loop {
             if let Some(status) = child.try_wait()? {
                 break status;
@@ -1136,6 +1153,8 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
             if std::time::Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
                 anyhow::bail!(
                     "'{} {}' timed out after {} second(s)",
                     program,
@@ -1145,16 +1164,8 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
             }
             std::thread::sleep(Duration::from_millis(100));
         };
-        // Child has exited, so both pipes are complete (net.exe writes only
-        // a few lines — they cannot have filled and deadlocked it).
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        if let Some(mut pipe) = child.stdout.take() {
-            let _ = std::io::Read::read_to_end(&mut pipe, &mut stdout);
-        }
-        if let Some(mut pipe) = child.stderr.take() {
-            let _ = std::io::Read::read_to_end(&mut pipe, &mut stderr);
-        }
+        let stdout = stdout_reader.join().unwrap_or_default();
+        let stderr = stderr_reader.join().unwrap_or_default();
         let mut output = String::from_utf8_lossy(&stdout).into_owned();
         output.push('\n');
         output.push_str(&String::from_utf8_lossy(&stderr));
