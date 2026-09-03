@@ -20,8 +20,8 @@ use super::{AppService, Internal, failure_text};
 use crate::WorkerKind;
 use crate::command::{DispatchOutcome, RejectReason, SubscriptionOperation};
 use crate::domain::actions::{
-    ReviewSurface, StagedReview, admin_blocked, arm_verification, build_snapshot,
-    proposal_matches, stale_reviews, verification_tasks,
+    ReviewSurface, StagedReview, admin_blocked, arm_verification, build_snapshot, proposal_matches,
+    stale_reviews, verification_tasks,
 };
 use crate::domain::ai_intent::{
     IntentAction, IntentReadiness, PendingAiIntent, requires_scan_data,

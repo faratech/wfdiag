@@ -777,10 +777,7 @@ fn add_tray_icon(window: HWND, tooltip: &str) -> Result<(), String> {
     // SAFETY: data is fully initialized for NIM_ADD.
     let ok = unsafe { Shell_NotifyIconW(NIM_ADD, &data) };
     if ok.as_bool() {
-        TRAY_ICON_OWNER.store(
-            window.0 as isize,
-            std::sync::atomic::Ordering::Release,
-        );
+        TRAY_ICON_OWNER.store(window.0 as isize, std::sync::atomic::Ordering::Release);
         set_lifecycle_flag(FLAG_TRAY_PRESENT, true);
         Ok(())
     } else {
@@ -825,8 +822,7 @@ static TRAY_TOOLTIP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// The HWND that added the live tray icon (`0` when none). The icon is bound
 /// to that HWND in the notification area, so a superseded window must still
 /// take it down when it is destroyed (2026-09-03 audit).
-static TRAY_ICON_OWNER: std::sync::atomic::AtomicIsize =
-    std::sync::atomic::AtomicIsize::new(0);
+static TRAY_ICON_OWNER: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 /// Remove the tray icon only when `window` owns the live one.
 fn remove_tray_icon_owned_by(window: HWND) {

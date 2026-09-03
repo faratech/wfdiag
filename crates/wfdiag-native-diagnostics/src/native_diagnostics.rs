@@ -11,13 +11,13 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use wfdiag_native_core::wmi::WmiConnection;
-use windows::core::HRESULT;
 use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_TIMEOUT};
 use windows::Win32::System::EventLog::{
     EVT_HANDLE, EvtClose, EvtNext, EvtQuery, EvtQueryChannelPath, EvtQueryReverseDirection,
     EvtRender, EvtRenderEventXml,
 };
 use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+use windows::core::HRESULT;
 use windows::core::PCWSTR;
 // Performance counter imports removed - not used in current implementation
 use winreg::RegKey;
@@ -323,8 +323,7 @@ impl NativeDiagnostics {
         let mut handles = [0isize; 16];
         while records.len() < row_cap {
             let mut returned = 0u32;
-            if let Err(error) =
-                unsafe { EvtNext(query.0, &mut handles, 250, 0, &raw mut returned) }
+            if let Err(error) = unsafe { EvtNext(query.0, &mut handles, 250, 0, &raw mut returned) }
             {
                 // ERROR_NO_MORE_ITEMS is the normal end of the result set;
                 // ERROR_TIMEOUT cannot be waited out with a 0 ms timeout.
@@ -1201,14 +1200,12 @@ impl NativeDiagnostics {
                         result_info["fragmentation_percent"] = json!(percent);
                         result_info["status"] = json!("Analyzed");
                     } else {
-                        result_info["status"] =
-                            json!("Analysis failed: Could not parse output");
+                        result_info["status"] = json!("Analysis failed: Could not parse output");
                     }
                 } else {
                     let error_str =
                         wfdiag_native_core::security::decode_windows_output(&output.stderr);
-                    result_info["status"] =
-                        json!(format!("Analysis failed: {}", error_str));
+                    result_info["status"] = json!(format!("Analysis failed: {}", error_str));
                 }
             }
             Err(e) => {

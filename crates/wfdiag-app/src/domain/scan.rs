@@ -98,14 +98,13 @@ impl TargetedOverlay {
         task_ids: &[String],
         base: ScanSnapshot,
     ) -> Option<Self> {
-        (!task_ids.is_empty()
-            && scan_kind == ScanKind::Targeted
-            && base.session_id.is_some())
-        .then(|| Self {
-            target_task_ids: task_ids.to_vec(),
-            base,
-            staged_results: Vec::new(),
-        })
+        (!task_ids.is_empty() && scan_kind == ScanKind::Targeted && base.session_id.is_some()).then(
+            || Self {
+                target_task_ids: task_ids.to_vec(),
+                base,
+                staged_results: Vec::new(),
+            },
+        )
     }
 
     /// The tasks this rerun is allowed to replace.
@@ -158,13 +157,9 @@ impl TargetedOverlay {
     ) -> Result<ScanSnapshot, String> {
         let mut results = self.base.results.clone();
         for target in &self.target_task_ids {
-            let position = staged
-                .iter()
-                .position(|result| &result.task_id == target);
+            let position = staged.iter().position(|result| &result.task_id == target);
             let Some(position) = position else {
-                return Err(format!(
-                    "targeted rerun did not return `{target}`"
-                ));
+                return Err(format!("targeted rerun did not return `{target}`"));
             };
             let replacement = staged.remove(position);
             results = merge_targeted_result(
@@ -676,8 +671,7 @@ impl ScanState {
             let mut staged = Vec::with_capacity(targets.len());
             for target in &targets {
                 let Some(output) = evidence.get(target) else {
-                    let error =
-                        format!("targeted rerun did not return `{target}`");
+                    let error = format!("targeted rerun did not return `{target}`");
                     self.restore_previous();
                     self.reset();
                     return RunOutcome::TargetedFailed { error };

@@ -8,11 +8,11 @@
 //! Secret values are write-only inputs and are never serialized or returned by
 //! [`SettingsService::load`].
 
-use zeroize::Zeroizing;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use zeroize::Zeroizing;
 
 mod persistence;
 

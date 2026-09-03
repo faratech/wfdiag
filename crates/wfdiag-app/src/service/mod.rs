@@ -27,7 +27,6 @@ use crate::command::{
 };
 use crate::config::AppConfig;
 use crate::domain::actions::{PendingVerification, StagedReview, verification_result};
-use wfdiag_native_remediation::broker::ActionSnapshot;
 use crate::domain::ai_intent::PendingAiIntent;
 use crate::domain::automation::Automation;
 use crate::domain::catalog::RefreshThrottle;
@@ -72,6 +71,7 @@ use wfdiag_native_history::{
 };
 use wfdiag_native_issues::SharedScanEvidence;
 use wfdiag_native_issues::projection::newly_critical;
+use wfdiag_native_remediation::broker::ActionSnapshot;
 use wfdiag_native_settings::{
     AppSettings, ProviderKeyId, SettingsCommand, SettingsEvent, SettingsService, SettingsUpdate,
 };
@@ -1648,12 +1648,13 @@ impl AppService {
         echo.gemini_api_key = None;
         echo.deepseek_api_key = None;
         echo.custom_api_key = None;
-        self.send_settings(SettingsRequestKind::Save(Box::new(echo)), move |request_id| {
-            SettingsCommand::Save {
+        self.send_settings(
+            SettingsRequestKind::Save(Box::new(echo)),
+            move |request_id| SettingsCommand::Save {
                 request_id,
                 settings,
-            }
-        })
+            },
+        )
     }
 
     fn settings_update(&mut self, update: SettingsUpdate) -> DispatchOutcome {

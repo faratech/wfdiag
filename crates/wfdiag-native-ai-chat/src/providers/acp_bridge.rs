@@ -25,11 +25,11 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+use process_wrap::tokio::ChildWrapper;
 #[cfg(windows)]
 use process_wrap::tokio::{CommandWrap, CreationFlags, JobObject, KillOnDrop};
 #[cfg(unix)]
 use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessSession};
-use process_wrap::tokio::ChildWrapper;
 
 #[cfg(windows)]
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;

@@ -539,15 +539,16 @@ mod tests {
         ];
         let pending = arm_verification(
             "run-1".to_string(),
-            &[
-                "low_disk_space".to_string(),
-                "space_consumers".to_string(),
-            ],
+            &["low_disk_space".to_string(), "space_consumers".to_string()],
             &issues,
             tasks.iter().map(|task| (*task).to_string()).collect(),
             true,
         );
-        let after = vec![issue("space_consumers", true, &["disk_usage", "logical_disk"])];
+        let after = vec![issue(
+            "space_consumers",
+            true,
+            &["disk_usage", "logical_disk"],
+        )];
         assert_eq!(
             verification_result(&pending, &after),
             (

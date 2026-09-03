@@ -73,7 +73,9 @@ impl EnvironmentPort for SystemEnvironment {
                 value => usize::try_from(value - 1).ok(),
             };
         }
-        let fresh = std::fs::read_dir(std::env::temp_dir()).ok().map(Iterator::count);
+        let fresh = std::fs::read_dir(std::env::temp_dir())
+            .ok()
+            .map(Iterator::count);
         CACHED_VALUE.store(
             fresh.map_or(0, |count| u64::try_from(count).map_or(0, |c| c + 1)),
             Ordering::Relaxed,

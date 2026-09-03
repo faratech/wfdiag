@@ -506,9 +506,11 @@ mod tests {
         let MarkdownBlock::Paragraph(inlines) = &document.blocks[0] else {
             panic!("expected a single paragraph");
         };
-        assert!(inlines
-            .iter()
-            .all(|inline| matches!(inline, MarkdownInline::Text(_))));
+        assert!(
+            inlines
+                .iter()
+                .all(|inline| matches!(inline, MarkdownInline::Text(_)))
+        );
     }
 
     #[test]

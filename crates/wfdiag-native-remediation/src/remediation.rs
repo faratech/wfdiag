@@ -721,8 +721,7 @@ pub(crate) async fn execute_authorized(
                         });
                         break;
                     }
-                    let Some(step_timeout) = timeout.checked_sub(sequence_started.elapsed())
-                    else {
+                    let Some(step_timeout) = timeout.checked_sub(sequence_started.elapsed()) else {
                         step_results.push(RemediationStepResult {
                             action: step.action_label.to_string(),
                             status: RemediationStepStatus::Cancelled,
@@ -730,7 +729,10 @@ pub(crate) async fn execute_authorized(
                         });
                         break;
                     };
-                    match runner.run(step.program, step.args, step_timeout, cancel).await {
+                    match runner
+                        .run(step.program, step.args, step_timeout, cancel)
+                        .await
+                    {
                         Ok(output) if output.success => {
                             actions_taken.push(step.action_label.to_string());
                             step_results.push(RemediationStepResult {
