@@ -2596,6 +2596,11 @@ fn discover_npu_luid_with_wmi(wmi_con: &wfdiag_native_core::wmi::WmiConnection) 
             if let Some(name) = counter.get("Name").and_then(|v| v.as_str())
                 && let Some(luid_start) = name.find("luid_")
                 && let Some(phys_start) = name.find("_phys_")
+                // The two scans are independent: a name carrying `_phys_`
+                // before `luid_` would make the slice range invalid and
+                // abort the process (release profile) on a background
+                // sampler thread (2026-09-03 audit). Skip such rows.
+                && phys_start > luid_start
             {
                 let luid = &name[luid_start..phys_start];
                 if let Some(engtype_start) = name.find("_engtype_") {
