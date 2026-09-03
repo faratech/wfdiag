@@ -2013,10 +2013,18 @@ impl NativeDiagnostics {
                 .map_err(|e| anyhow::anyhow!("Failed to get root folder: {e}"))?;
 
             // Recursive function to enumerate tasks
-            fn enumerate_folder(folder: &ITaskFolder, tasks: &mut Vec<Value>, depth: u32) {
-                if depth > 3 {
+            // Bound on scheduled tasks visited per scan (see call site).
+            const SCHEDULED_TASK_VISIT_CAP: usize = 400;
+
+            fn enumerate_folder(
+                folder: &ITaskFolder,
+                tasks: &mut Vec<Value>,
+                depth: u32,
+                budget: &mut usize,
+            ) {
+                if depth > 3 || *budget == 0 {
                     return;
-                } // Limit recursion depth
+                } // Limit recursion depth and total visited tasks
 
                 unsafe {
                     // Get tasks in this folder
@@ -2024,6 +2032,9 @@ impl NativeDiagnostics {
                         && let Ok(count) = task_collection.Count()
                     {
                         for i in 1..=count {
+                            if *budget == 0 {
+                                break;
+                            }
                             let idx = VARIANT::from(i);
                             if let Ok(task) = task_collection.get_Item(&idx) {
                                 let mut task_info = serde_json::Map::new();
@@ -2059,6 +2070,7 @@ impl NativeDiagnostics {
 
                                 if task_info.contains_key("TaskName") {
                                     tasks.push(Value::Object(task_info));
+                                    *budget -= 1;
                                 }
                             }
                         }
@@ -2071,14 +2083,19 @@ impl NativeDiagnostics {
                         for i in 1..=count {
                             let idx = VARIANT::from(i);
                             if let Ok(subfolder) = folders.get_Item(&idx) {
-                                enumerate_folder(&subfolder, tasks, depth + 1);
+                                enumerate_folder(&subfolder, tasks, depth + 1, budget);
                             }
                         }
                     }
                 }
             }
 
-            enumerate_folder(&root_folder, &mut tasks, 0);
+            // Visit at most this many tasks: seven COM round-trips each used
+            // to be paid for the whole tree before .take(200) discarded the
+            // rest (2026-09-03 audit). The cap sits above the 200-row output
+            // cap so enabled tasks are not crowded out by disabled ones.
+            let mut budget = SCHEDULED_TASK_VISIT_CAP;
+            enumerate_folder(&root_folder, &mut tasks, 0, &mut budget);
         }
 
         // Filter and limit
@@ -2095,10 +2112,8 @@ impl NativeDiagnostics {
             .take(200)
             .collect();
 
-        if filtered.is_empty() {
-            return Err(anyhow::anyhow!("No scheduled tasks found"));
-        }
-
+        // Every task disabled (or none at all) is a legitimate machine
+        // state, not a failed diagnostic (2026-09-03 audit).
         Ok(json!(filtered))
     }
 
