@@ -11,12 +11,20 @@ export interface DiagItem extends DiagnosticTask {
 }
 
 // Grounding sources come from an external search/grounding API response, not
-// our own code — same convention as the backend's open_url command (only
-// http/https/mailto are allowed) before a URL is used as a clickable link.
-function isSafeHttpUrl(url: string): boolean {
+// our own code, so a URL must pass the link policy before it becomes a
+// clickable anchor. The canonical policy lives in
+// crates/wfdiag-native-projection/src/markdown.rs (safe_markdown_link_target:
+// absolute http/https/mailto with a non-empty authority); this exported
+// mirror exists because the browser cannot call the Rust decision directly.
+// Keep the two in step — 2026-09-03 audit found three disagreeing copies.
+export function isSafeLinkTarget(url: string): boolean {
   try {
     const parsed = new URL(url)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+    return (
+      (parsed.protocol === 'http:' ||
+        parsed.protocol === 'https:' ||
+        parsed.protocol === 'mailto:') && parsed.hostname !== ''
+    )
   } catch {
     return false
   }
@@ -233,7 +241,7 @@ const AITrace: React.FC<{ meta: AIAnalysisMeta }> = ({ meta }) => {
             <ul>
               {grounding.sources.map((source, index) => (
                 <li key={`${source.url ?? source.title}-${index}`}>
-                  {source.url && isSafeHttpUrl(source.url) ? (
+                  {source.url && isSafeLinkTarget(source.url) ? (
                     <a href={source.url} target="_blank" rel="noreferrer">{source.title}</a>
                   ) : (
                     <span>{source.title}</span>

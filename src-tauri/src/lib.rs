@@ -965,13 +965,17 @@ async fn detect_issues(state: State<'_, AppState>) -> Result<Vec<Issue>, String>
 async fn open_url(url: String) -> Result<(), String> {
     let parsed =
         url::Url::parse(&url).map_err(|_| DiagError::internal("Invalid URL".to_string()))?;
-    match parsed.scheme() {
-        "http" | "https" | "mailto" => {}
-        scheme => {
-            return Err(
-                DiagError::internal(format!("URL scheme '{}' is not allowed", scheme)).into(),
-            );
-        }
+    // One URL policy for every shell: the projection crate's link-target
+    // rules (scheme allowlist + authority/encoding checks) are the single
+    // decision point the native shell's markdown renderer already uses;
+    // this used to be a private scheme-only copy that disagreed with it
+    // (2026-09-03 audit).
+    if wfdiag_native_projection::markdown::safe_markdown_link_target(&url).is_none() {
+        return Err(DiagError::internal(format!(
+            "URL scheme '{}' is not allowed",
+            parsed.scheme()
+        ))
+        .into());
     }
 
     #[cfg(target_os = "windows")]

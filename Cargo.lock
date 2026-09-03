@@ -5903,6 +5903,7 @@ dependencies = [
  "wfdiag-native-issues",
  "wfdiag-native-monitor",
  "wfdiag-native-phi",
+ "wfdiag-native-projection",
  "wfdiag-native-remediation",
  "wfdiag-native-settings",
  "wfdiag-native-system",
