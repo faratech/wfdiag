@@ -19,11 +19,17 @@ export interface DiagItem extends DiagnosticTask {
 // Keep the two in step — 2026-09-03 audit found three disagreeing copies.
 export function isSafeLinkTarget(url: string): boolean {
   try {
+    if (url.length > 2048 || /[\u0000-\u0020]/.test(url)) return false
     const parsed = new URL(url)
+    // mailto: carries its target in the path (WHATWG hostname is ''), which
+    // the Rust policy accepts as long as it is not empty or
+    // protocol-relative; every other scheme needs a host.
+    if (parsed.protocol === 'mailto:') {
+      return parsed.pathname !== '' && parsed.pathname !== '//'
+    }
     return (
-      (parsed.protocol === 'http:' ||
-        parsed.protocol === 'https:' ||
-        parsed.protocol === 'mailto:') && parsed.hostname !== ''
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      parsed.hostname !== ''
     )
   } catch {
     return false
