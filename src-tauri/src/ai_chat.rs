@@ -648,8 +648,11 @@ async fn mark_session_errored_after_panic(
     session_id: &str,
     message_id: &str,
 ) {
+    // Keyed by session id like every other chat_cancels use: the panic
+    // path used to remove by message_id and leave the dead turn's token
+    // behind (2026-09-03 audit).
     let mut cancels = runtime.chat_cancels.lock().await;
-    cancels.remove(message_id);
+    cancels.remove(session_id);
     let mut sessions = runtime.chat_sessions.lock().await;
     if let Some(session) = sessions.get_mut(session_id) {
         session.busy = false;
