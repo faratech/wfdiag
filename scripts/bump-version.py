@@ -293,15 +293,24 @@ def update_tsx_file(file_path: Path, new_version: str, patterns: list, dry_run: 
 
     try:
         content = file_path.read_text(encoding='utf-8')
-        updated = False
+        unmatched = []
 
         for pattern, replacement in patterns:
             if re.search(pattern, content):
                 if not dry_run:
                     content = re.sub(pattern, replacement.replace('VERSION', new_version), content)
-                updated = True
+            else:
+                unmatched.append(pattern)
 
-        if updated:
+        # A file counted as updated when ANY pattern matched left stale
+        # versions behind with a false pass (2026-09-03 audit): every
+        # pattern must match, so a renamed heading or string fails loudly
+        # instead of shipping an old version in one spot.
+        if unmatched:
+            print(f"  Warning: version patterns not found in {file_path}: {unmatched}")
+            return False
+
+        if patterns:
             if dry_run:
                 print(f"  [DRY RUN] Would update: {file_path}")
             else:
@@ -326,7 +335,7 @@ def main():
     dry_run = args.dry_run
 
     # Validate version format
-    if not re.match(r'^\d+\.\d+\.\d+$', new_version):
+    if not re.fullmatch(r'\d+\.\d+\.\d+', new_version):
         print(f"Error: Invalid version format '{new_version}'. Expected format: X.Y.Z (e.g., 2.1.6)")
         sys.exit(1)
 
