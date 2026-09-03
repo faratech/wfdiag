@@ -246,7 +246,12 @@ impl NativeDiagnostics {
                     entry.2 = record.sample_message;
                 }
             }
-            for (code, (count, last_seen, sample_message)) in groups {
+            // Deterministic order: this JSON feeds issue text, exports and
+            // the scan fingerprint, so iteration order must not depend on
+            // HashMap hashing (2026-09-03 audit).
+            let mut grouped: Vec<(u64, (u64, i64, String))> = groups.into_iter().collect();
+            grouped.sort_by_key(|(code, _)| *code);
+            for (code, (count, last_seen, sample_message)) in grouped {
                 events.push(json!({
                     "source": source,
                     "code": code,
