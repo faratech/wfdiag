@@ -1571,7 +1571,23 @@ fn open_log_file(path: &std::path::Path) -> Option<std::fs::File> {
             if is_multiply_linked(&metadata) {
                 return None;
             }
-            OpenOptions::new().append(true).open(path).ok()
+            // Windows: the append must not follow a reparse point swapped in
+            // after the probe above - plain OPEN_EXISTING would traverse it
+            // (2026-09-03 audit). FILE_FLAG_OPEN_REPARSE_POINT opens the
+            // link object itself instead of its target.
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                OpenOptions::new()
+                    .append(true)
+                    .custom_flags(0x0020_0000) // FILE_FLAG_OPEN_REPARSE_POINT
+                    .open(path)
+                    .ok()
+            }
+            #[cfg(not(windows))]
+            {
+                OpenOptions::new().append(true).open(path).ok()
+            }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()
             .create_new(true)
