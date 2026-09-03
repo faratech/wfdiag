@@ -337,7 +337,7 @@ impl WorkerState {
         let generated = tokio::select! {
             biased;
             () = cancel.cancelled() => None,
-            result = one_shot(generation.route.provider, &cfg, &prompt) => Some(result),
+            result = one_shot(generation.route.provider, &cfg, &prompt, cancel.clone()) => Some(result),
         };
         let Some(generated) = generated else {
             self.cancelled(request_id, provider_use);
@@ -507,13 +507,17 @@ async fn one_shot(
     provider: AIProvider,
     cfg: &ResolvedProviderConfig,
     prompt: &str,
+    cancel: CancellationToken,
 ) -> Result<String, String> {
     match provider {
         AIProvider::None => Err("No AI provider available".to_string()),
         AIProvider::PhiSilica => {
             wfdiag_native_phi::generate_response(
                 &format!("{PLAN_SYSTEM}\n\nPLAN TASK\n{prompt}"),
-                || false,
+                {
+                    let cancel = cancel.clone();
+                    move || cancel.is_cancelled()
+                },
             )
             .await
         }
