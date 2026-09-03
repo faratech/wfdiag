@@ -51,9 +51,23 @@ SPARSE_PACKAGE_NAME = "32827MikeFara.WindowsForumDiagnostics"
 # copies independently of this flag.
 BUNDLE_AI_DLLS = False
 
-# Certificate configuration for self-signing
+# Certificate configuration for self-signing. The PFX password is supplied
+# per run through WFDIAG_CERT_PASSWORD - it is no longer hardcoded (it was
+# git-tracked, exposed on signtool command lines, and templated into the
+# generated sparse-identity script; 2026-09-03 audit #314).
 CERT_PATH = OUTPUT_DIR / "wfdiag-selfsign.pfx"
-CERT_PASSWORD = "WFDiag2024!"
+
+
+def cert_password() -> str:
+    import os
+
+    password = os.environ.get("WFDIAG_CERT_PASSWORD", "").strip()
+    if not password:
+        raise SystemExit(
+            "Set WFDIAG_CERT_PASSWORD to the self-signed PFX password before "
+            "running a signing step (the password is no longer hardcoded)."
+        )
+    return password
 
 # Get CPU count for parallel builds
 CPU_COUNT = multiprocessing.cpu_count()
@@ -593,10 +607,10 @@ def build_sparse(version: str, sign: bool = False) -> bool:
             print(f"\n>>> Signing {msix_path.name}...")
             cmd = [
                 str(signtool), "sign", "/fd", "SHA256", "/a",
-                "/f", wslpath(CERT_PATH), "/p", CERT_PASSWORD,
+                "/f", wslpath(CERT_PATH), "/p", cert_password(),
                 wslpath(msix_path),
             ]
-            if not run_command(cmd, redact=CERT_PASSWORD):
+            if not run_command(cmd, redact=cert_password()):
                 print(f"Failed to sign {msix_path.name}")
                 return False
 
@@ -785,7 +799,8 @@ def ensure_certificate() -> bool:
 $ErrorActionPreference = "Stop"
 $Publisher = "{PUBLISHER}"
 $CertPath = "{wslpath(CERT_PATH)}"
-$CertPassword = "{CERT_PASSWORD}"
+if (-not $env:WFDIAG_CERT_PASSWORD) {{ throw "Set WFDIAG_CERT_PASSWORD before importing the PFX." }}
+$CertPassword = "$env:WFDIAG_CERT_PASSWORD"
 
 # Create the certificate
 $cert = New-SelfSignedCertificate `
@@ -817,7 +832,7 @@ try {{
 '''
 
     cmd = ["powershell.exe", "-Command", ps_script]
-    if not run_command(cmd, redact=CERT_PASSWORD):
+    if not run_command(cmd, redact=cert_password()):
         print("Failed to create certificate")
         print("\nTo create manually, run in Windows PowerShell as Admin:")
         print(f'  powershell.exe -File C:\\code\\sign-msix.ps1')
@@ -856,11 +871,11 @@ def sign_msix(version: str) -> bool:
         "/fd", "SHA256",
         "/a",
         "/f", wslpath(CERT_PATH),
-        "/p", CERT_PASSWORD,
+        "/p", cert_password(),
         wslpath(bundle_path)
     ]
 
-    if not run_command(cmd, redact=CERT_PASSWORD):
+    if not run_command(cmd, redact=cert_password()):
         print("Failed to sign bundle")
         print("\nIf you see 'Access denied', ensure certificate is installed to Trusted Root.")
         print("Run in Windows PowerShell as Admin:")

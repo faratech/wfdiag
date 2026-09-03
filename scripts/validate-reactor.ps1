@@ -17,7 +17,12 @@
 param(
     [ValidateSet("startup", "live-system", "about", "flows", "visual", "x64", "readiness", "gates", "all")]
     [string[]]$Suite = @("all"),
-    [string]$Executable = "C:\Temp\claude\wfdiag\target\aarch64-pc-windows-msvc\debug\wfdiag.exe",
+    # Mandatory: the evidence must name the exact binary under test. A
+    # default here pointed at an aarch64 debug exe that x64 hosts cannot
+    # launch, silently divorcing the reports from the candidate
+    # (2026-09-03 audit #315).
+    [Parameter(Mandatory = $true)]
+    [string]$Executable,
     [string]$BuildRoot = "C:\Temp\claude\wfdiag",
     [string]$ReportsRoot = "validation-reports"
 )
