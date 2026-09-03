@@ -2,10 +2,20 @@
 //!
 //! This is the single implementation of the untrusted-input → search-query
 //! boundary. Diagnostic output, issue evidence, and chat text are all
-//! attacker-influenced data, so nothing reaches the network unless it comes
-//! from [`SAFE_QUERY_FIELDS`] and survives the value rejection rules in
-//! [`safe_value_term`]. Both shells (native Reactor and Tauri) call these
-//! functions; neither keeps a private copy.
+//! attacker-influenced data, so machine-derived queries never reach the
+//! network unless they are reduced through [`SAFE_QUERY_FIELDS`] and survive
+//! the value rejection rules in [`safe_value_term`]
+//! ([`build_safe_query`]). Both shells (native Reactor and Tauri) call
+//! these functions; neither keeps a private copy.
+//!
+//! Scope note (2026-09-03 audit): the interactive chat tool
+//! [`search_windows_knowledge`] is deliberately different. Its query is
+//! model-authored user intent — the same trust level as the user's own
+//! prompt — so it is bounded by [`MAX_QUERY_CHARS`] and `compact_text`
+//! rather than reduced to the allowlisted field set; a field reduction
+//! there would destroy the question being asked. Every machine-derived
+//! path (analysis, release/update claims) still goes through the
+//! allowlist.
 //!
 //! The module also owns the minimal streamable-HTTP MCP client used for the
 //! read-only RAG lookups. The app only needs `initialize`,

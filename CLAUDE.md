@@ -289,9 +289,11 @@ Evidence comes from `scripts/validate-reactor.ps1 -Suite all` and the manual
   `TURN_TIMEOUT_SECS = 180`, then a forced final answer. Chat-triggered scans are never
   written into the scan session.
 * **One grounding sanitizer.** `crates/wfdiag-native-ai-chat/src/grounding.rs` is the single
-  untrusted-input → search-query boundary: nothing reaches the WindowsForum MCP endpoint
-  unless it comes from `SAFE_QUERY_FIELDS` and survives `safe_value_term`. No shell keeps a
-  private copy.
+  untrusted-input → search-query boundary: every *machine-derived* query is reduced through
+  `SAFE_QUERY_FIELDS` and `safe_value_term` before it reaches the WindowsForum MCP endpoint.
+  The one deliberate exception is the interactive `search_windows_knowledge` tool, whose
+  query is model-authored user intent (bounded by `MAX_QUERY_CHARS` and `compact_text`).
+  No shell keeps a private copy.
 * **Export destinations are closed.** `crates/wfdiag-native-export/src/path_policy.rs` decides the suggested filename,
   which directories may be saved into, and whether a filename belongs to this app (with
   canonicalization against junction/symlink replacement). `crates/wfdiag-native-export/src/external.rs` resolves a
