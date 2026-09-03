@@ -632,12 +632,16 @@ impl AppService {
         let Some(turn) = self.chat_turns.issue() else {
             return DispatchOutcome::Rejected(RejectReason::IdentityExhausted);
         };
-        let Some(attempt) =
+        let Some(mut attempt) =
             ChatAttempt::plan(turn.get(), prompt, preference, status.availability())
         else {
             let reason = self.provider_not_ready("sending");
             return DispatchOutcome::Rejected(reason);
         };
+        // The prompt and the tool evidence are captured once, when the turn
+        // is first sent (domain/consent.rs): every fallback retry answers
+        // the same question against the same evidence.
+        attempt.evidence = self.chat_tool_snapshot();
         self.chat_turn = Some(turn);
         self.snapshot.ai.chat = crate::snapshot_ai::ChatSnapshot::default();
         if self.dispatch_chat_attempt(None, attempt) {
@@ -657,7 +661,7 @@ impl AppService {
         let provider = attempt.current_provider;
         let fallback_from = attempt.fallback_from();
         let allow_fallback = attempt.allows_fallback();
-        let evidence = self.chat_tool_snapshot();
+        let evidence = attempt.evidence.clone();
         let queued = previous.map_or_else(
             || {
                 runtime.send_attempt(

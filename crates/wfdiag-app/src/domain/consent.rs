@@ -21,7 +21,9 @@ use wfdiag_native_settings::CloudFallbackPolicy;
 /// The prompt and the tool evidence are captured **once**, when the turn is
 /// first sent: a fallback retry must answer the same question against the same
 /// evidence, not a re-read of state that moved on in the meantime.
-#[derive(Clone, Debug, PartialEq, Eq)]
+// No PartialEq/Eq: the attempt carries the turn's tool evidence (a large,
+// non-comparable capture); attempts are compared field-wise where needed.
+#[derive(Clone, Debug)]
 pub struct ChatAttempt {
     /// The turn's stable identity, unchanged by fallback.
     pub turn: u64,
@@ -39,6 +41,11 @@ pub struct ChatAttempt {
     pub current_provider: AIProvider,
     /// The first attempt's failure, which is the one worth showing.
     pub first_failure: Option<String>,
+    /// The tool evidence this turn answers against, captured once when the
+    /// turn is first sent. A fallback retry must answer the same question
+    /// against the same evidence (2026-09-03 audit: it used to re-capture,
+    /// so a mid-turn scan commit changed the answer's grounding).
+    pub evidence: crate::ports::chat_tools::ChatToolSnapshot,
 }
 
 impl ChatAttempt {
@@ -60,6 +67,7 @@ impl ChatAttempt {
             initial_provider: candidate.provider,
             current_provider: candidate.provider,
             first_failure: None,
+            evidence: crate::ports::chat_tools::ChatToolSnapshot::default(),
         })
     }
 
@@ -166,7 +174,7 @@ pub fn decide_fallback(attempt: &ChatAttempt, policy: CloudFallbackPolicy) -> Fa
 }
 
 /// A prompt awaiting the user's answer, plus the turn it will resume.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct PendingConsent {
     /// The attempt to resume once the answer arrives.
     pub attempt: ChatAttempt,
@@ -206,7 +214,7 @@ impl ConsentAnswer {
 ///
 /// The answer is applied to the turn only after the write lands, so a failed
 /// write re-arms the prompt instead of silently losing the pending message.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct PendingPolicyWrite {
     /// The policy being persisted.
     pub policy: CloudFallbackPolicy,
@@ -215,7 +223,7 @@ pub struct PendingPolicyWrite {
 }
 
 /// What a completed preference write means for the waiting turn.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum PolicyWriteOutcome {
     /// Resume the turn on the cloud candidate.
     Continue(Box<PendingConsent>),
