@@ -133,6 +133,16 @@ windows-reactor-setup = {{ git = "{readiness.EXPECTED_REACTOR_REPOSITORY}", rev 
 ''',
         )
         self.write_text(
+            "Cargo.toml",
+            '''[workspace]
+members = ["apps/wfdiag", "crates/*", "src-tauri"]
+resolver = "2"
+
+[workspace.dependencies]
+serde = "1"
+''',
+        )
+        self.write_text(
             "apps/wfdiag/src/main.rs",
             "use windows_reactor::*;\nfn main() {}\n",
         )
@@ -318,6 +328,32 @@ class ReactorReadinessTests(unittest.TestCase):
         self.assertIn("cutover.contract", codes(report, "error"))
         finding = next(f for f in report.findings if f.code == "cutover.contract")
         self.assertEqual(finding.details["duplicates"], ["store_packaging_validation"])
+
+    def test_forbidden_dependency_in_a_workspace_member_is_a_blocker(self):
+        # The scan used to open only apps/wfdiag/Cargo.toml, so a web
+        # dependency declared in a linked engine crate kept the gate green
+        # (2026-09-03 audit).
+        self.fixture.write_text(
+            "crates/wfdiag-ui-core/Cargo.toml",
+            "[package]\nname = \"wfdiag-ui-core\"\n"
+            "version = \"0.1.0\"\n[dependencies]\nwry = \"0.24\"\n",
+        )
+
+        report = self.fixture.report()
+
+        self.assertFalse(report.ready)
+        finding = next(f for f in report.findings if f.code == "ui.native")
+        problems = finding.details["problems"]
+        self.assertTrue(
+            any(
+                entry.get("dependency") == "wry"
+                and entry.get("manifest") == str(
+                    Path("crates/wfdiag-ui-core/Cargo.toml")
+                )
+                for entry in problems["forbidden_dependencies"]
+            ),
+            problems,
+        )
 
     def test_store_identity_and_capability_drift_are_blockers(self):
         changed = appx_manifest(readiness.EXPECTED_REACTOR_FRAMEWORK)

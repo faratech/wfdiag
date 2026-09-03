@@ -457,18 +457,65 @@ def _check_native_ui(
         return
 
     dependency_hits: list[dict[str, str]] = []
-    for table_name, dependencies in _dependency_tables(cargo):
-        for name, specification in dependencies.items():
-            identities = _dependency_names(str(name), specification)
-            matches = _forbidden_dependency_matches(identities)
-            if matches:
-                dependency_hits.append(
-                    {
-                        "table": table_name,
-                        "dependency": str(name),
-                        "matched": ", ".join(matches),
-                    }
-                )
+
+    def _scan_manifest(relative: str, document: object) -> None:
+        for table_name, dependencies in _dependency_tables(document):
+            for name, specification in dependencies.items():
+                identities = _dependency_names(str(name), specification)
+                matches = _forbidden_dependency_matches(identities)
+                if matches:
+                    dependency_hits.append(
+                        {
+                            "manifest": relative,
+                            "table": table_name,
+                            "dependency": str(name),
+                            "matched": ", ".join(matches),
+                        }
+                    )
+
+    _scan_manifest(relative_manifest, cargo)
+
+    # The shell manifest alone said nothing about the crates it links: a
+    # workspace member resolving deps as `{ workspace = true }` was never
+    # opened, so a web dependency in an engine crate kept the gate green
+    # (2026-09-03 audit). Scan the whole workspace: the root's
+    # [workspace.dependencies] and every member manifest.
+    try:
+        workspace_root = tomllib.loads(
+            (root / "Cargo.toml").read_text(encoding="utf-8")
+        )
+        workspace_deps = workspace_root.get("workspace", {}).get("dependencies")
+        if isinstance(workspace_deps, dict):
+            _scan_manifest("Cargo.toml", {"dependencies": workspace_deps})
+        members = workspace_root.get("workspace", {}).get("members", [])
+        if isinstance(members, list):
+            member_paths: list[Path] = []
+            for member in members:
+                if not isinstance(member, str):
+                    continue
+                member_paths.extend(sorted(root.glob(member)))
+            for member_path in member_paths:
+                member_manifest = member_path / "Cargo.toml"
+                if not member_manifest.is_file():
+                    continue
+                relative = str(member_manifest.relative_to(root))
+                if relative == relative_manifest:
+                    continue
+                try:
+                    document = tomllib.loads(
+                        member_manifest.read_text(encoding="utf-8")
+                    )
+                except (OSError, tomllib.TOMLDecodeError) as error:
+                    dependency_hits.append(
+                        {
+                            "manifest": relative,
+                            "error": str(error),
+                        }
+                    )
+                    continue
+                _scan_manifest(relative, document)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        dependency_hits.append({"manifest": "Cargo.toml", "error": str(error)})
 
     if not source_root.is_dir():
         report.add(
