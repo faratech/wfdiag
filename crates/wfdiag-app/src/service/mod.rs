@@ -27,6 +27,7 @@ use crate::command::{
 };
 use crate::config::AppConfig;
 use crate::domain::actions::{PendingVerification, StagedReview, verification_result};
+use wfdiag_native_remediation::broker::ActionSnapshot;
 use crate::domain::ai_intent::PendingAiIntent;
 use crate::domain::automation::Automation;
 use crate::domain::catalog::RefreshThrottle;
@@ -290,6 +291,9 @@ pub struct AppService {
     automation: Automation,
     /// A finished run whose fixed issues are being re-checked.
     verification: Option<PendingVerification>,
+    /// Memoized `action_snapshot` keyed by (committed session, evidence
+    /// generation); fingerprinting every task output is not free.
+    action_snapshot_cache: Option<((Option<String>, u64), ActionSnapshot)>,
     catalog_pending: Option<(RequestId, String)>,
     catalog_throttle: RefreshThrottle,
     catalog_retry: Option<(String, CatalogDraft)>,
@@ -411,6 +415,7 @@ impl AppService {
             action_pending_review: None,
             automation: Automation::default(),
             verification: None,
+            action_snapshot_cache: None,
             catalog_pending: None,
             catalog_throttle: RefreshThrottle::new(),
             catalog_retry: None,

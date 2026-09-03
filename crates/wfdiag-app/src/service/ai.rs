@@ -1373,14 +1373,37 @@ impl AppService {
 
     /// The authoritative snapshot every prepare and approve is validated
     /// against. Captured fresh at each boundary, never cached.
-    pub(super) fn action_snapshot(&self) -> ActionSnapshot {
-        build_snapshot(
+    pub(super) fn action_snapshot(&mut self) -> ActionSnapshot {
+        // The fingerprint hashes every task output, so re-deriving it at
+        // every remediation boundary and issue projection cost O(total
+        // output bytes) each time. The value only changes when the committed
+        // session or the evidence generation does; memoize against exactly
+        // those (2026-09-03 audit).
+        let key = (
+            self.issues.committed_session_id().map(str::to_string),
+            self.evidence_generation.get(),
+        );
+        if self
+            .action_snapshot_cache
+            .as_ref()
+            .is_some_and(|(cached, _)| *cached == key)
+        {
+            return self
+                .action_snapshot_cache
+                .as_ref()
+                .expect("checked above")
+                .1
+                .clone();
+        }
+        let snapshot = build_snapshot(
             self.issues.committed_session_id(),
             self.evidence_generation.get(),
             &self.scan.snapshot().results,
             &self.snapshot.issues,
             self.snapshot.is_admin(),
-        )
+        );
+        self.action_snapshot_cache = Some((key, snapshot.clone()));
+        snapshot
     }
 
     pub(super) fn prepare_remediation(
