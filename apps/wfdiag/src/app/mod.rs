@@ -430,6 +430,7 @@ impl Component for WfdiagShell {
     #[allow(clippy::too_many_lines)]
     fn update(&mut self, message: Message, context: &ComponentContext<Self>) {
         self.ensure_window_hook(context);
+        let mut app_batch = false;
         match message {
             Message::NativeSignalReady => {
                 // #206: the toast worker posts a wake as soon as it records a
@@ -442,7 +443,10 @@ impl Component for WfdiagShell {
                     self.update(pending, context);
                 }
             }
-            Message::App(events) => self.apply_app_events(events, context),
+            Message::App(events) => {
+                app_batch = true;
+                self.apply_app_events(events, context);
+            }
             Message::WindowHookBootstrap => {}
             Message::WindowSize(size) => self.shell.window_size = size,
             Message::ColorSchemeChanged(color_scheme) => {
@@ -469,7 +473,13 @@ impl Component for WfdiagShell {
         // the read model synchronously (a started scan is `Starting` the
         // instant it is accepted), so the frame this message produces must be
         // rendered from the snapshot as it is now, not as it was last wake.
-        self.sync_from_snapshot();
+        // An event batch already synced at the top of `apply_app_events`, so
+        // a second full clone of the read model here doubled the cost of
+        // every batch (2026-09-03 audit); the facade wakes the shell again
+        // if a follow-up dispatch queues more work.
+        if !app_batch {
+            self.sync_from_snapshot();
+        }
         // Outcome notices raised anywhere above get their dismissal timer
         // here, where a context is at hand; the keyboard hook learns whether
         // a bare Enter now belongs to the chat composer.
