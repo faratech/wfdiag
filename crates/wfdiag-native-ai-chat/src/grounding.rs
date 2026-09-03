@@ -223,7 +223,7 @@ pub async fn ground_query(
     max_chars: usize,
     cancel: &CancellationToken,
 ) -> AnalysisGrounding {
-    let endpoint = windowsforum_endpoint();
+    let endpoint = WINDOWSFORUM_MCP_URL;
     let lookup = search_sources(&endpoint, &query.text, query.mode);
     let searched = tokio::select! {
         biased;
@@ -273,7 +273,7 @@ pub async fn search_windows_knowledge(
     if query.trim().is_empty() {
         return Err("search_windows_knowledge requires a query".to_string());
     }
-    let endpoint = windowsforum_endpoint();
+    let endpoint = WINDOWSFORUM_MCP_URL;
     let lookup = search_sources(&endpoint, &query, GroundingMode::General);
     let sources = tokio::select! {
         biased;
@@ -501,11 +501,6 @@ pub fn trace_from_rendered_grounding(query: &str, rendered: &str) -> GroundingTr
         sources,
         error: None,
     }
-}
-
-fn windowsforum_endpoint() -> String {
-    std::env::var("WFDIAG_WINDOWSFORUM_MCP_URL")
-        .unwrap_or_else(|_| WINDOWSFORUM_MCP_URL.to_string())
 }
 
 async fn search_sources(
