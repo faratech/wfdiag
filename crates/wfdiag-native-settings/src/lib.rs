@@ -8,6 +8,7 @@
 //! Secret values are write-only inputs and are never serialized or returned by
 //! [`SettingsService::load`].
 
+use zeroize::Zeroizing;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::{Arc, Mutex, mpsc};
@@ -321,7 +322,10 @@ pub enum ProviderCredentialAction {
 
 #[derive(Clone)]
 enum ProviderCredentialMutation {
-    Store(String),
+    /// The staged plaintext lives in `Zeroizing` like the protector
+    /// boundary: a cancelled dialog or a failed commit must not leave key
+    /// bytes in freed heap (2026-09-03 audit).
+    Store(Zeroizing<String>),
     Clear,
 }
 
@@ -356,7 +360,7 @@ impl ProviderCredentialTransaction {
     /// An empty value preserves the existing immediate API's semantics and
     /// stages a clear operation.
     pub fn stage_store(&mut self, provider: ProviderKeyId, key: impl Into<String>) {
-        let key = key.into();
+        let key = Zeroizing::new(key.into());
         self.mutations[provider.index()] = Some(if key.is_empty() {
             ProviderCredentialMutation::Clear
         } else {
@@ -534,6 +538,15 @@ pub trait CredentialStorage: Send + Sync + 'static {
     fn store(&self, provider: ProviderKeyId, key: &str) -> Result<(), SettingsError>;
     fn load(&self, provider: ProviderKeyId) -> Result<Option<String>, SettingsError>;
     fn clear(&self, provider: ProviderKeyId) -> Result<(), SettingsError>;
+
+    /// Credential availability without materializing its value. The default
+    /// answers through [`Self::load`]; an implementation with a cheaper
+    /// presence signal should override it — `load()` decrypts, and answering
+    /// the `*_api_key_set` booleans must not materialize every stored secret
+    /// on every settings load (2026-09-03 audit).
+    fn is_set(&self, provider: ProviderKeyId) -> Result<bool, SettingsError> {
+        Ok(self.load(provider)?.is_some())
+    }
 }
 
 pub trait SettingsValidator: Send + Sync + 'static {
@@ -711,11 +724,9 @@ impl SettingsService {
         self.credentials.load(provider)
     }
 
-    /// Return credential availability without exposing its value.
+    /// Return credential availability without exposing or decrypting it.
     pub fn provider_key_is_set(&self, provider: ProviderKeyId) -> Result<bool, SettingsError> {
-        Ok(self
-            .load_provider_key(provider)?
-            .is_some_and(|value| !value.is_empty()))
+        self.credentials.is_set(provider)
     }
 
     /// Apply every staged provider-key edit as one compensating transaction.
@@ -739,7 +750,8 @@ impl SettingsService {
     fn commit_provider_credentials_snapshotting(
         &self,
         transaction: &ProviderCredentialTransaction,
-    ) -> Result<Vec<(ProviderKeyId, Option<String>)>, ProviderCredentialTransactionError> {
+    ) -> Result<Vec<(ProviderKeyId, Option<Zeroizing<String>>)>, ProviderCredentialTransactionError>
+    {
         if transaction.is_empty() {
             return Ok(Vec::new());
         }
@@ -756,12 +768,14 @@ impl SettingsService {
             let value = self.credentials.load(provider).map_err(|error| {
                 ProviderCredentialTransactionError::Snapshot { provider, error }
             })?;
-            snapshots.push((provider, value));
+            snapshots.push((provider, value.map(Zeroizing::new)));
         }
 
         for (index, (provider, mutation)) in transaction.iter().enumerate() {
             let result = match mutation {
-                ProviderCredentialMutation::Store(key) => self.credentials.store(provider, key),
+                ProviderCredentialMutation::Store(key) => {
+                    self.credentials.store(provider, key.as_str())
+                }
                 ProviderCredentialMutation::Clear => self.credentials.clear(provider),
             };
             if let Err(error) = result {
@@ -791,7 +805,7 @@ impl SettingsService {
 
     fn rollback_provider_credentials(
         &self,
-        snapshots: &[(ProviderKeyId, Option<String>)],
+        snapshots: &[(ProviderKeyId, Option<Zeroizing<String>>)],
     ) -> Vec<ProviderCredentialRollbackFailure> {
         snapshots
             .iter()
@@ -799,7 +813,7 @@ impl SettingsService {
             .filter_map(|(provider, value)| {
                 let result = value.as_ref().map_or_else(
                     || self.credentials.clear(*provider),
-                    |value| self.credentials.store(*provider, value),
+                    |value| self.credentials.store(*provider, value.as_str()),
                 );
                 result.err().map(|error| ProviderCredentialRollbackFailure {
                     provider: *provider,

@@ -498,6 +498,16 @@ impl CredentialStorage for WindowsDpapiCredentialStorage {
         }
         Ok(())
     }
+
+    fn is_set(&self, provider: ProviderKeyId) -> Result<bool, SettingsError> {
+        // Presence and size only: answering `*_api_key_set` must not decrypt
+        // (and so materialize) every stored secret on every settings load
+        // (2026-09-03 audit). `symlink_metadata` never follows a planted link.
+        let Ok(path) = self.path(provider) else {
+            return Ok(false);
+        };
+        Ok(fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.len() > 0))
+    }
 }
 
 /// Move an undecryptable credential file aside so the failure is reported once
