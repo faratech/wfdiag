@@ -382,7 +382,14 @@ fn parse_non_code_inline(text: &str, output: &mut Vec<MarkdownInline>) {
         {
             let label_end = cursor + 1 + label_end_relative;
             let target_start = label_end + 2;
-            if let Some(target_end_relative) = link_target_end(&text[target_start..]) {
+            // The target scan is bounded like the label scan: without the
+            // window, `[x](` with no closing parenthesis anywhere later in
+            // the document re-scans the whole tail per occurrence, which is
+            // quadratic on the UI thread (the same class the `**` span
+            // lookup-ahead fix removed).
+            if let Some(target_end_relative) =
+                link_target_end(bounded_tail(text, target_start, MAX_INLINE_SPAN_CHARS))
+            {
                 let target_end = target_start + target_end_relative;
                 let label = &text[cursor + 1..label_end];
                 let target = &text[target_start..target_end];
@@ -485,6 +492,23 @@ mod tests {
 
     fn text(value: &str) -> MarkdownInline {
         MarkdownInline::Text(value.to_string())
+    }
+
+    #[test]
+    fn link_targets_scan_a_bounded_window_so_pathological_input_stays_linear() {
+        // Thousands of `[x](` with no closing parenthesis anywhere: the
+        // target lookup-ahead must be bounded like the label lookup-ahead,
+        // or every occurrence re-scans the rest of the document (quadratic
+        // on the UI thread, re-run per streaming delta).
+        let pathological = "[x](".repeat(20_000);
+        let document = parse_markdown_lite(&pathological);
+        assert_eq!(document.blocks.len(), 1);
+        let MarkdownBlock::Paragraph(inlines) = &document.blocks[0] else {
+            panic!("expected a single paragraph");
+        };
+        assert!(inlines
+            .iter()
+            .all(|inline| matches!(inline, MarkdownInline::Text(_))));
     }
 
     #[test]
