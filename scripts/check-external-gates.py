@@ -14,7 +14,9 @@ cutover review:
    clean-machine protocol (docs/validation/clean-machine-protocol.md) needs.
 
 Exit codes: 0 = no actionable external change, 1 = an actionable external
-change was detected (e.g. an official release published), 2 = check failure.
+change was detected (e.g. an official release published) or an alignment
+input drifted (store manifest vs the pinned framework/floor, missing
+protocol inputs), 2 = check failure.
 """
 
 from __future__ import annotations
@@ -71,40 +73,67 @@ def check_crates_io(timeout: float) -> dict:
 
 
 def read_runtime_pins(root: Path) -> dict:
+    # The framework name and floor are single-sourced from
+    # reactor-baselines/manifest.json (reactor_pin); the old prototype-scan
+    # loop assigned the constant it already held, so nothing read from
+    # apps/wfdiag/Cargo.toml could change any outcome (2026-09-03 audit).
+    baseline_path = root / "reactor-baselines" / "manifest.json"
     store_manifest = root / "AppxManifest.xml"
-    prototype = root / "apps/wfdiag" / "Cargo.toml"
     pins = {
+        "baseline_loaded": False,
         "store_framework": None,
+        "store_min_version": None,
         "reactor_framework": EXPECTED_RUNTIME_FRAMEWORK,
         "reactor_release": EXPECTED_RUNTIME_RELEASE,
+        "reactor_min_version": None,
     }
+    try:
+        pin = json.loads(baseline_path.read_text(encoding="utf-8"))["reactor_pin"]
+        pins["reactor_framework"] = pin["windows_app_runtime_framework"]
+        pins["reactor_release"] = pin["windows_app_runtime_release"]
+        pins["reactor_min_version"] = pin["windows_app_runtime_min_version"]
+        pins["baseline_loaded"] = True
+    except (OSError, json.JSONDecodeError, KeyError):
+        pass
     if store_manifest.is_file():
-        tree = ET.parse(store_manifest)
-        namespace = {"default": "http://schemas.microsoft.com/appx/manifest/foundation/windows10"}
+        try:
+            tree = ET.parse(store_manifest)
+        except ET.ParseError:
+            return pins
         for dependency in tree.getroot().iter():
             if dependency.tag.endswith("PackageDependency"):
                 name = dependency.get("Name") or ""
                 if name.startswith("Microsoft.WindowsAppRuntime."):
                     pins["store_framework"] = name
-    if prototype.is_file():
-        text = prototype.read_text(encoding="utf-8")
-        for framework in ("Microsoft.WindowsAppRuntime.1", "Microsoft.WindowsAppRuntime.2"):
-            if framework in text:
-                pins["reactor_framework"] = EXPECTED_RUNTIME_FRAMEWORK
+                    pins["store_min_version"] = dependency.get("MinVersion")
     return pins
 
 
 def check_runtime_drift(root: Path, host_frameworks: list[str] | None) -> dict:
     pins = read_runtime_pins(root)
-    drift = pins["store_framework"] != pins["reactor_framework"]
+    if not pins["baseline_loaded"]:
+        return {
+            "check": "runtime_alignment",
+            "status": "error",
+            "message": "reactor-baselines/manifest.json is missing or unreadable; "
+            "the runtime alignment pin cannot be checked.",
+            "pins": pins,
+        }
+    drift = (
+        pins["store_framework"] != pins["reactor_framework"]
+        or pins["store_min_version"] != pins["reactor_min_version"]
+    )
     report = {
         "check": "runtime_alignment",
         "status": "drift" if drift else "aligned",
         "message": (
-            f"Store manifest pins {pins['store_framework']} while the Reactor staging "
-            f"targets {pins['reactor_framework']} ({pins['reactor_release']})."
+            f"Store manifest pins {pins['store_framework']}"
+            f" MinVersion {pins['store_min_version']} while the Reactor staging "
+            f"targets {pins['reactor_framework']} MinVersion "
+            f"{pins['reactor_min_version']} ({pins['reactor_release']})."
             if drift else
-            f"Store manifest and Reactor staging agree on {pins['reactor_framework']}."
+            f"Store manifest and Reactor staging agree on {pins['reactor_framework']}"
+            f" MinVersion {pins['reactor_min_version']}."
         ),
         "pins": pins,
     }
@@ -174,7 +203,12 @@ def main() -> int:
 
     if errors:
         return 2
-    return 1 if actionable else 0
+    # Drift and incomplete protocol inputs are the watcher's reason to
+    # exist; they used to print and exit 0 (2026-09-03 audit).
+    drifted = [
+        check for check in checks if check["status"] in ("drift", "incomplete")
+    ]
+    return 1 if actionable or drifted else 0
 
 
 if __name__ == "__main__":
