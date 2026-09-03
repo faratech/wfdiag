@@ -155,9 +155,8 @@ fn dns_computer_name() -> Option<String> {
 ///
 /// The current collectors use shipping fallbacks and therefore do not fail.
 pub fn get_system_info() -> Result<SystemInfo, SystemError> {
-    let computer_name = dns_computer_name().unwrap_or_else(|| {
-        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Unknown".to_string())
-    });
+    let computer_name = dns_computer_name()
+        .unwrap_or_else(|| std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Unknown".to_string()));
 
     #[cfg(windows)]
     let os_version = get_windows_version_info();
