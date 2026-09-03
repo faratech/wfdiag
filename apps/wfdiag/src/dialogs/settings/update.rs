@@ -815,7 +815,13 @@ impl WfdiagShell {
                 // available, so re-probe once the keys have actually landed.
                 let _ = self.dispatch(AppCommand::RequestProviderStatus);
             }
-            SettingsEvent::Failed { error } => {
+            SettingsEvent::Failed { kind, error } => {
+                // Only a SAVE is a save failure: a credential-commit or load
+                // problem used to be reported as "Settings were not saved"
+                // and dropped the in-flight save epoch (2026-09-03 audit).
+                if kind != wfdiag_app::SettingsFailureKind::Save {
+                    return;
+                }
                 self.settings.saving = false;
                 self.settings.save_epoch = None;
                 window::set_close_to_tray(self.shell.settings.close_to_tray);

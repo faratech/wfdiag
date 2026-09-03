@@ -537,7 +537,13 @@ impl AiScreen {
                     });
                 }
             }
-            ProviderEvent::Failed { error } => {
+            ProviderEvent::Failed { source, error } => {
+                // Only the status check is a status failure; a model-list or
+                // subscription-probe problem must not clear the status bar's
+                // good state (2026-09-03 audit).
+                if source != &wfdiag_app::ProviderFailureSource::Status {
+                    return;
+                }
                 self.status_error = Some(error.clone());
                 if cx.shell.page == Page::Ai {
                     cx.status(format!("AI provider check failed · {error}"));

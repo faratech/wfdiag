@@ -2005,8 +2005,10 @@ impl AppService {
                         self.project_subscription_accounts(&status, preference);
                     }
                     Err(error) => {
-                        self.queue
-                            .push(AppEvent::Provider(ProviderEvent::Failed { error }));
+                        self.queue.push(AppEvent::Provider(ProviderEvent::Failed {
+                            source: crate::event::ProviderFailureSource::Status,
+                            error,
+                        }));
                     }
                 }
             }
@@ -2018,8 +2020,10 @@ impl AppService {
                 match probes {
                     Ok(probes) => self.apply_subscription_probes(&probes),
                     Err(error) => {
-                        self.queue
-                            .push(AppEvent::Provider(ProviderEvent::Failed { error }));
+                        self.queue.push(AppEvent::Provider(ProviderEvent::Failed {
+                            source: crate::event::ProviderFailureSource::Subscription,
+                            error,
+                        }));
                     }
                 }
             }
@@ -2065,9 +2069,12 @@ impl AppService {
                     Ok(models) => self
                         .queue
                         .push(AppEvent::Provider(ProviderEvent::OllamaModels(models))),
-                    Err(error) => self
-                        .queue
-                        .push(AppEvent::Provider(ProviderEvent::Failed { error })),
+                    Err(error) => {
+                        self.queue.push(AppEvent::Provider(ProviderEvent::Failed {
+                            source: crate::event::ProviderFailureSource::ModelList,
+                            error,
+                        }));
+                    }
                 }
             }
             Internal::ReportBaseline {
@@ -2485,9 +2492,19 @@ impl AppService {
             }
             Err(error) => {
                 let error = error.to_string();
+                let failure_kind = match kind {
+                    SettingsRequestKind::Load => crate::event::SettingsFailureKind::Load,
+                    SettingsRequestKind::Save(_) => crate::event::SettingsFailureKind::Save,
+                    SettingsRequestKind::Update => crate::event::SettingsFailureKind::Update,
+                    SettingsRequestKind::Credential => {
+                        crate::event::SettingsFailureKind::Credentials
+                    }
+                };
                 self.snapshot.settings_error = Some(error.clone());
-                self.queue
-                    .push(AppEvent::Settings(SettingsFact::Failed { error }));
+                self.queue.push(AppEvent::Settings(SettingsFact::Failed {
+                    kind: failure_kind,
+                    error,
+                }));
                 self.resolve_cloud_fallback_write(RequestId::from_raw(request_id), Err(()));
             }
         }

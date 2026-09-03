@@ -305,9 +305,23 @@ pub enum ProviderEvent {
     Subscription(Box<SubscriptionEvent>),
     /// A provider request failed.
     Failed {
+        /// Which request failed.
+        source: ProviderFailureSource,
         /// The diagnostic.
         error: String,
     },
+}
+
+/// Which provider request failed, so a model-list problem is not
+/// misattributed to the status check (2026-09-03 audit).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderFailureSource {
+    /// The provider availability status refresh.
+    Status,
+    /// The subscription-CLI account probes.
+    Subscription,
+    /// The local Ollama model list.
+    ModelList,
 }
 
 /// Settings facts.
@@ -332,9 +346,25 @@ pub enum SettingsEvent {
     CredentialsCommitted,
     /// A settings request failed.
     Failed {
+        /// Which request failed.
+        kind: SettingsFailureKind,
         /// The diagnostic.
         error: String,
     },
+}
+
+/// Which settings request failed, so a credential or load problem is not
+/// misattributed to a save (2026-09-03 audit).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsFailureKind {
+    /// The startup or explicit document load.
+    Load,
+    /// The complete-document save.
+    Save,
+    /// One typed mutation.
+    Update,
+    /// The staged credential transaction.
+    Credentials,
 }
 
 /// Export-rendering facts.

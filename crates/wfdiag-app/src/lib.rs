@@ -72,8 +72,8 @@ pub use domain::subscriptions::{SignInRequiredReason, SignInRequirement};
 pub use event::{
     ActionEvent, AnalysisEvent, AppEvent, AppEventReceiver, ChatEvent, ExportEvent, FixPlanEvent,
     HistoryEvent, HistoryRequest, IssuesEvent, ModelCatalogEvent, MonitorEvent,
-    PrioritizationEvent, ProviderEvent, ReportEvent, SafeFixOrigin, ScanEvent, SettingsEvent,
-    SubscriptionEvent, SystemEvent, UpdateEvent,
+    PrioritizationEvent, ProviderEvent, ProviderFailureSource, ReportEvent, SafeFixOrigin,
+    ScanEvent, SettingsEvent, SettingsFailureKind, SubscriptionEvent, SystemEvent, UpdateEvent,
 };
 pub use ids::{Epoch, RequestId};
 pub use ports::{AppPorts, ElevationPort, EnvironmentPort, UpdateThrottlePort};
