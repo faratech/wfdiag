@@ -3,6 +3,7 @@
 
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use windows::Win32::System::Com::{
@@ -25,7 +26,20 @@ const WBEM_S_TIMEDOUT: i32 = 0x0004_0004;
 // Thread-local COM initialization state
 thread_local! {
     static COM_INITIALIZED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// One reused WMI connection per thread, keyed by namespace (2026-09-03
+    /// audit: a full scan paid CoCreateInstance + ConnectServer +
+    /// CoSetProxyBlanket once per task, ~25 times). COM objects are
+    /// thread-affine, so the cache is thread-local; every
+    /// [`WmiConnection`] handed out shares the cached `IWbemServices`
+    /// pointer, and dropping a handle never closes the shared connection.
+    static REUSED_SERVICES:
+        RefCell<Option<(String, IWbemServices, std::time::Instant)>> =
+        const { RefCell::new(None) };
 }
+
+/// Evict the cached connection when older than this: WMI can go away
+/// (service restart), so no cached connection is trusted forever.
+const WMI_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Initialize COM for the current thread if not already done.
 ///
@@ -103,6 +117,19 @@ impl WmiConnection {
     pub fn with_namespace(namespace: &str) -> Result<Self> {
         ensure_com_initialized()?;
 
+        // Cache hit: hand out another handle to the shared connection.
+        if let Some(services) = REUSED_SERVICES.with(|slot| {
+            slot.borrow().as_ref().and_then(|(cached, services, created)| {
+                (cached == namespace && created.elapsed() < WMI_CACHE_TTL)
+                    .then(|| services.clone())
+            })
+        }) {
+            return Ok(Self {
+                services,
+                _marker: std::marker::PhantomData,
+            });
+        }
+
         unsafe {
             // Create WbemLocator instance
             let locator: IWbemLocator = CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER)
@@ -135,6 +162,15 @@ impl WmiConnection {
                 EOAC_NONE,
             )
             .ok();
+
+            // Cache the connection for the next task on this thread.
+            REUSED_SERVICES.with(|slot| {
+                *slot.borrow_mut() = Some((
+                    namespace.to_string(),
+                    services.clone(),
+                    std::time::Instant::now(),
+                ));
+            });
 
             Ok(Self {
                 services,
