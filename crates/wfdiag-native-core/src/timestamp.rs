@@ -130,29 +130,31 @@ impl Timestamp {
             s
         };
 
-        // Parse components
-        if s.len() < 19 {
+        // Parse components. Fields are cut from the byte view so a multi-byte
+        // character in the input becomes the documented `Err` instead of a
+        // char-boundary slicing panic: this deserializer runs on persisted
+        // documents, and the release profile aborts on panic.
+        let bytes = s.as_bytes();
+        if bytes.len() < 19 {
             return Err(DiagError::internal(format!("Invalid ISO 8601 format: {s}")).into());
         }
 
-        let year: i32 = s[0..4]
+        let field = |range: std::ops::Range<usize>, label: &str| -> Result<u32, String> {
+            let digits = std::str::from_utf8(&bytes[range])
+                .map_err(|_| DiagError::internal(format!("Invalid {label}")))?;
+            Ok(digits
+                .parse::<u32>()
+                .map_err(|_| DiagError::internal(format!("Invalid {label}")))?)
+        };
+        let year: i32 = std::str::from_utf8(&bytes[0..4])
+            .map_err(|_| DiagError::internal("Invalid year"))?
             .parse()
             .map_err(|_| DiagError::internal("Invalid year"))?;
-        let month: u32 = s[5..7]
-            .parse()
-            .map_err(|_| DiagError::internal("Invalid month"))?;
-        let day: u32 = s[8..10]
-            .parse()
-            .map_err(|_| DiagError::internal("Invalid day"))?;
-        let hour: u32 = s[11..13]
-            .parse()
-            .map_err(|_| DiagError::internal("Invalid hour"))?;
-        let minute: u32 = s[14..16]
-            .parse()
-            .map_err(|_| DiagError::internal("Invalid minute"))?;
-        let second: u32 = s[17..19]
-            .parse()
-            .map_err(|_| DiagError::internal("Invalid second"))?;
+        let month = field(5..7, "month")?;
+        let day = field(8..10, "day")?;
+        let hour = field(11..13, "hour")?;
+        let minute = field(14..16, "minute")?;
+        let second = field(17..19, "second")?;
 
         // Convert to Unix timestamp
         let days = ymd_to_days(year, month, day);
@@ -278,6 +280,20 @@ mod tests {
     fn test_epoch() {
         let ts = Timestamp::from_secs(0);
         assert_eq!(ts.to_iso_string(), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn non_ascii_input_is_an_error_not_a_panic() {
+        // A multi-byte character inside the first 19 bytes used to panic on a
+        // char-boundary slice; via `Deserialize` that aborted the process
+        // (release profile sets panic = "abort").
+        for input in [
+            "\u{fffd}024-06-12T15:30:45",
+            "2024-06-12T15:30:\u{45}5",
+            "２０２4-06-12T15:30:45",
+        ] {
+            assert!(Timestamp::from_iso_string(input).is_err(), "{input:?}");
+        }
     }
 }
 
