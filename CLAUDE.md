@@ -115,17 +115,20 @@ guards — on Linux with no Windows and no GUI.
 then `App::run_component::<WfdiagShell>`. Everything else lives in the modules below.
 
 * `app/` — the root Reactor `Component`: `mod.rs` (state fields + `Component` impl),
-  `state.rs`, `message.rs`, `consts.rs`, `policy.rs` (pure decisions), `tasks.rs`
-  (background helpers), `orchestration/` (one module per concern: `actions`, `analysis`,
-  `chat`, `export`, `history`, `issues`, `lifecycle`, `providers`, `report`, `scan`,
-  `settings`, `subscriptions`, `update`).
+  `state.rs`, `message.rs` (+ `shell_msg.rs` / `native_msg.rs` sub-messages), `consts.rs`,
+  `policy.rs` (pure decisions), `tasks.rs` (background helpers), `chrome.rs`, `screen.rs`,
+  `bootstrap.rs`, `shell_route.rs` / `native_route.rs` (message routing), and
+  `orchestration/` (`commands`, `events` — snapshot sync + event fan-out, `lifecycle`,
+  `route`).
 * `screens/{diagnostics,monitor,processes,ai,issues,history}/view.rs` — one module per page.
-* `dialogs/` — `about`, `action_review`, `palette`, `settings`.
+* `dialogs/` — `about`, `action_review`, `export`, `notice`, `palette`, `settings`,
+  `shortcuts_help`, `update_notice`.
 * `widgets/` — `badges`, `cards`, `chrome`, `icons`, `markdown_render`, `palette_colors`, `table`.
 * `platform/` — every Win32/WinRT/WinUI edge: `window` (subclass, lifecycle snapshots,
   keyboard hook), `instance`, `notifications`, `save_picker`, `external`, `focus`,
   `winui_focus_bindings`, `ui_wake`, `crash`.
-* `ai/` — `chat_tools` (the shell's tool backend) and `report` (Phi-aware resolvers).
+* The chat tool backend lives in the facade (`crates/wfdiag-app/src/ports/chat_tools.rs`),
+  not in the shell.
 * `fixtures/` — `knobs` (env-var knobs), `visual`, `issues`. Nothing here runs in production.
 
 Cargo features (release artifacts enable **none** of them):
