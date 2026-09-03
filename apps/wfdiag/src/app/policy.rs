@@ -789,20 +789,30 @@ pub(crate) fn rejection_text(reason: &wfdiag_app::RejectReason) -> String {
 /// defaults are application composition, which is why this stays with the
 /// shell rather than moving into `wfdiag-app`.
 pub(crate) fn reactor_provider_backend(
-    settings: SettingsService,
-    identity: Arc<dyn PackageIdentitySource>,
+    settings: &SettingsService,
+    identity: &Arc<dyn PackageIdentitySource>,
     cache: SharedAiCache,
 ) -> Arc<dyn ProviderManagementBackend> {
+    // Seed the selection from the persisted setting: without this, the first
+    // status refresh after a relaunch projected the Auto route as
+    // `active_provider` while turns actually routed by the persisted
+    // preference (2026-09-03 audit; sync_persisted had no callers).
+    let selection = ProviderSelectionState::default();
+    if let Ok(persisted) = settings.load_nonsecret_settings() {
+        selection.sync_persisted(&persisted.preferred_ai_provider, identity.as_ref());
+    }
     let probes = ProviderProbeBundle::shipping_networks(
-        Arc::new(SettingsServiceProviderConfigurationSource::new(settings)),
-        identity,
+        Arc::new(SettingsServiceProviderConfigurationSource::new(
+            settings.clone(),
+        )),
+        Arc::clone(identity),
         Arc::new(WindowsPhiStatusSource),
         Arc::new(FoundryCliEndpointSource::new()),
         Arc::new(ProcessSubscriptionCliStatusSource::new()),
     );
     Arc::new(ProviderManagementService::new(
         probes,
-        ProviderSelectionState::default(),
+        selection,
         Arc::new(cache),
         ProviderModelDefaults {
             foundry: "phi-4-mini".to_string(),

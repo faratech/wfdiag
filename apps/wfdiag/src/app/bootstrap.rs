@@ -56,7 +56,7 @@ pub(crate) fn start_application_service(
     let settings_service =
         crate::app::policy::reactor_settings_service(validator.clone() as Arc<_>);
     let provider_backend =
-        reactor_provider_backend(settings_service, identity, SharedAiCache::new(100));
+        reactor_provider_backend(&settings_service, &identity, SharedAiCache::new(100));
     let overrides = WindowsPortOverrides {
         settings_storage: crate::app::policy::reactor_settings_storage(),
         settings_validator: Some(validator as Arc<_>),
