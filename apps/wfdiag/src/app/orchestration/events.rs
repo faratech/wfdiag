@@ -309,11 +309,13 @@ impl WfdiagShell {
                 );
             }
             other => {
-                if other.is_some() {
-                    self.history.error = None;
-                    if self.shell.page == Page::History {
-                        self.request_history_list(context);
-                    }
+                // A scan with auto-save off finalizes with `None`: nothing
+                // was attempted, so it must not leave the *previous*
+                // scan's save failure on the History page (2026-09-03
+                // audit). Only a real save reloads the list.
+                self.history.error = None;
+                if other.is_some() && self.shell.page == Page::History {
+                    self.request_history_list(context);
                 }
                 self.shell.status = scan_complete_text(
                     label,
