@@ -152,18 +152,29 @@ impl Harness {
         collected
     }
 
+    /// Assert the event queue never dropped an event. A drop silently
+    /// removes a state-machine transition (chat Done, scan Finalized, a
+    /// repair confirmation), which no other assertion can see
+    /// (2026-09-03 audit).
+    pub fn assert_no_dropped_events(&self) {
+        assert_eq!(self.events.dropped(), 0, "the facade dropped queued events");
+    }
+
     /// Consume the harness, shutting the service down inside `budget`.
-    pub fn shutdown(self, budget: Duration) -> wfdiag_app::ShutdownReport {
+    pub fn shutdown(mut self, budget: Duration) -> wfdiag_app::ShutdownReport {
+        self.assert_no_dropped_events();
+        // Drain once more so the termination assert below observes a fully
+        // delivered stream rather than whatever the last drain left.
+        let _ = self.service.drain();
+        let _ = self.service.dispatch(AppCommand::Shutdown);
+        let report = self.service.shutdown(budget);
+        assert!(
+            self.events.is_terminated(),
+            "the receiver observes termination"
+        );
         let Self {
-            mut service,
-            events,
-            mocks,
-            directory,
-            startup_events: _,
+            mocks, directory, ..
         } = self;
-        let _ = service.dispatch(AppCommand::Shutdown);
-        let report = service.shutdown(budget);
-        assert!(events.is_terminated(), "the receiver observes termination");
         drop(mocks);
         drop(directory);
         report

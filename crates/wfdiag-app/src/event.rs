@@ -956,6 +956,29 @@ impl EventQueue {
         })
     }
 
+    /// Whether losing this event would strand a state machine: terminal
+    /// outcomes, lifecycle stops, and the repair-confirmation prompt must
+    /// survive queue pressure (2026-09-03 audit).
+    fn is_control_plane(event: &AppEvent) -> bool {
+        match event {
+            AppEvent::Terminated
+            | AppEvent::WorkerStopped { .. }
+            | AppEvent::ReplyTimedOut { .. } => true,
+            AppEvent::Chat(chat) => {
+                matches!(
+                    chat,
+                    crate::event::ChatEvent::Done { .. } | crate::event::ChatEvent::Failed { .. }
+                )
+            }
+            AppEvent::Scan(scan) => matches!(scan, crate::event::ScanEvent::Finalized { .. }),
+            AppEvent::Action(action) => matches!(
+                action,
+                crate::event::ActionEvent::RepairConfirmationRequired { .. }
+            ),
+            _ => false,
+        }
+    }
+
     fn state(&self) -> MutexGuard<'_, EventQueueState> {
         self.state
             .lock()
@@ -964,11 +987,35 @@ impl EventQueue {
 
     /// Queue one event. The oldest event is dropped when the queue is full;
     /// the drop count is reported by [`AppEventReceiver::dropped`].
+    ///
+    /// Control-plane events (terminal chat/report outcomes, repair
+    /// confirmations, scan finalization, worker lifecycle) are exempt from
+    /// being the drop victim: losing one strands a state machine with no
+    /// terminal event. When the queue is full, the oldest droppable event
+    /// is evicted instead; a control-plane event is only ever displaced by
+    /// another control-plane event (2026-09-03 audit).
     pub(crate) fn push(&self, event: AppEvent) {
         let mut state = self.state();
         if state.queue.len() >= self.capacity {
-            state.queue.pop_front();
-            state.dropped = state.dropped.saturating_add(1);
+            let incoming_control_plane = Self::is_control_plane(&event);
+            let evict = state
+                .queue
+                .iter()
+                .position(|queued| Self::is_control_plane(queued) == incoming_control_plane);
+            match evict {
+                Some(index) => {
+                    state.queue.remove(index);
+                    state.dropped = state.dropped.saturating_add(1);
+                }
+                // Queue entirely of the other class: keep the newest of the
+                // incoming class and drop this one (counted).
+                None => {
+                    if !incoming_control_plane {
+                        state.dropped = state.dropped.saturating_add(1);
+                        return;
+                    }
+                }
+            }
         }
         if matches!(event, AppEvent::Terminated) {
             state.terminated = true;
