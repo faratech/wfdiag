@@ -32,9 +32,9 @@ use tokio::time::interval;
 use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation};
 use windows::Win32::Foundation::{HANDLE, UNICODE_STRING};
 use windows::Win32::NetworkManagement::IpHelper::{
-    FreeMibTable, GetExtendedTcpTable, GetExtendedUdpTable, GetIfTable2, MIB_IF_TABLE2,
-    MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID, MIB_UDP6ROW_OWNER_PID, MIB_UDPROW_OWNER_PID,
-    TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
+    FreeMibTable, GetExtendedTcpTable, GetExtendedUdpTable, GetIfTable2, MIB_IF_ROW2,
+    MIB_IF_TABLE2, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID, MIB_UDP6ROW_OWNER_PID,
+    MIB_UDPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
 };
 use windows::Win32::Storage::FileSystem::{
     GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDriveStringsW, GetVolumeInformationW,
@@ -1025,6 +1025,22 @@ async fn presample_pdh(pdh_state: &Arc<std::sync::Mutex<PdhState>>) {
                                 state.counters.push(SendPtr(counter_handle.0));
                             }
                         }
+                        // The paging-file counter belongs to the same query;
+                        // registering it here (not only in get_pdh_stats's
+                        // never-taken lazy branch) keeps swap_utilization
+                        // meaningful (2026-09-03 audit).
+                        let paging_path: Vec<u16> =
+                            "\\Paging File(_Total)\\% Usage\0".encode_utf16().collect();
+                        let mut paging_counter: PDH_HCOUNTER = PDH_HCOUNTER::default();
+                        if PdhAddEnglishCounterW(
+                            query_handle,
+                            PCWSTR::from_raw(paging_path.as_ptr()),
+                            0,
+                            &raw mut paging_counter,
+                        ) == 0
+                        {
+                            state.counters.push(SendPtr(paging_counter.0));
+                        }
                         state.initialized = true;
                     }
                 }
@@ -1660,7 +1676,12 @@ fn detect_all_disk_types() -> HashMap<char, String> {
                         _ => "Unknown",
                     };
 
-                    // Get partitions for this disk
+                    // Get partitions for this disk. DeviceID is a number in
+                    // practice; refuse to interpolate anything else
+                    // (2026-09-03 audit).
+                    if !device_id.chars().all(|c| c.is_ascii_digit()) {
+                        continue;
+                    }
                     let part_query = format!(
                         "SELECT DriveLetter FROM MSFT_Partition WHERE DiskNumber = {device_id}",
                     );
@@ -1799,7 +1820,11 @@ async fn get_network_stats(previous_network: &Arc<Mutex<NetworkState>>) -> (f64,
 
         if GetIfTable2(&raw mut table).is_ok() && !table.is_null() {
             let num_entries = (*table).NumEntries as usize;
-            let entries = std::slice::from_raw_parts((*table).Table.as_ptr(), num_entries);
+            // addr_of! gives the true address of the row array without
+            // relying on the 1-element field's declared length
+            // (2026-09-03 audit).
+            let entries: &[MIB_IF_ROW2] =
+                std::slice::from_raw_parts(std::ptr::addr_of!((*table).Table).cast(), num_entries);
 
             for entry in entries {
                 if entry.Type == 24 || entry.OperStatus.0 != 1 {
@@ -2551,11 +2576,22 @@ pub fn get_npu_utilization() -> Option<f32> {
         }
     };
 
-    // Now query utilization with the known LUID
+    // Now query utilization with the known LUID. The discovery only ever
+    // yields `luid_0x..._0x...`, so reject anything that could bend the
+    // interpolated WQL, and constrain the match to the NPU's own engine
+    // type instead of summing every engine on the adapter
+    // (2026-09-03 audit).
+    if npu_luid.is_empty()
+        || !npu_luid
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '_' || c == 'x')
+    {
+        return None;
+    }
     let wmi_con = WmiConnection::new().ok()?;
 
     let query = format!(
-        "SELECT UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine WHERE Name LIKE '%{npu_luid}%'"
+        "SELECT UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine WHERE Name LIKE '%{npu_luid}[_]engtype[_]NPU'"
     );
 
     if let Ok(results) = wmi_con.query(&query) {

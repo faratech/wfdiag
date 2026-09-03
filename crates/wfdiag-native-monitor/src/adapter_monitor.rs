@@ -148,8 +148,12 @@ fn query_statistics(query: &mut D3DKMT_QUERYSTATISTICS) -> bool {
 
 fn open_process_query(pid: u32) -> Option<HANDLE> {
     unsafe {
-        OpenProcess(PROCESS_QUERY_INFORMATION, false, pid)
-            .or_else(|_| OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid))
+        // LIMITED first: D3DKMT statistics only need query-limited access,
+        // and trying full access first burns one guaranteed-failed kernel
+        // call on every protected/elevated process per sample
+        // (2026-09-03 audit).
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .or_else(|_| OpenProcess(PROCESS_QUERY_INFORMATION, false, pid))
             .ok()
     }
 }
@@ -167,7 +171,11 @@ fn for_each_enumerated_adapter(mut f: impl FnMut(&D3DKMT_ADAPTERINFO)) {
             return;
         }
 
-        for info in &infos[..enum2.NumAdapters as usize] {
+        // The two enumerations can disagree if adapters are hot-added
+        // between the calls; never slice past the allocated buffer
+        // (2026-09-03 audit).
+        let count = (enum2.NumAdapters as usize).min(infos.len());
+        for info in &infos[..count] {
             if info.hAdapter == 0 {
                 continue;
             }
