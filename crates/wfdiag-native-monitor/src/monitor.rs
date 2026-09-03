@@ -1696,10 +1696,15 @@ fn get_disk_info_optimized() -> Vec<DiskInfo> {
             return disks;
         }
 
+        // The return value is the required size when the buffer is too
+        // small; indexing up to it would run past the array (2026-09-03
+        // audit). Real hosts fit easily, so exceeding the buffer degrades to
+        // "no drives" instead of a panic.
+        let filled = (len as usize).min(buffer.len());
         let mut i = 0;
-        while i < len as usize && buffer[i] != 0 {
+        while i < filled && buffer[i] != 0 {
             let start = i;
-            while i < len as usize && buffer[i] != 0 {
+            while i < filled && buffer[i] != 0 {
                 i += 1;
             }
 
@@ -1896,7 +1901,20 @@ fn query_all_processes_optimized() -> Vec<NativeProcessInfo> {
         let mut offset: usize = 0;
 
         loop {
-            let proc_info = unsafe { &*buffer.as_ptr().add(offset).cast::<SystemProcessInfo>() };
+            // Bound the walk against the buffer and copy the record out
+            // unaligned: the previous code trusted `next_entry_offset` and
+            // the allocator's incidental alignment, so a truncated or
+            // garbage enumeration read past the allocation (2026-09-03
+            // audit). A malformed walk keeps what was parsed so far.
+            if offset
+                .checked_add(std::mem::size_of::<SystemProcessInfo>())
+                .is_none_or(|end| end > buffer.len())
+            {
+                break;
+            }
+            let proc_info = unsafe {
+                std::ptr::read_unaligned(buffer.as_ptr().add(offset).cast::<SystemProcessInfo>())
+            };
 
             let name = if proc_info.image_name.Length > 0 && !proc_info.image_name.Buffer.is_null()
             {
