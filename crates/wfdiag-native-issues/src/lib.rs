@@ -11,9 +11,11 @@ pub mod correlation;
 mod diagnostics;
 pub mod evidence;
 mod fix_plan;
-#[allow(clippy::all, clippy::pedantic)]
+// Pedantic stays exempt (these files predate the crate's lint baseline and
+// would need a wide style pass); the base lint set runs.
+#[allow(clippy::pedantic)]
 pub mod issue_catalog;
-#[allow(clippy::all, clippy::pedantic)]
+#[allow(clippy::pedantic)]
 pub mod issue_detector;
 pub mod next_steps;
 pub mod projection;

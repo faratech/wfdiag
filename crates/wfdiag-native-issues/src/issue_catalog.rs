@@ -983,10 +983,10 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
         "defender_definitions_stale" => defender_health_field(
             object("defender_health")?,
             "AntivirusSignatureAge",
-            &numeric,
+            numeric,
         ),
         "defender_quick_scan_overdue" => {
-            defender_health_field(object("defender_health")?, "QuickScanAge", &numeric)
+            defender_health_field(object("defender_health")?, "QuickScanAge", numeric)
         }
         "firewall_disabled" | "defender_disabled" => nonempty_array(spec.source_tasks[0])?
             .iter()

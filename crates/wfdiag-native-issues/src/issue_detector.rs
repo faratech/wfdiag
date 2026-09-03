@@ -86,7 +86,7 @@ fn actionable_space_consumers(ctx: &DetectCtx) -> Option<Vec<(String, u64, Strin
             (bytes >= threshold).then(|| (label.to_string(), bytes, remediation.to_string()))
         })
         .collect();
-    consumers.sort_by(|a, b| b.1.cmp(&a.1));
+    consumers.sort_by_key(|&(_, size, _)| std::cmp::Reverse(size));
     Some(consumers)
 }
 
