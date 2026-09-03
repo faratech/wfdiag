@@ -44,7 +44,7 @@ def appx_manifest(runtime: str) -> str:
   <Properties>
     <PublisherDisplayName>{readiness.EXPECTED_PUBLISHER_DISPLAY_NAME}</PublisherDisplayName>
   </Properties>
-  <Dependencies><PackageDependency Name="{runtime}" MinVersion="1.0.0.0" /></Dependencies>
+  <Dependencies><PackageDependency Name="{runtime}" MinVersion="2.4.0.0" /></Dependencies>
   <Capabilities>
     <Capability Name="internetClient" />
     <Capability Name="internetClientServer" />
@@ -172,6 +172,7 @@ windows-reactor-setup = {{ git = "{readiness.EXPECTED_REACTOR_REPOSITORY}", rev 
                 "prototype_manifest": "apps/wfdiag/Cargo.toml",
                 "windows_app_runtime_release": readiness.EXPECTED_REACTOR_RUNTIME_RELEASE,
                 "windows_app_runtime_framework": readiness.EXPECTED_REACTOR_FRAMEWORK,
+                "windows_app_runtime_min_version": readiness.EXPECTED_REACTOR_RUNTIME_MIN_VERSION,
             },
             "store_identity": {
                 "name": readiness.EXPECTED_IDENTITY_NAME,
@@ -280,6 +281,23 @@ class ReactorReadinessTests(unittest.TestCase):
             finding.details["reactor_runtime_release"],
             readiness.EXPECTED_REACTOR_RUNTIME_RELEASE,
         )
+
+    def test_lowered_runtime_min_version_is_a_blocker(self):
+        # The floor is part of the single-sourced contract: a lowered
+        # MinVersion must not report READY for a package that can never
+        # activate the pinned runtime (2026-09-03 audit).
+        changed = appx_manifest(readiness.EXPECTED_REACTOR_FRAMEWORK).replace(
+            'MinVersion="2.4.0.0"', 'MinVersion="0.0.0.0"'
+        )
+        self.fixture.write_text("AppxManifest.xml", changed)
+
+        report = self.fixture.report()
+
+        self.assertFalse(report.ready)
+        self.assertIn("runtime.alignment", codes(report, "blocker"))
+        finding = next(f for f in report.findings if f.code == "runtime.alignment")
+        self.assertEqual(finding.details["store_min_version"], "0.0.0.0")
+        self.assertEqual(finding.details["baseline_min_version"], "2.4.0.0")
 
     def test_store_identity_and_capability_drift_are_blockers(self):
         changed = appx_manifest(readiness.EXPECTED_REACTOR_FRAMEWORK)

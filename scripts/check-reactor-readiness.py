@@ -26,6 +26,7 @@ EXPECTED_REACTOR_REVISION = "1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8"
 EXPECTED_REACTOR_VERSION = "0.100.0"
 EXPECTED_REACTOR_RUNTIME_RELEASE = "2.4.0"
 EXPECTED_REACTOR_FRAMEWORK = "Microsoft.WindowsAppRuntime.2"
+EXPECTED_REACTOR_RUNTIME_MIN_VERSION = "2.4.0.0"
 EXPECTED_SCHEMA_VERSION = 2
 
 EXPECTED_UI_ARCHITECTURE = "native_winui3_reactor"
@@ -1045,30 +1046,47 @@ def _check_store_manifest(
         )
 
     runtime_dependencies = [
-        element.get("Name")
+        (element.get("Name"), element.get("MinVersion"))
         for element in _elements_named(appx_root, "PackageDependency")
         if (element.get("Name") or "").startswith("Microsoft.WindowsAppRuntime.")
     ]
     target_framework = manifest.get("reactor_pin", {}).get(
         "windows_app_runtime_framework"
     )
+    target_min_version = manifest.get("reactor_pin", {}).get(
+        "windows_app_runtime_min_version"
+    )
     target_release = manifest.get("reactor_pin", {}).get(
         "windows_app_runtime_release"
     )
+    declared_versions = {name: version for name, version in runtime_dependencies}
     if len(runtime_dependencies) != 1:
         report.add(
             "runtime.alignment",
             "blocker",
             "Store manifest must declare exactly one Windows App Runtime framework",
-            actual=runtime_dependencies,
+            actual=[name for name, _ in runtime_dependencies],
             reactor_target=target_framework,
         )
-    elif runtime_dependencies[0] != target_framework:
+    elif target_min_version is not None and declared_versions.get(
+        runtime_dependencies[0][0]
+    ) != target_min_version:
+        # A lowered MinVersion would report READY while the package can never
+        # activate the pinned runtime (2026-09-03 audit): the floor is part
+        # of the same single-sourced contract as the framework name.
+        report.add(
+            "runtime.alignment",
+            "blocker",
+            "Store manifest declares a different Windows App Runtime MinVersion than the pinned baseline",
+            store_min_version=declared_versions.get(runtime_dependencies[0][0]),
+            baseline_min_version=target_min_version,
+        )
+    elif runtime_dependencies[0][0] != target_framework:
         report.add(
             "runtime.alignment",
             "blocker",
             "Store manifest and the pinned Reactor revision declare different Windows App Runtime frameworks; do not cut over until one runtime strategy passes Store and on-device AI validation",
-            store_framework=runtime_dependencies[0],
+            store_framework=runtime_dependencies[0][0],
             reactor_framework=target_framework,
             reactor_runtime_release=target_release,
         )
