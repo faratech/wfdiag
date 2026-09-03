@@ -1139,6 +1139,14 @@ impl NativeDiagnostics {
 
         let mut fragmentation_results = Vec::new();
 
+        // The task deadline bounds the whole collector, but an abandoned
+        // blocking thread kept spawning one 300 s-capped `defrag /A` per
+        // remaining drive after the scan had already moved on (2026-09-03
+        // audit). Share one budget across the loop instead, leaving margin
+        // under the 240 s task deadline.
+        let started = std::time::Instant::now();
+        const FRAGMENTATION_BUDGET: std::time::Duration = std::time::Duration::from_secs(200);
+
         for disk in disks {
             if let Some(drive_letter) = disk.get("Name").and_then(|v| v.as_str()) {
                 let mut result_info = json!({
@@ -1147,6 +1155,12 @@ impl NativeDiagnostics {
                     "status": "Not analyzed",
                     "raw_output": ""
                 });
+
+                if started.elapsed() >= FRAGMENTATION_BUDGET {
+                    result_info["status"] = json!("Skipped: analysis budget exhausted");
+                    fragmentation_results.push(result_info);
+                    continue;
+                }
 
                 match Self::execute_secure_command("defrag", &[drive_letter, "/A"]) {
                     Ok(output) => {
