@@ -505,8 +505,28 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             let error_msg = format!("{e:?}");
             eprintln!("Native diagnostic failed for {task_id}: {error_msg}");
 
-            // Fallback to command-based diagnostics (no PowerShell)
-            match task_id {
+            // The command fallback shares the task's remaining deadline: an
+            // unbounded second command after a failed collector held the scan
+            // slot for deadline + executor timeout (2026-09-03 audit). There
+            // is no `dism_scan_health` fallback any more - its native path IS
+            // that command, so re-running a full /scanhealth after it just
+            // failed only multiplied the wait.
+            let task_name = get_all_tasks()
+                .into_iter()
+                .find(|task| task.id == task_id)
+                .map_or_else(|| task_id.to_string(), |task| task.name);
+            let remaining = deadline.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return TaskResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Native diagnostic failed: {error_msg}")),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                };
+            }
+            let fallback_id = task_id.to_string();
+            let fallback_error = error_msg.clone();
+            let fallback = tokio::task::spawn_blocking(move || match fallback_id.as_str() {
                 "ipconfig" => run_command("ipconfig", &["/all"]),
                 "hosts_file" => read_hosts_file(),
                 "dsregcmd" => run_command("dsregcmd", &["/status"]),
@@ -514,31 +534,33 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
                     "dism",
                     &["/online", "/cleanup-image", "/checkhealth", "/english"],
                 ),
-                "dism_scan_health" => run_command(
-                    "dism",
-                    &["/online", "/cleanup-image", "/scanhealth", "/english"],
-                ),
                 "driver_verifier" => run_command("verifier", &["/querysettings"]),
                 // These now have native implementations, return detailed error
-                "store_apps" | "performance" | "scheduled_tasks" | "chkdsk" | "windows_update" => {
-                    TaskResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!("Native diagnostic failed: {error_msg}")),
-                        duration_ms: 0,
-                    }
-                }
-                _ if get_all_tasks().iter().any(|task| task.id == task_id) => TaskResult {
+                _ if get_all_tasks().iter().any(|task| task.id == fallback_id) => TaskResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("Native diagnostic failed: {error_msg}")),
+                    error: Some(format!("Native diagnostic failed: {fallback_error}")),
                     duration_ms: 0,
                 },
                 _ => TaskResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("Unknown task: {task_id}")),
+                    error: Some(format!("Unknown task: {fallback_id}")),
                     duration_ms: 0,
+                },
+            });
+            match tokio::time::timeout(remaining, fallback).await {
+                Ok(joined) => joined.unwrap_or_else(|_| TaskResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Native diagnostic failed: {error_msg}")),
+                    duration_ms: 0,
+                }),
+                Err(_elapsed) => TaskResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(crate::deadlines::deadline_error(&task_name, deadline)),
+                    duration_ms: start.elapsed().as_millis() as u64,
                 },
             }
         }
