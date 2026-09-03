@@ -852,6 +852,10 @@ impl AppService {
         self.advance_evidence_generation();
         if self.issues.commit_evidence(session_id, evidence).is_err() {
             self.stop_issue_delivery("native issue evidence identity was exhausted");
+            // A verification rerun that commits but cannot produce a
+            // projection must still release the automation session
+            // (2026-09-03 audit).
+            self.abandon_verification_scan();
             return;
         }
         self.enqueue_issue_detection();
@@ -867,6 +871,7 @@ impl AppService {
             self.snapshot.issue_error = Some(detail.clone());
             self.queue
                 .push(AppEvent::Issues(IssuesEvent::Failed { error: detail }));
+            self.abandon_verification_scan();
             return;
         };
         let now = self.ports.environment.now();
@@ -875,11 +880,13 @@ impl AppService {
             Ok(request) => request,
             Err(refusal) => {
                 self.snapshot.issue_error = Some(format!("{refusal:?}"));
+                self.abandon_verification_scan();
                 return;
             }
         };
         if let Err(error) = runtime.enqueue(request) {
             self.stop_issue_delivery(format!("native issue detection stopped · {error}"));
+            self.abandon_verification_scan();
             return;
         }
         self.issue_outstanding = true;
