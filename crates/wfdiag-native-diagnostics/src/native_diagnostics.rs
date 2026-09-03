@@ -2323,6 +2323,10 @@ impl NativeDiagnostics {
         const CHANNEL: &str = "Microsoft-Windows-WindowsUpdateClient/Operational";
         const PROVIDER: &str = "Provider[@Name='Microsoft-Windows-WindowsUpdateClient']";
 
+        // The channel can legitimately not exist or be disabled by policy
+        // (common in enterprises); that is an honest zero, not a failed
+        // task. The success half already tolerated it - both halves do now
+        // (2026-09-03 audit).
         let failure_records = Self::query_channel_events(
             CHANNEL,
             &[
@@ -2332,7 +2336,8 @@ impl NativeDiagnostics {
             ],
             WINDOW_DAYS,
             ROW_CAP,
-        )?;
+        )
+        .unwrap_or_default();
         let success_records = Self::query_channel_events(
             CHANNEL,
             &[PROVIDER.to_string(), "(EventID=19)".to_string()],
