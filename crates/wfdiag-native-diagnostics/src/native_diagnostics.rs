@@ -1400,9 +1400,13 @@ impl NativeDiagnostics {
         }
 
         // Calculate battery health
+        // powercfg lists capacity-history periods chronologically ascending,
+        // so the newest row is the last one (2026-09-03 audit: `.first()`
+        // reported the oldest period as "latest", overstating battery
+        // health on recently degraded batteries).
         if let Some(latest) = battery_info["battery_capacity_history"]
             .as_array()
-            .and_then(|h| h.first())
+            .and_then(|h| h.last())
             && let (Some(full_charge), Some(design_capacity)) = (
                 latest["full_charge_capacity"].as_str(),
                 latest["design_capacity"].as_str(),
