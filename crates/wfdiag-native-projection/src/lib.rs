@@ -10,3 +10,4 @@ pub mod json_diff;
 pub mod markdown;
 pub mod process_identity;
 pub mod render;
+pub mod task_output;

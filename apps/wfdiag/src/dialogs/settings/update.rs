@@ -26,7 +26,7 @@ use crate::app::policy::{
     provider_display_name, provider_from_wire, provider_setup_index_for_provider,
     provider_setup_provider, rejection_text, set_provider_key_configured, set_provider_key_value,
     set_provider_setup_model, settings_dialog_callback_is_current, subscription_auth_state_index,
-    validate_phi_preference, window_theme_from_setting, window_theme_setting,
+    subscription_wire_id, validate_phi_preference, window_theme_from_setting, window_theme_setting,
 };
 use crate::dialogs::notice::state::{NoticeKind, NoticeRequest};
 use crate::platform::window;
@@ -517,10 +517,7 @@ impl WfdiagShell {
         if self.shell.deterministic_visual || !self.settings.open {
             return;
         }
-        let wire = match provider {
-            SubscriptionAuthProvider::Codex => "codex_cli",
-            SubscriptionAuthProvider::ClaudeCode => "claude_code",
-        };
+        let wire = subscription_wire_id(provider);
         match self.dispatch(AppCommand::SubscriptionAuth {
             provider: wire.to_string(),
             operation,
@@ -569,10 +566,7 @@ impl WfdiagShell {
         if self.shell.deterministic_visual || !self.settings.open {
             return;
         }
-        let wire = match provider {
-            SubscriptionAuthProvider::Codex => "codex_cli",
-            SubscriptionAuthProvider::ClaudeCode => "claude_code",
-        };
+        let wire = subscription_wire_id(provider);
         // This only raises the confirmation. Nothing is installed until the
         // user answers, and the vendor bootstrap raises a second one of its own.
         let outcome = self.dispatch(AppCommand::InstallSubscriptionCli {

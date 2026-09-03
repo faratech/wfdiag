@@ -260,12 +260,16 @@ pub(crate) fn onboarding_candidates(
             (AIProvider::CodexCli, true, false) => candidates.push(OnboardingCandidate {
                 label: "Sign in to ChatGPT",
                 detail: "Codex CLI detected",
-                action: OnboardingAction::SignIn("codex_cli"),
+                action: OnboardingAction::SignIn(subscription_wire_id(
+                    SubscriptionAuthProvider::Codex,
+                )),
             }),
             (AIProvider::ClaudeCode, true, false) => candidates.push(OnboardingCandidate {
                 label: "Sign in to Claude",
                 detail: "Claude Code CLI detected",
-                action: OnboardingAction::SignIn("claude_code"),
+                action: OnboardingAction::SignIn(subscription_wire_id(
+                    SubscriptionAuthProvider::ClaudeCode,
+                )),
             }),
             (AIProvider::PhiSilica, true, true) => candidates.push(OnboardingCandidate {
                 label: "Use on-device AI",
@@ -357,7 +361,7 @@ pub(crate) enum SignInBannerAction {
     InstallNative(&'static str),
 }
 
-const fn subscription_wire_id(provider: SubscriptionAuthProvider) -> &'static str {
+pub(crate) const fn subscription_wire_id(provider: SubscriptionAuthProvider) -> &'static str {
     match provider {
         SubscriptionAuthProvider::Codex => "codex_cli",
         SubscriptionAuthProvider::ClaudeCode => "claude_code",
