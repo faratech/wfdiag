@@ -14,20 +14,15 @@ use serde_json::Value;
 /// Parse the diagnostic output for `task_id` as a JSON array, if the task
 /// succeeded. The common shape for WMI-backed tasks.
 fn task_array(ctx: &DetectCtx, task_id: &str) -> Option<Vec<Value>> {
-    let result = ctx.results.get_task_result(task_id)?;
-    if !result.success {
-        return None;
+    match ctx.cached_task_json(task_id)? {
+        Value::Array(items) => Some(items),
+        _ => None,
     }
-    serde_json::from_str::<Vec<Value>>(&result.output).ok()
 }
 
 /// Parse the diagnostic output for `task_id` as a JSON object.
 fn task_object(ctx: &DetectCtx, task_id: &str) -> Option<Value> {
-    let result = ctx.results.get_task_result(task_id)?;
-    if !result.success {
-        return None;
-    }
-    serde_json::from_str::<Value>(&result.output).ok()
+    ctx.cached_task_json(task_id)
 }
 
 /// Read a JSON value as u64 whether it arrived as a number OR a numeric

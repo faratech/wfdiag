@@ -283,6 +283,7 @@ impl ReportService {
             (caps.context_budget_chars / 2).min(20_000)
         };
         let detect_ctx = DetectCtx {
+            parsed_cache: std::cell::RefCell::new(HashMap::new()),
             results: request.scan.results.as_ref(),
             now: request.detection_now,
             temp_file_count: None,

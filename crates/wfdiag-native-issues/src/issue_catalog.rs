@@ -63,6 +63,28 @@ pub struct DetectCtx<'a> {
     pub now: Timestamp,
     /// Entry count of the user's temp directory; None = unknown (not detected)
     pub temp_file_count: Option<usize>,
+    /// Per-run memo of one task's parsed JSON, shared by every detector:
+    /// previously each rule re-parsed the same collector output, up to six
+    /// times for one task (2026-09-03 audit).
+    pub parsed_cache: std::cell::RefCell<HashMap<String, Option<serde_json::Value>>>,
+}
+
+impl DetectCtx<'_> {
+    /// Parse one task's successful output as JSON, memoized per run.
+    pub(crate) fn cached_task_json(&self, task_id: &str) -> Option<serde_json::Value> {
+        let result = self.results.get_task_result(task_id)?;
+        if !result.success {
+            return None;
+        }
+        if let Some(hit) = self.parsed_cache.borrow().get(task_id) {
+            return hit.clone();
+        }
+        let parsed = serde_json::from_str::<serde_json::Value>(&result.output).ok();
+        self.parsed_cache
+            .borrow_mut()
+            .insert(task_id.to_string(), parsed.clone());
+        parsed
+    }
 }
 
 /// A positive detection: dynamic description plus an optional severity
@@ -1161,6 +1183,8 @@ pub(crate) mod test_support {
 
     pub fn ctx<'a>(results: &'a HashMap<String, TaskResult>) -> DetectCtx<'a> {
         DetectCtx {
+            parsed_cache: std::cell::RefCell::new(HashMap::new()),
+
             results,
             now: fixed_now(),
             temp_file_count: None,
@@ -1310,6 +1334,7 @@ mod tests {
     fn empty_context_yields_full_sweep_with_no_detections() {
         let results: HashMap<String, TaskResult> = HashMap::new();
         let ctx = DetectCtx {
+            parsed_cache: std::cell::RefCell::new(HashMap::new()),
             results: &results,
             now: test_support::fixed_now(),
             temp_file_count: None, // injected: no env probing in detectors

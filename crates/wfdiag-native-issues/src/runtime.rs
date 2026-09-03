@@ -147,6 +147,7 @@ impl IssueRuntime {
                     match command {
                         WorkerCommand::Detect(request) => {
                             let ctx = DetectCtx {
+                                parsed_cache: std::cell::RefCell::new(HashMap::new()),
                                 results: request.results.as_ref(),
                                 now: request.now,
                                 temp_file_count: request.temp_file_count,
@@ -332,6 +333,7 @@ mod tests {
             .collect();
         let direct_request = low_disk_request(0);
         let direct_ctx = DetectCtx {
+            parsed_cache: std::cell::RefCell::new(HashMap::new()),
             results: direct_request.results.as_ref(),
             now: direct_request.now,
             temp_file_count: direct_request.temp_file_count,
