@@ -59,6 +59,12 @@ pub fn attach_grounding(prompt: String, grounding: Option<&str>) -> String {
     format!("{grounding}\n\nANALYSIS TASK\n{prompt}")
 }
 
+/// Above this size, collector output is truncated without being parsed:
+/// a multi-megabyte payload (installed programs, event logs) would be
+/// inflated ~10x into a `Value` tree only to be cut down again
+/// (2026-09-03 audit; the same guard evidence.rs uses).
+const MAX_JSON_PARSE_INPUT_BYTES: usize = 512 * 1024;
+
 /// Convert JSON diagnostic output to human-readable text
 /// This dramatically reduces token count vs raw JSON
 #[must_use]
@@ -67,14 +73,15 @@ pub fn json_to_readable_text(output: &str, max_chars: usize) -> String {
     let trimmed = output.trim();
 
     // If it's JSON, convert to readable format
-    if (trimmed.starts_with('{') || trimmed.starts_with('['))
+    if trimmed.len() <= MAX_JSON_PARSE_INPUT_BYTES
+        && (trimmed.starts_with('{') || trimmed.starts_with('['))
         && let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed)
     {
         let text = render_json_value(&json, 0);
         return truncate_output(&text, max_chars);
     }
 
-    // Not JSON, just truncate the raw text
+    // Not JSON (or too large to parse), just truncate the raw text
     truncate_output(output, max_chars)
 }
 
