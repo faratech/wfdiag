@@ -646,9 +646,15 @@ impl Component for WfdiagShell {
         // The shell publishes frequently while telemetry and scans are live.
         // A closed palette must stay a zero-cost overlay: do not allocate its
         // specs, fuzzy-match them, or construct row controls until it opens.
-        let palette_dialog = self
-            .palette
-            .view(&env, self.palette_command_specs(), context);
+        // The specs are built eagerly as view() arguments, so gate them on
+        // the palette being open (2026-09-03 audit: ~200 allocations per
+        // frame were built and discarded while it stayed closed).
+        let palette_specs = if self.palette.open {
+            self.palette_command_specs()
+        } else {
+            Vec::new()
+        };
+        let palette_dialog = self.palette.view(&env, palette_specs, context);
         let shortcut_dialog = self.shortcuts.view(&env, context);
         let (title_brand, title_bar, title_actions) = self.title_bar(&env, context);
         let body = Grid::new()
