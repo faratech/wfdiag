@@ -441,12 +441,12 @@ async fn windows_cwd_is_spawnable(dir: &Path) -> bool {
 /// `windows_cwd_is_spawnable`).
 pub async fn bridge_workdir() -> Result<PathBuf, String> {
     if let Some(dir) = VALIDATED_WORKDIR.get() {
-        // Cheap self-heal if something deleted the directory since validation.
-        // This runs on the cache-hit fast path (every bridged call once
-        // warm), so it must not block the async runtime thread.
-        tokio::fs::create_dir_all(dir)
-            .await
-            .map_err(|e| format!("Could not create {}: {}", dir.display(), e))?;
+        // Best-effort self-heal if something deleted the directory since
+        // validation - a real failure surfaces from the child spawn itself,
+        // like the engine does (2026-09-03 audit: propagating this error
+        // made every bridge call fail until restart when the validated
+        // directory became un-creatable).
+        let _ = tokio::fs::create_dir_all(dir).await;
         return Ok(dir.clone());
     }
     let mut failures = Vec::new();

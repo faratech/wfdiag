@@ -335,20 +335,12 @@ pub async fn load_api_key() -> Result<String, String> {
     .into())
 }
 
-/// Network grounding is enabled only by the persisted opt-in. The legacy
-/// environment variable remains a kill-switch, but cannot enable grounding
-/// when the user setting is off.
+/// Network grounding is enabled only by the persisted opt-in. (The legacy
+/// WFDIAG_AI_GROUNDING environment kill-switch was removed with the
+/// no-production-env-knobs rule, 2026-09-03 audit: it silently overrode the
+/// user's persisted choice and was documented nowhere.)
 pub(crate) fn network_grounding_enabled() -> bool {
-    let opted_in = NETWORK_GROUNDING_ENABLED.load(Ordering::Relaxed);
-    let env_allows = std::env::var("WFDIAG_AI_GROUNDING")
-        .map(|value| {
-            !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "off"
-            )
-        })
-        .unwrap_or(true);
-    opted_in && env_allows
+    NETWORK_GROUNDING_ENABLED.load(Ordering::Relaxed)
 }
 
 pub(crate) fn cloud_fallback_policy() -> CloudFallbackPolicy {
