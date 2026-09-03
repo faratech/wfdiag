@@ -980,11 +980,9 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
             "RealTimeProtectionEnabled",
             |value| value.as_bool().is_some(),
         ),
-        "defender_definitions_stale" => defender_health_field(
-            object("defender_health")?,
-            "AntivirusSignatureAge",
-            numeric,
-        ),
+        "defender_definitions_stale" => {
+            defender_health_field(object("defender_health")?, "AntivirusSignatureAge", numeric)
+        }
         "defender_quick_scan_overdue" => {
             defender_health_field(object("defender_health")?, "QuickScanAge", numeric)
         }
