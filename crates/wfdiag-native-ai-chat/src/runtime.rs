@@ -741,6 +741,7 @@ impl<R: ProviderResolver, T: ChatTurnTools> WorkerState<R, T> {
         .await;
         match outcome {
             Ok(TurnStatus::Completed { .. }) => {
+                self.trim_completed_history();
                 if let Some(reason) = completed_scan_request_reason(
                     tools_enabled,
                     self.tools.scan_coverage(&evidence),
@@ -800,6 +801,24 @@ impl<R: ProviderResolver, T: ChatTurnTools> WorkerState<R, T> {
                 None
             }
         }
+    }
+
+    /// Keep the worker-owned history bounded. `MAX_SESSION_MESSAGES` was
+    /// enforced only on the session projection; the native worker's own
+    /// `messages` vec grew every turn, so an all-day session grew without
+    /// bound in memory and every tool round re-scanned all of it
+    /// (2026-09-03 audit).
+    fn trim_completed_history(&mut self) {
+        if self.messages.len() <= crate::engine::MAX_SESSION_MESSAGES {
+            return;
+        }
+        // Resume the next request on a user turn: extend the cut past any
+        // assistant/tool records so history never starts mid-turn.
+        let mut cut = self.messages.len() - crate::engine::MAX_SESSION_MESSAGES;
+        while cut < self.messages.len() && self.messages[cut].role != ChatRole::User {
+            cut += 1;
+        }
+        self.messages.drain(..cut);
     }
 
     /// Drop the trailing user message when no assistant reply was recorded,

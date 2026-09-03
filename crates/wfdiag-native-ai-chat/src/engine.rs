@@ -807,11 +807,13 @@ pub async fn run_chat_turn(
                 emitter.done(&done(provider_use, "refusal", tool_call_count));
                 return Ok(TurnStatus::Error);
             }
-            if answer.is_empty()
-                || (final_round
-                    && (!turn.tool_calls.is_empty()
-                        || matches!(turn.finished, FinishReason::ToolUse)))
-            {
+            // A final round that still emitted tool calls used to fail the
+            // turn even when a complete answer had already been streamed:
+            // compat servers (Ollama, custom OpenAI) routinely re-emit a
+            // stale tool call. Only an empty answer fails now; the stray
+            // calls are simply not recorded (the push below stores the
+            // answer with an empty tool-call list) (2026-09-03 audit).
+            if answer.is_empty() {
                 let message = "The provider ended without a final answer.".to_string();
                 if allow_fallback && round == 0 && tool_call_count == 0 {
                     return Err(message);
