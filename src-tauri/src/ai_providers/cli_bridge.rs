@@ -902,7 +902,7 @@ async fn run_sign_in_flow(mut cmd: tokio::process::Command, what: &str) -> Resul
         .stderr(Stdio::inherit());
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
+        // tokio's Command carries its own creation_flags.
         const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
         cmd.creation_flags(CREATE_NEW_CONSOLE);
     }

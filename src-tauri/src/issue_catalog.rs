@@ -28,6 +28,7 @@ pub fn detect_all_with(
         results: ctx.results,
         now: wfdiag_native_issues::Timestamp::from_secs(ctx.now.secs),
         temp_file_count: ctx.temp_file_count,
+        parsed_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
     };
     wfdiag_native_issues::detect_all_with(&portable, remediation_summary)
 }
