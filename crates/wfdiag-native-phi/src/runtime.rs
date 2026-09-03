@@ -1606,9 +1606,7 @@ pub async fn generate_response(
         prepare_phi_runtime()?;
         ensure_cached_model_locked(&mut cached)?;
         let Some(model) = cached.as_ref() else {
-            return Err(
-                "Phi Silica model was unavailable after preparation".to_string()
-            );
+            return Err("Phi Silica model was unavailable after preparation".to_string());
         };
         let result = generate_with_model(model, &prompt_owned, &is_cancelled);
         if result

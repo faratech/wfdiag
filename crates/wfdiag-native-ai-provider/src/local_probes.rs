@@ -642,10 +642,7 @@ impl ProcessSubscriptionCliStatusSource {
                 .in_flight
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            in_flight
-                .entry(cache_key.clone())
-                .or_default()
-                .clone()
+            in_flight.entry(cache_key.clone()).or_default().clone()
         };
         let _permit = guard.lock().await;
         if let Some(probe) = self.cached_snapshot(&cache_key) {

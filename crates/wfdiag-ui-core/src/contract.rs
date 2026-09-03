@@ -594,8 +594,7 @@ mod tests {
         );
 
         // Round-trip: the wire shape is the parse shape, error included.
-        let parsed: DiagnosticTaskResult =
-            serde_json::from_str(&json).expect("deserialize");
+        let parsed: DiagnosticTaskResult = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.task_id, "cpu");
         assert_eq!(parsed.result.error.as_deref(), Some("failed"));
     }
