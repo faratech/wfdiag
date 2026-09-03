@@ -46,10 +46,25 @@ STORE_PUBLISHER = "CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4"
 STORE_EXECUTABLE = "wfdiag.exe"
 REACTOR_BINARY = "wfdiag.exe"
 BOOTSTRAP_DLL = "Microsoft.WindowsAppRuntime.Bootstrap.dll"
-WINDOWS_APP_RUNTIME_FRAMEWORK = "Microsoft.WindowsAppRuntime.2"
-WINDOWS_APP_RUNTIME_MIN_VERSION = "2.4.0.0"
-REACTOR_REPOSITORY = "https://github.com/microsoft/windows-rs"
-REACTOR_REVISION = "1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8"
+
+
+def _reactor_pin() -> dict:
+    # The framework name and floor are single-sourced from
+    # reactor-baselines/manifest.json like every other consumer of
+    # reactor_pin. Hardcoding them here let the probe emit - and then
+    # "validate" - a stale floor after a baseline bump (2026-09-03 audit).
+    baseline = PROJECT_ROOT / "reactor-baselines" / "manifest.json"
+    try:
+        return json.loads(baseline.read_text(encoding="utf-8"))["reactor_pin"]
+    except (OSError, json.JSONDecodeError, KeyError) as error:
+        raise SystemExit(f"cannot read reactor pin from {baseline}: {error}") from error
+
+
+_REACTOR_PIN = _reactor_pin()
+WINDOWS_APP_RUNTIME_FRAMEWORK = _REACTOR_PIN["windows_app_runtime_framework"]
+WINDOWS_APP_RUNTIME_MIN_VERSION = _REACTOR_PIN["windows_app_runtime_min_version"]
+REACTOR_REPOSITORY = _REACTOR_PIN["repository"]
+REACTOR_REVISION = _REACTOR_PIN["revision"]
 
 NS_FOUNDATION = "http://schemas.microsoft.com/appx/manifest/foundation/windows10"
 NS_PHONE = "http://schemas.microsoft.com/appx/2014/phone/manifest"
@@ -345,7 +360,18 @@ def assert_manifest_contract(
         raise ProbeBuildError(
             f"generated manifest is missing capabilities: {sorted(missing_capabilities)!r}"
         )
-    if expected_capabilities is not None and capabilities != expected_capabilities:
+    if expected_capabilities is None:
+        # Layout/MSIX validation used to enforce the required subset only,
+        # so an ADDED capability shipped with exit 0 (2026-09-03 audit).
+        # Without an explicit expectation the Store manifest's own set is
+        # the contract.
+        try:
+            expected_capabilities = _capabilities(
+                ET.parse(STORE_MANIFEST).getroot()
+            )
+        except (OSError, ET.ParseError) as error:
+            raise ProbeBuildError(f"cannot parse {STORE_MANIFEST}: {error}") from error
+    if capabilities != expected_capabilities:
         raise ProbeBuildError("generated manifest changed the canonical capability set")
 
     dependencies = _one(
