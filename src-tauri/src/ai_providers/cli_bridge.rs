@@ -69,10 +69,6 @@ struct BridgeSpec {
     logout_args: &'static [&'static str],
     /// Command whose zero exit code means "signed in"
     status_args: &'static [&'static str],
-    /// Lowercase output substrings that mean "signed out" even when the
-    /// status command exits 0 — some CLIs report status without a failing
-    /// exit code.
-    signed_out_markers: &'static [&'static str],
 }
 
 const CODEX_SPEC: BridgeSpec = BridgeSpec {
@@ -80,7 +76,6 @@ const CODEX_SPEC: BridgeSpec = BridgeSpec {
     login_args: &["login"],
     logout_args: &["logout"],
     status_args: &["login", "status"],
-    signed_out_markers: &["not logged in"],
 };
 
 const CLAUDE_SPEC: BridgeSpec = BridgeSpec {
@@ -88,7 +83,6 @@ const CLAUDE_SPEC: BridgeSpec = BridgeSpec {
     login_args: &["auth", "login"],
     logout_args: &["auth", "logout"],
     status_args: &["auth", "status"],
-    signed_out_markers: &["not logged in", "please run /login"],
 };
 
 fn spec_for(provider: AIProvider) -> Option<&'static BridgeSpec> {
@@ -190,16 +184,23 @@ pub fn invalidate(provider: AIProvider) {
     {
         cache.remove(spec.binary);
     }
-    let shared_provider = match provider {
-        AIProvider::CodexCli => Some(wfdiag_native_ai_provider::SubscriptionCli::Codex),
-        AIProvider::ClaudeCode => Some(wfdiag_native_ai_provider::SubscriptionCli::ClaudeCode),
-        _ => None,
-    };
-    if let Some(shared_provider) = shared_provider {
+    if let Some(shared_provider) = engine_cli(provider) {
         wfdiag_native_ai_provider::ProcessSubscriptionCliStatusSource::new()
             .invalidate(shared_provider);
         wfdiag_native_ai_chat::ProcessSubscriptionModelCatalogSource::new()
             .invalidate(shared_provider);
+    }
+}
+
+/// The engine crate's CLI identity for a bridge provider, so the fork
+/// consumes the single-sourced vendor spec instead of its own copy.
+fn engine_cli(
+    provider: AIProvider,
+) -> Option<wfdiag_native_ai_provider::SubscriptionCli> {
+    match provider {
+        AIProvider::CodexCli => Some(wfdiag_native_ai_provider::SubscriptionCli::Codex),
+        AIProvider::ClaudeCode => Some(wfdiag_native_ai_provider::SubscriptionCli::ClaudeCode),
+        _ => None,
     }
 }
 
@@ -215,19 +216,48 @@ async fn probe_uncached(provider: AIProvider, spec: &'static BridgeSpec) -> (Bri
     cmd.args(spec.status_args);
     match run_headless(cmd, None, PROBE_TIMEOUT, spec.binary).await {
         Ok(output) => {
-            let text = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let authed = is_signed_in(spec, output.status.success(), &text);
-            (
-                BridgeProbe {
-                    path: Some(path),
-                    authed,
-                },
-                true,
-            )
+            // Three states from the single-sourced vendor spec: a non-zero
+            // exit WITHOUT a signed-out marker is `Unclear` — never proof of
+            // sign-out, and never cached as one. Collapsing it to
+            // "signed out" here used to make Auto routing silently fall
+            // through to metered cloud API keys for the whole TTL
+            // (2026-09-03 audit).
+            let verdict = engine_cli(provider)
+                .map(|cli| {
+                    wfdiag_native_ai_provider::parse_status_output(
+                        wfdiag_native_ai_provider::subscription_cli_spec(cli),
+                        output.status.success(),
+                        &String::from_utf8_lossy(&output.stdout),
+                        &String::from_utf8_lossy(&output.stderr),
+                    )
+                })
+                .unwrap_or(wfdiag_native_ai_provider::StatusVerdict::Unclear);
+            match verdict {
+                wfdiag_native_ai_provider::StatusVerdict::SignedIn => (
+                    BridgeProbe {
+                        path: Some(path),
+                        authed: true,
+                    },
+                    true,
+                ),
+                wfdiag_native_ai_provider::StatusVerdict::SignedOut => (
+                    BridgeProbe {
+                        path: Some(path),
+                        authed: false,
+                    },
+                    true,
+                ),
+                wfdiag_native_ai_provider::StatusVerdict::Unclear => {
+                    eprintln!("Bridge probe for {} inconclusive", spec.binary);
+                    (
+                        BridgeProbe {
+                            path: Some(path),
+                            authed: false,
+                        },
+                        false,
+                    )
+                }
+            }
         }
         // Timeout / spawn trouble: unknown, not signed out. Report unusable
         // for this call but leave the cache untouched.
@@ -242,17 +272,6 @@ async fn probe_uncached(provider: AIProvider, spec: &'static BridgeSpec) -> (Bri
             )
         }
     }
-}
-
-/// Signed in = the status command succeeded AND its output doesn't say
-/// otherwise (pure for testability).
-fn is_signed_in(spec: &BridgeSpec, exit_ok: bool, output: &str) -> bool {
-    let text = output.to_lowercase();
-    exit_ok
-        && !spec
-            .signed_out_markers
-            .iter()
-            .any(|marker| text.contains(marker))
 }
 
 // ============================================================================
@@ -840,12 +859,56 @@ Install the native executable (for example via the official installer) and retry
                 Ok(())
             }
         };
-        let (write_result, output) = tokio::join!(write, child.wait_with_output());
+        // Drain both pipes with a retained-bytes cap instead of
+        // `wait_with_output`, whose per-pipe Vec grew without limit (the
+        // engine fixed this as #204; this fork silently bypassed it —
+        // 2026-09-03 audit). Draining continues to EOF so a chatty child
+        // can never block on a full pipe.
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let (write_result, status, stdout, stderr) = tokio::join!(
+            write,
+            child.wait(),
+            drain_bounded(stdout, BRIDGE_STDOUT_LIMIT),
+            drain_bounded(stderr, BRIDGE_STDERR_LIMIT),
+        );
         write_result.map_err(|e| format!("Could not send input to {what}: {e}"))?;
-        output.map_err(|e| format!("{what} failed to run: {e}"))
+        let status = status.map_err(|e| format!("{what} failed to run: {e}"))?;
+        let stdout = stdout.map_err(|e| format!("{what} pipe read failed: {e}"))?;
+        let stderr = stderr.map_err(|e| format!("{what} pipe read failed: {e}"))?;
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
     })
     .await
     .map_err(|_| format!("{what} did not answer within {} seconds", timeout.as_secs()))?
+}
+
+/// Retained-bytes caps for bridge child pipes (#204 discipline).
+const BRIDGE_STDOUT_LIMIT: usize = 8 * 1024 * 1024;
+const BRIDGE_STDERR_LIMIT: usize = 256 * 1024;
+
+async fn drain_bounded<R: tokio::io::AsyncRead + Unpin>(
+    reader: Option<R>,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+
+    let mut retained = Vec::new();
+    let Some(mut reader) = reader else {
+        return Ok(retained);
+    };
+    let mut buffer = vec![0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(retained);
+        }
+        let remaining = limit.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..read.min(remaining)]);
+    }
 }
 
 // ============================================================================
@@ -1197,23 +1260,27 @@ mod tests {
     }
 
     #[test]
-    fn signed_out_markers_override_a_zero_exit_code() {
-        assert!(is_signed_in(
-            &CLAUDE_SPEC,
-            true,
-            "Logged in as: mike@example.com"
-        ));
-        assert!(!is_signed_in(
-            &CLAUDE_SPEC,
-            true,
-            "Not logged in · Please run /login"
-        ));
-        assert!(!is_signed_in(
-            &CLAUDE_SPEC,
-            false,
-            "Logged in as: mike@example.com"
-        ));
-        assert!(!is_signed_in(&CODEX_SPEC, true, "Not logged in"));
+    fn an_unclear_probe_is_never_signed_out_and_never_cached() {
+        use wfdiag_native_ai_provider::{StatusVerdict, parse_status_output};
+        let spec = wfdiag_native_ai_provider::subscription_cli_spec(engine_cli(
+            AIProvider::ClaudeCode,
+        )
+        .expect("claude is a bridge provider"));
+        // A signed-out marker wins even over a zero exit code.
+        assert_eq!(
+            parse_status_output(spec, true, "Not logged in · Please run /login", ""),
+            StatusVerdict::SignedOut
+        );
+        // A non-zero exit WITHOUT a marker is Unclear — the old fork
+        // collapsed this to "signed out" and cached it (2026-09-03 audit).
+        assert_eq!(
+            parse_status_output(spec, false, "Logged in as: mike@example.com", ""),
+            StatusVerdict::Unclear
+        );
+        assert_eq!(
+            parse_status_output(spec, true, "Logged in as: mike@example.com", ""),
+            StatusVerdict::SignedIn
+        );
     }
 
     #[test]
