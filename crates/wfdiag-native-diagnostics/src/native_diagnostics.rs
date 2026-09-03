@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use wfdiag_native_core::wmi::WmiConnection;
+use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_TIMEOUT, HRESULT_FROM_WIN32};
 use windows::Win32::System::EventLog::{
     EVT_HANDLE, EvtClose, EvtNext, EvtQuery, EvtQueryChannelPath, EvtQueryReverseDirection,
     EvtRender, EvtRenderEventXml,
@@ -321,9 +322,23 @@ impl NativeDiagnostics {
         let mut handles = [0isize; 16];
         while records.len() < row_cap {
             let mut returned = 0u32;
-            if unsafe { EvtNext(query.0, &mut handles, 250, 0, &raw mut returned) }.is_err()
-                || returned == 0
+            if let Err(error) =
+                unsafe { EvtNext(query.0, &mut handles, 250, 0, &raw mut returned) }
             {
+                // ERROR_NO_MORE_ITEMS is the normal end of the result set;
+                // ERROR_TIMEOUT cannot be waited out with a 0 ms timeout.
+                // Every other failure used to be swallowed here as "end of
+                // results", reporting a prefix of the window as if it were
+                // complete - fail the query instead (2026-09-03 audit).
+                let code = error.code();
+                if code != HRESULT_FROM_WIN32(ERROR_NO_MORE_ITEMS)
+                    && code != HRESULT_FROM_WIN32(ERROR_TIMEOUT)
+                {
+                    anyhow::bail!("EvtNext failed while reading '{channel}': {code:?}");
+                }
+                break;
+            }
+            if returned == 0 {
                 break;
             }
 
