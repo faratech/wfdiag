@@ -92,12 +92,12 @@ pub enum ScanEvent {
         /// Whether history auto-save is running for this scan.
         auto_save: bool,
     },
-    /// A single-row rerun merged into the committed scan.
+    /// A targeted rerun merged into the committed scan.
     TargetedCommitted {
         /// The committed session (the base scan's).
         session_id: String,
-        /// The task that was replaced.
-        task_id: String,
+        /// The tasks that were replaced.
+        task_ids: Vec<String>,
     },
     /// The rerun could not be merged; the base scan is visible again.
     TargetedFailed {
@@ -674,6 +674,9 @@ pub enum ActionEvent {
         resolved: Vec<String>,
         /// Issues still detected; the user needs the next step.
         unresolved: Vec<String>,
+        /// Issues the verification rerun did not cover; their state is
+        /// unknown until their own source tasks run again.
+        not_rechecked: Vec<String>,
     },
     /// The automation layer is done (every qualifying fix ran, or it stopped
     /// on a refusal).

@@ -163,8 +163,8 @@ fn a_targeted_rerun_replaces_exactly_one_row_in_the_committed_scan() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            AppEvent::Scan(ScanEvent::TargetedCommitted { session_id, task_id })
-                if session_id == &base_session && task_id == "processor"
+            AppEvent::Scan(ScanEvent::TargetedCommitted { session_id, task_ids })
+                if session_id == &base_session && task_ids.as_slice() == ["processor"]
         )),
         "the merged snapshot keeps the base session identity"
     );

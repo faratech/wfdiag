@@ -20,7 +20,7 @@ use super::{AppService, Internal, failure_text};
 use crate::WorkerKind;
 use crate::command::{DispatchOutcome, RejectReason, SubscriptionOperation};
 use crate::domain::actions::{
-    PendingVerification, ReviewSurface, StagedReview, admin_blocked, build_snapshot,
+    ReviewSurface, StagedReview, admin_blocked, arm_verification, build_snapshot,
     proposal_matches, stale_reviews, verification_tasks,
 };
 use crate::domain::ai_intent::{
@@ -1684,14 +1684,27 @@ impl AppService {
     /// the next projection verifies the fix; fall back to re-detection over
     /// the existing evidence when a rerun cannot start. Returns whether a
     /// projection update is now expected.
-    fn begin_verification(&mut self, run_id: String, issue_ids: Vec<String>) -> bool {
-        let tasks = verification_tasks(&issue_ids, &self.snapshot.issues);
-        if !tasks.is_empty()
+    fn begin_verification(&mut self, run_id: String, issue_ids: &[String]) -> bool {
+        let rerun_tasks = verification_tasks(issue_ids, &self.snapshot.issues);
+        if !rerun_tasks.is_empty()
             && self
-                .start_scan(wfdiag_native_diagnostics::ScanKind::Targeted, Some(tasks))
+                .start_scan(
+                    wfdiag_native_diagnostics::ScanKind::Targeted,
+                    Some(rerun_tasks.clone()),
+                )
                 .is_accepted()
         {
-            self.verification = Some(PendingVerification { run_id, issue_ids });
+            // Armed but not ready: only a projection built after this
+            // rerun's evidence commits may complete the verdict (2026-09-03
+            // audit - a host RefreshIssues mid-rerun used to report the
+            // pre-fix state as the verdict).
+            self.verification = Some(arm_verification(
+                run_id,
+                issue_ids,
+                &self.snapshot.issues,
+                rerun_tasks,
+                /* evidence_ready */ false,
+            ));
             return true;
         }
         self.refresh_issues().is_accepted()
@@ -1734,7 +1747,7 @@ impl AppService {
             // so the next projection says whether they cleared. When
             // that cannot run, at least never show the known-stale,
             // pre-repair projection.
-            self.begin_verification(run_id, fixed_issue_ids)
+            self.begin_verification(run_id, &fixed_issue_ids)
         } else {
             false
         };

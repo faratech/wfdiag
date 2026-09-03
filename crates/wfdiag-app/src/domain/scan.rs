@@ -75,53 +75,68 @@ impl ScanSnapshot {
     }
 }
 
-/// The single-row rerun transaction.
+/// The targeted rerun transaction: one committed session re-run for a set
+/// of tasks, each result merged back into the committed snapshot in place.
+/// A post-fix verification reruns several source tasks at once, and the old
+/// single-row overlay forced every wider rerun into a *replacement*
+/// transaction that wiped the committed scan (2026-09-03 audit).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetedOverlay {
-    target_task_id: String,
+    target_task_ids: Vec<String>,
     base: ScanSnapshot,
-    staged_result: Option<DiagnosticTaskResult>,
+    staged_results: Vec<DiagnosticTaskResult>,
 }
 
 impl TargetedOverlay {
-    /// Open an overlay when a committed session is being re-run for exactly
-    /// one task. Any other shape returns `None` and the caller performs a
-    /// normal replacement transaction instead.
+    /// Open an overlay when a committed session is being re-run for a
+    /// specific task set. An empty set or no committed session returns
+    /// `None` and the caller performs a normal replacement transaction
+    /// instead.
     #[must_use]
     pub fn for_committed_session(
         scan_kind: ScanKind,
         task_ids: &[String],
         base: ScanSnapshot,
     ) -> Option<Self> {
-        let [target_task_id] = task_ids else {
-            return None;
-        };
-        (scan_kind == ScanKind::Targeted && base.session_id.is_some()).then(|| Self {
-            target_task_id: target_task_id.clone(),
+        (!task_ids.is_empty()
+            && scan_kind == ScanKind::Targeted
+            && base.session_id.is_some())
+        .then(|| Self {
+            target_task_ids: task_ids.to_vec(),
             base,
-            staged_result: None,
+            staged_results: Vec::new(),
         })
     }
 
-    /// The task this rerun is allowed to replace.
+    /// The tasks this rerun is allowed to replace.
     #[must_use]
-    pub fn target_task_id(&self) -> &str {
-        &self.target_task_id
+    pub fn target_task_ids(&self) -> &[String] {
+        &self.target_task_ids
     }
 
-    /// Stage a streamed result. Anything but the target task is ignored.
+    /// Stage a streamed result. Anything outside the target set, or a
+    /// second result for an already-staged task, is ignored.
     pub fn stage(&mut self, result: DiagnosticTaskResult) {
-        if result.task_id == self.target_task_id {
-            self.staged_result = Some(result);
+        if self.target_task_ids.contains(&result.task_id)
+            && !self
+                .staged_results
+                .iter()
+                .any(|staged| staged.task_id == result.task_id)
+        {
+            self.staged_results.push(result);
         }
     }
 
     /// Progress counters for the rerun itself, not the base snapshot.
     #[must_use]
     pub fn staged_counts(&self) -> (usize, usize) {
-        self.staged_result
-            .as_ref()
-            .map_or((0, 0), |result| (1, usize::from(!result.success)))
+        (
+            self.staged_results.len(),
+            self.staged_results
+                .iter()
+                .filter(|result| !result.success)
+                .count(),
+        )
     }
 
     /// Abandon the rerun, restoring the untouched committed snapshot.
@@ -130,27 +145,41 @@ impl TargetedOverlay {
         self.base
     }
 
-    /// Merge the authoritative replacement into the base snapshot.
+    /// Merge the authoritative replacements into the base snapshot.
     ///
     /// # Errors
     ///
-    /// Returns a message when the runtime returned a different task than the
-    /// one this overlay was opened for.
+    /// Returns a message when the runtime did not return one result for
+    /// every task this overlay was opened for.
     pub fn commit(
         &self,
-        replacement: DiagnosticTaskResult,
+        mut staged: Vec<DiagnosticTaskResult>,
         catalog: &[DiagnosticTask],
     ) -> Result<ScanSnapshot, String> {
-        let results = merge_targeted_result(
-            self.base.results.clone(),
-            &self.target_task_id,
-            replacement,
-            self.base.session_id.as_deref(),
-            catalog,
-        )?;
+        let mut results = self.base.results.clone();
+        for target in &self.target_task_ids {
+            let position = staged
+                .iter()
+                .position(|result| &result.task_id == target);
+            let Some(position) = position else {
+                return Err(format!(
+                    "targeted rerun did not return `{target}`"
+                ));
+            };
+            let replacement = staged.remove(position);
+            results = merge_targeted_result(
+                results,
+                target,
+                replacement,
+                self.base.session_id.as_deref(),
+                catalog,
+            )?;
+        }
         let mut task_ids = self.base.task_ids.clone();
-        if !task_ids.iter().any(|id| id == &self.target_task_id) {
-            task_ids.push(self.target_task_id.clone());
+        for target in &self.target_task_ids {
+            if !task_ids.iter().any(|id| id == target) {
+                task_ids.push(target.clone());
+            }
         }
         let completed = results.len();
         let errors = results.iter().filter(|result| !result.success).count();
@@ -323,12 +352,12 @@ pub enum RunOutcome {
         /// Whether history auto-save should run for this scan.
         auto_save: bool,
     },
-    /// A single-row rerun committed into the existing snapshot.
+    /// A targeted rerun committed into the existing snapshot.
     TargetedCommitted {
         /// The session id of the committed evidence (the base session).
         session_id: String,
-        /// The one task that was replaced.
-        task_id: String,
+        /// The tasks that were replaced.
+        task_ids: Vec<String>,
         /// The merged evidence for the whole snapshot.
         evidence: SharedScanEvidence,
     },
@@ -643,22 +672,23 @@ impl ScanState {
         }
 
         if let Some(overlay) = self.overlay.as_ref() {
-            let Some(output) = evidence.get(overlay.target_task_id()) else {
-                let error = format!(
-                    "targeted rerun did not return `{}`",
-                    overlay.target_task_id()
-                );
-                self.restore_previous();
-                self.reset();
-                return RunOutcome::TargetedFailed { error };
-            };
-            let replacement = DiagnosticTaskResult::new(
-                session_id,
-                overlay.target_task_id().to_string(),
-                std::sync::Arc::clone(output),
-            );
-            let target_task_id = overlay.target_task_id().to_string();
-            return match overlay.commit(replacement, catalog) {
+            let targets = overlay.target_task_ids().to_vec();
+            let mut staged = Vec::with_capacity(targets.len());
+            for target in &targets {
+                let Some(output) = evidence.get(target) else {
+                    let error =
+                        format!("targeted rerun did not return `{target}`");
+                    self.restore_previous();
+                    self.reset();
+                    return RunOutcome::TargetedFailed { error };
+                };
+                staged.push(DiagnosticTaskResult::new(
+                    session_id,
+                    target.clone(),
+                    std::sync::Arc::clone(output),
+                ));
+            }
+            return match overlay.commit(staged, catalog) {
                 Ok(committed) => {
                     let committed_session = committed
                         .effective_session_id()
@@ -670,7 +700,7 @@ impl ScanState {
                     self.reset();
                     RunOutcome::TargetedCommitted {
                         session_id: committed_session,
-                        task_id: target_task_id,
+                        task_ids: targets,
                         evidence: merged,
                     }
                 }
@@ -954,14 +984,14 @@ mod tests {
         );
         let RunOutcome::TargetedCommitted {
             session_id,
-            task_id,
+            task_ids,
             evidence,
         } = outcome
         else {
             panic!("the rerun should commit into the base snapshot")
         };
         assert_eq!(session_id, "scan_1");
-        assert_eq!(task_id, "processor");
+        assert_eq!(task_ids, ["processor"]);
         assert_eq!(evidence.len(), 2);
         assert_eq!(state.snapshot().results.len(), 2);
         assert!(!state.snapshot().results[1].success, "processor replaced");

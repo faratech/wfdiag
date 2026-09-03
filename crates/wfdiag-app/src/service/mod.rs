@@ -727,9 +727,12 @@ impl AppService {
             });
         }
 
-        let targeted_rerun = kind == ScanKind::Targeted
-            && task_ids.len() == 1
-            && self.scan.snapshot().session_id.is_some();
+        // Any targeted rerun over a committed session merges in place, one
+        // task or many: capping the overlay at a single task forced wider
+        // post-fix verification reruns into replacement transactions that
+        // wiped the committed scan (2026-09-03 audit).
+        let targeted_rerun =
+            kind == ScanKind::Targeted && self.scan.snapshot().session_id.is_some();
         let policy = ScanPolicy {
             auto_save: auto_save_allowed(self.snapshot.settings.auto_save, targeted_rerun),
             max_concurrent_tasks: scan_concurrency(self.snapshot.settings.max_concurrent_tasks),
@@ -1884,6 +1887,7 @@ impl AppService {
             }
             Internal::ScanStartFailed { error } => {
                 self.scan.start_failed();
+                self.abandon_verification_scan();
                 self.queue
                     .push(AppEvent::Scan(ScanEvent::StartFailed { error }));
             }
@@ -2133,9 +2137,11 @@ impl AppService {
         match outcome {
             RunOutcome::Stale => {}
             RunOutcome::Cancelled => {
+                self.abandon_verification_scan();
                 self.queue.push(AppEvent::Scan(ScanEvent::Cancelled));
             }
             RunOutcome::Failed { error, stopped } => {
+                self.abandon_verification_scan();
                 self.queue
                     .push(AppEvent::Scan(ScanEvent::Failed { error, stopped }));
             }
@@ -2143,24 +2149,31 @@ impl AppService {
                 completed,
                 expected,
             } => {
+                self.abandon_verification_scan();
                 self.queue.push(AppEvent::Scan(ScanEvent::Incomplete {
                     completed,
                     expected,
                 }));
             }
             RunOutcome::TargetedFailed { error } => {
+                self.abandon_verification_scan();
                 self.queue
                     .push(AppEvent::Scan(ScanEvent::TargetedFailed { error }));
             }
             RunOutcome::TargetedCommitted {
                 session_id,
-                task_id,
+                task_ids,
                 evidence,
             } => {
+                // The verification rerun's evidence is in: only a projection
+                // committed from here on is a verdict (2026-09-03 audit).
+                if let Some(pending) = self.verification.as_mut() {
+                    pending.evidence_ready = true;
+                }
                 self.queue
                     .push(AppEvent::Scan(ScanEvent::TargetedCommitted {
                         session_id: session_id.clone(),
-                        task_id,
+                        task_ids,
                     }));
                 self.commit_scan_evidence(session_id, evidence);
             }
@@ -2169,6 +2182,11 @@ impl AppService {
                 evidence,
                 auto_save,
             } => {
+                // A verification that had no committed session to overlay
+                // runs as a replacement; its commit is still the rerun's.
+                if let Some(pending) = self.verification.as_mut() {
+                    pending.evidence_ready = true;
+                }
                 let snapshot = self.scan.snapshot();
                 self.queue.push(AppEvent::Scan(ScanEvent::Committed {
                     session_id: session_id.clone(),
@@ -2187,6 +2205,17 @@ impl AppService {
                     }));
                 }
             }
+        }
+    }
+
+    /// The verification rerun ended without committing (refused start,
+    /// failure, cancellation). Drop it and let the automation session
+    /// finish: nothing else clears `await_projection`, so leaving it set
+    /// stranded every later safe-fix run behind `Busy` (2026-09-03 audit).
+    fn abandon_verification_scan(&mut self) {
+        if self.verification.take().is_some() && self.automation.await_projection {
+            self.automation.await_projection = false;
+            self.continue_automation();
         }
     }
 
@@ -2488,28 +2517,45 @@ impl AppService {
                     issues: escalated,
                 }));
             }
-            // Post-fix verification: this projection was built from the
-            // re-collected evidence, so it says whether the fix worked.
-            if let Some(pending) = self.verification.take() {
-                let (resolved, unresolved) = verification_result(&pending, &self.snapshot.issues);
+            // Post-fix verification: a projection completes the verdict only
+            // once the verification rerun's evidence has committed. Before
+            // that, any accepted projection (a host RefreshIssues, say)
+            // describes pre-fix evidence and must not be mistaken for a
+            // verdict (2026-09-03 audit).
+            let verification_ready = self
+                .verification
+                .as_ref()
+                .is_some_and(|pending| pending.evidence_ready);
+            if verification_ready {
+                let pending = self.verification.take().expect("checked above");
+                let (resolved, unresolved, not_rechecked) =
+                    verification_result(&pending, &self.snapshot.issues);
                 self.audit(
                     crate::ports::audit::AuditKind::Verified,
                     serde_json::json!({
                         "runId": pending.run_id,
                         "resolved": resolved,
                         "unresolved": unresolved,
+                        "notRechecked": not_rechecked,
                     }),
                 );
                 self.queue.push(AppEvent::Action(ActionEvent::Verified {
                     run_id: pending.run_id,
                     resolved,
                     unresolved,
+                    not_rechecked,
                 }));
             }
             // The automation layer: continue a session that waited for this
             // projection, or start one after a new scan when the user asked
-            // for that. A refresh of the same scan never starts one.
-            if self.automation.await_projection {
+            // for that. A refresh of the same scan never starts one. A
+            // session whose verification is still mid-rerun keeps waiting.
+            if self.automation.await_projection
+                && self
+                    .verification
+                    .as_ref()
+                    .is_none_or(|pending| pending.evidence_ready)
+            {
                 self.automation.await_projection = false;
                 self.continue_automation();
             } else if new_session

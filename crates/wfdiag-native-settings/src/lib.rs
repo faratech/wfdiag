@@ -610,6 +610,10 @@ pub struct SettingsService {
     credential_transaction_lock: Arc<Mutex<()>>,
 }
 
+/// Pre-mutation credential snapshots for rollback compensation: each entry
+/// remembers the value (zeroized on drop) a provider had before its write.
+type CredentialSnapshots = Vec<(ProviderKeyId, Option<Zeroizing<String>>)>;
+
 impl SettingsService {
     #[must_use]
     pub fn new(
@@ -750,8 +754,7 @@ impl SettingsService {
     fn commit_provider_credentials_snapshotting(
         &self,
         transaction: &ProviderCredentialTransaction,
-    ) -> Result<Vec<(ProviderKeyId, Option<Zeroizing<String>>)>, ProviderCredentialTransactionError>
-    {
+    ) -> Result<CredentialSnapshots, ProviderCredentialTransactionError> {
         if transaction.is_empty() {
             return Ok(Vec::new());
         }
@@ -779,7 +782,8 @@ impl SettingsService {
                 ProviderCredentialMutation::Clear => self.credentials.clear(provider),
             };
             if let Err(error) = result {
-                let rollback_failures = self.rollback_provider_credentials(&snapshots[..=index]);
+                let rollback_failures =
+                    self.rollback_provider_credentials(snapshots[..=index].to_vec().as_ref());
                 return Err(if rollback_failures.is_empty() {
                     ProviderCredentialTransactionError::Apply { provider, error }
                 } else {
@@ -805,7 +809,7 @@ impl SettingsService {
 
     fn rollback_provider_credentials(
         &self,
-        snapshots: &[(ProviderKeyId, Option<Zeroizing<String>>)],
+        snapshots: &CredentialSnapshots,
     ) -> Vec<ProviderCredentialRollbackFailure> {
         snapshots
             .iter()

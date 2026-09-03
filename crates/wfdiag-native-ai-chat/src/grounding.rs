@@ -225,8 +225,7 @@ pub async fn ground_query(
     max_chars: usize,
     cancel: &CancellationToken,
 ) -> AnalysisGrounding {
-    let endpoint = WINDOWSFORUM_MCP_URL;
-    let lookup = search_sources(&endpoint, &query.text, query.mode);
+    let lookup = search_sources(WINDOWSFORUM_MCP_URL, &query.text, query.mode);
     let searched = tokio::select! {
         biased;
         () = cancel.cancelled() => Err("Grounding request cancelled".to_string()),
@@ -275,8 +274,7 @@ pub async fn search_windows_knowledge(
     if query.trim().is_empty() {
         return Err("search_windows_knowledge requires a query".to_string());
     }
-    let endpoint = WINDOWSFORUM_MCP_URL;
-    let lookup = search_sources(&endpoint, &query, GroundingMode::General);
+    let lookup = search_sources(WINDOWSFORUM_MCP_URL, &query, GroundingMode::General);
     let sources = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err("Grounding request cancelled".to_string()),

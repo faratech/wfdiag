@@ -135,8 +135,45 @@ pub fn proposal_matches(proposal: &ActionProposal, snapshot: &ActionSnapshot) ->
 pub struct PendingVerification {
     /// The run.
     pub run_id: String,
-    /// The detected issues the run's actions were bound to.
-    pub issue_ids: Vec<String>,
+    /// The issues the run's actions were bound to, each with its source
+    /// tasks captured at arm time: an issue the rerun clears disappears
+    /// from the fresh projection, so its tasks must be remembered here.
+    pub issue_tasks: Vec<(String, Vec<String>)>,
+    /// The tasks the verification rerun re-collects. Empty when the verdict
+    /// comes from a plain re-detection instead.
+    pub rerun_tasks: Vec<String>,
+    /// True once the rerun's evidence has committed. A projection that
+    /// arrives before this describes pre-fix evidence and must not produce
+    /// a verdict (2026-09-03 audit).
+    pub evidence_ready: bool,
+}
+
+/// Arm a verification: remember what the run fixed and which tasks decide
+/// whether the fixes held.
+#[must_use]
+pub fn arm_verification(
+    run_id: String,
+    issue_ids: &[String],
+    issues: &[Issue],
+    rerun_tasks: Vec<String>,
+    evidence_ready: bool,
+) -> PendingVerification {
+    let issue_tasks = issues
+        .iter()
+        .filter(|issue| issue_ids.contains(&issue.id))
+        .map(|issue| {
+            (
+                issue.id.clone(),
+                issue.source_tasks.iter().flatten().cloned().collect(),
+            )
+        })
+        .collect();
+    PendingVerification {
+        run_id,
+        issue_tasks,
+        rerun_tasks,
+        evidence_ready,
+    }
 }
 
 /// The diagnostic tasks whose fresh output decides whether `issue_ids` are
@@ -155,18 +192,39 @@ pub fn verification_tasks(issue_ids: &[String], issues: &[Issue]) -> Vec<String>
 }
 
 /// Split a verification's issues into the ones the fresh projection no
-/// longer detects and the ones it still does. An issue the projection no
-/// longer knows at all (removed rule) counts as resolved.
+/// longer detects, the ones it still does, and the ones this rerun never
+/// re-checked.
+///
+/// Only an issue whose source tasks were all re-collected can be called
+/// resolved or unresolved; anything the rerun did not cover is reported as
+/// `not_rechecked` instead of silently counted as fixed (2026-09-03 audit:
+/// the old shape counted every vanished issue as resolved, so a rerun of
+/// two tasks "verified" the whole scan).
 #[must_use]
 pub fn verification_result(
     pending: &PendingVerification,
     issues: &[Issue],
-) -> (Vec<String>, Vec<String>) {
-    pending.issue_ids.iter().cloned().partition(|issue_id| {
-        !issues
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut resolved = Vec::new();
+    let mut unresolved = Vec::new();
+    let mut not_rechecked = Vec::new();
+    for (issue_id, source_tasks) in &pending.issue_tasks {
+        let covered = !pending.rerun_tasks.is_empty()
+            && source_tasks
+                .iter()
+                .all(|task| pending.rerun_tasks.contains(task));
+        if !covered {
+            not_rechecked.push(issue_id.clone());
+        } else if issues
             .iter()
             .any(|issue| &issue.id == issue_id && issue.status == IssueStatus::Detected)
-    })
+        {
+            unresolved.push(issue_id.clone());
+        } else {
+            resolved.push(issue_id.clone());
+        }
+    }
+    (resolved, unresolved, not_rechecked)
 }
 
 /// Whether any action in a preview is Repair-tier, and therefore needs the
@@ -226,7 +284,7 @@ pub fn stale_reviews(
 #[cfg(test)]
 mod tests {
     use super::{
-        PendingVerification, ReviewSurface, StagedReview, admin_blocked, build_snapshot,
+        ReviewSurface, StagedReview, admin_blocked, arm_verification, build_snapshot,
         contains_repair, detected_issue_remediations, proposal_matches, scan_fingerprint,
         stale_reviews, verification_result, verification_tasks,
     };
@@ -432,10 +490,13 @@ mod tests {
             verification_tasks(&ids, &before),
             ["logical_disk", "disk_usage"]
         );
-        let pending = PendingVerification {
-            run_id: "run-1".to_string(),
-            issue_ids: ids,
-        };
+        let pending = arm_verification(
+            "run-1".to_string(),
+            &ids,
+            &before,
+            verification_tasks(&ids, &before),
+            true,
+        );
         let after = vec![
             issue("low_disk_space", false, &["logical_disk"]),
             issue("space_consumers", true, &["disk_usage", "logical_disk"]),
@@ -444,6 +505,54 @@ mod tests {
             verification_result(&pending, &after),
             (
                 vec!["low_disk_space".to_string()],
+                vec!["space_consumers".to_string()],
+                Vec::<String>::new()
+            )
+        );
+    }
+
+    #[test]
+    fn verification_counts_an_issue_the_rerun_did_not_cover_as_not_rechecked() {
+        // `space_consumers` also depends on `disk_usage`, which this rerun
+        // did not re-collect: it may not be counted resolved just because
+        // the fresh projection is silent about it (2026-09-03 audit).
+        let issue = |id: &str, detected: bool, tasks: &[&str]| Issue {
+            id: id.to_string(),
+            category: "Test".to_string(),
+            severity: wfdiag_native_issues::IssueSeverity::Warning,
+            status: if detected {
+                IssueStatus::Detected
+            } else {
+                IssueStatus::Ok
+            },
+            title: id.to_string(),
+            description: String::new(),
+            recommendation: String::new(),
+            detected,
+            source_tasks: Some(tasks.iter().map(|task| (*task).to_string()).collect()),
+            remediation: None,
+        };
+        let tasks = ["logical_disk"];
+        let issues = vec![
+            issue("low_disk_space", true, &["logical_disk"]),
+            issue("space_consumers", true, &["disk_usage", "logical_disk"]),
+        ];
+        let pending = arm_verification(
+            "run-1".to_string(),
+            &[
+                "low_disk_space".to_string(),
+                "space_consumers".to_string(),
+            ],
+            &issues,
+            tasks.iter().map(|task| (*task).to_string()).collect(),
+            true,
+        );
+        let after = vec![issue("space_consumers", true, &["disk_usage", "logical_disk"])];
+        assert_eq!(
+            verification_result(&pending, &after),
+            (
+                vec!["low_disk_space".to_string()],
+                Vec::<String>::new(),
                 vec!["space_consumers".to_string()]
             )
         );

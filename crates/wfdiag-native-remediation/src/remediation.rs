@@ -1116,6 +1116,17 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
     // Returns (exit_ok, combined output) — the output lets callers tell a
     // real failure from a benign "already in target state" result.
     let run_quiet = |program: &str, args: &[&str]| -> anyhow::Result<(bool, String)> {
+        fn drain<R: std::io::Read + Send + 'static>(
+            pipe: Option<R>,
+        ) -> std::thread::JoinHandle<Vec<u8>> {
+            std::thread::spawn(move || {
+                let mut buffer = Vec::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = std::io::Read::read_to_end(&mut pipe, &mut buffer);
+                }
+                buffer
+            })
+        }
         let mut cmd = std::process::Command::new(trusted_system_program(program)?);
         cmd.args(args);
         cmd.stdout(std::process::Stdio::piped());
@@ -1133,17 +1144,6 @@ fn reset_windows_update(_cancel: &CancellationToken) -> anyhow::Result<FixResult
         // only after exit assumed the output fits the OS pipe buffer, and a
         // child that filled one would block forever on write and get
         // misreported as a timeout (2026-09-03 audit).
-        fn drain<R: std::io::Read + Send + 'static>(
-            pipe: Option<R>,
-        ) -> std::thread::JoinHandle<Vec<u8>> {
-            std::thread::spawn(move || {
-                let mut buffer = Vec::new();
-                if let Some(mut pipe) = pipe {
-                    let _ = std::io::Read::read_to_end(&mut pipe, &mut buffer);
-                }
-                buffer
-            })
-        }
         let stdout_reader = drain(child.stdout.take());
         let stderr_reader = drain(child.stderr.take());
         let status = loop {
