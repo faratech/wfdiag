@@ -158,14 +158,25 @@ pub fn arm_verification(
     rerun_tasks: Vec<String>,
     evidence_ready: bool,
 ) -> PendingVerification {
-    let issue_tasks = issues
+    // Built from the ids first: an issue the current snapshot no longer
+    // knows still belongs to the run, and with no source tasks it lands in
+    // `not_rechecked` instead of silently vanishing from the verdict
+    // (2026-09-03 audit).
+    let known: std::collections::HashMap<&str, Vec<String>> = issues
         .iter()
         .filter(|issue| issue_ids.contains(&issue.id))
         .map(|issue| {
             (
-                issue.id.clone(),
+                issue.id.as_str(),
                 issue.source_tasks.iter().flatten().cloned().collect(),
             )
+        })
+        .collect();
+    let issue_tasks = issue_ids
+        .iter()
+        .map(|id| {
+            let source_tasks = known.get(id.as_str()).cloned().unwrap_or_default();
+            (id.clone(), source_tasks)
         })
         .collect();
     PendingVerification {
