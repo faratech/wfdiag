@@ -15,9 +15,11 @@
     "windows_app_runtime_release": "2.4.0",
     "windows_app_runtime_framework": "Microsoft.WindowsAppRuntime.2",
     "crates_io_observation": {
-      "checked_on": "2026-09-01",
-      "windows-reactor": "0.0.0",
-      "windows-reactor-setup": "0.0.0"
+      "checked_on": "2026-09-03",
+      "windows-reactor": "0.100.0",
+      "windows-reactor-setup": "0.100.0",
+      "windows-core": "0.100.0",
+      "note": "official release adopted as the dependency pin (supersedes the git revision consumption; same reviewed source)"
     },
     "windows_app_runtime_min_version": "2.4.0.0",
     "decision_record": "docs/REACTOR_MIGRATION.md#cutover-decision-2026-09-01"

@@ -120,7 +120,7 @@ impl FocusManager {
                 windows_core::Interface::as_raw(this),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         })
     }
     pub(crate) fn GetFocusedElementWithRoot<P0>(
@@ -136,7 +136,7 @@ impl FocusManager {
                 xamlroot.param().abi(),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         })
     }
     fn IFocusManagerStatics<R, F: FnOnce(&IFocusManagerStatics) -> windows_core::Result<R>>(
@@ -173,8 +173,8 @@ impl FocusState {
     pub const Keyboard: Self = Self(2);
     pub const Programmatic: Self = Self(3);
 }
-impl windows_core::TypeKind for FocusState {
-    type TypeKind = windows_core::CopyType;
+impl windows_core::imp::TypeKind for FocusState {
+    type TypeKind = windows_core::imp::CopyType;
 }
 impl windows_core::RuntimeType for FocusState {
     const SIGNATURE: windows_core::imp::ConstBuffer =

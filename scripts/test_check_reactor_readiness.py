@@ -126,10 +126,10 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-windows-reactor = {{ git = "{readiness.EXPECTED_REACTOR_REPOSITORY}", rev = "{readiness.EXPECTED_REACTOR_REVISION}" }}
+windows-reactor = "{readiness.EXPECTED_REACTOR_VERSION}"
 
 [build-dependencies]
-windows-reactor-setup = {{ git = "{readiness.EXPECTED_REACTOR_REPOSITORY}", rev = "{readiness.EXPECTED_REACTOR_REVISION}" }}
+windows-reactor-setup = "{readiness.EXPECTED_REACTOR_VERSION}"
 ''',
         )
         self.write_text(
@@ -372,16 +372,21 @@ class ReactorReadinessTests(unittest.TestCase):
     def test_floating_or_changed_reactor_pin_is_a_blocker(self):
         cargo_path = self.root / "apps/wfdiag/Cargo.toml"
         cargo = cargo_path.read_text(encoding="utf-8")
-        cargo = cargo.replace(
-            f'rev = "{readiness.EXPECTED_REACTOR_REVISION}"',
-            'branch = "master"',
+        # A floating branch, and a drifted version, are both refusals.
+        floating = cargo.replace(
+            f'windows-reactor = "{readiness.EXPECTED_REACTOR_VERSION}"',
+            'windows-reactor = { version = "0.100.0", branch = "master" }',
             1,
         )
-        cargo_path.write_text(cargo, encoding="utf-8")
-
-        report = self.fixture.report()
-
-        self.assertIn("reactor.prototype", codes(report, "blocker"))
+        drifted = cargo.replace(
+            f'windows-reactor = "{readiness.EXPECTED_REACTOR_VERSION}"',
+            f'windows-reactor = "{readiness.EXPECTED_REACTOR_VERSION}-rc.1"',
+            1,
+        )
+        for mutated in (floating, drifted):
+            cargo_path.write_text(mutated, encoding="utf-8")
+            report = self.fixture.report()
+            self.assertIn("reactor.prototype", codes(report, "blocker"))
 
     def test_webview_dependency_is_a_blocker(self):
         cargo_path = self.root / "apps/wfdiag/Cargo.toml"

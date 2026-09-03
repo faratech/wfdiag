@@ -52,7 +52,8 @@ fn main() {
     } else {
         // Default: keep the prototype small and use the shared Windows App
         // Runtime, staging only its bootstrap DLL beside the executable.
-        windows_reactor_setup::as_framework_dependent();
+        // windows-reactor-setup 0.100.0 made framework-dependent the
+        // implicit default; only the self-contained path needs a call.
         if cfg!(windows) {
             // Keep deployment-mode target directories separate, but also clean
             // up an obsolete projection left by an older WFDiag build if a

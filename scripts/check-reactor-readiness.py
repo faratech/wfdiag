@@ -364,19 +364,26 @@ def _check_reactor_prototype(
             cargo.get("build-dependencies", {}).get("windows-reactor-setup"),
         ),
     )
+    # The official crates.io 0.100.0 release superseded the reviewed git
+    # revision (same version, same reviewed source) as the consumed form:
+    # a registry dependency at exactly the expected version is the pin now
+    # (2026-09-03 audit; check-external-gates.py still watches for newer).
     problems: dict[str, Any] = {}
     for label, dependency in dependencies:
-        if not isinstance(dependency, dict):
-            problems[label] = "must be a git dependency table"
-            continue
         dependency_problems: dict[str, Any] = {}
-        if dependency.get("git") != EXPECTED_REACTOR_REPOSITORY:
-            dependency_problems["git"] = dependency.get("git")
-        if dependency.get("rev") != EXPECTED_REACTOR_REVISION:
-            dependency_problems["rev"] = dependency.get("rev")
-        for floating_key in ("branch", "tag"):
-            if floating_key in dependency:
-                dependency_problems[floating_key] = dependency[floating_key]
+        if isinstance(dependency, str):
+            if dependency != EXPECTED_REACTOR_VERSION:
+                dependency_problems["version"] = dependency
+        elif isinstance(dependency, dict):
+            if dependency.get("version") != EXPECTED_REACTOR_VERSION:
+                dependency_problems["version"] = dependency.get("version")
+            if "git" in dependency or "path" in dependency:
+                dependency_problems["source"] = "must be the crates.io release"
+            for floating_key in ("branch", "tag"):
+                if floating_key in dependency:
+                    dependency_problems[floating_key] = dependency[floating_key]
+        else:
+            dependency_problems["dependency"] = "must be a version string or table"
         if dependency_problems:
             problems[label] = dependency_problems
 
@@ -384,7 +391,7 @@ def _check_reactor_prototype(
         report.add(
             "reactor.prototype",
             "blocker",
-            "Reactor prototype dependencies are not pinned to the reviewed revision",
+            "Reactor prototype dependencies are not the reviewed crates.io release",
             path=str(relative),
             problems=problems,
         )
@@ -392,7 +399,7 @@ def _check_reactor_prototype(
         report.add(
             "reactor.prototype",
             "pass",
-            "Reactor and reactor-setup prototype dependencies use the exact reviewed revision",
+            "Reactor and reactor-setup prototype dependencies are the reviewed crates.io release",
             path=str(relative),
         )
 

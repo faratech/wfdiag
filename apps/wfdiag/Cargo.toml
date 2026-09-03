@@ -58,9 +58,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
-windows-core = { git = "https://github.com/microsoft/windows-rs", rev = "1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8" }
-windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8" }
+windows-core = "0.100.0"
+windows-reactor = "0.100.0"
 
 [build-dependencies]
 serde_json = { workspace = true }
-windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8" }
+windows-reactor-setup = "0.100.0"

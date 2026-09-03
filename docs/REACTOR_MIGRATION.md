@@ -103,13 +103,19 @@ approximating the source depth without a browser renderer.
 > Cargo dependencies, `reactor-baselines/manifest.json` (`reactor_pin`), and
 > `scripts/build-reactor-msix-probe.py` in one reviewed change. Historical text follows.
 
-The feasibility spike pins both `windows-reactor` and
+> **2026-09-03 update:** crates.io publishes the real `0.100.0` for
+> `windows-reactor`, `windows-reactor-setup`, and `windows-core`; the
+> dependencies now consume that release directly and the git revision below is
+> retained only as provenance (it is the same reviewed source). Historical
+> spike notes follow.
+
+The feasibility spike pinned both `windows-reactor` and
 `windows-reactor-setup` to the reviewed `windows-rs` commit
 `1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8`. The source identifies the
 Reactor API as 0.100.0. A fresh `cargo search` on 2026-08-31 still reports
-only the placeholder `0.0.0` releases for both crates, so the usable API is
-not available from crates.io. A branch, tag, or floating Git dependency is
-prohibited.
+only the placeholder `0.0.0` releases for both crates, so the usable API was
+not available from crates.io at the time. A branch, tag, or floating Git
+dependency is prohibited.
 
 The pin is prototype-only. Production requires an official, non-placeholder
 release that contains the APIs WFDiag validated. Update the expected version,

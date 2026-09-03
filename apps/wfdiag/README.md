@@ -49,13 +49,14 @@ layers.
 
 ## Dependency pin
 
-`windows-reactor`, `windows-reactor-setup`, and `windows-core` are pinned to Microsoft
-`windows-rs` revision `1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8` (Reactor 0.100.0 source),
-because crates.io still publishes only the placeholder `0.0.0` for both Reactor crates. The
-pin is a **revision, never a branch**. Moving it means updating both Cargo dependencies,
-`reactor-baselines/manifest.json` (`reactor_pin`), and `scripts/build-reactor-msix-probe.py`
-together in one reviewed change. `scripts/check-external-gates.py` watches crates.io so the
-eventual move to an official release happens as an ordinary dependency update.
+`windows-reactor`, `windows-reactor-setup`, and `windows-core` are consumed from the
+official crates.io 0.100.0 release (adopted 2026-09-03, superseding the git-revision pin of
+the same reviewed source). A branch, tag, floating git dependency, or any other version is
+prohibited. Moving the pin means updating the three Cargo dependencies,
+`reactor-baselines/manifest.json` (`reactor_pin`), `scripts/build-reactor-msix-probe.py`, and
+the readiness script's `EXPECTED_REACTOR_*` constants together in one reviewed change.
+`scripts/check-external-gates.py` watches crates.io for anything newer than the adopted
+release.
 
 ## Check from WSL
 

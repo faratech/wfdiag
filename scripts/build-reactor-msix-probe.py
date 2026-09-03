@@ -173,15 +173,20 @@ def assert_reactor_dependency_contract() -> None:
         ("dependencies", "windows-reactor"),
         ("build-dependencies", "windows-reactor-setup"),
     )
+    expected_version = _REACTOR_PIN["expected_crate_version"]
     for table_name, dependency_name in expected:
         dependency = document.get(table_name, {}).get(dependency_name)
-        if not isinstance(dependency, dict):
-            raise ProbeBuildError(f"{dependency_name} must be an exact git dependency")
-        if dependency.get("git") != REACTOR_REPOSITORY or dependency.get(
-            "rev"
-        ) != REACTOR_REVISION:
+        version = (
+            dependency
+            if isinstance(dependency, str)
+            else dependency.get("version") if isinstance(dependency, dict) else None
+        )
+        if version != expected_version or isinstance(dependency, dict) and (
+            "git" in dependency or "path" in dependency
+        ):
             raise ProbeBuildError(
-                f"{dependency_name} is not pinned to the reviewed Reactor revision"
+                f"{dependency_name} is not the reviewed crates.io release "
+                f"({expected_version!r})"
             )
 
 

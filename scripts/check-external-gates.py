@@ -53,22 +53,34 @@ def check_crates_io(timeout: float) -> dict:
         for entry in (payload.get("versions") or [])
         if not entry.get("yanked")
     ]
-    real = [version for version in versions if version != PLACEHOLDER_VERSION]
-    real.sort(key=lambda value: [int(part) if part.isdigit() else 0
-                                 for part in value.split(".")])
-    if real:
+    # 0.100.0 is ADOPTED as the dependency pin (2026-09-03), so only a
+    # release *newer* than the adopted one is actionable; the placeholder
+    # and the adopted version itself are clear.
+    def newer_than_adopted(version: str) -> bool:
+        def key(value: str) -> list[int]:
+            return [int(part) if part.isdigit() else 0 for part in value.split(".")]
+        return key(version) > key(EXPECTED_REACTOR_VERSION)
+
+    newer = sorted(
+        (version for version in versions if version != PLACEHOLDER_VERSION
+         and newer_than_adopted(version)),
+        key=lambda value: [int(part) if part.isdigit() else 0
+                           for part in value.split(".")],
+    )
+    if newer:
         return {
             "check": "crates_io",
             "status": "actionable",
-            "message": (f"windows-reactor has published non-placeholder versions "
-                        f"{real}; the pinned prototype expects {EXPECTED_REACTOR_VERSION}. "
-                        f"Review the release and make cutover.official_reactor_release actionable."),
-            "versions": real,
+            "message": (f"windows-reactor has published versions newer than the "
+                        f"adopted {EXPECTED_REACTOR_VERSION}: {newer}. "
+                        f"Review the release and update the dependency pin."),
+            "versions": newer,
         }
     return {
         "check": "crates_io",
         "status": "clear",
-        "message": "windows-reactor is still the placeholder 0.0.0 release.",
+        "message": (f"windows-reactor {EXPECTED_REACTOR_VERSION} is the adopted "
+                    f"release; nothing newer published."),
     }
 
 
