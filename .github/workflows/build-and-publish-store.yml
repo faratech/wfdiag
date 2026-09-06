@@ -32,12 +32,18 @@ env:
 permissions:
   contents: read
 
+concurrency:
+  group: build-publish-store-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # =============================================================================
   # Build x64 executable
   # =============================================================================
   build-x64:
     runs-on: windows-latest
+    env:
+      __COMPAT_LAYER: RunAsInvoker
     outputs:
       version: ${{ steps.version.outputs.version }}
       publish_to_store: ${{ steps.version.outputs.publish_to_store }}
@@ -142,6 +148,8 @@ jobs:
   # =============================================================================
   build-arm64:
     runs-on: windows-latest
+    env:
+      __COMPAT_LAYER: RunAsInvoker
     steps:
       - uses: actions/checkout@v4
 
@@ -493,17 +501,17 @@ jobs:
         run: find artifacts -type f -name "*.exe" -o -name "*.msixbundle" | head -20
 
       - name: Attest x64 executable
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: artifacts/exe-x64/wfdiag-tauri.exe
 
       - name: Attest ARM64 executable
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: artifacts/exe-arm64/wfdiag-tauri.exe
 
       - name: Attest MSIX bundle
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: artifacts/msixbundle-unsigned/*.msixbundle
 

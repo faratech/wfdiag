@@ -45,6 +45,8 @@ jobs:
     # The crate is cfg(windows) end to end; clippy and tests need a Windows runner
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      __COMPAT_LAYER: RunAsInvoker
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -111,6 +113,8 @@ jobs:
   rust-arm64:
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      __COMPAT_LAYER: RunAsInvoker
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
