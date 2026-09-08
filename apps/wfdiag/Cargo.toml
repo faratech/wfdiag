@@ -62,5 +62,6 @@ windows-core = "0.100.0"
 windows-reactor = "0.100.0"
 
 [build-dependencies]
+embed-resource.workspace = true
 serde_json = { workspace = true }
 windows-reactor-setup = "0.100.0"

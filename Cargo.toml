@@ -18,6 +18,7 @@ agent-client-protocol = "1"
 anyhow = "1.0"
 async-openai = { version = "0.41", default-features = false }
 dirs = "6.0"
+embed-resource = "3"
 encoding_rs = "0.8"
 event-listener = "5.4.2"
 eventsource-stream = "0.2"

@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 const WEBVIEW2_PROJECTION: &str = "Microsoft.Web.WebView2.Core.dll";
 const APP_VERSION_SOURCE: &str = "../../version.json";
+const APP_ICON_RESOURCE: &str = "app-icon.rc";
+const APP_ICON_SOURCE: &str = "../../src-tauri/icons/icon.ico";
 
 // The pinned setup crate copies these PE images from the Windows App Runtime
 // MSIX. Its copy helpers deliberately ignore missing inputs, so checking only
@@ -40,6 +42,7 @@ const REQUIRED_RUNTIME_DLLS: &[&str] = &[
 
 fn main() {
     configure_app_version();
+    embed_app_icon();
 
     if std::env::var_os("CARGO_FEATURE_SELF_CONTAINED").is_some() {
         // Direct-installer validation: stage the Windows App Runtime beside the
@@ -61,6 +64,15 @@ fn main() {
             remove_unused_webview_projection();
         }
     }
+}
+
+fn embed_app_icon() {
+    println!("cargo:rerun-if-changed={APP_ICON_RESOURCE}");
+    println!("cargo:rerun-if-changed={APP_ICON_SOURCE}");
+
+    embed_resource::compile(APP_ICON_RESOURCE, embed_resource::NONE)
+        .manifest_required()
+        .expect("failed to embed the WFDiag application icon");
 }
 
 fn require_native_windows_packaging_host() {

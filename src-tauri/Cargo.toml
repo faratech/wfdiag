@@ -24,7 +24,7 @@ name = "debug_diagnostics"
 path = "src/bin/debug_diagnostics.rs"
 
 [build-dependencies]
-embed-resource = "3"
+embed-resource.workspace = true
 tauri-build = { version = "2.6", features = [] }
 
 [dependencies]

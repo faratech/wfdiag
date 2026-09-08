@@ -29,8 +29,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState};
 use windows::Win32::UI::Shell::{
-    DefSubclassProc, ExtractIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
-    NOTIFYICONDATAW, RemoveWindowSubclass, SetWindowSubclass, Shell_NotifyIconW,
+    DefSubclassProc, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    RemoveWindowSubclass, SetWindowSubclass, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::TrackPopupMenu;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -52,6 +52,9 @@ pub const TRAY_COMMAND_SHOW: u8 = 1;
 pub const TRAY_COMMAND_QUICK_SCAN: u8 = 2;
 /// Tray menu: exit the application (bypasses close-to-tray).
 pub const TRAY_COMMAND_EXIT: u8 = 3;
+
+/// Integer resource id declared in `apps/wfdiag/app-icon.rc`.
+const APP_ICON_RESOURCE_ID: u16 = 1;
 
 /// One shipping application-wide shortcut captured by the window subclass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -808,9 +811,8 @@ fn encode_tray_tooltip(tooltip: &str, capacity: usize) -> Vec<u16> {
 }
 
 /// The process-wide tray icon. `Shell_NotifyIconW` copies the icon, so the
-/// handle is loaded once and reused across add/remove cycles instead of
-/// leaking one `ExtractIconW` result per install. Stored as a `usize` because
-/// raw `HICON` wrappers are not `Sync`.
+/// handle is loaded once and reused across add/remove cycles. Stored as a
+/// `usize` because raw `HICON` wrappers are not `Sync`.
 fn tray_icon() -> windows::Win32::UI::WindowsAndMessaging::HICON {
     static TRAY_ICON: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     let handle = *TRAY_ICON.get_or_init(|| load_app_icon().0 as usize);
@@ -857,13 +859,16 @@ fn restore_tray_icon_after_shell_restart(window: HWND) {
     }
 }
 
-/// The executable's first icon resource, or the default application icon.
+/// The executable's WFDiag icon resource, or the default application icon.
 fn load_app_icon() -> windows::Win32::UI::WindowsAndMessaging::HICON {
     unsafe {
         if let Ok(module) = GetModuleHandleW(None) {
             let instance = HINSTANCE(module.0);
-            let icon = ExtractIconW(Some(instance), PCWSTR::null(), 0);
-            if !icon.is_invalid() && icon.0 as usize != 1 {
+            // MAKEINTRESOURCEW(id): integer resources are represented by a
+            // pointer whose high word is zero. `LoadIconW` selects the best
+            // image from the embedded multi-resolution icon group.
+            let resource = PCWSTR::from_raw(usize::from(APP_ICON_RESOURCE_ID) as *const u16);
+            if let Ok(icon) = LoadIconW(Some(instance), resource) {
                 return icon;
             }
         }
