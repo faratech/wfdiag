@@ -1,6 +1,6 @@
 [package]
 name = "wfdiag"
-version = "2.6.0"
+version = "2.5.9"
 edition.workspace = true
 publish.workspace = true
 rust-version.workspace = true

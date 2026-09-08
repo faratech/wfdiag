@@ -9,7 +9,7 @@ The version is defined once in `/version.json`:
 
 ```json
 {
-  "version": "2.5.8",
+  "version": "2.5.9",
   "name": "WF Diagnostics",
   "description": "WindowsForum Diagnostic Tool"
 }
@@ -142,6 +142,8 @@ Supporting pieces: `scripts/lib/ReactorUia.psm1` (hermetic launch, unique-button
 status-text scanning, crash events, graceful close, combined-image sheets, WebView guard),
 `scripts/lib/mock-provider.py` (the isolated OpenAI-compatible mock),
 `measure-reactor-resources.ps1` (startup/memory/footprint), and
+`test-reactor-performance.ps1` (foreground-verified versus minimized native
+resource samples; rejects focus loss rather than reporting paused live-monitor CPU), and
 `docs/validation/clean-machine-protocol.md` (the manual clean-machine and Store-certification
 protocol with a sign-off table).
 

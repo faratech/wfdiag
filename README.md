@@ -1,7 +1,7 @@
-# WF Diagnostics v2.6.0 - WindowsForum Diagnostic Tool
+# WF Diagnostics v2.5.9 - WindowsForum Diagnostic Tool
 
 [![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC_BY--NC--ND_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
-[![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)](https://github.com/faratech/wfdiag/releases)
+[![Version](https://img.shields.io/badge/version-2.5.9-blue.svg)](https://github.com/faratech/wfdiag/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightblue.svg)](https://github.com/faratech/wfdiag)
 [![Security](https://img.shields.io/badge/security-hardened-green.svg)](https://github.com/faratech/wfdiag)
 [![AI](https://img.shields.io/badge/AI-Hybrid-purple.svg)](https://github.com/faratech/wfdiag)
@@ -144,7 +144,7 @@ Auto routing is local-first: Phi Silica → Foundry Local → Ollama → custom 
 
 ## 🔄 Version History
 
-### **v2.6.0 (Current) - Automation, Built-in Fixes, and an Assistant That Acts**
+### **v2.5.9 (Current) - Automation, Built-in Fixes, and an Assistant That Acts**
 - ✅ **Built-in fixes**: seven new one-click or confirm-once remediations (drive optimization, Windows temp cleanup, Defender definition update and quick scan, firewall on, network address renewal, memory test at next restart) replace opening Windows tools for most rules; CPU and memory rules point at the Processes page.
 - ✅ **Safe-fix automation** (opt-in): run every one-click safe fix after each scan or with "Fix safe issues now"; repairs always wait for your confirmation, and every fix is verified by re-collecting its evidence.
 - ✅ **Assistant that acts** (opt-in): the AI can run the safe fixes it stages or plans, sees each issue's fix, tier and likely root cause, and reports what changed.
