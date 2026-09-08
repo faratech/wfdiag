@@ -15,11 +15,18 @@ on:
 permissions:
   contents: write
   id-token: write
+  attestations: write
+
+concurrency:
+  group: release-signed-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
 
 jobs:
   # Job 1: Windows Certificate Signing
   windows-sign:
     runs-on: windows-latest
+    env:
+      __COMPAT_LAYER: RunAsInvoker
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     
