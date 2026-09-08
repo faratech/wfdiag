@@ -10,7 +10,7 @@ probe can never disagree about the manifest or the payload:
 
 ```text
 build-reactor-msix-probe.py stage --target x64 --executable <wfdiag.exe> \
-    --bootstrap <Microsoft.WindowsAppRuntime.Bootstrap.dll> --output msix-build
+    --output msix-build
 build-reactor-msix-probe.py pack --target x64 --layout msix-build/layout-x64 \
     --package msix-build/bundle/WindowsForum_Diagnostics_<ver>_x64.msix
 build-reactor-msix-probe.py bundle --packages-dir msix-build/bundle \
@@ -27,16 +27,27 @@ The probe builds the default, framework-dependent Reactor target for x64 and
 ARM64. Each clean package layout contains:
 
 - `wfdiag.exe`
-- Reactor's architecture-matched
-  `Microsoft.WindowsAppRuntime.Bootstrap.dll`
 - the canonical Store manifest and its four referenced image assets
 
-No other DLL is allowed. In particular, the probe does not copy anything from
+No app-local DLL is allowed, including the obsolete bootstrap shim. In particular, the probe does not copy anything from
 `src-tauri/resources/ai-sdk`; it rejects app-local
 `Microsoft.WindowsAppRuntime.dll`, WinUI/XAML runtime DLLs, and Windows AI DLLs.
-The bootstrap SHA-256 and PE machine are pinned independently for x64 and ARM64,
-which prevents an older 1.8 bootstrap or a cross-architecture bootstrap from
-entering the package.
+The executable PE machine is checked independently for x64 and ARM64.
+
+### Bootstrap correction (2.5.9)
+
+The official crates.io `windows-reactor` 0.100.0 source uses
+`src/native/winui/bootstrap.rs` to call the OS package-dependency APIs directly.
+The old git setup helper's embedded bootstrap DLL and per-architecture hashes
+are not the deployment contract of that published crate. Do not restore the
+old DLL to make packaging pass: both layouts and MSIX archives now reject it.
+The startup diagnostics and portable ZIP instructions follow the same contract.
+
+This correction does not remove the shared-runtime manifest dependency or close
+any clean-machine, packaged-startup, hardware, or Store certification gate.
+The owner subsequently approved tagging and Store submission after confirming
+the application works, explicitly proceeding despite the outstanding evidence.
+That release approval does not mark the validation gates passed.
 
 The manifest is derived from `AppxManifest.xml`, preserving the production
 Store identity/publisher/version, both `TargetDeviceFamily` declarations, all
@@ -53,8 +64,9 @@ already declares since the cutover decision):
                    Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
 ```
 
-This matches the Windows App Runtime 2.4 bootstrap and metadata hard-coded by
-the pinned Reactor revision. The framework package must be present on any
+The official pinned Reactor 0.100.0 initializes this framework directly through
+Windows `TryCreatePackageDependency` / `AddPackageDependency` APIs, not a
+bootstrap DLL. The framework package must be present on any
 machine used for a future packaged runtime test; it is intentionally not
 carried app-local in this probe.
 
@@ -88,5 +100,5 @@ python3 -m unittest scripts/test_build_reactor_msix_probe.py -v
 ```
 
 The tests pin manifest preservation/runtime alignment, exact payload inventory,
-PE architecture and bootstrap identity, archive inspection, and rejection of a
+PE architecture, archive inspection, and rejection of a
 dual runtime or app-local AI DLL.

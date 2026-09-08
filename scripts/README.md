@@ -65,7 +65,7 @@ the shipped package and the local probe cannot diverge.
 
 | Subcommand | Purpose |
 | --- | --- |
-| `stage --target {x64,arm64} --executable <exe> --bootstrap <dll> --output <dir>` | build the per-arch layout from a prebuilt `wfdiag.exe` and its `Microsoft.WindowsAppRuntime.Bootstrap.dll` |
+| `stage --target {x64,arm64} --executable <exe> --output <dir>` | build the per-arch layout from a prebuilt `wfdiag.exe` |
 | `pack --target <arch> --layout <dir> --package <file.msix>` | pack one staged layout into an unsigned MSIX |
 | `bundle --packages-dir <dir> --bundle <file.msixbundle>` | bundle the packed per-arch MSIX files |
 | `validate-layout --target <arch> <layout>` | check a staged layout |
@@ -74,8 +74,8 @@ the shipped package and the local probe cannot diverge.
 
 Each rendered manifest derives from the canonical `AppxManifest.xml` and changes only the
 executable, architecture, and Windows App Runtime dependency
-(`Microsoft.WindowsAppRuntime.2`, minimum `2.4.0.0`). Only Reactor's pinned 2.4 bootstrap DLL
-is staged: app-local Windows App Runtime/WinUI DLLs and the stale `src-tauri/resources/ai-sdk`
+(`Microsoft.WindowsAppRuntime.2`, minimum `2.4.0.0`). No app-local DLLs are staged: the obsolete bootstrap shim,
+Windows App Runtime/WinUI DLLs and the stale `src-tauri/resources/ai-sdk`
 AI DLLs are rejected before and after packing. The script has no sign, install, registration,
 upload, or publishing operation. See `docs/REACTOR_STORE_PROBE.md`.
 

@@ -146,8 +146,7 @@ jobs:
 
       - name: Build native shell (x64)
         if: env.SHELL_KIND == 'reactor'
-        # Framework-dependent: build.rs stages only the matching
-        # Microsoft.WindowsAppRuntime.Bootstrap.dll beside the executable.
+        # Framework-dependent: no app-local bootstrap DLL; Reactor uses OS package-dependency APIs.
         run: cargo build --locked --release -p wfdiag --target x86_64-pc-windows-msvc
 
       - name: Build x64 executable (Tauri rollback)
@@ -167,7 +166,6 @@ jobs:
           if-no-files-found: error
           path: |
             target/x86_64-pc-windows-msvc/release/wfdiag.exe
-            target/x86_64-pc-windows-msvc/release/Microsoft.WindowsAppRuntime.Bootstrap.dll
 
       - name: Upload x64 executable (Tauri rollback)
         if: env.SHELL_KIND == 'tauri'
@@ -262,7 +260,6 @@ jobs:
           if-no-files-found: error
           path: |
             target/aarch64-pc-windows-msvc/release/wfdiag.exe
-            target/aarch64-pc-windows-msvc/release/Microsoft.WindowsAppRuntime.Bootstrap.dll
 
       - name: Upload ARM64 executable (Tauri rollback)
         if: env.SHELL_KIND == 'tauri'
@@ -272,7 +269,7 @@ jobs:
           path: target/aarch64-pc-windows-msvc/release/wfdiag-tauri.exe
 
   # =============================================================================
-  # Create MSIX Bundle (native shell: probe-rendered manifest + bootstrap DLL;
+  # Create MSIX Bundle (native shell: probe-rendered manifest + executable;
   # Tauri rollback: inline manifest + dist + app-local AI DLLs)
   # =============================================================================
   create-msix-bundle:
@@ -322,7 +319,6 @@ jobs:
             Write-Host "`n=== $arch: stage layout ==="
             python $probe stage --target $arch `
               --executable "artifacts/$arch/wfdiag.exe" `
-              --bootstrap "artifacts/$arch/Microsoft.WindowsAppRuntime.Bootstrap.dll" `
               --output msix-build
             if ($LASTEXITCODE -ne 0) { throw "staging the $arch layout failed" }
 
@@ -368,7 +364,7 @@ jobs:
             $arch = if ($package.BaseName -like "*_arm64") { "arm64" } elseif ($package.BaseName -like "*_x64") { "x64" } else { throw "$($package.Name): cannot infer architecture" }
             # The probe contract checks identity, capabilities (incl. systemAIModels),
             # the WindowsAppRuntime.2 dependency, the exact payload set (no app-local
-            # runtime or AI DLLs), PE architecture, and the pinned bootstrap hash.
+            # runtime or AI DLLs), PE architecture, and the absence of app-local DLLs.
             python scripts/build-reactor-msix-probe.py validate-msix --target $arch $package.FullName
             if ($LASTEXITCODE -ne 0) { throw "$($package.Name) failed the MSIX contract" }
 
@@ -704,19 +700,17 @@ jobs:
           for ARCH in x64 arm64; do
             if [ -f "exe-$ARCH/wfdiag.exe" ]; then
               # Native shell: framework-dependent, so the download is the exe
-              # plus the WindowsAppRuntime bootstrap DLL it must sit beside.
+              # plus instructions for installing the shared runtime.
               cat > "exe-$ARCH/README.txt" <<'NOTE'
           WindowsForum Diagnostics (native shell, framework-dependent build)
 
-          Keep wfdiag.exe and Microsoft.WindowsAppRuntime.Bootstrap.dll in the same
-          folder — the DLL must keep that exact name and match the exe's
-          architecture (use one folder per architecture). The Windows App
-          Runtime 2.x framework must also be installed:
+          No app-local bootstrap DLL is required. The matching Windows App
+          Runtime 2.x framework must be installed:
           https://aka.ms/windowsappsdk/2.4/latest/windowsappruntimeinstall-x64.exe
           https://aka.ms/windowsappsdk/2.4/latest/windowsappruntimeinstall-arm64.exe
           The Microsoft Store package installs it for you.
           NOTE
-              (cd "exe-$ARCH" && zip -q "../WindowsForum_Diagnostics_${VERSION}_${ARCH}.zip" wfdiag.exe Microsoft.WindowsAppRuntime.Bootstrap.dll README.txt)
+              (cd "exe-$ARCH" && zip -q "../WindowsForum_Diagnostics_${VERSION}_${ARCH}.zip" wfdiag.exe README.txt)
             elif [ -f "exe-$ARCH/wfdiag-tauri.exe" ]; then
               mv "exe-$ARCH/wfdiag-tauri.exe" "WindowsForum_Diagnostics_${VERSION}_${ARCH}.exe"
             fi
@@ -754,7 +748,7 @@ jobs:
             echo "### Alternative Downloads"
             echo "- **MSIX Bundle**: Unsigned Store-submission artifact; it is not directly installable"
             if [ "${{ needs.build-x64.outputs.shell }}" = "reactor" ]; then
-              echo "- **Zip (x64 / ARM64)**: wfdiag.exe plus its Windows App Runtime bootstrap DLL; requires the Windows App Runtime 2.x framework (see README.txt inside)"
+              echo "- **Zip (x64 / ARM64)**: wfdiag.exe and runtime setup instructions; requires the Windows App Runtime 2.x framework (see README.txt inside)"
             else
               echo "- **Portable EXE**: Standalone executables for x64 and ARM64, no installation required"
             fi

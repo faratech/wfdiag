@@ -5,9 +5,7 @@
 //! module a missing `Microsoft.WindowsAppRuntime.2` framework package makes the
 //! executable exit silently with no window and no log. Both paths now leave a
 //! record on disk and put one modal `MessageBoxW` in front of the user. The
-//! runtime-start path also diagnoses *which* piece is missing — the bootstrap
-//! shim beside the executable or the machine-wide framework package — instead
-//! of always telling the user to repair the framework.
+//! runtime-start path distinguishes shared-framework and self-contained deployment.
 //!
 //! Everything here runs on a process that is already failing: no allocation is
 //! required for the message box path to work, every filesystem step is
@@ -31,18 +29,10 @@ const CRASH_DIALOG_TITLE: &str = "WindowsForum Diagnostics";
 /// Framework package the shell depends on for its WinUI 3 runtime.
 const APP_RUNTIME_PACKAGE: &str = "Microsoft.WindowsAppRuntime.2";
 
-/// File name the runtime bootstrap looks for beside the executable.
-///
-/// Reactor loads this exact name from the executable's directory; an
-/// arch-suffixed copy (`-arm64.dll`, `-x64.dll`) is not found and surfaces as
-/// `0x8007007E` (`ERROR_MOD_NOT_FOUND`) — a deployment mistake, not a broken
-/// framework install.
-const BOOTSTRAP_DLL: &str = "Microsoft.WindowsAppRuntime.Bootstrap.dll";
-
 /// Which runtime deployment mode the executable was built in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeFlavor {
-    /// Only the bootstrap shim is staged; the machine supplies the runtime.
+    /// The machine supplies the runtime; no bootstrap DLL is staged.
     FrameworkDependent,
     /// The complete runtime is staged beside the executable (`self-contained`).
     SelfContained,
@@ -83,10 +73,9 @@ pub(crate) fn install_panic_hook(app_version: &'static str) {
 pub(crate) fn report_runtime_start_failure(app_version: &str, error: &dyn std::fmt::Display) -> ! {
     let detail = truncate_chars(&error.to_string(), MAX_PANIC_MESSAGE_CHARS);
     let flavor = runtime_flavor();
-    let bootstrap_dll_present = bootstrap_dll_present();
-    let record = runtime_start_record(app_version, flavor, bootstrap_dll_present, &detail);
+    let record = runtime_start_record(app_version, flavor, &detail);
     let written = write_crash_record(&record);
-    let body = runtime_start_body(flavor, bootstrap_dll_present, &detail, written.as_deref());
+    let body = runtime_start_body(flavor, &detail, written.as_deref());
     show_message_box(&body);
     std::process::exit(2);
 }
@@ -103,60 +92,27 @@ fn runtime_flavor() -> RuntimeFlavor {
     }
 }
 
-/// Whether the bootstrap shim sits beside the running executable.
-///
-/// Best effort on an already-failing process: any lookup failure counts as
-/// absent, which is also the safer answer for the guidance below.
-fn bootstrap_dll_present() -> bool {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .is_some_and(|directory| directory.join(BOOTSTRAP_DLL).is_file())
-}
-
 /// Assemble the on-disk crash record for one runtime-start failure.
-fn runtime_start_record(
-    app_version: &str,
-    flavor: RuntimeFlavor,
-    bootstrap_dll_present: bool,
-    detail: &str,
-) -> String {
+fn runtime_start_record(app_version: &str, flavor: RuntimeFlavor, detail: &str) -> String {
     let mut record = String::new();
     let _ = writeln!(record, "timestamp: {}", timestamp_seconds());
     let _ = writeln!(record, "version: {app_version}");
     let _ = writeln!(record, "kind: runtime-start");
     let _ = writeln!(record, "flavor: {flavor:?}");
-    let _ = writeln!(record, "bootstrap_dll_present: {bootstrap_dll_present}");
     let _ = writeln!(record, "detail: {detail}");
     record
 }
 
 /// Build the modal body for one runtime-start failure.
 ///
-/// Pure so the three branches stay unit-testable. The message must name the
-/// actual missing piece: a lost bootstrap shim is a deployment mistake the
-/// user can fix by restoring one file, and "install or repair the framework
-/// package" sends them chasing a runtime that is fine.
-fn runtime_start_body(
-    flavor: RuntimeFlavor,
-    bootstrap_dll_present: bool,
-    detail: &str,
-    record_path: Option<&Path>,
-) -> String {
+/// Guidance follows the deployment mode, without guessing the cause from local files.
+fn runtime_start_body(flavor: RuntimeFlavor, detail: &str, record_path: Option<&Path>) -> String {
     let cause = match flavor {
-        RuntimeFlavor::FrameworkDependent if bootstrap_dll_present => format!(
-            "WindowsForum Diagnostics could not start its Windows App Runtime host.\n\n\
-             The {APP_RUNTIME_PACKAGE} framework package is required. Install or repair it, \
-             then start the app again. The bootstrap shim beside the executable was found \
-             but could not be used; check that {BOOTSTRAP_DLL} matches the executable's \
-             architecture."
-        ),
         RuntimeFlavor::FrameworkDependent => format!(
             "WindowsForum Diagnostics could not start its Windows App Runtime host.\n\n\
-             The bootstrap shim {BOOTSTRAP_DLL} was not found beside the executable. A \
-             framework-dependent build requires that file — with the executable's \
-             architecture — in the same folder; every release zip ships it. Restore it \
-             (one architecture per folder), then start the app again."
+             This build uses the installed {APP_RUNTIME_PACKAGE} framework package. \
+             Check that the matching runtime is installed and healthy. \
+             No app-local bootstrap DLL is required. See the error details below."
         ),
         RuntimeFlavor::SelfContained => format!(
             "WindowsForum Diagnostics could not start its Windows App Runtime host.\n\n\
@@ -338,41 +294,31 @@ mod tests {
     }
 
     #[test]
-    fn missing_bootstrap_shim_names_the_shim_not_the_framework() {
+    fn framework_failure_does_not_request_a_bootstrap_dll() {
         let body = runtime_start_body(
             RuntimeFlavor::FrameworkDependent,
-            false,
             "The specified module could not be found (0x8007007E)",
             None,
         );
-        assert!(body.contains(BOOTSTRAP_DLL));
-        assert!(body.contains("same folder"));
+        assert!(body.contains(APP_RUNTIME_PACKAGE));
+        assert!(body.contains("No app-local bootstrap DLL is required"));
         assert!(!body.contains("Install or repair"));
     }
 
     #[test]
-    fn unusable_bootstrap_shim_keeps_framework_guidance() {
-        let body = runtime_start_body(RuntimeFlavor::FrameworkDependent, true, "boom", None);
-        assert!(body.contains(APP_RUNTIME_PACKAGE));
-        assert!(body.contains("architecture"));
-        assert!(body.contains("Details: boom"));
-    }
-
-    #[test]
     fn self_contained_failure_points_at_the_staged_runtime() {
-        let body = runtime_start_body(RuntimeFlavor::SelfContained, false, "boom", None);
+        let body = runtime_start_body(RuntimeFlavor::SelfContained, "boom", None);
         assert!(body.contains(APP_RUNTIME_PACKAGE));
         assert!(body.contains("staged"));
-        assert!(!body.contains(BOOTSTRAP_DLL));
+        assert!(!body.contains("Bootstrap.dll"));
     }
 
     #[test]
     fn runtime_start_record_names_kind_and_flavor() {
-        let record =
-            runtime_start_record("2.5.9", RuntimeFlavor::FrameworkDependent, false, "boom");
+        let record = runtime_start_record("2.5.9", RuntimeFlavor::FrameworkDependent, "boom");
         assert!(record.contains("kind: runtime-start"));
         assert!(record.contains("flavor: FrameworkDependent"));
-        assert!(record.contains("bootstrap_dll_present: false"));
+        assert!(!record.contains("bootstrap_dll_present"));
         assert!(record.contains("detail: boom"));
     }
 
@@ -380,12 +326,11 @@ mod tests {
     fn body_names_the_record_path_when_one_was_written() {
         let body = runtime_start_body(
             RuntimeFlavor::FrameworkDependent,
-            false,
             "boom",
             Some(Path::new(r"C:\logs\crash-1.log")),
         );
         assert!(body.contains("crash-1.log"));
-        let without = runtime_start_body(RuntimeFlavor::FrameworkDependent, false, "boom", None);
+        let without = runtime_start_body(RuntimeFlavor::FrameworkDependent, "boom", None);
         assert!(without.contains("could not be written"));
     }
 }

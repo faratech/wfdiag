@@ -42,7 +42,7 @@ layers.
 
 | Feature | Purpose |
 | --- | --- |
-| *(default)* | **Framework-dependent.** `build.rs` stages only the matching `Microsoft.WindowsAppRuntime.Bootstrap.dll` beside the executable; the machine must have Windows App Runtime 2.4 installed. This is what the Store package ships. |
+| *(default)* | **Framework-dependent.** Reactor resolves the runtime through Windows package-dependency APIs without an app-local bootstrap DLL; the machine must have Windows App Runtime 2.4 installed. This is what the Store package ships. |
 | `self-contained` | Stages the complete Windows App Runtime beside the executable for direct-installer (MSI/NSIS/portable) validation. **Native Windows Cargo only** — see below. |
 | `settings-test-path` | Enables the exact-path settings store used by integration validation. Never enable it for a Store or direct-installer production artifact. |
 | `validation` | Superset of `settings-test-path`. Also compiles in `src/fixtures/knobs.rs` — every environment knob (`WFDIAG_REACTOR_*`, `WFDIAG_NO_*`) and the `--wfdiag-version-probe` entry point. Without it the shell performs **no** environment reads at all and every knob is a compile-time production default (#186, #212). Never enable it for a production artifact. |
@@ -130,16 +130,12 @@ capability required by the Store-only on-device AI path.
 
 ### Startup failure `0x8007007E` ("The specified module could not be found")
 
-The runtime bootstrap loads `Microsoft.WindowsAppRuntime.Bootstrap.dll` from the
-executable's own directory, by that exact name. When the startup modal blames the *bootstrap
-shim*, the file is missing beside `wfdiag.exe` — usually because a deployment folder renamed
-it (`Microsoft.WindowsAppRuntime.Bootstrap-arm64.dll`) or mixed architectures. Keep one
-architecture per folder, with the DLL unsuffixed and matching the exe; each release zip ships
-the correct pair. When the modal blames the framework package instead, the shim was found but
-unusable (architecture mismatch) or the machine is genuinely missing the Windows App Runtime
-2.4+ framework (the Store package supplies it). Either way the modal also records a
-`kind: runtime-start` entry under `%LOCALAPPDATA%\WFDiag\logs` so a failing machine leaves
-evidence behind.
+The framework-dependent build uses the installed Windows App Runtime directly;
+no `Microsoft.WindowsAppRuntime.Bootstrap.dll` is required beside the executable.
+Check the error details and the matching Windows App Runtime framework installation
+(the Store package declares this dependency). For a self-contained build, restore
+the complete staged runtime instead. Startup failures record a `kind: runtime-start`
+entry under `%LOCALAPPDATA%\\WFDiag\\logs`.
 
 ## Validation
 

@@ -50,8 +50,8 @@ fn main() {
         verify_staged_runtime_architecture();
         remove_unused_webview_projection();
     } else {
-        // Default: keep the prototype small and use the shared Windows App
-        // Runtime, staging only its bootstrap DLL beside the executable.
+        // Default: use the shared Windows App Runtime. Reactor resolves it
+        // through OS package-dependency APIs; no bootstrap DLL is staged.
         // windows-reactor-setup 0.100.0 made framework-dependent the
         // implicit default; only the self-contained path needs a call.
         if cfg!(windows) {

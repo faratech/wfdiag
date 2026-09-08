@@ -3,7 +3,7 @@
 
 This path is deliberately separate from the shipping Tauri Store workflow. It
 builds the framework-dependent Reactor executable for x64 and ARM64, stages
-only Reactor's matching Windows App Runtime bootstrap DLL, derives the package
+no app-local runtime DLLs, derives the package
 manifest from the canonical Store manifest, and packages unsigned MSIX files
 for offline inspection.
 
@@ -12,7 +12,7 @@ It never signs, installs, registers, uploads, or publishes a package.
 The `stage`, `pack`, `bundle`, `validate-layout`, and `validate-msix`
 subcommands expose the same manifest renderer and contracts to the Store
 release workflow, which builds the shell itself and hands the prebuilt
-executable + bootstrap DLL to this module so the shipped package and the
+executable to this module so the shipped package and the
 probe can never disagree about the manifest or the payload.
 """
 
@@ -45,7 +45,6 @@ STORE_IDENTITY_NAME = "32827MikeFara.WindowsForumDiagnostics"
 STORE_PUBLISHER = "CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4"
 STORE_EXECUTABLE = "wfdiag.exe"
 REACTOR_BINARY = "wfdiag.exe"
-BOOTSTRAP_DLL = "Microsoft.WindowsAppRuntime.Bootstrap.dll"
 
 
 def _reactor_pin() -> dict:
@@ -107,7 +106,6 @@ class Target:
     triple: str
     manifest_architecture: str
     pe_machine: int
-    bootstrap_sha256: str
 
 
 TARGETS = {
@@ -116,14 +114,12 @@ TARGETS = {
         "x86_64-pc-windows-msvc",
         "x64",
         0x8664,
-        "44752d799b8d7cead99d6a20cb9a46009a9a2dfaa9701176a573e50a30ab089c",
     ),
     "arm64": Target(
         "arm64",
         "aarch64-pc-windows-msvc",
         "arm64",
         0xAA64,
-        "cd7e3ecba5615152fe1cb508b30781bdaf108960847c1cab3636a5771e61fdcd",
     ),
 }
 
@@ -430,28 +426,6 @@ def assert_pe_architecture(path: Path, target: Target) -> None:
         )
 
 
-def assert_bootstrap_identity(path: Path, target: Target) -> None:
-    actual = _sha256(path)
-    if actual != target.bootstrap_sha256:
-        raise ProbeBuildError(
-            f"{path} is not the pinned Reactor Windows App Runtime 2.4 bootstrap "
-            f"for {target.name}: sha256 {actual}"
-        )
-
-
-def _case_insensitive_file(directory: Path, name: str) -> Path:
-    matches = [
-        path
-        for path in directory.iterdir()
-        if path.is_file() and path.name.casefold() == name.casefold()
-    ]
-    if len(matches) != 1:
-        raise ProbeBuildError(
-            f"expected exactly one {name} in {directory}, found {len(matches)}"
-        )
-    return matches[0]
-
-
 def _profile_root_dlls(directory: Path) -> list[Path]:
     return sorted(
         (
@@ -502,7 +476,7 @@ def run_command(command: list[str], *, cwd: Path, env: dict[str, str] | None = N
 
 
 def _remove_reactor_build_script_outputs(profile_dir: Path) -> None:
-    """Force the package build script to restage its bootstrap side effect."""
+    """Invalidate this package's previous deployment-mode build outputs."""
     build_root = profile_dir / "build"
     if not build_root.is_dir():
         return
@@ -517,7 +491,7 @@ def _remove_reactor_build_script_outputs(profile_dir: Path) -> None:
 
 def build_framework_dependent_payload(
     target: Target, cargo_target_dir: Path, release: bool
-) -> tuple[Path, Path]:
+) -> Path:
     profile = "release" if release else "debug"
     profile_dir = cargo_target_dir / target.triple / profile
 
@@ -526,11 +500,8 @@ def build_framework_dependent_payload(
     llvm_bin = Path("/usr/lib/llvm-20/bin")
     if os.name != "nt" and llvm_bin.is_dir():
         environment["PATH"] = f"{llvm_bin}{os.pathsep}{environment.get('PATH', '')}"
-    # The bootstrap is a build-script side effect, not a Cargo artifact. If a
-    # previous run's bootstrap is deleted while Cargo considers the build
-    # script fresh, Cargo will not recreate it. Remove only this package's
-    # target-specific build-script outputs so Reactor setup runs on every probe
-    # build while compiled dependencies remain cached.
+    # Clear previous deployment-mode artifacts in this probe's dedicated target
+    # directory while retaining compiled dependencies.
     _remove_reactor_build_script_outputs(profile_dir)
     _remove_previous_root_deployment_files(profile_dir)
     run_command(_cargo_command(target, release), cwd=PROJECT_ROOT, env=environment)
@@ -538,18 +509,15 @@ def build_framework_dependent_payload(
     executable = profile_dir / REACTOR_BINARY
     if not executable.is_file():
         raise ProbeBuildError(f"Reactor build did not produce {executable}")
-    bootstrap = _case_insensitive_file(profile_dir, BOOTSTRAP_DLL)
     root_dlls = _profile_root_dlls(profile_dir)
-    if [path.name.casefold() for path in root_dlls] != [BOOTSTRAP_DLL.casefold()]:
+    if root_dlls:
         raise ProbeBuildError(
-            "framework-dependent build staged DLLs other than the Reactor bootstrap: "
+            "framework-dependent build unexpectedly staged app-local DLLs: "
             f"{[path.name for path in root_dlls]!r}"
         )
 
     assert_pe_architecture(executable, target)
-    assert_pe_architecture(bootstrap, target)
-    assert_bootstrap_identity(bootstrap, target)
-    return executable, bootstrap
+    return executable
 
 
 def _reset_owned_directory(path: Path, owned_root: Path) -> None:
@@ -591,7 +559,6 @@ def assert_layout_contract(layout: Path, target: Target) -> None:
     expected_files = {
         "AppxManifest.xml",
         STORE_EXECUTABLE,
-        BOOTSTRAP_DLL,
         *assets,
     }
     actual_files = {
@@ -602,7 +569,7 @@ def assert_layout_contract(layout: Path, target: Target) -> None:
     if actual_files != expected_files:
         raise ProbeBuildError(
             "probe layout must contain only the manifest, Store assets, Reactor "
-            "executable, and Reactor bootstrap; "
+            "executable; "
             f"missing={sorted(expected_files - actual_files)!r}, "
             f"unexpected={sorted(actual_files - expected_files)!r}"
         )
@@ -612,9 +579,9 @@ def assert_layout_contract(layout: Path, target: Target) -> None:
         for path in layout.rglob("*")
         if path.is_file() and path.suffix.casefold() == ".dll"
     )
-    if [name.casefold() for name in dlls] != [BOOTSTRAP_DLL.casefold()]:
+    if dlls:
         raise ProbeBuildError(
-            "probe layout contains a dual runtime or app-local AI DLL: "
+            "probe layout contains an unexpected app-local DLL: "
             f"{dlls!r}"
         )
 
@@ -623,15 +590,12 @@ def assert_layout_contract(layout: Path, target: Target) -> None:
         if not asset_path.is_file() or asset_path.stat().st_size == 0:
             raise ProbeBuildError(f"manifest asset is missing or empty: {asset_path}")
     assert_pe_architecture(layout / STORE_EXECUTABLE, target)
-    assert_pe_architecture(layout / BOOTSTRAP_DLL, target)
-    assert_bootstrap_identity(layout / BOOTSTRAP_DLL, target)
 
 
 def stage_layout(
     output_root: Path,
     target: Target,
     executable: Path,
-    bootstrap: Path,
 ) -> Path:
     layout = output_root / f"layout-{target.name}"
     _reset_owned_directory(layout, output_root)
@@ -641,7 +605,6 @@ def stage_layout(
     root = ET.fromstring(manifest)
     _copy_manifest_assets(layout, manifest_asset_paths(root))
     shutil.copy2(executable, layout / STORE_EXECUTABLE)
-    shutil.copy2(bootstrap, layout / BOOTSTRAP_DLL)
     assert_layout_contract(layout, target)
     return layout
 
@@ -719,9 +682,9 @@ def assert_msix_contract(package: Path, target: Target) -> None:
             if "appxsignature.p7x" in names_folded:
                 raise ProbeBuildError(f"probe package was unexpectedly signed: {package}")
             dlls = sorted(name for name in names if name.casefold().endswith(".dll"))
-            if [name.casefold() for name in dlls] != [BOOTSTRAP_DLL.casefold()]:
+            if dlls:
                 raise ProbeBuildError(
-                    f"packaged probe contains a dual runtime or app-local AI DLL: {dlls!r}"
+                    f"packaged probe contains an unexpected app-local DLL: {dlls!r}"
                 )
             manifest_name = next(
                 (name for name in names if name.casefold() == "appxmanifest.xml"), None
@@ -733,21 +696,10 @@ def assert_msix_contract(package: Path, target: Target) -> None:
                 (name for name in names if name.casefold() == STORE_EXECUTABLE.casefold()),
                 None,
             )
-            bootstrap_name = next(
-                (name for name in names if name.casefold() == BOOTSTRAP_DLL.casefold()),
-                None,
-            )
-            if executable_name is None or bootstrap_name is None:
+            if executable_name is None:
                 raise ProbeBuildError(f"package is missing the Reactor payload: {package}")
             if pe_machine_bytes(archive.read(executable_name), executable_name) != target.pe_machine:
                 raise ProbeBuildError(f"packaged executable architecture is wrong: {package}")
-            if pe_machine_bytes(archive.read(bootstrap_name), bootstrap_name) != target.pe_machine:
-                raise ProbeBuildError(f"packaged bootstrap architecture is wrong: {package}")
-            bootstrap_hash = hashlib.sha256(archive.read(bootstrap_name)).hexdigest()
-            if bootstrap_hash != target.bootstrap_sha256:
-                raise ProbeBuildError(
-                    f"packaged bootstrap is not Reactor's pinned 2.4 payload: {package}"
-                )
     except (OSError, zipfile.BadZipFile) as error:
         raise ProbeBuildError(f"cannot inspect MSIX {package}: {error}") from error
 
@@ -832,10 +784,10 @@ def build_probe(args: argparse.Namespace) -> Path:
     payloads: dict[str, dict[str, object]] = {}
     for target in TARGETS.values():
         print(f"\n=== Building framework-dependent Reactor payload: {target.name} ===")
-        executable, bootstrap = build_framework_dependent_payload(
+        executable = build_framework_dependent_payload(
             target, cargo_target_dir, not args.debug
         )
-        layout = stage_layout(output_root, target, executable, bootstrap)
+        layout = stage_layout(output_root, target, executable)
         package = packages_dir / (
             f"WindowsForum_Diagnostics_ReactorProbe_{version}_{target.name}.msix"
         )
@@ -844,7 +796,6 @@ def build_probe(args: argparse.Namespace) -> Path:
             "target": target.triple,
             "layout": str(layout),
             "executable_sha256": _sha256(layout / STORE_EXECUTABLE),
-            "bootstrap_sha256": _sha256(layout / BOOTSTRAP_DLL),
             "package": str(package),
             "package_sha256": _sha256(package),
         }
@@ -899,7 +850,7 @@ def _target_argument(parser: argparse.ArgumentParser) -> None:
 
 
 def stage_prebuilt(args: argparse.Namespace) -> Path:
-    """Stage one Store layout from a prebuilt executable + bootstrap DLL.
+    """Stage one Store layout from a prebuilt executable.
 
     Used by the Store release workflow, which builds the shell itself and only
     needs the manifest renderer and the layout contract from this module.
@@ -911,7 +862,6 @@ def stage_prebuilt(args: argparse.Namespace) -> Path:
         output_root,
         TARGETS[args.target],
         args.executable.resolve(),
-        args.bootstrap.resolve(),
     )
     print(layout)
     return layout
@@ -949,11 +899,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command")
 
     stage = subparsers.add_parser(
-        "stage", help="stage a Store layout from a prebuilt executable and bootstrap DLL"
+        "stage", help="stage a Store layout from a prebuilt executable"
     )
     _target_argument(stage)
     stage.add_argument("--executable", type=Path, required=True)
-    stage.add_argument("--bootstrap", type=Path, required=True)
     stage.add_argument("--output", type=Path, required=True, help="layout parent directory")
     stage.set_defaults(handler=stage_prebuilt)
 

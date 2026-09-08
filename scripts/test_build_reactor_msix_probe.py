@@ -1,4 +1,3 @@
-import hashlib
 import importlib.util
 from pathlib import Path
 import struct
@@ -31,13 +30,11 @@ class ReactorMsixProbeTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.exe_bytes = pe_image(0x8664) + b"reactor-executable"
-        self.bootstrap_bytes = pe_image(0x8664) + b"reactor-2.4-bootstrap"
         self.target = probe.Target(
             "x64",
             "x86_64-pc-windows-msvc",
             "x64",
             0x8664,
-            hashlib.sha256(self.bootstrap_bytes).hexdigest(),
         )
 
     def tearDown(self):
@@ -45,11 +42,9 @@ class ReactorMsixProbeTests(unittest.TestCase):
 
     def _payload_files(self):
         executable = self.root / "source" / probe.REACTOR_BINARY
-        bootstrap = self.root / "source" / probe.BOOTSTRAP_DLL
         executable.parent.mkdir(parents=True)
         executable.write_bytes(self.exe_bytes)
-        bootstrap.write_bytes(self.bootstrap_bytes)
-        return executable, bootstrap
+        return executable
 
     def test_manifest_preserves_store_contract_and_aligns_runtime_2_4(self):
         probe.assert_reactor_dependency_contract()
@@ -94,13 +89,13 @@ class ReactorMsixProbeTests(unittest.TestCase):
         self.assertEqual(runtimes[0].attrib["Name"], "Microsoft.WindowsAppRuntime.2")
         self.assertEqual(runtimes[0].attrib["MinVersion"], "2.4.0.0")
 
-    def test_layout_contains_only_reactor_exe_bootstrap_manifest_and_assets(self):
-        executable, bootstrap = self._payload_files()
+    def test_layout_contains_only_reactor_exe_manifest_and_assets(self):
+        executable = self._payload_files()
         output = self.root / "output"
         output.mkdir()
 
         layout = probe.stage_layout(
-            output, self.target, executable, bootstrap
+            output, self.target, executable
         )
 
         probe.assert_layout_contract(layout, self.target)
@@ -109,17 +104,18 @@ class ReactorMsixProbeTests(unittest.TestCase):
             for path in layout.rglob("*")
             if path.is_file() and path.suffix.casefold() == ".dll"
         ]
-        self.assertEqual(dlls, [probe.BOOTSTRAP_DLL])
+        self.assertEqual(dlls, [])
         self.assertFalse((layout / "Microsoft.WindowsAppRuntime.dll").exists())
         self.assertFalse((layout / "Microsoft.Windows.AI.Text.dll").exists())
 
     def test_layout_rejects_dual_runtime_and_app_local_ai_dlls(self):
-        executable, bootstrap = self._payload_files()
+        executable = self._payload_files()
         output = self.root / "output"
         output.mkdir()
-        layout = probe.stage_layout(output, self.target, executable, bootstrap)
+        layout = probe.stage_layout(output, self.target, executable)
 
         for forbidden in (
+            "Microsoft.WindowsAppRuntime.Bootstrap.dll",
             "Microsoft.WindowsAppRuntime.dll",
             "Microsoft.UI.Xaml.dll",
             "Microsoft.Windows.AI.Text.dll",
@@ -131,20 +127,11 @@ class ReactorMsixProbeTests(unittest.TestCase):
                     probe.assert_layout_contract(layout, self.target)
                 path.unlink()
 
-    def test_stale_ai_sdk_bootstrap_is_rejected_by_pinned_hash(self):
-        stale = self.root / probe.BOOTSTRAP_DLL
-        stale.write_bytes(pe_image(0x8664) + b"stale-1.8-bootstrap")
-
-        with self.assertRaisesRegex(
-            probe.ProbeBuildError, "not the pinned Reactor Windows App Runtime 2.4"
-        ):
-            probe.assert_bootstrap_identity(stale, self.target)
-
     def test_msix_archive_contract_rejects_app_local_ai_payload_drift(self):
-        executable, bootstrap = self._payload_files()
+        executable = self._payload_files()
         output = self.root / "output"
         output.mkdir()
-        layout = probe.stage_layout(output, self.target, executable, bootstrap)
+        layout = probe.stage_layout(output, self.target, executable)
         package = self.root / "probe.msix"
 
         with zipfile.ZipFile(package, "w") as archive:
@@ -155,14 +142,14 @@ class ReactorMsixProbeTests(unittest.TestCase):
 
         with zipfile.ZipFile(package, "a") as archive:
             archive.writestr("Microsoft.Windows.AI.Text.dll", b"stale")
-        with self.assertRaisesRegex(probe.ProbeBuildError, "app-local AI DLL"):
+        with self.assertRaisesRegex(probe.ProbeBuildError, "app-local DLL"):
             probe.assert_msix_contract(package, self.target)
 
     def test_msix_archive_contract_rejects_a_signature(self):
-        executable, bootstrap = self._payload_files()
+        executable = self._payload_files()
         output = self.root / "output"
         output.mkdir()
-        layout = probe.stage_layout(output, self.target, executable, bootstrap)
+        layout = probe.stage_layout(output, self.target, executable)
         package = self.root / "signed-probe.msix"
 
         with zipfile.ZipFile(package, "w") as archive:
@@ -173,6 +160,24 @@ class ReactorMsixProbeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(probe.ProbeBuildError, "unexpectedly signed"):
             probe.assert_msix_contract(package, self.target)
+
+    def test_msix_rejects_obsolete_bootstrap_even_with_matching_architecture(self):
+        executable = self._payload_files()
+        layout = probe.stage_layout(self.root / "output", self.target, executable)
+        package = self.root / "obsolete-bootstrap.msix"
+        with zipfile.ZipFile(package, "w") as archive:
+            for path in layout.rglob("*"):
+                if path.is_file():
+                    archive.write(path, path.relative_to(layout).as_posix())
+            archive.writestr("Microsoft.WindowsAppRuntime.Bootstrap.dll", pe_image(0x8664))
+        with self.assertRaises(probe.ProbeBuildError):
+            probe.assert_msix_contract(package, self.target)
+
+    def test_layout_rejects_wrong_executable_architecture_without_dlls(self):
+        executable = self._payload_files()
+        executable.write_bytes(pe_image(0xAA64))
+        with self.assertRaisesRegex(probe.ProbeBuildError, "PE machine"):
+            probe.stage_layout(self.root / "output", self.target, executable)
 
     def test_framework_build_command_never_enables_validation_or_self_contained_features(self):
         command = probe._cargo_command(probe.TARGETS["arm64"], True)
@@ -218,7 +223,7 @@ class SubcommandTests(unittest.TestCase):
 
     def test_stage_pack_bundle_and_validate_route_to_handlers(self):
         stage = probe.parse_args(
-            ["stage", "--target", "x64", "--executable", "a.exe", "--bootstrap", "b.dll", "--output", "out"]
+            ["stage", "--target", "x64", "--executable", "a.exe", "--output", "out"]
         )
         self.assertIs(stage.handler, probe.stage_prebuilt)
         self.assertEqual(stage.target, "x64")
@@ -233,7 +238,7 @@ class SubcommandTests(unittest.TestCase):
 
     def test_unknown_target_is_rejected(self):
         with self.assertRaises(SystemExit):
-            probe.parse_args(["stage", "--target", "ia64", "--executable", "a", "--bootstrap", "b", "--output", "o"])
+            probe.parse_args(["stage", "--target", "ia64", "--executable", "a", "--output", "o"])
 
 
 if __name__ == "__main__":

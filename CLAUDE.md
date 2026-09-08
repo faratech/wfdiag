@@ -135,7 +135,7 @@ Cargo features (release artifacts enable **none** of them):
 
 | Feature | Effect |
 | --- | --- |
-| *(default)* | framework-dependent — `build.rs` stages only the matching `Microsoft.WindowsAppRuntime.Bootstrap.dll` |
+| *(default)* | framework-dependent — Reactor resolves the shared runtime through OS package-dependency APIs; no app-local bootstrap DLL |
 | `self-contained` | stages the full Windows App Runtime beside the exe for direct-installer validation; **must** be built with native Windows Cargo |
 | `settings-test-path` | the exact-path settings store used by integration validation |
 | `validation` | superset of `settings-test-path`: also compiles in `fixtures/knobs.rs` — every env knob (`WFDIAG_REACTOR_*`, `WFDIAG_NO_*`) and the `--wfdiag-version-probe` entry point. Without it the shell performs **no** environment reads at all and every knob is a compile-time production default (#186, #212) |
