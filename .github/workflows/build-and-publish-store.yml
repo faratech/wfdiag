@@ -316,13 +316,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path msix-build/bundle | Out-Null
 
           foreach ($arch in @("x64", "arm64")) {
-            Write-Host "`n=== $arch: stage layout ==="
+            Write-Host "`n=== ${arch}: stage layout ==="
             python $probe stage --target $arch `
               --executable "artifacts/$arch/wfdiag.exe" `
               --output msix-build
             if ($LASTEXITCODE -ne 0) { throw "staging the $arch layout failed" }
 
-            Write-Host "=== $arch: pack ==="
+            Write-Host "=== ${arch}: pack ==="
             python $probe pack --target $arch `
               --layout "msix-build/layout-$arch" `
               --package "msix-build/bundle/${projectName}_${version}_$arch.msix"
