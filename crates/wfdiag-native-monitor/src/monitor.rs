@@ -865,7 +865,7 @@ impl SystemMonitor {
         *snapshot = Some(ProcessSnapshot {
             processes,
             captured_at,
-            captured_instant: now,
+            captured_instant: Instant::now(),
         });
         let snapshot = snapshot.as_ref().expect("process snapshot was just stored");
         paginate_process_snapshot(&snapshot.processes, snapshot.captured_at, &query)
@@ -2046,8 +2046,11 @@ async fn get_top_processes_optimized(
     } else {
         Vec::new()
     };
-    let adapter_stats =
-        crate::adapter_monitor::process_stats(&adapter_processes, include_process_adapter_stats);
+    let adapter_stats = if include_process_adapter_stats {
+        crate::adapter_monitor::process_stats(&adapter_processes, true)
+    } else {
+        HashMap::new()
+    };
 
     prune_process_cpu_times(&mut prev, &current_pids);
     let mut processes = Vec::with_capacity(native_procs.len());

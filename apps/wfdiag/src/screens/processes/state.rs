@@ -18,7 +18,7 @@ use windows_reactor::*;
 /// Refresh button — may show `Refreshing…` and disable the paging buttons.
 /// The two-second live tick re-queries the same CPU-sorted page and must
 /// update the rows in place, otherwise the summary and the pager flicker
-/// twice a second while nothing the user did has changed.
+/// every two seconds while nothing the user did has changed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProcessQueryOrigin {
     /// The user changed the query, or asked for a refresh.
@@ -105,6 +105,12 @@ impl ProcessesScreen {
             self.rows.clear();
             return;
         };
+        // Snapshot synchronization also runs for unrelated events and every
+        // telemetry sample. Do not reformat and allocate 100 rows when the
+        // process worker has not published a different page.
+        if self.page.as_ref() == Some(page) {
+            return;
+        }
         let previous: HashMap<ProcessIdentity, Arc<ProcessViewRow>> = self
             .rows
             .drain(..)

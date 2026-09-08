@@ -149,28 +149,14 @@ impl MonitorHandle for WindowsMonitorHandle {
     }
 
     fn request_processes(&self, query: ProcessQuery) -> Result<ProcessPageReply, String> {
-        let native = self
-            .runtime
-            .request_processes(query.into())
-            .map_err(|error| error.to_string())?;
-        let (sender, receiver) = oneshot::channel();
-        // The collector answers on its own worker; translate on a short-lived
-        // thread so neither the UI thread nor the collector is blocked.
-        std::thread::Builder::new()
-            .name("wfdiag-app-process-page".to_string())
-            .spawn(move || {
-                let outcome = match native.blocking_recv() {
-                    Ok(NativeProcessQueryOutcome::Page(page)) => {
-                        ProcessQueryOutcome::Page(Box::new(page.into()))
-                    }
-                    Ok(NativeProcessQueryOutcome::Superseded) | Err(_) => {
-                        ProcessQueryOutcome::Superseded
-                    }
-                };
-                let _ = sender.send(outcome);
+        self.runtime
+            .request_processes_with(query.into(), |outcome| match outcome {
+                NativeProcessQueryOutcome::Page(page) => {
+                    ProcessQueryOutcome::Page(Box::new(page.into()))
+                }
+                NativeProcessQueryOutcome::Superseded => ProcessQueryOutcome::Superseded,
             })
-            .map_err(|error| error.to_string())?;
-        Ok(receiver)
+            .map_err(|error| error.to_string())
     }
 
     fn request_network_connections(&self) -> Result<NetworkConnectionsReply, String> {

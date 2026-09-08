@@ -65,6 +65,37 @@ impl Default for MarkdownStyle {
 /// URLs are emitted as native hyperlinks.
 #[must_use]
 pub fn render_markdown_lite(text: &str, style: MarkdownStyle) -> View {
+    View::component::<MarkdownComponent>(MarkdownInput {
+        text: text.to_owned(),
+        style,
+    })
+}
+
+#[derive(Clone, PartialEq)]
+struct MarkdownInput {
+    text: String,
+    style: MarkdownStyle,
+}
+
+struct MarkdownComponent;
+
+impl Component for MarkdownComponent {
+    type Input = MarkdownInput;
+    type Message = ();
+
+    fn create(_: &Self::Input, _: &ComponentContext<Self>) -> Self {
+        Self
+    }
+
+    fn view(&self, input: &Self::Input, _: &mut ViewContext<Self>) -> View {
+        render_document(&input.text, input.style)
+    }
+}
+
+// Reactor skips this component when its input is unchanged. Completed chat
+// messages and diagnostic reports are therefore not parsed on composer edits
+// or unrelated telemetry wakes, and retain their native controls.
+fn render_document(text: &str, style: MarkdownStyle) -> View {
     let document = parse_markdown_lite(text);
     let children = document
         .blocks

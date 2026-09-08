@@ -1152,7 +1152,7 @@ pub(crate) fn ai_assistant_workspace(
                                 .into()
                         });
                 KeyedView::new(
-                    format!("{}-{index}", message.turn),
+                    format!("{}-{:?}", message.turn, message.role),
                     StackPanel::new()
                         .max_width(if narrow { 620.0 } else { 760.0 })
                         .horizontal_alignment(if is_user {

@@ -1216,13 +1216,6 @@ pub(crate) fn machine_card_accessibility_name(
     label
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MonitoringLifecycleAction {
-    None,
-    Pause,
-    ResumeAndRefresh,
-}
-
 pub(crate) fn window_is_usable(snapshot: window::WindowLifecycleSnapshot) -> bool {
     snapshot.registered && snapshot.visible && !snapshot.minimized && snapshot.focused
 }
@@ -1261,24 +1254,6 @@ pub(crate) fn global_shortcut_is_allowed(
             event.command,
             window::GlobalShortcutCommand::QuickScan | window::GlobalShortcutCommand::FullScan
         )
-}
-
-pub(crate) fn monitoring_lifecycle_action(
-    snapshot: window::WindowLifecycleSnapshot,
-    monitoring_paused: bool,
-    paused_by_lifecycle: bool,
-) -> MonitoringLifecycleAction {
-    if window_is_usable(snapshot) {
-        if monitoring_paused && paused_by_lifecycle {
-            MonitoringLifecycleAction::ResumeAndRefresh
-        } else {
-            MonitoringLifecycleAction::None
-        }
-    } else if monitoring_paused {
-        MonitoringLifecycleAction::None
-    } else {
-        MonitoringLifecycleAction::Pause
-    }
 }
 
 pub(crate) fn history_tag_draft_for_selection(
@@ -2102,49 +2077,6 @@ pub(crate) mod tests {
         assert_eq!(
             history_comparison_placeholder(Some("older"), Some("latest"), false, None),
             "Comparison is unavailable. Select the scan again to retry."
-        );
-    }
-
-    #[test]
-    fn window_lifecycle_pauses_only_when_unusable_and_resumes_only_its_own_pause() {
-        let usable = window::WindowLifecycleSnapshot {
-            registered: true,
-            visible: true,
-            focused: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            monitoring_lifecycle_action(usable, false, false),
-            MonitoringLifecycleAction::None
-        );
-
-        for unusable in [
-            window::WindowLifecycleSnapshot {
-                visible: false,
-                ..usable
-            },
-            window::WindowLifecycleSnapshot {
-                minimized: true,
-                ..usable
-            },
-            window::WindowLifecycleSnapshot {
-                focused: false,
-                ..usable
-            },
-        ] {
-            assert_eq!(
-                monitoring_lifecycle_action(unusable, false, false),
-                MonitoringLifecycleAction::Pause
-            );
-        }
-
-        assert_eq!(
-            monitoring_lifecycle_action(usable, true, true),
-            MonitoringLifecycleAction::ResumeAndRefresh
-        );
-        assert_eq!(
-            monitoring_lifecycle_action(usable, true, false),
-            MonitoringLifecycleAction::None
         );
     }
 

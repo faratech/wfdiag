@@ -183,6 +183,11 @@ pub enum AppCommand {
     // ---- monitoring ----------------------------------------------------
     /// Request one immediate telemetry sample.
     MonitorRefresh,
+    /// Declare whether a host surface currently consumes periodic telemetry.
+    SetMonitorDemand {
+        /// Sampling is needed by the active surface.
+        active: bool,
+    },
     /// Pause or resume one-second sampling.
     SetMonitorPaused {
         /// Whether sampling is paused.

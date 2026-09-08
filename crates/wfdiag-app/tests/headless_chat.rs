@@ -38,6 +38,34 @@ fn terminals(events: &[AppEvent]) -> usize {
 }
 
 #[test]
+fn a_long_conversation_survives_worker_history_eviction() {
+    let mut harness = boot_ai("chat_history_eviction");
+    harness.mocks.ai.chat.script(
+        AIProvider::Ollama,
+        (0..60)
+            .map(|_| ScriptedTurn::text("bounded answer"))
+            .collect(),
+    );
+    harness.commit_scan();
+    for index in 0..60 {
+        assert!(
+            harness
+                .service
+                .dispatch(AppCommand::ChatSend {
+                    prompt: format!("Explain the scan, question {index}"),
+                })
+                .is_accepted()
+        );
+        let events = harness.pump_for("a terminal after history eviction", |event| {
+            matches!(event, AppEvent::Chat(ChatEvent::Done { .. }))
+        });
+        assert_eq!(terminals(&events), 1);
+        assert_eq!(harness.service.snapshot().ai.chat.text, "bounded answer");
+    }
+    harness.shutdown(Duration::from_secs(2));
+}
+
+#[test]
 fn a_turn_streams_coalesced_deltas_and_ends_exactly_once() {
     let mut harness = boot_ai("chat_stream");
     harness.mocks.ai.chat.script(

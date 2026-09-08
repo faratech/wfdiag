@@ -26,21 +26,13 @@ impl MonitorScreen {
 
     /// Pause or resume live sampling from the page's own button.
     pub(crate) fn toggle(&mut self, cx: &mut ScreenCx<'_>) {
-        let pause = !self.paused;
-        if !pause && !cx.shell.window_usable {
-            // Preserve the user's resume intent without waking the monitor
-            // while the app is hidden, minimized, or inactive.
-            self.paused_by_lifecycle = true;
-            cx.status("Live monitoring will resume when the window is active");
-            return;
-        }
+        let pause = !self.user_paused;
         if cx
             .dispatch(AppCommand::SetMonitorPaused { paused: pause })
             .is_accepted()
         {
-            self.paused = pause;
-            self.paused_by_lifecycle = false;
-            if !pause {
+            self.user_paused = pause;
+            if !pause && cx.shell.window_usable {
                 let _ = cx.dispatch(AppCommand::MonitorRefresh);
             }
             cx.status(if pause {

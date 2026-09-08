@@ -415,7 +415,7 @@ impl Component for WfdiagShell {
         window::set_close_to_tray(component.shell.settings.close_to_tray);
         // Keep the collector warm but idle until a live surface consumes it.
         if !initial_page.consumes_live_telemetry() {
-            component.dispatch(AppCommand::SetMonitorPaused { paused: true });
+            component.dispatch(AppCommand::SetMonitorDemand { active: false });
             component.monitor.paused = true;
         }
         if initial_page == Page::Processes && !deterministic_visual {
@@ -433,6 +433,9 @@ impl Component for WfdiagShell {
         let mut app_batch = false;
         match message {
             Message::NativeSignalReady => {
+                // Each drained message synchronizes its own changes below.
+                // The enclosing wake is only an envelope, not another update.
+                app_batch = true;
                 // #206: the toast worker posts a wake as soon as it records a
                 // failure; the atomic guard inside makes this a no-op read on
                 // every ordinary wake.

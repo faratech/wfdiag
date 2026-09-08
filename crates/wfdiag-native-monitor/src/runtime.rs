@@ -119,6 +119,7 @@ impl From<&NativeSystemStats> for SystemStats {
 enum RuntimeCommand {
     ControlWake,
     ProcessWake,
+    ProcessComplete,
     Shutdown,
 }
 
@@ -181,7 +182,7 @@ impl CoalescedControl {
 
 struct ProcessRequest {
     query: ProcessQuery,
-    reply: oneshot::Sender<ProcessQueryOutcome>,
+    reply: Box<dyn FnOnce(ProcessQueryOutcome) + Send>,
 }
 
 /// Outcome of a queued process query.
@@ -217,7 +218,7 @@ impl LatestProcessRequest {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .replace(request);
         if let Some(previous) = previous {
-            let _ = previous.reply.send(ProcessQueryOutcome::Superseded);
+            (previous.reply)(ProcessQueryOutcome::Superseded);
         }
         !self.wake_pending.swap(true, Ordering::AcqRel)
     }
@@ -248,6 +249,32 @@ fn reap_worker(worker: JoinHandle<()>) {
         .spawn(move || {
             let _ = worker.join();
         });
+}
+
+fn monitor_executor() -> io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_time()
+        .thread_name("wfdiag-monitor-async")
+        .build()
+}
+
+fn spawn_process_capture(
+    monitor: Arc<SystemMonitor>,
+    request: ProcessRequest,
+    completion: mpsc::UnboundedSender<RuntimeCommand>,
+) {
+    let runtime = tokio::runtime::Handle::current();
+    tokio::spawn(async move {
+        // One blocking capture at most. Even a failed capture releases the
+        // busy latch, so the latest pending query can still be serviced.
+        let _ = tokio::task::spawn_blocking(move || {
+            let page = runtime.block_on(monitor.list_processes(request.query));
+            (request.reply)(ProcessQueryOutcome::Page(page));
+        })
+        .await;
+        let _ = completion.send(RuntimeCommand::ProcessComplete);
+    });
 }
 
 /// Owns the Tokio worker used by the native collector.
@@ -294,17 +321,13 @@ impl NativeMonitorRuntime {
         let worker_control = Arc::clone(&control);
         let process_requests = Arc::new(LatestProcessRequest::default());
         let worker_process_requests = Arc::clone(&process_requests);
+        let completion_sender = commands.clone();
         let (startup_sender, startup_receiver) = std_mpsc::sync_channel(1);
 
         let worker = std::thread::Builder::new()
             .name("wfdiag-native-monitor".to_string())
             .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
-                    .enable_time()
-                    .thread_name("wfdiag-monitor-async")
-                    .build()
-                {
+                let runtime = match monitor_executor() {
                     Ok(runtime) => runtime,
                     Err(error) => {
                         let _ = startup_sender.send(Err(error.to_string()));
@@ -318,6 +341,7 @@ impl NativeMonitorRuntime {
                     let monitor = Arc::new(SystemMonitor::with_emitter(emitter.clone()));
                     monitor.start_monitoring_with_profile(profile).await;
                     let mut running = true;
+                    let mut process_busy = false;
 
                     while let Some(command) = command_receiver.recv().await {
                         match command {
@@ -340,22 +364,29 @@ impl NativeMonitorRuntime {
                                     let _ = emitter.emit_system_stats(&stats);
                                 }
                             }
-                            RuntimeCommand::ProcessWake => {
+                            RuntimeCommand::ProcessWake | RuntimeCommand::ProcessComplete => {
+                                if matches!(command, RuntimeCommand::ProcessComplete) {
+                                    process_busy = false;
+                                }
+                                if process_busy {
+                                    // Leave the replaceable slot occupied until
+                                    // the one active capture has finished.
+                                    continue;
+                                }
                                 if let Some(request) = worker_process_requests.take_for_wake() {
                                     // Enumerate on its own task so a
                                     // multi-second process snapshot cannot
                                     // delay ControlWake handling: pause() and
                                     // stop_monitoring() must take effect
                                     // promptly even while a query is in
-                                    // flight. Concurrent enumerations still
-                                    // serialize inside SystemMonitor's snapshot
-                                    // refresh lock, and the UI rejects stale
-                                    // pages by request id.
-                                    let monitor = Arc::clone(&monitor);
-                                    tokio::spawn(async move {
-                                        let page = monitor.list_processes(request.query).await;
-                                        let _ = request.reply.send(ProcessQueryOutcome::Page(page));
-                                    });
+                                    // flight. Only one capture runs here; the
+                                    // facade rejects an obsolete completed page.
+                                    process_busy = true;
+                                    spawn_process_capture(
+                                        Arc::clone(&monitor),
+                                        request,
+                                        completion_sender.clone(),
+                                    );
                                 }
                             }
                             RuntimeCommand::Shutdown => break,
@@ -442,7 +473,23 @@ impl NativeMonitorRuntime {
         &self,
         query: ProcessQuery,
     ) -> io::Result<oneshot::Receiver<ProcessQueryOutcome>> {
+        self.request_processes_with(query, std::convert::identity)
+    }
+
+    /// Map the bounded query reply on the collector, without a waiting thread
+    /// in the host. The mapper must be a short, nonblocking projection.
+    ///
+    /// # Errors
+    /// Returns an I/O error when the worker has stopped.
+    pub fn request_processes_with<T: Send + 'static>(
+        &self,
+        query: ProcessQuery,
+        map: impl FnOnce(ProcessQueryOutcome) -> T + Send + 'static,
+    ) -> io::Result<oneshot::Receiver<T>> {
         let (reply, receiver) = oneshot::channel();
+        let reply = Box::new(move |outcome| {
+            let _ = reply.send(map(outcome));
+        });
         if self
             .process_requests
             .submit(ProcessRequest { query, reply })
@@ -485,22 +532,53 @@ mod tests {
     }
 
     #[test]
+    fn a_burst_during_capture_retains_only_one_pending_query() {
+        let slot = LatestProcessRequest::default();
+        assert!(slot.submit(ProcessRequest {
+            query: query("active"),
+            reply: Box::new(|_| {}),
+        }));
+        let active = slot.take_for_wake().unwrap();
+        let superseded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for index in 0..1_000 {
+            let count = Arc::clone(&superseded);
+            let wake = slot.submit(ProcessRequest {
+                query: query(&index.to_string()),
+                reply: Box::new(move |outcome| {
+                    if matches!(outcome, ProcessQueryOutcome::Superseded) {
+                        count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }),
+            });
+            assert_eq!(wake, index == 0);
+        }
+        assert_eq!(superseded.load(Ordering::Relaxed), 999);
+        assert_eq!(active.query.search, "active");
+        assert_eq!(slot.take_for_wake().unwrap().query.search, "999");
+        assert!(slot.take_for_wake().is_none());
+    }
+
+    #[test]
     fn pending_process_requests_are_latest_wins_with_one_wake() {
         let slot = LatestProcessRequest::default();
         let (first_reply, mut first_receiver) = oneshot::channel();
         assert!(slot.submit(ProcessRequest {
             query: query("first"),
-            reply: first_reply,
+            reply: Box::new(move |outcome| {
+                let _ = first_reply.send(outcome);
+            }),
         }));
 
         let (latest_reply, _latest_receiver) = oneshot::channel();
         assert!(!slot.submit(ProcessRequest {
             query: query("latest"),
-            reply: latest_reply,
+            reply: Box::new(move |outcome| {
+                let _ = latest_reply.send(outcome);
+            }),
         }));
         assert!(matches!(
             first_receiver.try_recv(),
-            Err(oneshot::error::TryRecvError::Closed)
+            Ok(ProcessQueryOutcome::Superseded)
         ));
 
         let pending = slot.take_for_wake().expect("latest request remains queued");
@@ -510,7 +588,9 @@ mod tests {
         let (next_reply, _next_receiver) = oneshot::channel();
         assert!(slot.submit(ProcessRequest {
             query: query("next"),
-            reply: next_reply,
+            reply: Box::new(move |outcome| {
+                let _ = next_reply.send(outcome);
+            }),
         }));
     }
 

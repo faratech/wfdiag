@@ -436,6 +436,9 @@ impl AiScreen {
             }
             _ => {}
         }
+        if !self.turn_open {
+            self.trim_display_history();
+        }
     }
 
     /// Append the user and assistant bubbles for one submitted turn.
@@ -462,13 +465,62 @@ impl AiScreen {
             tools: wfdiag_native_ai_chat::ChatToolHistory::default(),
             proposals: Vec::new(),
         });
-        let excess = self
+        self.trim_display_history();
+    }
+
+    fn trim_display_history(&mut self) {
+        let records = self
             .messages
-            .len()
-            .saturating_sub(MAX_CHAT_DISPLAY_MESSAGES);
-        if excess > 0 {
-            self.messages.drain(0..excess);
-        }
+            .iter()
+            .map(|message| {
+                let tool_chars = message
+                    .tools
+                    .activities()
+                    .iter()
+                    .map(|tool| {
+                        tool.call_id.chars().count()
+                            + tool.tool.chars().count()
+                            + tool.args_summary.chars().count()
+                            + tool
+                                .result_preview
+                                .as_deref()
+                                .unwrap_or_default()
+                                .chars()
+                                .count()
+                            + tool
+                                .model_output
+                                .as_deref()
+                                .unwrap_or_default()
+                                .chars()
+                                .count()
+                            + tool
+                                .model_error
+                                .as_deref()
+                                .unwrap_or_default()
+                                .chars()
+                                .count()
+                    })
+                    .sum::<usize>();
+                (
+                    message.role == ChatDisplayRole::User,
+                    message.text.chars().count()
+                        + message
+                            .terminal_message
+                            .as_deref()
+                            .unwrap_or_default()
+                            .chars()
+                            .count()
+                        + message
+                            .proposals
+                            .iter()
+                            .map(|value| value.chars().count())
+                            .sum::<usize>()
+                        + tool_chars,
+                )
+            })
+            .collect::<Vec<_>>();
+        let cut = wfdiag_native_ai_chat::completed_history_cut(&records, MAX_CHAT_DISPLAY_MESSAGES);
+        self.messages.drain(..cut);
     }
 
     fn assistant_message_mut(&mut self, turn: u64) -> Option<&mut ChatDisplayMessage> {

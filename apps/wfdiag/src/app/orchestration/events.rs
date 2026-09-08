@@ -73,169 +73,194 @@ impl WfdiagShell {
     /// while the rest of `self` is written; nothing else may borrow it here.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn sync_from_snapshot(&mut self) {
-        let Some(app) = self.app.take() else {
+        let Some(mut app) = self.app.take() else {
             return;
         };
+        let changes = app.take_snapshot_changes();
         {
             let snapshot = app.snapshot();
 
             // ---- settings ---------------------------------------------
-            self.shell.settings = snapshot.settings.clone();
-            self.settings.loading = snapshot.settings_loading;
-            self.settings.error = snapshot.settings_error.clone();
+            if changes.contains(wfdiag_app::SnapshotChanges::SETTINGS) {
+                self.shell.settings = snapshot.settings.clone();
+                self.settings.loading = snapshot.settings_loading;
+                self.settings.error = snapshot.settings_error.clone();
+            }
 
             // ---- host identity ----------------------------------------
-            if let Some(info) = snapshot.system_info.as_ref() {
-                self.shell.is_admin = info.is_admin;
-                self.shell.system_info = info.clone();
+            if changes.contains(wfdiag_app::SnapshotChanges::HOST) {
+                if let Some(info) = snapshot.system_info.as_ref() {
+                    self.shell.is_admin = info.is_admin;
+                    self.shell.system_info = info.clone();
+                }
+                self.shell.architecture = snapshot.architecture.clone();
+                self.shell.system_error = snapshot.system_error.clone();
             }
-            self.shell.architecture = snapshot.architecture.clone();
-            self.shell.system_error = snapshot.system_error.clone();
 
             // ---- scan --------------------------------------------------
-            self.diagnostics.catalog.clone_from(&snapshot.catalog);
-            self.diagnostics.results.clone_from(&snapshot.scan.results);
-            self.diagnostics
-                .expected_task_ids
-                .clone_from(&snapshot.scan.task_ids);
-            self.diagnostics.scan_kind = snapshot.scan.scan_kind;
-            self.diagnostics.duration_ms = snapshot.scan.duration_ms;
-            self.diagnostics.total = snapshot.scan.total;
-            self.diagnostics.completed = snapshot.scan.completed;
-            self.diagnostics.errors = snapshot.scan.errors;
-            self.diagnostics.scan_phase = snapshot.scan_phase;
-            // A running scan seeds every requested task as Queued; live
-            // transitions arrive as `ScanEvent::Progress`.
-            for task_id in &snapshot.scan.task_ids {
+            if changes.contains(wfdiag_app::SnapshotChanges::SCAN) {
+                self.diagnostics.catalog.clone_from(&snapshot.catalog);
+                self.diagnostics.results.clone_from(&snapshot.scan.results);
                 self.diagnostics
-                    .task_statuses
-                    .entry(task_id.clone())
-                    .or_insert(wfdiag_ui_core::TaskProgressStatus::Queued);
+                    .expected_task_ids
+                    .clone_from(&snapshot.scan.task_ids);
+                self.diagnostics.scan_kind = snapshot.scan.scan_kind;
+                self.diagnostics.duration_ms = snapshot.scan.duration_ms;
+                self.diagnostics.total = snapshot.scan.total;
+                self.diagnostics.completed = snapshot.scan.completed;
+                self.diagnostics.errors = snapshot.scan.errors;
+                self.diagnostics.scan_phase = snapshot.scan_phase;
+                // A running scan seeds every requested task as Queued; live
+                // transitions arrive as `ScanEvent::Progress`.
+                for task_id in &snapshot.scan.task_ids {
+                    self.diagnostics
+                        .task_statuses
+                        .entry(task_id.clone())
+                        .or_insert(wfdiag_ui_core::TaskProgressStatus::Queued);
+                }
             }
 
             // ---- issues -------------------------------------------------
-            self.issues.issues.clone_from(&snapshot.issues);
-            self.issues.error = snapshot.issue_error.clone();
-            self.issues.maintenance = snapshot.maintenance_remediations();
+            if changes.contains(wfdiag_app::SnapshotChanges::ISSUES) {
+                self.issues.issues.clone_from(&snapshot.issues);
+                self.issues.error = snapshot.issue_error.clone();
+                self.issues.maintenance = snapshot.maintenance_remediations();
+            }
 
             // ---- history ------------------------------------------------
-            self.history
-                .summaries
-                .clone_from(&snapshot.history.summaries);
-            self.history.loading = snapshot.history.loading;
-            self.history.comparison = snapshot.history.comparison_summary.clone();
-            self.history.trends =
-                (!snapshot.history.trends.is_empty()).then(|| snapshot.history.trends.clone());
+            if changes.contains(wfdiag_app::SnapshotChanges::HISTORY) {
+                self.history
+                    .summaries
+                    .clone_from(&snapshot.history.summaries);
+                self.history.loading = snapshot.history.loading;
+                self.history.comparison = snapshot.history.comparison_summary.clone();
+                self.history.trends =
+                    (!snapshot.history.trends.is_empty()).then(|| snapshot.history.trends.clone());
+            }
 
             // ---- monitoring ---------------------------------------------
-            self.monitor.paused = snapshot.monitor.paused;
-            // #194: adopting the page here (not in `view`) is what lets an
-            // unchanged row keep its `Arc` and be skipped by reconciliation.
-            self.processes
-                .set_page(snapshot.monitor.process_page.as_ref());
-            self.monitor.network_connections = snapshot.monitor.connections.clone();
-            if let Some(error) = snapshot.monitor.error.as_ref() {
-                self.monitor.error = Some(error.clone());
+            if changes.contains(wfdiag_app::SnapshotChanges::MONITOR) {
+                self.monitor.paused = snapshot.monitor.paused;
+                self.monitor.user_paused = snapshot.monitor.user_paused;
+                // #194: adopting the page here (not in `view`) is what lets an
+                // unchanged row keep its `Arc` and be skipped by reconciliation.
+                self.processes
+                    .set_page(snapshot.monitor.process_page.as_ref());
+                self.monitor.network_connections = snapshot.monitor.connections.clone();
+                if let Some(error) = snapshot.monitor.error.as_ref() {
+                    self.monitor.error = Some(error.clone());
+                }
             }
 
             // ---- providers -----------------------------------------------
-            self.ai.provider_status = snapshot.provider_status.clone();
-            self.ai.status_loading = snapshot.provider_loading;
-            self.ai.sign_in_required = snapshot.provider_setup.sign_in_required;
-            for (index, state) in self.settings.provider_catalogs.iter_mut().enumerate() {
-                if let Some(provider) = crate::app::policy::provider_setup_provider(index)
-                    && let Some(engine) =
-                        snapshot.provider_setup.catalogs.get(&provider.to_string())
-                {
-                    state.clone_from(engine);
+            if changes.contains(wfdiag_app::SnapshotChanges::PROVIDERS) {
+                self.ai.provider_status = snapshot.provider_status.clone();
+                self.ai.status_loading = snapshot.provider_loading;
+                self.ai.sign_in_required = snapshot.provider_setup.sign_in_required;
+                for (index, state) in self.settings.provider_catalogs.iter_mut().enumerate() {
+                    if let Some(provider) = crate::app::policy::provider_setup_provider(index)
+                        && let Some(engine) =
+                            snapshot.provider_setup.catalogs.get(&provider.to_string())
+                    {
+                        state.clone_from(engine);
+                    }
                 }
-            }
-            for (wire, account) in &snapshot.provider_setup.accounts {
-                if let Some(provider) = subscription_provider_from_wire(wire)
-                    && let Some(state) = self
-                        .settings
-                        .subscription_auth_states
-                        .get_mut(subscription_auth_state_index(provider))
-                {
-                    state.clone_from(account);
+                for (wire, account) in &snapshot.provider_setup.accounts {
+                    if let Some(provider) = subscription_provider_from_wire(wire)
+                        && let Some(state) = self
+                            .settings
+                            .subscription_auth_states
+                            .get_mut(subscription_auth_state_index(provider))
+                    {
+                        state.clone_from(account);
+                    }
                 }
+                self.settings.subscription_install_prompt = snapshot.provider_setup.install_prompt;
+                self.settings.subscription_install_progress =
+                    snapshot.provider_setup.install_progress;
+                self.settings.subscription_install_error =
+                    snapshot.provider_setup.install_error.clone();
             }
-            self.settings.subscription_install_prompt = snapshot.provider_setup.install_prompt;
-            self.settings.subscription_install_progress = snapshot.provider_setup.install_progress;
-            self.settings.subscription_install_error =
-                snapshot.provider_setup.install_error.clone();
 
             // ---- AI -------------------------------------------------------
-            self.ai.streaming = snapshot.ai.chat.streaming;
-            self.ai.cloud_fallback_consent =
-                snapshot
+            if changes.contains(wfdiag_app::SnapshotChanges::AI) {
+                self.ai.streaming = snapshot.ai.chat.streaming;
+                self.ai.cloud_fallback_consent =
+                    snapshot
+                        .ai
+                        .chat
+                        .cloud_fallback
+                        .as_ref()
+                        .map(|prompt| CloudFallbackConsent {
+                            candidate: provider_from_wire(&prompt.candidate),
+                            local_provider: snapshot
+                                .ai
+                                .chat
+                                .provider
+                                .as_deref()
+                                .map_or(AIProvider::None, provider_from_wire),
+                            reason: prompt.reason.clone(),
+                            saving: prompt.saving,
+                        });
+                self.ai.report_text = snapshot.ai.report.text.clone();
+                self.ai.report_provider = snapshot.ai.report.provider.clone();
+                self.ai.report_provider_use = snapshot.ai.report.provider_use.clone();
+                self.ai.report_generating = snapshot.ai.report.generating;
+                self.ai.report_error = snapshot.ai.report.error.clone();
+                self.diagnostics.analyses = snapshot
                     .ai
-                    .chat
-                    .cloud_fallback
-                    .as_ref()
-                    .map(|prompt| CloudFallbackConsent {
-                        candidate: provider_from_wire(&prompt.candidate),
-                        local_provider: snapshot
-                            .ai
-                            .chat
-                            .provider
-                            .as_deref()
-                            .map_or(AIProvider::None, provider_from_wire),
-                        reason: prompt.reason.clone(),
-                        saving: prompt.saving,
-                    });
-            self.ai.report_text = snapshot.ai.report.text.clone();
-            self.ai.report_provider = snapshot.ai.report.provider.clone();
-            self.ai.report_provider_use = snapshot.ai.report.provider_use.clone();
-            self.ai.report_generating = snapshot.ai.report.generating;
-            self.ai.report_error = snapshot.ai.report.error.clone();
-            self.diagnostics.analyses = snapshot
-                .ai
-                .analyses
-                .iter()
-                .map(|(task_id, analysis)| {
-                    (
-                        task_id.clone(),
-                        DiagnosticAnalysisDisplay {
-                            interpretation: analysis.interpretation.clone(),
-                            provider_use: analysis.provider_use.clone(),
-                            grounding: analysis.grounding.clone(),
-                            cached: analysis.cached,
-                            error: analysis.error.clone(),
-                            busy: analysis.busy,
-                        },
-                    )
-                })
-                .collect();
-            self.issues.prioritization = IssuePrioritizationDisplay {
-                text: snapshot.ai.prioritization.text.clone(),
-                provider_use: snapshot.ai.prioritization.provider_use.clone(),
-                cached: snapshot.ai.prioritization.cached,
-                error: snapshot.ai.prioritization.error.clone(),
-                busy: snapshot.ai.prioritization.busy,
-            };
-            self.issues.fix_plan = snapshot.ai.fix_plan.plan.clone();
-            self.issues.fix_plan_busy = snapshot.ai.fix_plan.busy;
-            self.issues.fix_plan_error = snapshot.ai.fix_plan.error.clone();
-            self.ai.pending_intent = snapshot.ai.pending_intent.clone();
-            self.ai.preparation_error = snapshot.ai.preparation_error.clone();
+                    .analyses
+                    .iter()
+                    .map(|(task_id, analysis)| {
+                        (
+                            task_id.clone(),
+                            DiagnosticAnalysisDisplay {
+                                interpretation: analysis.interpretation.clone(),
+                                provider_use: analysis.provider_use.clone(),
+                                grounding: analysis.grounding.clone(),
+                                cached: analysis.cached,
+                                error: analysis.error.clone(),
+                                busy: analysis.busy,
+                            },
+                        )
+                    })
+                    .collect();
+                self.issues.prioritization = IssuePrioritizationDisplay {
+                    text: snapshot.ai.prioritization.text.clone(),
+                    provider_use: snapshot.ai.prioritization.provider_use.clone(),
+                    cached: snapshot.ai.prioritization.cached,
+                    error: snapshot.ai.prioritization.error.clone(),
+                    busy: snapshot.ai.prioritization.busy,
+                };
+                self.issues.fix_plan = snapshot.ai.fix_plan.plan.clone();
+                self.issues.fix_plan_busy = snapshot.ai.fix_plan.busy;
+                self.issues.fix_plan_error = snapshot.ai.fix_plan.error.clone();
+                self.ai.pending_intent = snapshot.ai.pending_intent.clone();
+                self.ai.preparation_error = snapshot.ai.preparation_error.clone();
+            }
 
             // ---- remediation ----------------------------------------------
-            self.action_review.review = snapshot.actions.review.clone();
-            self.action_review.repair_confirm = snapshot.actions.repair_confirmation.clone();
-            self.issues.active_run = snapshot.actions.active_run.clone();
-            self.issues
-                .run_history
-                .clone_from(&snapshot.actions.history);
-            self.issues.busy = snapshot.actions.active_run.is_some();
+            if changes.contains(wfdiag_app::SnapshotChanges::ACTIONS) {
+                self.action_review.review = snapshot.actions.review.clone();
+                self.action_review.repair_confirm = snapshot.actions.repair_confirmation.clone();
+                self.issues.active_run = snapshot.actions.active_run.clone();
+                self.issues
+                    .run_history
+                    .clone_from(&snapshot.actions.history);
+                self.issues.busy = snapshot.actions.active_run.is_some();
+            }
 
             // ---- updates ---------------------------------------------------
-            if let Some(update) = snapshot.update.available.as_ref() {
+            if changes.contains(wfdiag_app::SnapshotChanges::UPDATES)
+                && let Some(update) = snapshot.update.available.as_ref()
+            {
                 self.update_notice.info = Some(update.clone());
             }
         }
         self.app = Some(app);
-        self.prune_action_expansion();
+        if changes.contains(wfdiag_app::SnapshotChanges::ACTIONS) {
+            self.prune_action_expansion();
+        }
     }
 
     /// Keep the Expander set to runs the user can actually see.

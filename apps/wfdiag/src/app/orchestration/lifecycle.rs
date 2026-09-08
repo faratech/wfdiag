@@ -7,9 +7,8 @@ use crate::app::consts::WINDOW_COMMAND_POLL;
 use crate::app::message::Message;
 use crate::app::native_msg::NativeMsg;
 use crate::app::policy::{
-    MonitoringLifecycleAction, effective_window_theme, global_shortcut_is_allowed,
-    monitoring_lifecycle_action, onboarding_probe_wanted, window_hook_retry_delay,
-    window_is_usable, window_theme_setting,
+    effective_window_theme, global_shortcut_is_allowed, onboarding_probe_wanted,
+    window_hook_retry_delay, window_is_usable, window_theme_setting,
 };
 use crate::app::state::{AiMode, Page, PageTransition};
 use crate::app::tasks::{spawn_instance_watch, spawn_palette_focus_delay, spawn_window_hook_retry};
@@ -213,39 +212,21 @@ impl WfdiagShell {
         if !self.shell.page.consumes_live_telemetry() {
             return;
         }
-        match monitoring_lifecycle_action(
-            snapshot,
-            self.monitor.paused,
-            self.monitor.paused_by_lifecycle,
-        ) {
-            MonitoringLifecycleAction::Pause => {
-                if self
-                    .dispatch(AppCommand::SetMonitorPaused { paused: true })
-                    .is_accepted()
-                {
-                    self.monitor.paused = true;
-                    self.monitor.paused_by_lifecycle = true;
-                    self.processes.loading = false;
-                    self.shell.status =
-                        "Live monitoring paused while the window is inactive".to_string();
-                }
+        let paused = self
+            .app
+            .as_ref()
+            .is_none_or(|app| app.snapshot().monitor.paused);
+        if !paused && self.monitor.paused {
+            let _ = self.dispatch(AppCommand::MonitorRefresh);
+            if self.shell.page == Page::Processes {
+                self.request_process_page(context, false);
             }
-            MonitoringLifecycleAction::ResumeAndRefresh => {
-                if self
-                    .dispatch(AppCommand::SetMonitorPaused { paused: false })
-                    .is_accepted()
-                {
-                    self.monitor.paused = false;
-                    self.monitor.paused_by_lifecycle = false;
-                    let _ = self.dispatch(AppCommand::MonitorRefresh);
-                    if self.shell.page == Page::Processes {
-                        self.request_process_page(context, false);
-                    }
-                    self.shell.status = "Live monitoring resumed and refreshed".to_string();
-                }
-            }
-            MonitoringLifecycleAction::None => {}
+            self.shell.status = "Live monitoring resumed and refreshed".to_string();
+        } else if paused && !self.shell.window_usable {
+            self.processes.loading = false;
+            self.shell.status = "Live monitoring paused while the window is inactive".to_string();
         }
+        self.monitor.paused = paused;
     }
 
     pub(crate) fn blocking_overlay_open(&self) -> bool {
@@ -508,19 +489,9 @@ impl WfdiagShell {
         if transition.leaves_processes() {
             self.processes.invalidate_request();
         }
-        if self.shell.page.consumes_live_telemetry()
-            && !transition.next.consumes_live_telemetry()
-            && !self.monitor.paused
-        {
-            // Keep the worker and its small system snapshot warm, but stop all
-            // periodic collection while no live surface consumes it.
-            if self
-                .dispatch(AppCommand::SetMonitorPaused { paused: true })
-                .is_accepted()
-            {
-                self.monitor.paused = true;
-            }
-        }
+        self.dispatch(AppCommand::SetMonitorDemand {
+            active: transition.next.consumes_live_telemetry(),
+        });
         self.shell.page = transition.next;
         true
     }
@@ -555,16 +526,11 @@ impl WfdiagShell {
     /// usable again, so entering the page while minimized keeps the collector
     /// idle and records the intent instead.
     fn resume_live_monitoring(&mut self) {
-        let _ = self.dispatch(AppCommand::MonitorRefresh);
-        if !self.monitor.paused || !self.shell.window_usable {
-            return;
-        }
         if self
-            .dispatch(AppCommand::SetMonitorPaused { paused: false })
-            .is_accepted()
+            .app
+            .as_ref()
+            .is_some_and(|app| !app.snapshot().monitor.paused)
         {
-            self.monitor.paused = false;
-            self.monitor.paused_by_lifecycle = false;
             let _ = self.dispatch(AppCommand::MonitorRefresh);
         }
     }

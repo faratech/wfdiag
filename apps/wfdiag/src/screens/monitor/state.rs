@@ -16,8 +16,8 @@ pub(crate) struct MonitorScreen {
     /// Resume button is the Monitor page's, but read by the window lifecycle
     /// and by the Processes page, which rides the same tick.
     pub(crate) paused: bool,
-    /// A pause the *lifecycle* imposed, which only the lifecycle may lift.
-    pub(crate) paused_by_lifecycle: bool,
+    /// Explicit user intent; navigation and visibility never clear it.
+    pub(crate) user_paused: bool,
     pub(crate) stats: Option<SystemStats>,
     pub(crate) history: MonitorHistory,
     pub(crate) error: Option<String>,

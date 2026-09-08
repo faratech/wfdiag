@@ -38,7 +38,7 @@ use crate::domain::invalidation::Invalidation;
 use crate::domain::issues::IssueTracker;
 use crate::domain::providers::PhiPreferenceGate;
 use crate::domain::scan::{
-    RunOutcome, ScanPhase, ScanPolicy, ScanState, select_scan_tasks, task_allowed_by_privacy,
+    RunOutcome, ScanPolicy, ScanState, select_scan_tasks, task_allowed_by_privacy,
 };
 use crate::domain::startup::{StartupReadiness, StartupScanGate};
 use crate::domain::subscriptions::SignInRequirement;
@@ -243,6 +243,7 @@ pub struct AppService {
     internal_tx: mpsc::Sender<Internal>,
     internal_rx: mpsc::Receiver<Internal>,
     snapshot: AppSnapshot,
+    monitor_demand: bool,
     scan: ScanState,
     issues: IssueTracker,
     startup_gate: StartupScanGate,
@@ -365,7 +366,8 @@ impl AppService {
         let watcher = ReplyWatcher::start(&queue, config.reply_poll_interval);
         let (internal_tx, internal_rx) = mpsc::channel();
         let mut service = Self {
-            replies: PendingReplies::new(config.reply_timeout),
+            replies: PendingReplies::new(config.reply_timeout)
+                .with_waker(std::task::Waker::from(Arc::clone(&queue))),
             config,
             ports,
             settings_service,
@@ -376,6 +378,7 @@ impl AppService {
             internal_tx,
             internal_rx,
             snapshot,
+            monitor_demand: true,
             scan: ScanState::new(),
             issues: IssueTracker::new(),
             startup_gate: StartupScanGate::default(),
@@ -446,6 +449,16 @@ impl AppService {
         if self.terminating && !matches!(command, AppCommand::Shutdown) {
             return DispatchOutcome::Rejected(RejectReason::Terminating);
         }
+        self.queue.mark_changes(match &command {
+            AppCommand::MonitorRefresh
+            | AppCommand::SetMonitorDemand { .. }
+            | AppCommand::SetMonitorPaused { .. }
+            | AppCommand::WindowVisibility { .. }
+            | AppCommand::RequestProcessPage(_)
+            | AppCommand::RequestNetworkConnections
+            | AppCommand::RequestProcessDetail { .. } => crate::SnapshotChanges::MONITOR,
+            _ => crate::SnapshotChanges::ALL,
+        });
         let outcome = match command {
             AppCommand::Start { startup_scan } => self.start_host(startup_scan),
             AppCommand::WindowVisibility { visible } => self.set_window_visible(visible),
@@ -478,6 +491,10 @@ impl AppService {
 
             AppCommand::MonitorRefresh => self.monitor_refresh(),
             AppCommand::SetMonitorPaused { paused } => self.set_monitor_paused(paused),
+            AppCommand::SetMonitorDemand { active } => {
+                self.monitor_demand = active;
+                self.apply_monitor_activity()
+            }
             AppCommand::RequestProcessPage(query) => self.request_process_page(query),
             AppCommand::RequestNetworkConnections => self.request_network_connections(),
             AppCommand::RequestProcessDetail { pid } => self.request_process_detail(pid),
@@ -591,11 +608,19 @@ impl AppService {
         self.drain_internal();
         self.maybe_start_delayed_update_check();
         self.maybe_start_startup_scan();
-        self.snapshot.scan_phase = self.scan.phase();
-        self.snapshot.scan = self.scan.snapshot().clone();
+        if self.queue.changes().contains(crate::SnapshotChanges::SCAN) {
+            self.snapshot.scan_phase = self.scan.phase();
+            self.snapshot.scan = self.scan.snapshot().clone();
+        }
         self.resume_pending_intent();
         self.publish_pending_work();
         self.queue.take()
+    }
+
+    /// Acknowledge changed rendering domains after dispatch/drain. Only the
+    /// rendering host consumes this; event receivers do not clear it.
+    pub fn take_snapshot_changes(&mut self) -> crate::SnapshotChanges {
+        self.queue.take_changes()
     }
 
     /// Stop every worker in dependency order within `budget` per worker.
@@ -648,7 +673,7 @@ impl AppService {
         // Hiding the window stops one-second sampling; it is the single
         // biggest idle cost the shell has. A host without live monitoring
         // still gets an acceptance: the visibility itself was recorded.
-        let _ = self.set_monitor_paused(!visible);
+        let _ = self.apply_monitor_activity();
         DispatchOutcome::accepted()
     }
 
@@ -1363,6 +1388,23 @@ impl AppService {
     }
 
     fn set_monitor_paused(&mut self, paused: bool) -> DispatchOutcome {
+        let changed = self.snapshot.monitor.user_paused != paused;
+        self.snapshot.monitor.user_paused = paused;
+        let outcome = self.apply_monitor_activity();
+        if changed
+            && self.workers.monitor.is_some()
+            && matches!(outcome, DispatchOutcome::Ignored { .. })
+        {
+            DispatchOutcome::accepted()
+        } else {
+            outcome
+        }
+    }
+
+    fn apply_monitor_activity(&mut self) -> DispatchOutcome {
+        let paused = self.snapshot.monitor.user_paused
+            || !self.monitor_demand
+            || !self.snapshot.window_visible;
         let Some(handle) = self.workers.monitor.as_ref() else {
             return DispatchOutcome::Ignored {
                 detail: "live monitoring is not running",
@@ -1883,6 +1925,9 @@ impl AppService {
                 Err(_) => break,
             }
         }
+        if messages.len() == CHANNEL_DRAIN_LIMIT {
+            self.queue.wake();
+        }
         for message in messages {
             self.apply_internal(message);
         }
@@ -2330,6 +2375,9 @@ impl AppService {
         };
         let events = receiver.drain();
         let terminated = receiver.is_terminated();
+        if events.is_empty() && !terminated {
+            return;
+        }
         let catalog = self.snapshot.catalog.clone();
         for event in events {
             match event {
@@ -2760,15 +2808,17 @@ impl AppService {
     }
 
     fn publish_pending_work(&self) {
-        let outstanding = self.ai_outstanding()
-            + self.replies.len()
-            + usize::from(self.issue_outstanding)
+        let outstanding = usize::from(self.issue_outstanding)
             + self.export_requests.len()
             + usize::from(self.system_info_request.is_some())
-            + usize::from(self.architecture_request.is_some())
-            + usize::from(self.update_startup_due.is_some())
-            + usize::from(!matches!(self.scan.phase(), ScanPhase::Idle));
-        self.watcher.signal().set_pending(outstanding);
+            + usize::from(self.architecture_request.is_some());
+        let deadline = self
+            .replies
+            .next_deadline()
+            .into_iter()
+            .chain(self.update_startup_due)
+            .min();
+        self.watcher.signal().set_schedule(outstanding, deadline);
     }
 
     /// The settings service, for hosts that need one synchronous read.
@@ -2795,5 +2845,57 @@ fn flatten<T>(result: Result<Result<T, String>, ReplyFailure>) -> Result<T, Stri
     match result {
         Ok(inner) => inner,
         Err(failure) => Err(failure_text(failure)),
+    }
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+
+    #[test]
+    fn optional_ai_workers_start_only_on_demand_and_are_retained() {
+        let (mut service, _) = AppService::start(AppConfig::default(), AppPorts::mock()).unwrap();
+        assert!(service.workers.report.is_none());
+        assert!(service.workers.analysis.is_none());
+        assert!(service.workers.fix_plan.is_none());
+        assert!(service.workers.model_catalog.is_none());
+        assert!(service.workers.subscription_auth.is_none());
+        assert!(service.workers.subscription_install.is_none());
+        assert!(
+            service.workers.actions.is_some(),
+            "remediation recovery remains eager"
+        );
+        for domain in [
+            "report",
+            "analysis",
+            "fix plan",
+            "model discovery",
+            "subscription CLI",
+        ] {
+            service.workers.ensure_optional(
+                domain,
+                &service.ports,
+                &service.settings_service,
+                &service.queue,
+            );
+        }
+        assert!(service.workers.report.is_some());
+        assert!(service.workers.analysis.is_some());
+        assert!(service.workers.fix_plan.is_some());
+        assert!(service.workers.model_catalog.is_some());
+        assert!(service.workers.subscription_auth.is_some());
+        assert!(service.workers.subscription_install.is_some());
+        let report = std::ptr::from_ref(service.workers.report.as_ref().unwrap());
+        service.workers.ensure_optional(
+            "report",
+            &service.ports,
+            &service.settings_service,
+            &service.queue,
+        );
+        assert_eq!(
+            report,
+            std::ptr::from_ref(service.workers.report.as_ref().unwrap())
+        );
+        let _ = service.shutdown(Duration::from_secs(2));
     }
 }

@@ -349,6 +349,14 @@ enum StreamOutcome {
     Error { message: String, partial: String },
 }
 
+fn stream_prefix(text: &str, remaining: usize) -> &str {
+    let end = text
+        .char_indices()
+        .nth(remaining)
+        .map_or(text.len(), |(index, _)| index);
+    &text[..end]
+}
+
 async fn stream_one_turn(
     chat: &dyn ChatProvider,
     request: &ChatRequest,
@@ -389,11 +397,16 @@ async fn stream_one_turn(
             }
             result = &mut future => {
                 while let Ok(delta) = rx.try_recv() {
-                    streamed.push_str(&delta);
-                    pending.push_str(&delta);
+                    let delta = stream_prefix(&delta, MAX_STREAM_CHARS.saturating_sub(streamed_chars));
+                    streamed_chars += delta.chars().count();
+                    streamed.push_str(delta);
+                    pending.push_str(delta);
                 }
                 flush!();
                 return match result {
+                    Ok(turn) if turn.text.chars().count() > MAX_STREAM_CHARS => StreamOutcome::Error {
+                        message: "AI response exceeded the local memory budget".to_string(), partial: streamed,
+                    },
                     Ok(turn) => StreamOutcome::Completed(turn),
                     Err(message) => StreamOutcome::Error { message, partial: streamed },
                 };
@@ -412,9 +425,10 @@ async fn stream_one_turn(
                         // The running count replaces a per-delta
                         // `streamed.chars().count()`, which was O(n^2).
                         if streamed_chars < MAX_STREAM_CHARS {
+                            let delta = stream_prefix(&delta, MAX_STREAM_CHARS - streamed_chars);
                             streamed_chars += delta.chars().count();
-                            streamed.push_str(&delta);
-                            pending.push_str(&delta);
+                            streamed.push_str(delta);
+                            pending.push_str(delta);
                             if pending.chars().count() >= FLUSH_CHARS {
                                 flush!();
                             }
@@ -1147,33 +1161,45 @@ pub fn project_session(session: &ChatSession) -> Vec<ChatMessageView> {
 }
 
 pub fn trim_completed_session(session: &mut ChatSession) {
-    let total_chars = session.messages.iter().map(message_chars).sum::<usize>();
-    if session.messages.len() <= MAX_SESSION_MESSAGES && total_chars <= MAX_SESSION_CHARS {
-        return;
-    }
-    let mut start = session.messages.len().saturating_sub(MAX_SESSION_MESSAGES);
-    let mut kept_chars = session.messages[start..]
-        .iter()
-        .map(message_chars)
-        .sum::<usize>();
-    while kept_chars > MAX_SESSION_CHARS && start + 1 < session.messages.len() {
-        kept_chars = kept_chars.saturating_sub(message_chars(&session.messages[start]));
-        start += 1;
-    }
-    while start < session.messages.len() && !matches!(session.messages[start].role, ChatRole::User)
-    {
-        start += 1;
-    }
-    if start == 0 || start >= session.messages.len() {
-        return;
-    }
-    session.messages.drain(..start);
+    let start = trim_completed_messages(&mut session.messages);
     session
         .turns
         .retain(|turn| turn.user_message_index >= start);
     for turn in &mut session.turns {
         turn.user_message_index -= start;
     }
+}
+
+/// Evict complete oldest turns from terminal history, returning the number
+/// of removed messages. An oversized single turn is evicted too: retaining it
+/// would defeat the memory ceiling even after a cancellation or failure.
+pub(crate) fn trim_completed_messages(messages: &mut Vec<ChatMessage>) -> usize {
+    let records = messages
+        .iter()
+        .map(|message| (message.role == ChatRole::User, message_chars(message)))
+        .collect::<Vec<_>>();
+    let start = completed_history_cut(&records, MAX_SESSION_MESSAGES);
+    messages.drain(..start);
+    start
+}
+
+/// Oldest prefix to evict from terminal worker or display history. Each
+/// record supplies whether it starts a turn and its retained character size.
+/// The same character ceiling applies to both projections.
+#[must_use]
+pub fn completed_history_cut(records: &[(bool, usize)], max_messages: usize) -> usize {
+    let mut start = records.len().saturating_sub(max_messages);
+    let mut kept_chars = records[start..]
+        .iter()
+        .fold(0usize, |sum, (_, size)| sum.saturating_add(*size));
+    while kept_chars > MAX_SESSION_CHARS && start < records.len() {
+        kept_chars = kept_chars.saturating_sub(records[start].1);
+        start += 1;
+    }
+    while start < records.len() && !records[start].0 {
+        start += 1;
+    }
+    start
 }
 
 pub fn prune_sessions<S: std::hash::BuildHasher>(
@@ -1265,6 +1291,36 @@ pub fn finish_session_with_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_and_worker_budgets_preserve_whole_turns_and_unicode() {
+        assert_eq!(
+            completed_history_cut(
+                &[(true, 1), (false, MAX_SESSION_CHARS), (true, 3), (false, 4)],
+                200
+            ),
+            2
+        );
+        assert_eq!(
+            completed_history_cut(&[(true, 1), (false, 2), (true, 3), (false, 4)], 3),
+            2
+        );
+        assert_eq!(stream_prefix("a🦀b", 2), "a🦀");
+        assert_eq!(stream_prefix("🦀", 0), "");
+    }
+
+    #[test]
+    fn completed_history_evicts_oversized_turns_and_respects_boundaries() {
+        let mut messages = vec![ChatMessage::user("x".repeat(MAX_SESSION_CHARS + 1))];
+        assert_eq!(trim_completed_messages(&mut messages), 1);
+        assert!(messages.is_empty());
+        let mut messages = (0..MAX_SESSION_MESSAGES + 2)
+            .map(|_| ChatMessage::user("question".to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(trim_completed_messages(&mut messages), 2);
+        assert_eq!(messages.len(), MAX_SESSION_MESSAGES);
+        assert!(messages.iter().map(message_chars).sum::<usize>() <= MAX_SESSION_CHARS);
+    }
     use crate::{ChatTurnRecord, ToolActivityRecord};
     use serde_json::json;
     use std::sync::Mutex;

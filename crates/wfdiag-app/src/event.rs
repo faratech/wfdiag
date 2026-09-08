@@ -10,7 +10,7 @@ use crate::domain::subscriptions::SignInRequiredReason;
 use crate::ids::RequestId;
 use crate::ports::monitor::ProcessDetail;
 use crate::ports::monitor::{NetworkConnection, ProcessPage};
-use crate::snapshot::AppSnapshot;
+use crate::snapshot::{AppSnapshot, SnapshotChanges};
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -963,6 +963,7 @@ struct EventQueueState {
     queue: VecDeque<AppEvent>,
     dropped: u64,
     terminated: bool,
+    changes: SnapshotChanges,
 }
 
 /// The shared event storage behind [`AppEventReceiver`].
@@ -981,6 +982,7 @@ impl EventQueue {
                 queue: VecDeque::new(),
                 dropped: 0,
                 terminated: false,
+                changes: SnapshotChanges::ALL,
             }),
             wake: Mutex::new(None),
         })
@@ -1026,6 +1028,13 @@ impl EventQueue {
     /// another control-plane event (2026-09-03 audit).
     pub(crate) fn push(&self, event: AppEvent) {
         let mut state = self.state();
+        // Broad invalidation for cross-domain workflows; hot telemetry and
+        // token events are isolated so they never clone scan/history data.
+        state.changes.0 |= match &event {
+            AppEvent::Monitor(_) => SnapshotChanges::MONITOR.0,
+            AppEvent::Chat(_) | AppEvent::Report(_) => SnapshotChanges::AI.0,
+            _ => SnapshotChanges::ALL.0,
+        };
         if state.queue.len() >= self.capacity {
             let incoming_control_plane = Self::is_control_plane(&event);
             let evict = state
@@ -1056,6 +1065,18 @@ impl EventQueue {
     pub(crate) fn take(&self) -> Vec<AppEvent> {
         let mut state = self.state();
         state.queue.drain(..).collect()
+    }
+
+    pub(crate) fn mark_changes(&self, changes: SnapshotChanges) {
+        self.state().changes.0 |= changes.0;
+    }
+
+    pub(crate) fn take_changes(&self) -> SnapshotChanges {
+        std::mem::take(&mut self.state().changes)
+    }
+
+    pub(crate) fn changes(&self) -> SnapshotChanges {
+        self.state().changes
     }
 
     pub(crate) fn wake(&self) {
@@ -1089,6 +1110,15 @@ impl fmt::Debug for AppEventReceiver {
             .field("pending", &self.pending_len())
             .field("terminated", &self.is_terminated())
             .finish_non_exhaustive()
+    }
+}
+
+impl std::task::Wake for EventQueue {
+    fn wake(self: Arc<Self>) {
+        EventQueue::wake(&self);
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        EventQueue::wake(self);
     }
 }
 
@@ -1154,6 +1184,21 @@ mod tests {
     use super::{AppEvent, AppEventReceiver, ChatEvent, EventQueue, UiWakeHandler};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn hot_events_invalidate_only_their_domains_and_acknowledge_once() {
+        use crate::{MonitorEvent, SnapshotChanges};
+        let queue = EventQueue::new(8);
+        assert_eq!(queue.take_changes(), SnapshotChanges::ALL);
+        queue.push(AppEvent::Monitor(MonitorEvent::PausedChanged {
+            paused: true,
+        }));
+        assert_eq!(queue.take_changes(), SnapshotChanges::MONITOR);
+        assert_eq!(queue.take_changes(), SnapshotChanges::default());
+        queue.push(AppEvent::Chat(ChatEvent::Cancelled));
+        queue.take(); // Draining events must not swallow snapshot invalidation.
+        assert_eq!(queue.take_changes(), SnapshotChanges::AI);
+    }
 
     #[test]
     fn the_queue_is_bounded_and_reports_what_it_dropped() {

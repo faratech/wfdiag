@@ -268,6 +268,7 @@ pub(crate) const MONITOR_HISTORY_SAMPLES: usize = 60;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct MonitorSample {
+    pub(crate) timestamp: i64,
     pub(crate) cpu: f64,
     pub(crate) memory: f64,
     pub(crate) storage: f64,
@@ -279,6 +280,7 @@ pub(crate) struct MonitorSample {
 impl MonitorSample {
     pub(crate) fn from_stats(stats: &SystemStats) -> Self {
         Self {
+            timestamp: stats.timestamp,
             cpu: f64::from(stats.cpu_utilization),
             memory: f64::from(stats.memory_utilization),
             storage: f64::from(stats.storage_used_percent),
@@ -305,6 +307,13 @@ pub(crate) struct MonitorHistory {
 }
 
 impl MonitorHistory {
+    pub(crate) fn time_labels(&self) -> [String; 5] {
+        wfdiag_native_projection::render::monitor_time_labels(
+            self.samples.front().map_or(0, |sample| sample.timestamp),
+            self.samples.back().map_or(0, |sample| sample.timestamp),
+        )
+    }
+
     pub(crate) fn push_stats(&mut self, stats: &SystemStats) {
         self.samples.push_back(MonitorSample::from_stats(stats));
         while self.samples.len() > MONITOR_HISTORY_SAMPLES {
@@ -336,6 +345,7 @@ impl MonitorHistory {
         let npu = [0.0; 5];
         let samples = (0..5)
             .map(|index| MonitorSample {
+                timestamp: index as i64 * 15,
                 cpu: cpu[index],
                 memory: memory[index],
                 storage: storage[index],

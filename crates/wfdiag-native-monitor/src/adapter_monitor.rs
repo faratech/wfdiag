@@ -92,6 +92,7 @@ struct AdapterState {
     enumerated_luids: Vec<LuidKey>,
     pending_luids: Vec<LuidKey>,
     last_topology_check: Option<Instant>,
+    last_discovery: Option<Instant>,
     last_snapshot: AdapterSnapshot,
 }
 
@@ -455,7 +456,15 @@ pub fn refresh() -> AdapterSnapshot {
         }
     }
 
-    if !state.detected || state.needs_reenumeration {
+    // A failed driver query must not trigger expensive adapter discovery on
+    // every one-second sample. Retain the last snapshot while backing off at
+    // the normal topology cadence; genuine topology checks remain periodic.
+    if !state.detected
+        || (state.needs_reenumeration
+            && state
+                .last_discovery
+                .is_none_or(|last| now.duration_since(last) >= TOPOLOGY_CHECK_INTERVAL))
+    {
         let old = std::mem::take(&mut state.adapters);
         let (mut adapters, luids, pending) = detect_adapters();
 
@@ -481,6 +490,7 @@ pub fn refresh() -> AdapterSnapshot {
         state.enumerated_luids = luids;
         state.pending_luids = pending;
         state.detected = true;
+        state.last_discovery = Some(now);
         state.needs_reenumeration = false;
         state.last_topology_check = Some(now);
         state.last_proc_sample = None;

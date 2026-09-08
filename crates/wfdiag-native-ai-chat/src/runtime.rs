@@ -741,7 +741,6 @@ impl<R: ProviderResolver, T: ChatTurnTools> WorkerState<R, T> {
         .await;
         match outcome {
             Ok(TurnStatus::Completed { .. }) => {
-                self.trim_completed_history();
                 if let Some(reason) = completed_scan_request_reason(
                     tools_enabled,
                     self.tools.scan_coverage(&evidence),
@@ -770,6 +769,10 @@ impl<R: ProviderResolver, T: ChatTurnTools> WorkerState<R, T> {
             }
         }
         emitter.reconcile_model_messages(&self.messages[turn_message_start..]);
+        // Reconcile before eviction: turn_message_start indexes the original
+        // history, and can be out of bounds after older turns are removed.
+        // Cancelled and failed turns can also retain partial assistant text.
+        self.trim_completed_history();
         emitter.flush_terminal();
     }
 
@@ -809,16 +812,7 @@ impl<R: ProviderResolver, T: ChatTurnTools> WorkerState<R, T> {
     /// bound in memory and every tool round re-scanned all of it
     /// (2026-09-03 audit).
     fn trim_completed_history(&mut self) {
-        if self.messages.len() <= crate::engine::MAX_SESSION_MESSAGES {
-            return;
-        }
-        // Resume the next request on a user turn: extend the cut past any
-        // assistant/tool records so history never starts mid-turn.
-        let mut cut = self.messages.len() - crate::engine::MAX_SESSION_MESSAGES;
-        while cut < self.messages.len() && self.messages[cut].role != ChatRole::User {
-            cut += 1;
-        }
-        self.messages.drain(..cut);
+        crate::engine::trim_completed_messages(&mut self.messages);
     }
 
     /// Drop the trailing user message when no assistant reply was recorded,

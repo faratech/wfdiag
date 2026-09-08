@@ -79,7 +79,8 @@ pub use ids::{Epoch, RequestId};
 pub use ports::{AppPorts, ElevationPort, EnvironmentPort, UpdateThrottlePort};
 pub use service::{AppService, AppStartError, ShutdownReport};
 pub use snapshot::{
-    AppSnapshot, HistorySnapshot, MonitorSnapshot, UpdateSnapshot, WorkerUnavailable,
+    AppSnapshot, HistorySnapshot, MonitorSnapshot, SnapshotChanges, UpdateSnapshot,
+    WorkerUnavailable,
 };
 pub use snapshot_ai::{
     ActionsSnapshot, AiSnapshot, AnalysisSnapshot, ChatSnapshot, CloudFallbackPrompt,

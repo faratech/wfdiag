@@ -134,7 +134,7 @@ pub(crate) struct ProcessRowInput {
     pub(crate) select_process: Callback<Option<ProcessIdentity>>,
 }
 
-/// #194: the live tick re-queries the same page twice a second, so most rows
+/// The live tick re-queries the same page every two seconds, so most rows
 /// arrive byte-identical. The screen keeps the previous `Arc` for those, which
 /// makes the row comparison a pointer test instead of thirteen field tests —
 /// and, more importantly, makes Reactor skip the realized row altogether.
@@ -269,8 +269,8 @@ pub(crate) fn processes_page(
     // #194: rows are keyed by process identity, not by slot index. A
     // CPU-sorted page reorders on every live tick; with positional keys that
     // moved every row's contents into a different slot and re-rendered the
-    // whole table twice a second. With identity keys Reactor moves the
-    // realized row, and an unchanged row compares equal and is skipped.
+    // whole table every two seconds. With a keyed panel Reactor moves the
+    // existing row, and an unchanged row compares equal and is skipped.
     let rows = display_rows
         .iter()
         .take(visible)
@@ -380,9 +380,14 @@ pub(crate) fn processes_page(
         View::empty()
     };
     let rows_view = Grid::new().children((
-        ItemsRepeater::new()
+        // Pages are bounded to 100 rows. Reactor 0.100 resets an
+        // ItemsRepeater's entire native collection when ordered keys change;
+        // CPU sorting therefore tears down every realized row on each tick.
+        // A keyed panel uses native MoveChild reconciliation instead, keeping
+        // row controls, focus, and the enclosing scroll viewer alive.
+        StackPanel::new()
             .horizontal_alignment(HorizontalAlignment::Stretch)
-            .items(rows),
+            .keyed_children(rows),
         empty_message,
     ));
 

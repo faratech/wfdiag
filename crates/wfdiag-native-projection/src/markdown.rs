@@ -166,14 +166,15 @@ fn fenced_segments(text: &str) -> Vec<FencedSegment<'_>> {
             text: &text[cursor..fence],
         });
         let mut after = fence + 3;
-        if let Some(newline) = text[after..].find('\n') {
-            let label = &text[after..after + newline];
-            if label
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            {
-                after += newline + 1;
-            }
+        // Stop at the first non-label byte. Searching the entire remaining
+        // document for a newline at every fence is quadratic for malformed
+        // model output such as repeated "```x" without a newline.
+        let label_len = text[after..]
+            .bytes()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            .count();
+        if text.as_bytes().get(after + label_len) == Some(&b'\n') {
+            after += label_len + 1;
         }
         cursor = after;
         code = !code;
@@ -489,6 +490,17 @@ fn alignment_of(cell: &str) -> MarkdownAlignment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_fences_without_newlines_preserve_literal_labels() {
+        let input = "```x".repeat(131_072);
+        let segments = fenced_segments(&input);
+        assert_eq!(segments.len(), 131_073);
+        assert!(segments.iter().skip(1).all(|segment| segment.text == "x"));
+        let labeled = fenced_segments("```rust_1\nbody```\nafter");
+        assert_eq!(labeled[1].text, "body");
+        assert_eq!(labeled[2].text, "after");
+    }
 
     fn text(value: &str) -> MarkdownInline {
         MarkdownInline::Text(value.to_string())

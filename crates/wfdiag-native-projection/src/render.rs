@@ -16,6 +16,22 @@ pub const MONITOR_GRAPH_WIDTH: f64 = 300.0;
 pub const MONITOR_GRAPH_HEIGHT: f64 = 72.0;
 pub const MONITOR_GRAPH_PATH_COUNT: usize = 2;
 
+/// Labels for the observed time span, including startup and a paused sampler.
+#[must_use]
+pub fn monitor_time_labels(first_timestamp: i64, last_timestamp: i64) -> [String; 5] {
+    let span = last_timestamp.saturating_sub(first_timestamp).max(0);
+    [4, 3, 2, 1, 0].map(|quarter| {
+        let seconds = span / 4 * quarter + span % 4 * quarter / 4;
+        if quarter == 0 {
+            "now".to_string()
+        } else if seconds == 0 {
+            String::new()
+        } else {
+            format!("−{seconds}s")
+        }
+    })
+}
+
 const MONITOR_GRAPH_BASELINE: f64 = 68.0;
 const MONITOR_GRAPH_LINE_HALF_WIDTH: f64 = 0.8;
 const MONITOR_GRAPH_SAMPLES: usize = 60;
@@ -41,11 +57,15 @@ fn monitor_graph_points(series: &[f64], max: f64) -> Vec<(f64, f64)> {
     };
     let start = series.len().saturating_sub(MONITOR_GRAPH_SAMPLES);
     let series = &series[start..];
-    if series.len() <= 1 {
+    if series.is_empty() {
         return vec![
             (0.0, MONITOR_GRAPH_BASELINE),
             (MONITOR_GRAPH_WIDTH, MONITOR_GRAPH_BASELINE),
         ];
+    }
+    if series.len() == 1 {
+        let y = graph_y(series[0]);
+        return vec![(0.0, y), (MONITOR_GRAPH_WIDTH, y)];
     }
 
     let step = MONITOR_GRAPH_WIDTH / (series.len() - 1) as f64;
@@ -105,6 +125,14 @@ pub fn monitor_graph_geometry(series: &[f64], max: f64) -> MonitorGraphGeometry 
         );
     }
     ribbon.push_str(" Z");
+
+    // PathIcon normalizes geometry to its own bounds. Both layers must have
+    // the same full viewport bounds or a flat 10% line expands to fill the
+    // icon and no longer aligns with its area. These closed, zero-area
+    // figures contribute bounds without painting any pixels.
+    let bounds = " M0 0 L0 72 Z M300 0 L300 72 Z";
+    area.push_str(bounds);
+    ribbon.push_str(bounds);
 
     MonitorGraphGeometry { area, ribbon }
 }
@@ -167,5 +195,28 @@ mod tests {
         assert!(!geometry.area.contains("inf"));
         assert!(!geometry.ribbon.contains("NaN"));
         assert!(!geometry.ribbon.contains("inf"));
+    }
+
+    #[test]
+    fn first_sample_and_flat_series_preserve_their_actual_level() {
+        for value in [0.0, 10.0, 50.0, 100.0] {
+            let single = monitor_graph_points(&[value], 100.0);
+            let flat = monitor_graph_points(&[value, value], 100.0);
+            assert_eq!(single, flat);
+            let geometry = monitor_graph_geometry(&[value, value], 100.0);
+            let bounds = " M0 0 L0 72 Z M300 0 L300 72 Z";
+            assert!(geometry.area.ends_with(bounds));
+            assert!(geometry.ribbon.ends_with(bounds));
+        }
+    }
+
+    #[test]
+    fn time_axis_uses_observed_timestamps_instead_of_claiming_sixty_seconds() {
+        assert_eq!(
+            monitor_time_labels(100, 120),
+            ["−20s", "−15s", "−10s", "−5s", "now"]
+        );
+        assert_eq!(monitor_time_labels(100, 100), ["", "", "", "", "now"]);
+        assert_eq!(monitor_time_labels(120, 100), ["", "", "", "", "now"]);
     }
 }

@@ -6,17 +6,27 @@ use crate::screens::monitor::view::{monitor_axis, monitor_graph};
 use crate::widgets::palette_colors::Palette;
 use windows_reactor::*;
 
+pub(crate) struct MetricChart<'a> {
+    pub(crate) series: &'a [f64],
+    pub(crate) max: f64,
+    pub(crate) time_labels: &'a [String; 5],
+}
+
 pub(crate) fn metric_card(
     palette: Palette,
     name: &str,
     hint: &str,
     value: &str,
     unit: &'static str,
-    series: &[f64],
-    max: f64,
+    chart: MetricChart<'_>,
 ) -> View {
+    let MetricChart {
+        series,
+        max,
+        time_labels,
+    } = chart;
     Border::new()
-        .height(156.0)
+        .height(216.0)
         .background(palette.card)
         .border_brush(palette.border)
         .border_thickness(1.0)
@@ -60,7 +70,13 @@ pub(crate) fn metric_card(
                             )),
                     )),
                 monitor_graph(palette, series, max),
-                monitor_axis(palette),
+                TextBlock::new()
+                    .text(format!("0–{max:.1} {unit}"))
+                    .margin(Thickness::new(0.0, 8.0, 0.0, 0.0))
+                    .font_size(10.0)
+                    .foreground(palette.muted)
+                    .horizontal_alignment(HorizontalAlignment::Right),
+                monitor_axis(palette, time_labels),
             )),
         )
 }

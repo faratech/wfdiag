@@ -46,8 +46,9 @@ $outputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 
 $version = Get-ReactorApplicationVersion -Executable $resolvedExecutable `
     -ProbeFile (Join-Path $env:TEMP "wfdiag-reactor-procparity-version.json")
-if ($version -ne "2.5.8") {
-    throw "Candidate version '$version' is not the pinned 2.5.8 oracle."
+$expectedVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot "..\version.json") -Raw | ConvertFrom-Json).version
+if ($version -ne $expectedVersion) {
+    throw "Candidate version '$version' does not match repository version '$expectedVersion'."
 }
 
 $failures = [System.Collections.Generic.List[string]]::new()
@@ -82,6 +83,8 @@ $session = Start-ReactorCandidate -Executable $resolvedExecutable -Seconds 8 `
         WFDIAG_REACTOR_PAGE = "processes"
         WFDIAG_REACTOR_WIDTH = "1440"
         WFDIAG_REACTOR_HEIGHT = "1000"
+        WFDIAG_REACTOR_SETTINGS_TEST_PATH = (Join-Path $outputDirectory "settings.json")
+        WFDIAG_NO_TRAY = "1"
     }
 
 function Invoke-Capture {
@@ -470,7 +473,9 @@ try {
     # Combined sheets against the Store baseline when it exists.
     $storeBaselinePath = Get-AbsolutePath -Path $StoreBaselinePng
     if (Test-Path -LiteralPath $storeBaselinePath) {
-        $storePath = (Resolve-Path -LiteralPath $storeBaselinePath).Path
+        # .Path may include the PowerShell provider prefix for WSL UNC paths;
+        # System.Drawing requires the native filesystem path.
+        $storePath = (Resolve-Path -LiteralPath $storeBaselinePath).ProviderPath
         foreach ($pair in @(
             @{ Reactor = $initial; Name = "processes-initial" },
             @{ Reactor = $settled; Name = "processes-refreshed" },

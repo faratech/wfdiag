@@ -200,6 +200,49 @@ fn a_reply_that_never_lands_becomes_a_typed_timeout() {
 }
 
 #[test]
+fn visibility_and_page_demand_preserve_the_user_pause() {
+    let mut harness = boot("monitor_demand");
+    // Visibility must not invent demand for a non-live page.
+    harness
+        .service
+        .dispatch(AppCommand::SetMonitorDemand { active: false });
+    harness
+        .service
+        .dispatch(AppCommand::WindowVisibility { visible: false });
+    harness
+        .service
+        .dispatch(AppCommand::WindowVisibility { visible: true });
+    assert!(harness.mocks.monitor.control().is_paused());
+    harness
+        .service
+        .dispatch(AppCommand::SetMonitorDemand { active: true });
+    assert!(!harness.mocks.monitor.control().is_paused());
+
+    // Neither navigation nor a minimize/restore may clear a user pause.
+    harness
+        .service
+        .dispatch(AppCommand::SetMonitorPaused { paused: true });
+    harness
+        .service
+        .dispatch(AppCommand::SetMonitorDemand { active: false });
+    harness
+        .service
+        .dispatch(AppCommand::WindowVisibility { visible: false });
+    harness
+        .service
+        .dispatch(AppCommand::SetMonitorDemand { active: true });
+    harness
+        .service
+        .dispatch(AppCommand::WindowVisibility { visible: true });
+    assert!(harness.mocks.monitor.control().is_paused());
+    harness
+        .service
+        .dispatch(AppCommand::SetMonitorPaused { paused: false });
+    assert!(!harness.mocks.monitor.control().is_paused());
+    harness.shutdown(Duration::from_secs(2));
+}
+
+#[test]
 fn live_monitoring_streams_samples_pages_and_connections() {
     use wfdiag_app::ports::monitor::{NetworkConnection, ProcessPage, ProcessRow};
 

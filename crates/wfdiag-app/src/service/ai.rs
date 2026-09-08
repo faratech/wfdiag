@@ -201,21 +201,6 @@ impl AppService {
             .clone_from(&self.workers.rehydrated_active_run);
     }
 
-    /// How much AI work is outstanding, for the reply watcher's tick.
-    pub(super) fn ai_outstanding(&self) -> usize {
-        usize::from(self.chat_pending.is_some())
-            + usize::from(self.report_pending.is_some())
-            + usize::from(self.analysis_pending.is_some())
-            + usize::from(self.prioritization_pending.is_some())
-            + usize::from(self.fix_plan_pending.is_some())
-            + usize::from(self.action_pending.is_some())
-            + usize::from(self.catalog_pending.is_some())
-            + usize::from(self.subscription_auth_pending.is_some())
-            + usize::from(self.subscription_install_pending.is_some())
-            + usize::from(self.pending_intent.is_some())
-            + usize::from(self.snapshot.actions.active_run.is_some())
-    }
-
     /// Version the committed evidence every derived projection is bound to.
     pub(super) fn advance_evidence_generation(&mut self) {
         if let Some(generation) = self.evidence_generations.issue() {
@@ -937,6 +922,8 @@ impl AppService {
                 detail: "a report is already being generated".to_string(),
             });
         }
+        self.workers
+            .ensure_optional("report", &self.ports, &self.settings_service, &self.queue);
         if self.workers.report.is_none() {
             return DispatchOutcome::Rejected(unavailable(
                 "report",
@@ -1177,6 +1164,8 @@ impl AppService {
             Ok(route) => route,
             Err(reason) => return DispatchOutcome::Rejected(reason),
         };
+        self.workers
+            .ensure_optional("analysis", &self.ports, &self.settings_service, &self.queue);
         let Some(runtime) = self.workers.analysis.as_ref() else {
             return DispatchOutcome::Rejected(unavailable(
                 "analysis",
@@ -1269,6 +1258,8 @@ impl AppService {
             Ok(route) => route,
             Err(reason) => return DispatchOutcome::Rejected(reason),
         };
+        self.workers
+            .ensure_optional("analysis", &self.ports, &self.settings_service, &self.queue);
         let Some(runtime) = self.workers.analysis.as_ref() else {
             return DispatchOutcome::Rejected(unavailable(
                 "analysis",
@@ -1333,6 +1324,8 @@ impl AppService {
             return DispatchOutcome::Rejected(reason);
         }
         let snapshot = self.action_snapshot();
+        self.workers
+            .ensure_optional("fix plan", &self.ports, &self.settings_service, &self.queue);
         let Some(runtime) = self.workers.fix_plan.as_ref() else {
             return DispatchOutcome::Rejected(unavailable(
                 "fix plan",
@@ -2069,6 +2062,12 @@ impl AppService {
         provider: AIProvider,
         draft: CatalogDraft,
     ) -> DispatchOutcome {
+        self.workers.ensure_optional(
+            "model discovery",
+            &self.ports,
+            &self.settings_service,
+            &self.queue,
+        );
         let Some(runtime) = self.workers.model_catalog.as_ref() else {
             return DispatchOutcome::Rejected(unavailable(
                 "model discovery",
@@ -2165,6 +2164,12 @@ impl AppService {
             SubscriptionAuthProvider::Codex => self.snapshot.settings.codex_cli_path.clone(),
             SubscriptionAuthProvider::ClaudeCode => self.snapshot.settings.claude_cli_path.clone(),
         };
+        self.workers.ensure_optional(
+            "subscription CLI",
+            &self.ports,
+            &self.settings_service,
+            &self.queue,
+        );
         let Some(runtime) = self.workers.subscription_auth.as_ref() else {
             return DispatchOutcome::Rejected(unavailable(
                 "subscription CLI",
@@ -2259,6 +2264,12 @@ impl AppService {
         }
         let provider = prompt.provider();
         let method = prompt.method();
+        self.workers.ensure_optional(
+            "subscription CLI",
+            &self.ports,
+            &self.settings_service,
+            &self.queue,
+        );
         let Some(runtime) = self.workers.subscription_install.as_ref() else {
             return DispatchOutcome::Rejected(unavailable(
                 "subscription CLI",
@@ -2318,7 +2329,7 @@ impl AppService {
     pub(super) fn drain_ai_events(&mut self) {
         let mut chat_delta = String::new();
         let mut report_delta = String::new();
-        for event in take_events(&mut self.workers.chat_events) {
+        for event in take_events(&mut self.workers.chat_events, &self.queue) {
             self.apply_chat_event(event, &mut chat_delta);
         }
         if !chat_delta.is_empty() {
@@ -2326,7 +2337,7 @@ impl AppService {
             self.queue
                 .push(AppEvent::Chat(ChatEvent::Delta { text: chat_delta }));
         }
-        for event in take_events(&mut self.workers.report_events) {
+        for event in take_events(&mut self.workers.report_events, &self.queue) {
             self.apply_report_event(event, &mut report_delta);
         }
         if !report_delta.is_empty() {
@@ -2339,28 +2350,28 @@ impl AppService {
             self.queue
                 .push(AppEvent::Report(ReportEvent::Delta { text: report_delta }));
         }
-        for event in take_events(&mut self.workers.analysis_events) {
+        for event in take_events(&mut self.workers.analysis_events, &self.queue) {
             self.apply_analysis_event(event);
         }
-        for event in take_events(&mut self.workers.fix_plan_events) {
+        for event in take_events(&mut self.workers.fix_plan_events, &self.queue) {
             self.apply_fix_plan_event(event);
         }
         // Run transitions before command replies: a run's terminal summary
         // arrives on both streams, and applying the reply first would let the
         // earlier `Running` transition resurrect a finished run.
-        for event in take_events(&mut self.workers.action_runs) {
+        for event in take_events(&mut self.workers.action_runs, &self.queue) {
             self.apply_action_run(event);
         }
-        for event in take_events(&mut self.workers.action_events) {
+        for event in take_events(&mut self.workers.action_events, &self.queue) {
             self.apply_action_event(event);
         }
-        for event in take_events(&mut self.workers.model_catalog_events) {
+        for event in take_events(&mut self.workers.model_catalog_events, &self.queue) {
             self.apply_catalog_event(event);
         }
-        for event in take_events(&mut self.workers.subscription_auth_events) {
+        for event in take_events(&mut self.workers.subscription_auth_events, &self.queue) {
             self.apply_subscription_auth_event(event);
         }
-        for event in take_events(&mut self.workers.subscription_install_events) {
+        for event in take_events(&mut self.workers.subscription_install_events, &self.queue) {
             self.apply_subscription_install_event(event);
         }
     }
@@ -3253,7 +3264,10 @@ fn subscription_key(provider: SubscriptionAuthProvider) -> String {
 
 /// Take up to [`AI_DRAIN_LIMIT`] events, dropping the receiver when the worker
 /// has stopped so a dead channel is not polled forever.
-fn take_events<T>(receiver: &mut Option<std::sync::mpsc::Receiver<T>>) -> Vec<T> {
+fn take_events<T>(
+    receiver: &mut Option<std::sync::mpsc::Receiver<T>>,
+    queue: &crate::event::EventQueue,
+) -> Vec<T> {
     let mut events = Vec::new();
     let mut disconnected = false;
     if let Some(channel) = receiver.as_ref() {
@@ -3270,6 +3284,9 @@ fn take_events<T>(receiver: &mut Option<std::sync::mpsc::Receiver<T>>) -> Vec<T>
     }
     if disconnected {
         *receiver = None;
+    }
+    if events.len() == AI_DRAIN_LIMIT {
+        queue.wake();
     }
     events
 }

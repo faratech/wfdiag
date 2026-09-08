@@ -23,6 +23,41 @@ use wfdiag_native_system::{ArchitectureSnapshot, SystemInfo};
 use wfdiag_native_update::{UpdateInfo, UpdateOutcome};
 use wfdiag_ui_core::SystemStats;
 
+/// Domains changed since the rendering host last acknowledged the snapshot.
+/// This is invalidation metadata only, never a worker staleness identifier.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SnapshotChanges(pub(crate) u16);
+
+impl SnapshotChanges {
+    /// The settings read model changed.
+    pub const SETTINGS: Self = Self(1 << 0);
+    /// The host read model changed.
+    pub const HOST: Self = Self(1 << 1);
+    /// The scan read model changed.
+    pub const SCAN: Self = Self(1 << 2);
+    /// The issues read model changed.
+    pub const ISSUES: Self = Self(1 << 3);
+    /// The history read model changed.
+    pub const HISTORY: Self = Self(1 << 4);
+    /// The monitor read model changed.
+    pub const MONITOR: Self = Self(1 << 5);
+    /// The providers read model changed.
+    pub const PROVIDERS: Self = Self(1 << 6);
+    /// The ai read model changed.
+    pub const AI: Self = Self(1 << 7);
+    /// The actions read model changed.
+    pub const ACTIONS: Self = Self(1 << 8);
+    /// The updates read model changed.
+    pub const UPDATES: Self = Self(1 << 9);
+    /// Every domain needs synchronization, including the initial frame.
+    pub const ALL: Self = Self((1 << 10) - 1);
+    /// Whether the supplied domain needs synchronization.
+    #[must_use]
+    pub const fn contains(self, domain: Self) -> bool {
+        self.0 & domain.0 != 0
+    }
+}
+
 /// A worker that could not start, or has stopped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerUnavailable {
@@ -56,6 +91,8 @@ pub struct MonitorSnapshot {
     pub available: bool,
     /// Whether sampling is paused.
     pub paused: bool,
+    /// Explicit user pause, independent of host visibility and page demand.
+    pub user_paused: bool,
     /// The newest telemetry sample.
     pub latest: Option<SystemStats>,
     /// The most recent monitoring failure.

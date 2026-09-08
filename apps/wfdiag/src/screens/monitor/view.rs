@@ -8,9 +8,8 @@ use crate::app::screen::ShellEnv;
 use crate::app::shell_msg::ShellMsg;
 use crate::app::state::{MonitorHistory, MonitorMetric, Page};
 use crate::screens::monitor::state::{MonitorMsg, MonitorScreen};
-use crate::widgets::cards::metric_card;
+use crate::widgets::cards::{MetricChart, metric_card};
 use crate::widgets::chrome::{fa_icon_label, page_header};
-use crate::widgets::icons;
 use crate::widgets::icons::FaIcon;
 use crate::widgets::palette_colors::Palette;
 use wfdiag_app::ports::monitor::NetworkConnection;
@@ -40,7 +39,7 @@ pub(crate) fn monitor_graph(palette: Palette, series: &[f64], max: f64) -> View 
     ];
 
     Viewbox::new()
-        .height(62.0)
+        .height(100.0)
         .margin(Thickness::new(0.0, 12.0, 0.0, 0.0))
         .stretch(Stretch::Fill)
         .slot(
@@ -65,14 +64,25 @@ pub(crate) fn monitor_graph(palette: Palette, series: &[f64], max: f64) -> View 
                     Canvas::new()
                         .width(MONITOR_GRAPH_WIDTH)
                         .height(MONITOR_GRAPH_HEIGHT)
-                        .children(graph_paths),
+                        .children((
+                            Canvas::new().children([8.0, 38.0, 68.0].map(|y| {
+                                Line::new()
+                                    .x1(0.0)
+                                    .x2(MONITOR_GRAPH_WIDTH)
+                                    .y1(y)
+                                    .y2(y)
+                                    .stroke(palette.border)
+                                    .stroke_thickness(0.6)
+                            })),
+                            Canvas::new().children(graph_paths),
+                        )),
                 ),
         )
 }
 
 pub(crate) fn monitor_axis_label(
     palette: Palette,
-    label: &'static str,
+    label: &str,
     column: i32,
     alignment: HorizontalAlignment,
 ) -> View {
@@ -86,7 +96,7 @@ pub(crate) fn monitor_axis_label(
         .into()
 }
 
-pub(crate) fn monitor_axis(palette: Palette) -> View {
+pub(crate) fn monitor_axis(palette: Palette, labels: &[String; 5]) -> View {
     Grid::new()
         .margin(Thickness::new(0.0, 5.0, 0.0, 0.0))
         .columns([
@@ -101,16 +111,15 @@ pub(crate) fn monitor_axis(palette: Palette) -> View {
             GridLength::Auto,
         ])
         .children((
-            monitor_axis_label(palette, "-60s", 0, HorizontalAlignment::Left),
-            monitor_axis_label(palette, "-45", 2, HorizontalAlignment::Center),
-            monitor_axis_label(palette, "-30", 4, HorizontalAlignment::Center),
-            monitor_axis_label(palette, "-15", 6, HorizontalAlignment::Center),
-            monitor_axis_label(palette, "now", 8, HorizontalAlignment::Right),
+            monitor_axis_label(palette, &labels[0], 0, HorizontalAlignment::Left),
+            monitor_axis_label(palette, &labels[1], 2, HorizontalAlignment::Center),
+            monitor_axis_label(palette, &labels[2], 4, HorizontalAlignment::Center),
+            monitor_axis_label(palette, &labels[3], 6, HorizontalAlignment::Center),
+            monitor_axis_label(palette, &labels[4], 8, HorizontalAlignment::Right),
         ))
 }
 
 pub(crate) fn monitor_action_button(
-    palette: Palette,
     icon: FaIcon,
     label: &'static str,
     width: f64,
@@ -119,31 +128,9 @@ pub(crate) fn monitor_action_button(
     Button::new()
         .width(width)
         .height(32.0)
-        .resource_overrides(
-            ResourceOverrides::new()
-                .set("ButtonBackground", palette.card)
-                .set("ButtonBackgroundPointerOver", palette.card)
-                .set("ButtonBackgroundPressed", palette.active)
-                .set("ButtonBorderBrush", palette.border)
-                .set("ButtonBorderBrushPointerOver", palette.border)
-                .set("ButtonBorderThemeThickness", Thickness::uniform(1.0))
-                .set("ButtonPadding", Thickness::xy(15.0, 0.0))
-                .set("ControlCornerRadius", CornerRadius::uniform(7.0)),
-        )
         .on_click(action)
         .automation_name(label)
-        .content(
-            StackPanel::new()
-                .orientation(Orientation::Horizontal)
-                .spacing(8.0)
-                .children((
-                    icons::path(icon).width(12.0).height(12.0),
-                    TextBlock::new()
-                        .text(label)
-                        .font_size(13.0)
-                        .font_weight(FontWeight::SEMI_BOLD),
-                )),
-        )
+        .content(fa_icon_label(icon, label))
 }
 
 pub(crate) fn monitor_status_pill(palette: Palette, paused: bool) -> View {
@@ -218,13 +205,12 @@ pub(crate) fn monitor_page(
         .margin(Thickness::new(0.0, 1.0, 0.0, -1.0))
         .children((
             monitor_action_button(
-                palette,
                 if paused { FaIcon::Play } else { FaIcon::Pause },
                 if paused { "Resume" } else { "Pause" },
                 88.0,
                 toggle,
             ),
-            monitor_action_button(palette, FaIcon::Refresh, "Refresh", 96.0, refresh.clone()),
+            monitor_action_button(FaIcon::Refresh, "Refresh", 96.0, refresh.clone()),
         ));
     let (
         cpu_hint,
@@ -293,7 +279,11 @@ pub(crate) fn monitor_page(
             format!("{:.1}", stats.memory_utilization),
             "Provisioned storage capacity used".to_string(),
             format!("{:.1}", stats.storage_used_percent),
-            "Up + down throughput".to_string(),
+            format!(
+                "↑ {:.2} · ↓ {:.2} MB/s",
+                stats.network_upload_kb / 1024.0,
+                stats.network_download_kb / 1024.0
+            ),
             format!("{network_mb:.2}"),
             gpu_hint,
             if stats.gpu_available {
@@ -332,6 +322,7 @@ pub(crate) fn monitor_page(
     };
 
     let cpu_series = history.series(MonitorMetric::Cpu);
+    let time_labels = history.time_labels();
     let memory_series = history.series(MonitorMetric::Memory);
     let storage_series = history.series(MonitorMetric::Storage);
     let network_series = history.series(MonitorMetric::Network);
@@ -353,8 +344,11 @@ pub(crate) fn monitor_page(
                 &cpu_hint,
                 &cpu_value,
                 "%",
-                &cpu_series,
-                100.0,
+                MetricChart {
+                    series: &cpu_series,
+                    max: 100.0,
+                    time_labels: &time_labels,
+                },
             ),
         ),
         (
@@ -365,8 +359,11 @@ pub(crate) fn monitor_page(
                 &memory_hint,
                 &memory_value,
                 "%",
-                &memory_series,
-                100.0,
+                MetricChart {
+                    series: &memory_series,
+                    max: 100.0,
+                    time_labels: &time_labels,
+                },
             ),
         ),
         (
@@ -377,8 +374,11 @@ pub(crate) fn monitor_page(
                 &storage_hint,
                 &storage_value,
                 "%",
-                &storage_series,
-                100.0,
+                MetricChart {
+                    series: &storage_series,
+                    max: 100.0,
+                    time_labels: &time_labels,
+                },
             ),
         ),
         (
@@ -389,8 +389,11 @@ pub(crate) fn monitor_page(
                 &network_hint,
                 &network_value,
                 "MB/s",
-                &network_series,
-                network_max,
+                MetricChart {
+                    series: &network_series,
+                    max: network_max,
+                    time_labels: &time_labels,
+                },
             ),
         ),
     ];
@@ -403,8 +406,11 @@ pub(crate) fn monitor_page(
                 &gpu_hint,
                 &gpu_value,
                 "%",
-                &gpu_series,
-                100.0,
+                MetricChart {
+                    series: &gpu_series,
+                    max: 100.0,
+                    time_labels: &time_labels,
+                },
             ),
         ));
     }
@@ -417,8 +423,11 @@ pub(crate) fn monitor_page(
                 &npu_hint,
                 &npu_value,
                 "%",
-                &npu_series,
-                100.0,
+                MetricChart {
+                    series: &npu_series,
+                    max: 100.0,
+                    time_labels: &time_labels,
+                },
             ),
         ));
     }

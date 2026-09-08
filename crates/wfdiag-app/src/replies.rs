@@ -8,14 +8,18 @@
 //! [`PendingReplies`] instead keeps every outstanding reply in one list that
 //! [`crate::AppService::drain`] polls, and gives each a deadline: a reply that
 //! never arrives is reported as a typed timeout instead of hanging.
-//! [`ReplyWatcher`] is one thread that wakes the host every 50 ms *only while*
-//! something is outstanding, and blocks on a condition variable otherwise.
+//! Oneshots register a completion waker. [`ReplyWatcher`] sleeps until the
+//! nearest deadline, polling only legacy channels without wake support, and
+//! blocks on a condition variable when neither deadlines nor legacy work exist.
 
 use crate::command::WorkerKind;
 use crate::event::EventQueue;
 use crate::ids::RequestId;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::task::{Context, Poll, Waker};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -42,7 +46,7 @@ trait PendingReply<M> {
     fn worker(&self) -> WorkerKind;
     fn request(&self) -> RequestId;
     fn deadline(&self) -> Instant;
-    fn poll(&mut self) -> Option<M>;
+    fn poll(&mut self, context: &mut Context<'_>) -> Option<M>;
     fn expire(&mut self) -> Option<M>;
 }
 
@@ -71,11 +75,11 @@ where
         self.deadline
     }
 
-    fn poll(&mut self) -> Option<M> {
-        match self.receiver.try_recv() {
-            Ok(value) => self.map.take().map(|map| map(Ok(value))),
-            Err(oneshot::error::TryRecvError::Empty) => None,
-            Err(oneshot::error::TryRecvError::Closed) => self
+    fn poll(&mut self, context: &mut Context<'_>) -> Option<M> {
+        match Pin::new(&mut self.receiver).poll(context) {
+            Poll::Ready(Ok(value)) => self.map.take().map(|map| map(Ok(value))),
+            Poll::Pending => None,
+            Poll::Ready(Err(_)) => self
                 .map
                 .take()
                 .map(|map| map(Err(ReplyFailure::WorkerStopped))),
@@ -108,6 +112,7 @@ pub(crate) struct ReplyBatch<M> {
 pub(crate) struct PendingReplies<M> {
     entries: Vec<Box<dyn PendingReply<M>>>,
     timeout: Duration,
+    waker: Option<Waker>,
 }
 
 impl<M> std::fmt::Debug for PendingReplies<M> {
@@ -116,6 +121,7 @@ impl<M> std::fmt::Debug for PendingReplies<M> {
             .debug_struct("PendingReplies")
             .field("outstanding", &self.entries.len())
             .field("timeout", &self.timeout)
+            .field("waker", &self.waker)
             .finish()
     }
 }
@@ -125,7 +131,17 @@ impl<M> PendingReplies<M> {
         Self {
             entries: Vec::new(),
             timeout,
+            waker: None,
         }
+    }
+
+    pub(crate) fn with_waker(mut self, waker: Waker) -> Self {
+        self.waker = Some(waker);
+        self
+    }
+
+    pub(crate) fn next_deadline(&self) -> Option<Instant> {
+        self.entries.iter().map(|entry| entry.deadline()).min()
     }
 
     /// Register one reply. `map` turns the answer — or the failure — into the
@@ -149,8 +165,13 @@ impl<M> PendingReplies<M> {
             map: Some(map),
             marker: std::marker::PhantomData,
         }));
+        // Prime the Future on the next host drain to register its waker.
+        if let Some(waker) = &self.waker {
+            waker.wake_by_ref();
+        }
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
@@ -160,8 +181,9 @@ impl<M> PendingReplies<M> {
         let mut messages = Vec::new();
         let mut timeouts = Vec::new();
         let mut retained: Vec<Box<dyn PendingReply<M>>> = Vec::with_capacity(self.entries.len());
+        let mut context = Context::from_waker(self.waker.as_ref().unwrap_or(Waker::noop()));
         for mut entry in self.entries.drain(..) {
-            if let Some(message) = entry.poll() {
+            if let Some(message) = entry.poll(&mut context) {
                 messages.push(message);
                 continue;
             }
@@ -193,6 +215,7 @@ impl<M> PendingReplies<M> {
 #[derive(Debug, Default)]
 struct WatchState {
     pending: usize,
+    deadline: Option<Instant>,
     stop: bool,
 }
 
@@ -211,10 +234,16 @@ impl WorkSignal {
     }
 
     /// Publish how many units of work are outstanding.
+    #[cfg(test)]
     pub(crate) fn set_pending(&self, pending: usize) {
+        self.set_schedule(pending, None);
+    }
+
+    pub(crate) fn set_schedule(&self, pending: usize, deadline: Option<Instant>) {
         let mut state = self.lock();
-        if state.pending != pending {
+        if state.pending != pending || state.deadline != deadline {
             state.pending = pending;
+            state.deadline = deadline;
             drop(state);
             self.changed.notify_all();
         }
@@ -258,7 +287,7 @@ impl ReplyWatcher {
             .spawn(move || {
                 loop {
                     let mut state = worker_signal.lock();
-                    while !state.stop && state.pending == 0 {
+                    while !state.stop && state.pending == 0 && state.deadline.is_none() {
                         state = worker_signal
                             .changed
                             .wait(state)
@@ -267,16 +296,32 @@ impl ReplyWatcher {
                     if state.stop {
                         break;
                     }
-                    let (state, _timeout) = worker_signal
+                    let delay = state
+                        .deadline
+                        .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+                    let delay = if state.pending > 0 {
+                        delay.map_or(interval, |delay| delay.min(interval))
+                    } else {
+                        delay.unwrap_or(interval)
+                    };
+                    let (mut state, timeout) = worker_signal
                         .changed
-                        .wait_timeout(state, interval)
+                        .wait_timeout(state, delay)
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let stop = state.stop;
+                    let deadline_expired = state
+                        .deadline
+                        .is_some_and(|deadline| deadline <= Instant::now());
+                    if deadline_expired {
+                        state.deadline = None;
+                    }
                     drop(state);
                     if stop {
                         break;
                     }
-                    worker_queue.wake();
+                    if timeout.timed_out() || deadline_expired {
+                        worker_queue.wake();
+                    }
                 }
                 worker_running.store(false, Ordering::Release);
                 let _ = finished_tx.send(());
@@ -340,6 +385,54 @@ mod tests {
     use crate::ids::RequestId;
     use std::time::{Duration, Instant};
     use tokio::sync::oneshot;
+
+    #[test]
+    fn completion_wakes_the_host_without_a_polling_tick() {
+        let queue = EventQueue::new(8);
+        let events = crate::AppEventReceiver::new(std::sync::Arc::clone(&queue));
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+        events.set_wake_handler(wfdiag_ui_core::UiWakeHandler::new(move || {
+            let _ = wake_tx.send(());
+        }));
+        let mut replies =
+            PendingReplies::new(Duration::from_secs(30)).with_waker(std::task::Waker::from(queue));
+        let (sender, receiver) = oneshot::channel();
+        replies.register(
+            WorkerKind::System,
+            RequestId::from_raw(1),
+            receiver,
+            map_message,
+        );
+        wake_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("registration primes polling");
+        assert!(replies.poll(Instant::now()).messages.is_empty());
+        sender.send(7).unwrap();
+        wake_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("completion wakes directly");
+        assert_eq!(replies.poll(Instant::now()).messages, ["ok:7"]);
+    }
+
+    #[test]
+    fn a_deadline_only_wait_does_not_tick_and_wakes_once_at_expiry() {
+        let queue = EventQueue::new(8);
+        let events = crate::AppEventReceiver::new(std::sync::Arc::clone(&queue));
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+        events.set_wake_handler(wfdiag_ui_core::UiWakeHandler::new(move || {
+            let _ = wake_tx.send(());
+        }));
+        let mut watcher = ReplyWatcher::start(&queue, Duration::from_millis(5));
+        watcher
+            .signal()
+            .set_schedule(0, Some(Instant::now() + Duration::from_millis(100)));
+        assert!(wake_rx.recv_timeout(Duration::from_millis(25)).is_err());
+        wake_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("deadline wakes");
+        assert!(wake_rx.recv_timeout(Duration::from_millis(25)).is_err());
+        assert!(watcher.stop(Duration::from_secs(1)));
+    }
 
     fn map_message(result: Result<u8, ReplyFailure>) -> String {
         match result {

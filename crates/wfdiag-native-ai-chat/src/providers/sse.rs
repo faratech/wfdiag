@@ -5,6 +5,19 @@
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 
+/// Bound raw transport accumulation, including partial SSE frames, tool
+/// arguments and provider replay/thinking blocks, before JSON assembly.
+pub(crate) const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+pub(crate) fn charge_response_bytes(used: &mut usize, additional: usize) -> Result<(), String> {
+    *used = used.saturating_add(additional);
+    if *used > MAX_RESPONSE_BYTES {
+        Err("AI response exceeded the local memory budget".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 /// Drive an SSE response, invoking `on_event(event_name, data)` per event.
 /// Stops cleanly when the stream ends or `on_event` returns `false`
 /// (e.g. a terminal event was seen). Transport errors are returned.
@@ -25,7 +38,13 @@ pub(crate) async fn for_each_event<F>(
 where
     F: FnMut(&str, &str) -> Result<bool, String>,
 {
-    let mut stream = response.bytes_stream().eventsource();
+    let mut received = 0;
+    let bytes = response.bytes_stream().map(move |chunk| {
+        let chunk = chunk.map_err(|error| error.to_string())?;
+        charge_response_bytes(&mut received, chunk.len())?;
+        Ok::<_, String>(chunk)
+    });
+    let mut stream = bytes.eventsource();
     while let Some(event) = stream.next().await {
         let event = event.map_err(|e| format!("stream error: {e}"))?;
         if !on_event(&event.event, &event.data)? {
@@ -34,4 +53,16 @@ where
         tokio::task::yield_now().await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn response_budget_rejects_oversized_chunks_and_accumulation() {
+        let mut used = 0;
+        assert!(charge_response_bytes(&mut used, MAX_RESPONSE_BYTES).is_ok());
+        assert!(charge_response_bytes(&mut used, 1).is_err());
+        assert!(charge_response_bytes(&mut used, usize::MAX).is_err());
+    }
 }

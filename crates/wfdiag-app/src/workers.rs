@@ -316,39 +316,9 @@ impl AppWorkers {
                 (None, None)
             }
         };
-        let (report, report_events) = match start_report_runtime(
-            Arc::clone(&ports.ai.report_resolvers),
-            ports.ai.cache.clone(),
-            Arc::clone(&wake),
-        ) {
-            Ok(session) => (Some(session.runtime), Some(session.events)),
-            Err(error) => {
-                ai_errors.push(("report", error));
-                (None, None)
-            }
-        };
-        let (analysis, analysis_events) = match ports.ai.analysis.start(
-            settings_service.clone(),
-            ports.ai.cache.clone(),
-            Arc::clone(&wake),
-        ) {
-            Ok(session) => (Some(session.handle), Some(session.events)),
-            Err(error) => {
-                ai_errors.push(("analysis", error));
-                (None, None)
-            }
-        };
-        let (fix_plan, fix_plan_events) = match ports
-            .ai
-            .fix_plan
-            .start(settings_service.clone(), Arc::clone(&wake))
-        {
-            Ok(session) => (Some(session.handle), Some(session.events)),
-            Err(error) => {
-                ai_errors.push(("fix plan", error));
-                (None, None)
-            }
-        };
+        let (report, report_events) = (None, None);
+        let (analysis, analysis_events) = (None, None);
+        let (fix_plan, fix_plan_events) = (None, None);
         let (
             actions,
             action_events,
@@ -370,34 +340,13 @@ impl AppWorkers {
                 (None, None, None, Vec::new(), Vec::new(), None)
             }
         };
-        let (model_catalog, model_catalog_events) = match ports
-            .ai
-            .model_catalog
-            .start(settings_service.clone(), Arc::clone(&wake))
-        {
-            Ok(session) => (Some(session.handle), Some(session.events)),
-            Err(error) => {
-                ai_errors.push(("model discovery", error));
-                (None, None)
-            }
-        };
+        let (model_catalog, model_catalog_events) = (None, None);
         let (
             subscription_auth,
             subscription_auth_events,
             subscription_install,
             subscription_install_events,
-        ) = match ports.ai.subscriptions.start(settings_service.clone(), wake) {
-            Ok(session) => (
-                Some(session.auth),
-                Some(session.auth_events),
-                Some(session.install),
-                Some(session.install_events),
-            ),
-            Err(error) => {
-                ai_errors.push(("subscription CLI", error));
-                (None, None, None, None)
-            }
-        };
+        ) = (None, None, None, None);
 
         (
             Self {
@@ -445,6 +394,109 @@ impl AppWorkers {
         )
     }
 
+    /// Allocate an optional AI domain on first use, retaining it thereafter.
+    /// Failed starts are remembered and use the existing unavailable path.
+    pub(crate) fn ensure_optional(
+        &mut self,
+        domain: &str,
+        ports: &AppPorts,
+        settings_service: &SettingsService,
+        queue: &Arc<EventQueue>,
+    ) {
+        if self.ai_error(domain).is_some() {
+            return;
+        }
+        let wake_queue = Arc::clone(queue);
+        let wake: crate::ports::ai::AiWake = Arc::new(move || wake_queue.wake());
+        match domain {
+            "report" if self.report.is_none() => {
+                let (report, report_events) = match start_report_runtime(
+                    Arc::clone(&ports.ai.report_resolvers),
+                    ports.ai.cache.clone(),
+                    Arc::clone(&wake),
+                ) {
+                    Ok(session) => (Some(session.runtime), Some(session.events)),
+                    Err(error) => {
+                        self.ai_errors.push(("report", error));
+                        (None, None)
+                    }
+                };
+                self.report = report;
+                self.report_events = report_events;
+            }
+            "analysis" if self.analysis.is_none() => {
+                let (analysis, analysis_events) = match ports.ai.analysis.start(
+                    settings_service.clone(),
+                    ports.ai.cache.clone(),
+                    Arc::clone(&wake),
+                ) {
+                    Ok(session) => (Some(session.handle), Some(session.events)),
+                    Err(error) => {
+                        self.ai_errors.push(("analysis", error));
+                        (None, None)
+                    }
+                };
+                self.analysis = analysis;
+                self.analysis_events = analysis_events;
+            }
+            "fix plan" if self.fix_plan.is_none() => {
+                let (fix_plan, fix_plan_events) = match ports
+                    .ai
+                    .fix_plan
+                    .start(settings_service.clone(), Arc::clone(&wake))
+                {
+                    Ok(session) => (Some(session.handle), Some(session.events)),
+                    Err(error) => {
+                        self.ai_errors.push(("fix plan", error));
+                        (None, None)
+                    }
+                };
+                self.fix_plan = fix_plan;
+                self.fix_plan_events = fix_plan_events;
+            }
+            "model discovery" if self.model_catalog.is_none() => {
+                let (model_catalog, model_catalog_events) = match ports
+                    .ai
+                    .model_catalog
+                    .start(settings_service.clone(), Arc::clone(&wake))
+                {
+                    Ok(session) => (Some(session.handle), Some(session.events)),
+                    Err(error) => {
+                        self.ai_errors.push(("model discovery", error));
+                        (None, None)
+                    }
+                };
+                self.model_catalog = model_catalog;
+                self.model_catalog_events = model_catalog_events;
+            }
+            "subscription CLI"
+                if self.subscription_auth.is_none() && self.subscription_install.is_none() =>
+            {
+                let (
+                    subscription_auth,
+                    subscription_auth_events,
+                    subscription_install,
+                    subscription_install_events,
+                ) = match ports.ai.subscriptions.start(settings_service.clone(), wake) {
+                    Ok(session) => (
+                        Some(session.auth),
+                        Some(session.auth_events),
+                        Some(session.install),
+                        Some(session.install_events),
+                    ),
+                    Err(error) => {
+                        self.ai_errors.push(("subscription CLI", error));
+                        (None, None, None, None)
+                    }
+                };
+                self.subscription_auth = subscription_auth;
+                self.subscription_auth_events = subscription_auth_events;
+                self.subscription_install = subscription_install;
+                self.subscription_install_events = subscription_install_events;
+            }
+            _ => {}
+        }
+    }
     /// The recorded failure for one AI domain, if any.
     pub(crate) fn ai_error(&self, domain: &str) -> Option<&str> {
         self.ai_errors

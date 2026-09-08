@@ -386,9 +386,11 @@ pub async fn chat_stream(
     let mut actual_models = Vec::new();
     // index -> (id, name, accumulated argument JSON fragments)
     let mut pending: BTreeMap<u32, (Option<String>, String, String)> = BTreeMap::new();
+    let mut response_bytes = 0;
 
     while let Some(item) = stream.next().await {
         let chunk = item.map_err(|e| friendly_error(provider, cfg, e))?;
+        super::sse::charge_response_bytes(&mut response_bytes, chunk.model.len())?;
         if !chunk.model.trim().is_empty()
             && !actual_models.iter().any(|model| model == &chunk.model)
         {
@@ -400,6 +402,7 @@ pub async fn chat_stream(
         if let Some(content) = choice.delta.content
             && !content.is_empty()
         {
+            super::sse::charge_response_bytes(&mut response_bytes, content.len())?;
             text.push_str(&content);
             // try_send keeps SSE consumption non-blocking like the other
             // transports: a blocking send would park this future forever if
@@ -412,19 +415,26 @@ pub async fn chat_stream(
             // Accumulate only: the engine re-emits refusals as a single
             // "The provider refused this request: …" message, so streaming
             // these deltas too would show the text twice.
+            super::sse::charge_response_bytes(&mut response_bytes, delta.len())?;
             refusal.push_str(&delta);
         }
         if let Some(fragments) = choice.delta.tool_calls {
             for fragment in fragments {
+                // Charge even empty/new records so fabricated indexes cannot
+                // build an unbounded map without emitting argument text.
+                super::sse::charge_response_bytes(&mut response_bytes, 64)?;
                 let entry = pending.entry(fragment.index).or_default();
                 if let Some(id) = fragment.id {
+                    super::sse::charge_response_bytes(&mut response_bytes, id.len())?;
                     entry.0 = Some(id);
                 }
                 if let Some(function) = fragment.function {
                     if let Some(name) = function.name {
+                        super::sse::charge_response_bytes(&mut response_bytes, name.len())?;
                         entry.1.push_str(&name);
                     }
                     if let Some(arguments) = function.arguments {
+                        super::sse::charge_response_bytes(&mut response_bytes, arguments.len())?;
                         entry.2.push_str(&arguments);
                     }
                 }
