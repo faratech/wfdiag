@@ -1,0 +1,29 @@
+name: CodeQL
+
+on:
+  schedule:
+    - cron: '13 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze CodeQL languages
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: actions,javascript-typescript,python,rust
+          build-mode: none
+      - uses: github/codeql-action/analyze@v3

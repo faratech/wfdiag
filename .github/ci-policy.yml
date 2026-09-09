@@ -1,0 +1,7 @@
+version: 1
+workflows:
+  .github/workflows/ci.yml: fast
+  .github/workflows/codeql.yml: deep
+  .github/workflows/reactor-validation.yml: deep
+  .github/workflows/claude.yml: event
+  .github/workflows/claude-code-review.yml: event

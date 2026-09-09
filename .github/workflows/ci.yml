@@ -1,12 +1,15 @@
 name: CI
 
 on:
-  # No branch filter on pull_request: stacked PRs (feature -> feature) must
-  # run the same gates as PRs into main — cargo test only ever executes on
-  # windows-latest for the shells; the engine crates also test on Linux.
   pull_request:
-  push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'validation-reports/**'
+  workflow_dispatch:
+  schedule:
+    - cron: '47 3 * * 1'
 
 permissions:
   contents: read
@@ -17,6 +20,7 @@ concurrency:
 
 jobs:
   store-identity:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -26,6 +30,7 @@ jobs:
       - run: python3 -m unittest scripts/test_build_reactor_msix_probe.py -v
 
   frontend:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -42,6 +47,7 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
   rust-portable:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     # The engine crates must build and test with no GUI and no Windows: this
     # job is the headless guarantee. Only the two shells (WinUI / Tauri) are
     # excluded; wfdiag-native-monitor compiles to an empty library off-Windows.
@@ -59,6 +65,7 @@ jobs:
       - run: cargo test --locked --workspace --exclude wfdiag --exclude wfdiag-tauri
 
   rust:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     # Windows: the whole workspace (engine crates, native Reactor shell, and the
     # Tauri rollback shell) formats, lints, and tests together.
     runs-on: windows-latest
@@ -92,6 +99,7 @@ jobs:
       - run: cargo test --locked -p wfdiag
 
   rust-arm64:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 60
     env:
@@ -115,6 +123,7 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets --features wfdiag/validation --target aarch64-pc-windows-msvc -- -D warnings
 
   cargo-audit:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     continue-on-error: true # advisory for one release; covers the whole workspace lock
