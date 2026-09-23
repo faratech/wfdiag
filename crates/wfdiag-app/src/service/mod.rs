@@ -53,7 +53,7 @@ use crate::ids::{Generation, Generations, RequestId, RequestIds};
 use crate::ports::AppPorts;
 use crate::ports::monitor::ProcessDetail;
 use crate::ports::monitor::{NetworkConnection, ProcessQuery, ProcessQueryOutcome};
-use crate::replies::{PendingReplies, ReplyFailure, ReplyWatcher};
+use crate::replies::{PendingReplies, ReplyFailure, ReplyTimeout, ReplyWatcher};
 use crate::snapshot::AppSnapshot;
 use crate::workers::{AppWorkers, WorkerStopRecord};
 use ai::{CatalogDraft, PendingAnalysis, PendingSubscriptionAuth, PendingSubscriptionInstall};
@@ -2774,6 +2774,7 @@ impl AppService {
     fn poll_replies(&mut self) {
         let batch = self.replies.poll(Instant::now());
         for timeout in batch.timeouts {
+            self.release_timed_out_request(&timeout);
             self.queue.push(AppEvent::ReplyTimedOut {
                 worker: timeout.worker,
                 request: timeout.request,
@@ -2781,6 +2782,26 @@ impl AppService {
         }
         for message in batch.messages {
             self.apply_internal(message);
+        }
+    }
+
+    /// A reply that outlives the facade deadline releases the request-side
+    /// in-flight state it holds. The late answer is discarded by the
+    /// request-id guard either way, so without this the domain stays
+    /// "already running" forever and every later command of that kind is
+    /// rejected or parked until restart.
+    fn release_timed_out_request(&mut self, timeout: &ReplyTimeout) {
+        let expired = |held: &Option<RequestId>| *held == Some(timeout.request);
+        if expired(&self.provider_status_request) {
+            self.provider_status_request = None;
+            self.snapshot.provider_loading = false;
+        }
+        if expired(&self.subscription_accounts_request) {
+            self.subscription_accounts_request = None;
+        }
+        if expired(&self.update_request) {
+            self.update_request = None;
+            self.snapshot.update.in_flight = false;
         }
     }
 
@@ -2896,6 +2917,59 @@ mod performance_tests {
             report,
             std::ptr::from_ref(service.workers.report.as_ref().unwrap())
         );
+        let _ = service.shutdown(Duration::from_secs(2));
+    }
+}
+
+#[cfg(test)]
+mod reply_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn a_timed_out_reply_releases_the_in_flight_state_it_holds() {
+        let (mut service, _) = AppService::start(AppConfig::default(), AppPorts::mock()).unwrap();
+
+        let provider = service.requests.issue().unwrap();
+        service.provider_status_request = Some(provider);
+        service.snapshot.provider_loading = true;
+        let accounts = service.requests.issue().unwrap();
+        service.subscription_accounts_request = Some(accounts);
+        let update = service.requests.issue().unwrap();
+        service.update_request = Some(update);
+        service.snapshot.update.in_flight = true;
+
+        // A foreign request id releases nothing.
+        let stranger = service.requests.issue().unwrap();
+        service.release_timed_out_request(&ReplyTimeout {
+            worker: WorkerKind::Provider,
+            request: stranger,
+        });
+        assert!(service.provider_status_request.is_some());
+        assert!(service.snapshot.provider_loading);
+        assert!(service.subscription_accounts_request.is_some());
+        assert!(service.snapshot.update.in_flight);
+
+        service.release_timed_out_request(&ReplyTimeout {
+            worker: WorkerKind::Provider,
+            request: provider,
+        });
+        assert!(service.provider_status_request.is_none());
+        assert!(!service.snapshot.provider_loading);
+        assert!(service.subscription_accounts_request.is_some());
+
+        service.release_timed_out_request(&ReplyTimeout {
+            worker: WorkerKind::Provider,
+            request: accounts,
+        });
+        assert!(service.subscription_accounts_request.is_none());
+
+        service.release_timed_out_request(&ReplyTimeout {
+            worker: WorkerKind::Update,
+            request: update,
+        });
+        assert!(service.update_request.is_none());
+        assert!(!service.snapshot.update.in_flight);
+
         let _ = service.shutdown(Duration::from_secs(2));
     }
 }
