@@ -1064,7 +1064,7 @@ impl AppService {
             // Attribution from dispatch, not from the first Ack: a failure
             // before streaming must still say which provider failed
             // (R4-F4-3).
-            provider: Some(provider.clone()),
+            provider: Some(provider.to_string()),
             ..crate::snapshot_ai::ReportSnapshot::default()
         };
         // The "Changed since last scan" section needs the newest stored scan.
