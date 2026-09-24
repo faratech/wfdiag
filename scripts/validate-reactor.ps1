@@ -28,6 +28,22 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+
+function Invoke-ReactorPython {
+    # A missing python leaves $LASTEXITCODE holding the PREVIOUS suite's
+    # code (CommandNotFoundException never sets it), so both the aggregated
+    # and the standalone verdict would read stale. Resolve the interpreter
+    # first and fail loudly with a dedicated code instead.
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Script, [string[]]$ScriptArguments = @())
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -eq $python) {
+        Write-Host "  python was not found on PATH; cannot run $Script"
+        return @{ Output = @("python not found"); ExitCode = 3 }
+    }
+    $output = & $python.Source $Script @ScriptArguments 2>&1
+    return @{ Output = $output; ExitCode = $LASTEXITCODE }
+}
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -144,9 +160,10 @@ if ($Suite -contains "visual") {
     }
 
     Write-Host "`n=== visual: variants check ==="
-    $output = & python (Join-Path $PSScriptRoot "check-variants.py") `
-        --manifest $visualManifest --json 2>&1
-    $code = $LASTEXITCODE
+    $run = Invoke-ReactorPython -Script (Join-Path $PSScriptRoot "check-variants.py") `
+        -ScriptArguments @("--manifest", $visualManifest, "--json")
+    $output = $run.Output
+    $code = $run.ExitCode
     $output | ForEach-Object { Write-Host "  $_" }
     $summary.suites["visual/check"] = @{ exitCode = $code }
     if ($code -ne 0) {
@@ -169,8 +186,10 @@ if ($Suite -contains "x64") {
 
 if ($Suite -contains "readiness") {
     Write-Host "`n=== readiness ==="
-    $output = & python (Join-Path $PSScriptRoot "check-reactor-readiness.py") --json 2>&1
-    $code = $LASTEXITCODE
+    $run = Invoke-ReactorPython -Script (Join-Path $PSScriptRoot "check-reactor-readiness.py") `
+        -ScriptArguments @("--json")
+    $output = $run.Output
+    $code = $run.ExitCode
     $output | ForEach-Object { Write-Host "  $_" }
     $summary.suites["readiness"] = @{ exitCode = $code }
     if ($code -ne 0) {
@@ -180,8 +199,10 @@ if ($Suite -contains "readiness") {
 
 if ($Suite -contains "gates") {
     Write-Host "`n=== gates: external ==="
-    $output = & python (Join-Path $PSScriptRoot "check-external-gates.py") --json 2>&1
-    $code = $LASTEXITCODE
+    $run = Invoke-ReactorPython -Script (Join-Path $PSScriptRoot "check-external-gates.py") `
+        -ScriptArguments @("--json")
+    $output = $run.Output
+    $code = $run.ExitCode
     $output | ForEach-Object { Write-Host "  $_" }
     $summary.suites["gates/external"] = @{
         exitCode = $code
