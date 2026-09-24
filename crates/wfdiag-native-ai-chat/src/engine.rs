@@ -756,6 +756,12 @@ pub async fn run_chat_turn(
         .await;
         let turn = match stream {
             Err(_) => {
+                // The turn is over, but the provider call may still be
+                // running underneath (Phi's spawn_blocking generation holds
+                // the process-wide model mutex). Cancelling the token is
+                // what lets it release early instead of idling out its own
+                // budget.
+                cancel.cancel();
                 let message =
                     format!("The AI request did not finish within {TURN_TIMEOUT_SECS} seconds");
                 if allow_fallback && round == 0 && tool_call_count == 0 {
