@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 const WEBVIEW2_PROJECTION: &str = "Microsoft.Web.WebView2.Core.dll";
 const APP_VERSION_SOURCE: &str = "../../version.json";
 const APP_ICON_RESOURCE: &str = "app-icon.rc";
-const APP_ICON_SOURCE: &str = "../../src-tauri/icons/icon.ico";
+const APP_ICON_SOURCE: &str = "icons/icon.ico";
 
 // The pinned setup crate copies these PE images from the Windows App Runtime
 // MSIX. Its copy helpers deliberately ignore missing inputs, so checking only
