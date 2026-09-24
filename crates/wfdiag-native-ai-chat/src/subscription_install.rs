@@ -1107,7 +1107,10 @@ mod tests {
     // headless lane keeps covering the installer guardrails; re-enable the
     // Windows leg after fixing, do not delete.
     #[tokio::test]
-    #[cfg_attr(target_os = "windows", ignore = "subscription_install: red on windows-x64 CI, see FIXME in this module's tests")]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "subscription_install: red on windows-x64 CI, see FIXME in this module's tests"
+    )]
     async fn fixed_allowlisted_commands_and_budgets_cover_every_provider_and_method() {
         for (provider, package, script, status_args) in [
             (
@@ -1261,7 +1264,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(target_os = "windows", ignore = "subscription_install: red on windows-x64 CI, see FIXME in this module's tests")]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "subscription_install: red on windows-x64 CI, see FIXME in this module's tests"
+    )]
     async fn an_existing_verified_cli_runs_status_but_never_an_installer() {
         let fake = Arc::new(FakeProcess::new());
         fake.installed.store(true, Ordering::Release);
@@ -1332,7 +1338,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(target_os = "windows", ignore = "subscription_install: red on windows-x64 CI, see FIXME in this module's tests")]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "subscription_install: red on windows-x64 CI, see FIXME in this module's tests"
+    )]
     async fn cancellation_after_installer_commit_does_not_relabel_success() {
         let fake = Arc::new(FakeProcess::new());
         fake.cancel_after_install.store(true, Ordering::Release);
@@ -1374,7 +1383,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(target_os = "windows", ignore = "subscription_install: red on windows-x64 CI, see FIXME in this module's tests")]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "subscription_install: red on windows-x64 CI, see FIXME in this module's tests"
+    )]
     async fn progress_is_ordered_and_contains_only_static_stages() {
         let fake = Arc::new(FakeProcess::new());
         let stages = Arc::new(Mutex::new(Vec::new()));

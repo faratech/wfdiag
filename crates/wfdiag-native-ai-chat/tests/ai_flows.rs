@@ -256,7 +256,10 @@ async fn streaming_round_trip_reaches_completed_with_mock_reply() {
 // since the 2026-09-23 audit (passes on Linux); re-enable after fixing,
 // do not delete.
 #[tokio::test]
-#[cfg_attr(target_os = "windows", ignore = "slow_stream_cancels_mid_turn: red on windows-x64 CI, see FIXME above")]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "slow_stream_cancels_mid_turn: red on windows-x64 CI, see FIXME above"
+)]
 async fn slow_stream_cancels_mid_turn() {
     let _mock = ensure_mock_provider();
     let cancel = CancellationToken::new();
