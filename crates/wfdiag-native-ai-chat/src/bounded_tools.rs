@@ -188,11 +188,11 @@ impl BoundedToolCatalog {
                             "enum": remediation_ids,
                         },
                         "issue_id": {
-                            "type": "string",
-                            "description": "Detected issue ID when the remediation is issue-bound",
+                            "type": ["string", "null"],
+                            "description": "Detected issue ID when the remediation is issue-bound; null for standalone maintenance actions",
                         }
                     },
-                    "required": ["remediation_id"],
+                    "required": ["remediation_id", "issue_id"],
                     "additionalProperties": false,
                 }),
             },
@@ -240,6 +240,9 @@ impl BoundedToolCatalog {
                 }
                 let issue_id = args
                     .get("issue_id")
+                    // OpenAI strict mode requires every property to be
+                    // present; the model sends null for the optional case.
+                    .filter(|value| !value.is_null())
                     .map(|_| bounded_required_string(call, args, "issue_id", MAX_ISSUE_ID_CHARS))
                     .transpose()?;
                 Ok(BoundedToolOperation::StageRemediation {
@@ -330,7 +333,14 @@ impl<B: BoundedToolBackend> ToolExecutor for BoundedToolExecutor<B> {
 }
 
 fn empty_object_schema() -> Value {
-    json!({"type": "object", "properties": {}, "additionalProperties": false})
+    // `required: []` is explicit: OpenAI strict mode expects the key, and the
+    // schema-compliance test below enforces it for every tool.
+    json!({
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+    })
 }
 
 fn require_object(call: &ToolCall) -> Result<&serde_json::Map<String, Value>, String> {
@@ -400,6 +410,60 @@ mod tests {
                 id: "open_disk_cleanup".to_string(),
             }],
         )
+    }
+
+    #[test]
+    fn every_tool_schema_is_openai_strict_compliant() {
+        // OpenAI strict mode (to_openai_tools with strict=true for the OpenAI
+        // provider) requires `additionalProperties: false` and every property
+        // listed in `required`. A tool spec that violates either makes every
+        // tools-bearing OpenAI request 400 (#AI-gate F2).
+        for spec in catalog().specs() {
+            let properties = spec.parameters["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{}: parameters are not an object", spec.name));
+            assert_eq!(
+                spec.parameters["additionalProperties"],
+                json!(false),
+                "{name}: additionalProperties must be false",
+                name = spec.name
+            );
+            let required = spec.parameters["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{}: required is not a list", spec.name));
+            let required: std::collections::BTreeSet<&str> = required
+                .iter()
+                .map(|value| value.as_str().expect("required entries are strings"))
+                .collect();
+            for name in properties.keys() {
+                assert!(
+                    required.contains(name.as_str()),
+                    "{}: property {name:?} is not in required - OpenAI strict mode would 400",
+                    spec.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stage_remediation_treats_a_null_issue_id_as_absent() {
+        let staged = catalog()
+            .parse(&ToolCall {
+                id: "9".to_string(),
+                name: "stage_remediation".to_string(),
+                arguments: json!({
+                    "remediation_id": "open_disk_cleanup",
+                    "issue_id": null,
+                }),
+            })
+            .expect("null issue_id must parse");
+        assert_eq!(
+            staged,
+            BoundedToolOperation::StageRemediation {
+                remediation_id: "open_disk_cleanup".to_string(),
+                issue_id: None,
+            }
+        );
     }
 
     #[test]
