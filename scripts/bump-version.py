@@ -59,6 +59,11 @@ def update_json_file(file_path: Path, new_version: str, dry_run: bool) -> bool:
                 content,
                 count=1  # Only replace the first match (root version)
             )
+            if new_content == content:
+                raise ValueError(
+                    f"version pattern did not match in {file_path} - "
+                    "the file was left unchanged"
+                )
             file_path.write_text(new_content, encoding='utf-8')
             print(f"  Updated: {file_path} ({old_version} -> {new_version})")
 
@@ -137,13 +142,13 @@ def update_cargo_toml(file_path: Path, new_version: str, dry_run: bool) -> bool:
         return False
 
 
-def refresh_cargo_lock(cargo_dir: Path, dry_run: bool) -> None:
+def refresh_cargo_lock(cargo_dir: Path, dry_run: bool) -> bool:
     """Re-sync Cargo.lock's own-package version entry after Cargo.toml's
     [package].version changes — otherwise the next build leaves the tree
     dirty (or fails outright under --locked)."""
     if dry_run:
         print("  [DRY RUN] Would refresh Cargo.lock to match the new version")
-        return
+        return True
     try:
         subprocess.run(
             ["cargo", "update", "--offline", "-p", "wfdiag-tauri", "-p", "wfdiag"],
@@ -153,11 +158,14 @@ def refresh_cargo_lock(cargo_dir: Path, dry_run: bool) -> None:
             text=True,
         )
         print("  Refreshed: Cargo.lock")
+        return True
     except FileNotFoundError:
         print("  Warning: cargo not found on PATH — Cargo.lock was not refreshed; run "
               "'cargo update -p wfdiag-tauri -p wfdiag' manually before committing")
+        return False
     except subprocess.CalledProcessError as e:
         print(f"  Warning: failed to refresh Cargo.lock: {e.stderr.strip() if e.stderr else e}")
+        return False
 
 
 def update_msix_conf(file_path: Path, new_version: str, dry_run: bool) -> bool:
@@ -370,7 +378,11 @@ def main():
     shell_updated = update_cargo_toml(script_dir / 'apps' / 'wfdiag' / 'Cargo.toml', new_version, dry_run)
     success_count += int(tauri_updated) + int(shell_updated)
     if tauri_updated or shell_updated:
-        refresh_cargo_lock(script_dir, dry_run)
+        # Counted like every other write: a stale lock must fail the run,
+        # or the next --locked build rejects the bump after a green exit.
+        total_count += 1
+        if refresh_cargo_lock(script_dir, dry_run):
+            success_count += 1
 
     # 5. src-tauri/tauri.conf.json
     total_count += 1
@@ -432,7 +444,8 @@ def main():
         print()
         print("Next steps:")
         print("  1. Review changes: git diff")
-        print(f"  2. Commit changes: git add -A && git commit -m 'Bump version to {new_version}'")
+        print("  2. Commit changes with explicit pathspecs (never 'git add -A'):")
+        print(f"     git commit -m 'Bump version to {new_version}' -- version.json Cargo.lock package.json src-tauri apps src README.md")
         print("  3. Build release: python3 build-cross.py build-all")
 
     sys.exit(0 if success_count == total_count else 1)
