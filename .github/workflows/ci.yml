@@ -52,6 +52,7 @@ jobs:
     # job is the headless guarantee. Only the two shells (WinUI / Tauri) are
     # excluded; wfdiag-native-monitor compiles to an empty library off-Windows.
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.0
