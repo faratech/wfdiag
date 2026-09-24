@@ -1061,6 +1061,10 @@ impl AppService {
         self.snapshot.ai.report = crate::snapshot_ai::ReportSnapshot {
             generating: true,
             source_session_id: Some(session_id),
+            // Attribution from dispatch, not from the first Ack: a failure
+            // before streaming must still say which provider failed
+            // (R4-F4-3).
+            provider: Some(provider.clone()),
             ..crate::snapshot_ai::ReportSnapshot::default()
         };
         // The "Changed since last scan" section needs the newest stored scan.
@@ -2542,8 +2546,11 @@ impl AppService {
             FallbackDecision::Continue { provider } => {
                 let previous = self.chat_pending;
                 attempt.advance_to(provider);
-                // The retry is invisible: no terminal event was emitted, the
-                // conversation is untouched, and this is the same logical turn.
+                // The retry is terminal-event-invisible: no terminal event
+                // was emitted and the conversation is untouched. A fresh
+                // ChatEvent::Started does fire per attempt (it carries the
+                // provider badge), so hosts keying resets on Started will
+                // see the new provider.
                 if !self.dispatch_chat_attempt(previous, attempt) {
                     self.finish_chat_failure("The native AI chat queue is unavailable".to_string());
                 }
