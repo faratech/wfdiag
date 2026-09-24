@@ -172,6 +172,17 @@ fn unavailable(domain: &'static str, detail: Option<&str>) -> RejectReason {
     }
 }
 
+/// A resumed intent whose re-dispatch is refused must not vanish: the host
+/// already showed "Deferred". Returns the user-facing text when the outcome
+/// dropped the request.
+fn dropped_request_text(outcome: &DispatchOutcome) -> Option<String> {
+    match outcome {
+        DispatchOutcome::Accepted { .. } => None,
+        DispatchOutcome::Rejected(reason) => Some(reason.to_string()),
+        DispatchOutcome::Ignored { detail } => Some((*detail).to_string()),
+    }
+}
+
 impl AppService {
     // ---- start-up bookkeeping -------------------------------------------
 
@@ -336,10 +347,27 @@ impl AppService {
                 self.snapshot.ai.preparation_error = None;
                 match intent {
                     PendingAiIntent::Chat { prompt } => {
-                        let _ = self.begin_chat_turn(prompt);
+                        if let Some(message) = dropped_request_text(&self.begin_chat_turn(prompt)) {
+                            // A resumed turn can still be refused (a dead
+                            // chat worker, exhausted identities); emitting
+                            // the failure keeps the request from vanishing
+                            // without any event.
+                            self.snapshot.ai.preparation_error = Some(message.clone());
+                            self.queue
+                                .push(AppEvent::Chat(ChatEvent::Failed { message }));
+                        }
                     }
                     PendingAiIntent::Report { force_refresh } => {
-                        let _ = self.begin_report(force_refresh);
+                        if let Some(message) =
+                            dropped_request_text(&self.begin_report(force_refresh))
+                        {
+                            // Same class as the report's vanished scan
+                            // prerequisite: the host saw "Deferred" and then
+                            // nothing. Fail loudly instead.
+                            self.snapshot.ai.preparation_error = Some(message.clone());
+                            self.queue
+                                .push(AppEvent::Report(ReportEvent::Failed { message }));
+                        }
                     }
                 }
             }
