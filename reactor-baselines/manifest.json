@@ -451,8 +451,7 @@
         "apps/wfdiag/captures-2.5.8/live-system-validation/diagnostics-live-system-20260830-114311.png",
         "apps/wfdiag/captures-2.5.8/live-system-validation/diagnostics-live-system-20260830-114311.uia.json",
         "apps/wfdiag/src/main.rs",
-        "scripts/test-reactor-live-system.ps1",
-        "src-tauri/src/architecture.rs"
+        "scripts/test-reactor-live-system.ps1"
       ]
     },
     {
@@ -475,8 +474,7 @@
         "crates/wfdiag-native-issues/src/lib.rs",
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "apps/wfdiag/src/main.rs",
-        "src-tauri/src/issue_catalog.rs"
+        "apps/wfdiag/src/main.rs"
       ]
     },
     {
@@ -488,9 +486,7 @@
         "crates/wfdiag-native-remediation/src/remediation.rs",
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "apps/wfdiag/src/action_support.rs",
-        "src-tauri/src/action_broker.rs",
-        "src-tauri/src/remediation.rs"
+        "apps/wfdiag/src/action_support.rs"
       ]
     },
     {
@@ -530,8 +526,7 @@
         "crates/wfdiag-native-history/src/runtime.rs",
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "apps/wfdiag/src/main.rs",
-        "src-tauri/src/results_storage.rs"
+        "apps/wfdiag/src/main.rs"
       ]
     },
     {
@@ -544,8 +539,7 @@
         "apps/wfdiag/src/export_support.rs",
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.png",
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
-        "apps/wfdiag/src/main.rs",
-        "src-tauri/src/commands/export.rs"
+        "apps/wfdiag/src/main.rs"
       ]
     },
     {
@@ -561,7 +555,6 @@
         "apps/wfdiag/src/main.rs",
         "apps/wfdiag/src/provider_setup_support.rs",
         "apps/wfdiag/src/subscription_auth_support.rs",
-        "src-tauri/src/commands/settings.rs",
         "src/components/SettingsDialog.tsx"
       ]
     },
@@ -581,9 +574,7 @@
         "apps/wfdiag/src/provider_setup_support.rs",
         "apps/wfdiag/src/subscription_auth_support.rs",
         "crates/wfdiag-native-ai-chat/src/subscription_auth.rs",
-        "crates/wfdiag-native-ai-provider/src/model_catalog.rs",
-        "src-tauri/src/ai_providers/ollama.rs",
-        "src-tauri/src/ai_service.rs"
+        "crates/wfdiag-native-ai-provider/src/model_catalog.rs"
       ]
     },
     {
@@ -599,9 +590,7 @@
         "crates/wfdiag-native-ai-chat/src/compat_provider.rs",
         "crates/wfdiag-native-ai-chat/tests/ai_flows.rs",
         "crates/wfdiag-native-ai-provider/src/compat.rs",
-        "src-tauri/src/ai_providers/openai_compat.rs",
-        "scripts/test-reactor-ai-flows.ps1",
-        "src-tauri/src/ai_chat.rs"
+        "scripts/test-reactor-ai-flows.ps1"
       ]
     },
     {
@@ -612,8 +601,7 @@
         "apps/wfdiag/src/report_support.rs",
         ".github/workflows/reactor-validation.yml",
         "crates/wfdiag-native-ai-report/src/lib.rs",
-        "scripts/test-reactor-ai-flows.ps1",
-        "src-tauri/src/ai_report.rs"
+        "scripts/test-reactor-ai-flows.ps1"
       ]
     },
     {
@@ -624,8 +612,6 @@
         "crates/wfdiag-native-phi/src/lib.rs",
         "apps/wfdiag/src/chat_support.rs",
         "apps/wfdiag/src/report_support.rs",
-        "src-tauri/src/phi_silica.rs",
-        "src-tauri/src/sparse_identity.rs",
         "AppxManifest.xml"
       ]
     },
@@ -666,7 +652,6 @@
         "apps/wfdiag/captures-2.5.8/live-system-validation-claude/diagnostics-live-system-20260830-190753.uia.json",
         "apps/wfdiag/src/main.rs",
         "apps/wfdiag/src/update_support.rs",
-        "src-tauri/src/update_check.rs",
         "src/components/AboutDialog.tsx",
         "src/hooks/useUpdateCheck.ts"
       ]
