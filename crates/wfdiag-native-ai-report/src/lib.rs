@@ -138,9 +138,10 @@ pub type ReportFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub use wfdiag_native_ai_chat::ResolvedChatProvider as ResolvedReportProvider;
 
 /// Provider routing/configuration boundary. The report core owns the policy:
-/// Auto may move a Phi-wide report to the next private/local provider, but it
-/// never crosses into a cloud execution class without an explicit UI consent
-/// flow.
+/// Auto may move a Phi-wide report to the next available candidate in the
+/// full fallback order — cloud included, per the owner decision on #395
+/// (2026-09-24); there is no consent flow on this path, the fall-through is
+/// silent by ruling.
 pub trait ReportProviderResolver: Send + Sync + 'static {
     fn preference(&self) -> AIProviderPreference;
 

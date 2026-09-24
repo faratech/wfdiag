@@ -188,10 +188,12 @@ pub const fn route_provider(
     AIProvider::None
 }
 
-/// Compatibility helper for request paths that may retry locally but do not
-/// implement a cloud-consent flow.
+/// Next Auto candidate from the full fallback order — cloud included, with
+/// no consent gate. Owner decision 2026-09-24 (#395): reports and fix plans
+/// fall through to configured cloud keys without asking, because their
+/// single-attempt workers have no consent UI to route through.
 #[must_use]
-pub fn next_auto_local_route(
+pub fn next_auto_route(
     preference: AIProviderPreference,
     tried: &[AIProvider],
     availability: ProviderAvailability,
@@ -201,7 +203,6 @@ pub fn next_auto_local_route(
     }
     provider_fallback_plan(preference, availability)
         .into_iter()
-        .take_while(|provider| provider_trust_zone(*provider) == Some(ProviderTrustZone::Local))
         .find(|provider| !tried.contains(provider))
 }
 

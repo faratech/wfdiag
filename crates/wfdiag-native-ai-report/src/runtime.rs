@@ -505,7 +505,7 @@ impl Drop for NativeReportRuntime {
 mod tests {
     use super::*;
     use wfdiag_native_ai_chat::no_wake;
-    use wfdiag_native_ai_provider::{AIProviderPreference, next_auto_local_route};
+    use wfdiag_native_ai_provider::{AIProviderPreference, next_auto_route};
     use wfdiag_native_history::{ScanSummary, Timestamp};
     use wfdiag_native_issues::SharedScanEvidence;
 
@@ -843,7 +843,7 @@ mod tests {
             ollama: true,
             ..Default::default()
         };
-        let next = next_auto_local_route(
+        let next = next_auto_route(
             AIProviderPreference::Auto,
             &[AIProvider::PhiSilica],
             availability,

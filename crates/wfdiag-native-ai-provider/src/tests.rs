@@ -214,7 +214,7 @@ fn local_retry_routing_uses_private_order_and_skips_tried_providers() {
         ..Default::default()
     };
     assert_eq!(
-        next_auto_local_route(
+        next_auto_route(
             AIProviderPreference::Auto,
             &[AIProvider::PhiSilica],
             availability,
@@ -222,7 +222,7 @@ fn local_retry_routing_uses_private_order_and_skips_tried_providers() {
         Some(AIProvider::FoundryLocal)
     );
     assert_eq!(
-        next_auto_local_route(
+        next_auto_route(
             AIProviderPreference::Auto,
             &[AIProvider::PhiSilica, AIProvider::FoundryLocal],
             availability,
@@ -230,11 +230,11 @@ fn local_retry_routing_uses_private_order_and_skips_tried_providers() {
         Some(AIProvider::Ollama)
     );
     assert_eq!(
-        next_auto_local_route(AIProviderPreference::OpenAI, &[], availability),
+        next_auto_route(AIProviderPreference::OpenAI, &[], availability),
         None
     );
     assert_eq!(
-        next_auto_local_route(
+        next_auto_route(
             AIProviderPreference::Auto,
             &[
                 AIProvider::PhiSilica,
@@ -243,7 +243,10 @@ fn local_retry_routing_uses_private_order_and_skips_tried_providers() {
             ],
             availability,
         ),
-        None
+        // With the locals exhausted, Auto falls through to the first
+        // available cloud candidate (owner decision 2026-09-24, #395)
+        // instead of stopping before the cloud class.
+        Some(AIProvider::OpenAI)
     );
 }
 

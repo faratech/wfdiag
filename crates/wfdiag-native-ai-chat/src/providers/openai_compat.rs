@@ -428,7 +428,12 @@ pub async fn chat_stream(
     let include_tools = if provider == AIProvider::Ollama && !req.tools.is_empty() {
         let endpoint = cfg.endpoint_or_err(provider)?;
         let model = cfg.model_or_err(provider)?;
-        super::ollama::model_supports_tools(endpoint, model).await?
+        // A transient capability-probe failure must not abort the whole turn
+        // (owner decision on #396): degrade to tool-less for this turn.
+        // Only successes are cached, so the next turn re-probes.
+        super::ollama::model_supports_tools(endpoint, model)
+            .await
+            .unwrap_or(false)
     } else {
         true
     };

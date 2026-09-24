@@ -54,7 +54,7 @@ pub use credential_store::{
 };
 pub use fallback::{
     AUTO_FALLBACK_ORDER, FallbackCandidate, ProviderTrustZone, crosses_local_to_cloud,
-    next_auto_local_route, next_fallback_candidate, provider_fallback_plan, provider_trust_zone,
+    next_auto_route, next_fallback_candidate, provider_fallback_plan, provider_trust_zone,
     route_provider,
 };
 pub use local_probes::{

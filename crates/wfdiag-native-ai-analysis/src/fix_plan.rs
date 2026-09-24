@@ -20,8 +20,7 @@ use wfdiag_native_ai_provider::{
     AIProvider, AIProviderPreference, AUTO_FALLBACK_ORDER, CompatConfigPorts,
     FoundryEndpointSource, OllamaSource, ProcessSubscriptionCliStatusSource, ProviderAvailability,
     ResolvedProviderConfig, SettingsProviderKeySource, SubscriptionCliStatusSource,
-    SubscriptionConfigPorts, next_auto_local_route, resolve_compat_config,
-    resolve_subscription_config,
+    SubscriptionConfigPorts, next_auto_route, resolve_compat_config, resolve_subscription_config,
 };
 use wfdiag_native_issues::{
     Issue, build_fix_plan_prompt, catalog as issue_catalog, parse_fix_plan, remediation_catalog,
@@ -52,8 +51,9 @@ pub struct FixPlanRoute {
 /// Apply the shipping fix-plan workload policy to a provider-status snapshot.
 ///
 /// In `Auto`, a wide structured plan moves from Phi to the next available
-/// private local model when one exists. This is an initial workload routing
-/// choice rather than a failed provider call. It is still recorded in
+/// candidate in the full fallback order — cloud included, per the owner
+/// decision on #395 (2026-09-24). This is an initial workload routing choice
+/// rather than a failed provider call. It is still recorded in
 /// `fallback_from` so attribution stays transparent and a later retry cannot
 /// accidentally route back to the deliberately bypassed Phi candidate.
 #[must_use]
@@ -64,8 +64,7 @@ pub fn initial_fix_plan_route(
 ) -> FixPlanRoute {
     let provider =
         if preference == AIProviderPreference::Auto && active_provider == AIProvider::PhiSilica {
-            next_auto_local_route(preference, &[active_provider], availability)
-                .unwrap_or(active_provider)
+            next_auto_route(preference, &[active_provider], availability).unwrap_or(active_provider)
         } else {
             active_provider
         };
