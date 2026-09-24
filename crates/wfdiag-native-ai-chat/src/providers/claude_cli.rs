@@ -38,12 +38,18 @@ const STDIN_INSTRUCTION: &str = "Answer the request in the piped input.";
 
 /// One-shot analysis. The system text is prepended to the payload (same
 /// pattern as the Codex and Foundry one-shots).
+///
+/// One-shots skip the ACP adapter deliberately: its only advantage is delta
+/// streaming, which a one-shot doesn't use, and its failure path would stack
+/// a 150s print attempt after up to 260s of ACP budgets — bounded, but up to
+/// ~410s of "in progress" for a single analysis. Print mode is the natural
+/// one-shot shape and is bounded by [`EXEC_TIMEOUT`].
 pub async fn one_shot(
     cfg: &ResolvedProviderConfig,
     system: &str,
     prompt: &str,
 ) -> Result<String, String> {
-    exec(cfg, format!("{system}\n\n{prompt}"), None).await
+    exec_print_mode(cfg, format!("{system}\n\n{prompt}")).await
 }
 
 /// Chat turn: the ACP path streams chunk deltas through `tx` as they
@@ -73,6 +79,7 @@ async fn exec(
     payload: String,
     delta_tx: Option<mpsc::Sender<String>>,
 ) -> Result<String, String> {
+    let started = std::time::Instant::now();
     let cli = cfg.endpoint_or_err(AIProvider::ClaudeCode)?;
     let cli = Path::new(&cli);
 
@@ -104,6 +111,18 @@ async fn exec(
     match outcome {
         AdapterOutcome::Answer(text) => Ok(text),
         AdapterOutcome::Failed(acp_error) if !emitted.load(Ordering::Relaxed) => {
+            // The fallback needs a full EXEC budget of its own. If the ACP
+            // attempt already burned most of the turn deadline, a doomed
+            // fallback would end in the generic "did not finish within 180
+            // seconds" instead of this specific adapter error.
+            let elapsed = started.elapsed().as_secs();
+            if elapsed + EXEC_TIMEOUT.as_secs() >= crate::engine::TURN_TIMEOUT_SECS {
+                return Err(format!(
+                    "{acp_error} — not enough of the {}s turn budget remains for the \
+                     print-mode fallback",
+                    crate::engine::TURN_TIMEOUT_SECS
+                ));
+            }
             match exec_print_mode(cfg, payload).await {
                 Ok(text) => {
                     if let Some(tx) = delta_tx {
