@@ -12,13 +12,22 @@ measurements of this machine, not universal CPU/RAM guarantees.
 param(
     [Parameter(Mandatory = $true)][string]$Executable,
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
-    [string[]]$Pages = @('diagnostics', 'monitor', 'processes', 'ai'),
+    [ValidateSet('diagnostics', 'monitor', 'processes', 'ai')][string[]]$Pages = @('diagnostics', 'monitor', 'processes', 'ai'),
     [ValidateRange(3, 120)][int]$SampleSeconds = 15,
     [ValidateRange(1, 60)][int]$SettleSeconds = 8
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'lib\ReactorUia.psm1') -Force
+# The WFDIAG_REACTOR_* knobs passed to the candidate are compile-time
+# fixtures: without the validation feature they do not exist, a plain build
+# ignores them (and writes the developer's real settings), and every page
+# would record an identically mislabeled "passed" run. The bounded version
+# probe fails fast on such a build and stamps each record with the build
+# actually measured.
+$candidateVersion = Get-ReactorApplicationVersion -Executable $Executable `
+    -ProbeFile (Join-Path $env:TEMP 'wfdiag-reactor-performance-version.json')
+Write-Host "Candidate version: $candidateVersion"
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -42,7 +51,7 @@ $results = [Collections.Generic.List[object]]::new()
 foreach ($page in $Pages) {
     $session = $null
     $record = [ordered]@{
-        page = $page; executable = $Executable; sha256 = $imageHash
+        page = $page; executable = $Executable; sha256 = $imageHash; version = $candidateVersion
         logicalProcessors = [Environment]::ProcessorCount
         capturedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
         samples = @(); status = 'running'; error = $null; close = $null

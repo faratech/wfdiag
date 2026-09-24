@@ -65,9 +65,14 @@ and rejects runs that lose foreground ownership. Initial before/after trials on
 ANDROMEDA were interrupted by other foreground applications. A before-build
 Monitor run completed, but there is no matched valid after run; **no CPU/RAM
 reduction percentage or Tauri comparison is claimed**. Repeat on an undisturbed
-desktop with identical release features and representative long-running work:
+desktop with identical release features and representative long-running work.
+The script probes the candidate's version before sampling and requires a
+`--features wfdiag/validation` build: the page/settings/tray knobs it passes are
+compile-time fixtures, and a featureless exe would ignore them and write the
+real user settings store.
 
 ```powershell
+cargo build --release -p wfdiag --features wfdiag/validation --target x86_64-pc-windows-msvc
 .\scripts\test-reactor-performance.ps1 -Executable C:\before\wfdiag.exe -OutputDirectory C:\perf\before
 .\scripts\test-reactor-performance.ps1 -Executable C:\after\wfdiag.exe -OutputDirectory C:\perf\after
 ```
