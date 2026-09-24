@@ -23,10 +23,9 @@ pub(crate) const ELEVATED_RELAUNCH_FLAG: &str = "--wfdiag-elevated-relaunch";
 #[cfg(feature = "validation")]
 pub(crate) const VERSION_PROBE_FILE_ENV: &str = "WFDIAG_REACTOR_VERSION_PROBE_FILE";
 
-pub(crate) const APP_BADGE: &[u8] = include_bytes!("../../../../public/wf-ds/app-badge.png");
+pub(crate) const APP_BADGE: &[u8] = include_bytes!("../../assets/app-badge.png");
 
-pub(crate) const BOT_AVATAR: &[u8] =
-    include_bytes!("../../../../public/wf-ds/chatgpt-bot-avatar.webp");
+pub(crate) const BOT_AVATAR: &[u8] = include_bytes!("../../assets/chatgpt-bot-avatar.webp");
 
 pub(crate) const STETHOSCOPE_LIGHT: &[u8] = include_bytes!("../../assets/stethoscope-light.png");
 
