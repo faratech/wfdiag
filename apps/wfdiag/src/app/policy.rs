@@ -1407,6 +1407,36 @@ pub(crate) fn resolved_export_format(value: &str) -> ReportFormat {
 // environment variable, so it now lives with the other knobs and is compiled
 // out entirely without the `validation` feature.
 
+/// What the shell does about live monitoring after a window-lifecycle change.
+pub(crate) enum MonitoringTransition {
+    /// The engine resumed since the shell last looked: refresh telemetry (and
+    /// the process table when the processes page is showing).
+    Resume,
+    /// The engine paused while the window is unusable: drop stale loading state.
+    PausedWhileUnusable,
+    /// Nothing to do.
+    None,
+}
+
+/// Pure decision for the shell's window-lifecycle monitor handling. The shell
+/// refreshes only when the ENGINE resumed (the shell's `monitor.paused` shadow
+/// said paused), and treats a pause as visible only while the window cannot
+/// show the pages that consume telemetry. 6dc31b9 inlined this; the 2026-09-23
+/// audit put the decision back where the repo convention keeps it testable.
+pub(crate) fn monitoring_lifecycle_transition(
+    engine_paused: bool,
+    shell_thought_paused: bool,
+    window_usable: bool,
+) -> MonitoringTransition {
+    if !engine_paused && shell_thought_paused {
+        MonitoringTransition::Resume
+    } else if engine_paused && !window_usable {
+        MonitoringTransition::PausedWhileUnusable
+    } else {
+        MonitoringTransition::None
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -2354,5 +2384,41 @@ pub(crate) mod tests {
             worker_timeout_text("history"),
             "The history worker did not answer in time · try again"
         );
+    }
+    #[test]
+    fn monitoring_resumes_only_on_an_engine_resume_and_pauses_only_when_unusable() {
+        use MonitoringTransition::{None as NoTransition, PausedWhileUnusable, Resume};
+        // The engine resumed while the shell thought it was paused: refresh.
+        assert!(matches!(
+            monitoring_lifecycle_transition(false, true, true),
+            Resume
+        ));
+        // The engine was already running: nothing to do, whatever the shadow.
+        assert!(matches!(
+            monitoring_lifecycle_transition(false, false, true),
+            NoTransition
+        ));
+        assert!(matches!(
+            monitoring_lifecycle_transition(false, false, false),
+            NoTransition
+        ));
+        // A pause is acted on only while the window cannot show telemetry.
+        assert!(matches!(
+            monitoring_lifecycle_transition(true, false, false),
+            PausedWhileUnusable
+        ));
+        assert!(matches!(
+            monitoring_lifecycle_transition(true, true, false),
+            PausedWhileUnusable
+        ));
+        // Paused but the window is usable: the user did that on purpose.
+        assert!(matches!(
+            monitoring_lifecycle_transition(true, true, true),
+            NoTransition
+        ));
+        assert!(matches!(
+            monitoring_lifecycle_transition(true, false, true),
+            NoTransition
+        ));
     }
 }

@@ -7,8 +7,9 @@ use crate::app::consts::WINDOW_COMMAND_POLL;
 use crate::app::message::Message;
 use crate::app::native_msg::NativeMsg;
 use crate::app::policy::{
-    effective_window_theme, global_shortcut_is_allowed, onboarding_probe_wanted,
-    window_hook_retry_delay, window_is_usable, window_theme_setting,
+    MonitoringTransition, effective_window_theme, global_shortcut_is_allowed,
+    monitoring_lifecycle_transition, onboarding_probe_wanted, window_hook_retry_delay,
+    window_is_usable, window_theme_setting,
 };
 use crate::app::state::{AiMode, Page, PageTransition};
 use crate::app::tasks::{spawn_instance_watch, spawn_palette_focus_delay, spawn_window_hook_retry};
@@ -216,15 +217,21 @@ impl WfdiagShell {
             .app
             .as_ref()
             .is_none_or(|app| app.snapshot().monitor.paused);
-        if !paused && self.monitor.paused {
-            let _ = self.dispatch(AppCommand::MonitorRefresh);
-            if self.shell.page == Page::Processes {
-                self.request_process_page(context, false);
+        match monitoring_lifecycle_transition(paused, self.monitor.paused, self.shell.window_usable)
+        {
+            MonitoringTransition::Resume => {
+                let _ = self.dispatch(AppCommand::MonitorRefresh);
+                if self.shell.page == Page::Processes {
+                    self.request_process_page(context, false);
+                }
+                self.shell.status = "Live monitoring resumed and refreshed".to_string();
             }
-            self.shell.status = "Live monitoring resumed and refreshed".to_string();
-        } else if paused && !self.shell.window_usable {
-            self.processes.loading = false;
-            self.shell.status = "Live monitoring paused while the window is inactive".to_string();
+            MonitoringTransition::PausedWhileUnusable => {
+                self.processes.loading = false;
+                self.shell.status =
+                    "Live monitoring paused while the window is inactive".to_string();
+            }
+            MonitoringTransition::None => {}
         }
         self.monitor.paused = paused;
     }
