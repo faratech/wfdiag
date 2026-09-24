@@ -252,10 +252,11 @@ async fn streaming_round_trip_reaches_completed_with_mock_reply() {
 }
 
 // FIXME: red on windows-x64 CI — surfaced 2026-09-03 once the fmt gate and
-// subscription_install failures stopped masking it. Ignored with intent;
-// re-enable after fixing, do not delete.
+// subscription_install failures stopped masking it. Ignored on Windows only
+// since the 2026-09-23 audit (passes on Linux); re-enable after fixing,
+// do not delete.
 #[tokio::test]
-#[ignore = "slow_stream_cancels_mid_turn: see FIXME above"]
+#[cfg_attr(target_os = "windows", ignore = "slow_stream_cancels_mid_turn: red on windows-x64 CI, see FIXME above")]
 async fn slow_stream_cancels_mid_turn() {
     let _mock = ensure_mock_provider();
     let cancel = CancellationToken::new();
