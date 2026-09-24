@@ -9,7 +9,10 @@ on:
         type: string
 
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number || github.run_id }}
+  # The only trigger is workflow_dispatch, so key the group on the input:
+  # the pull_request field it used before never exists here, making the
+  # group unique per run and cancel-in-progress inert (62a779f's purpose).
+  group: claude-review-${{ inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
