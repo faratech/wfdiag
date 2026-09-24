@@ -2175,12 +2175,25 @@ impl AppService {
                     return;
                 }
                 self.process_detail_request = None;
-                if let Ok(detail) = detail {
-                    self.snapshot.monitor.process_detail = Some(detail.clone());
-                    self.queue
-                        .push(AppEvent::Monitor(MonitorEvent::ProcessDetail(Box::new(
-                            detail,
-                        ))));
+                match detail {
+                    Ok(detail) => {
+                        self.snapshot.monitor.process_detail = Some(detail.clone());
+                        self.queue
+                            .push(AppEvent::Monitor(MonitorEvent::ProcessDetail(Box::new(
+                                detail,
+                            ))));
+                    }
+                    Err(error) => {
+                        // Page and network report their failures in the
+                        // domain's own terms; detail must not be the silent
+                        // one (the host otherwise learns only the generic
+                        // ReplyTimedOut).
+                        self.snapshot.monitor.error = Some(error.clone());
+                        self.queue
+                            .push(AppEvent::Monitor(MonitorEvent::Unavailable {
+                                reason: error,
+                            }));
+                    }
                 }
             }
             Internal::NetworkConnections {
@@ -2780,6 +2793,19 @@ impl AppService {
         if stopped && !self.terminating {
             self.workers.system_replies = None;
             self.workers.system = None;
+            // The worker is gone, and system probes carry no reply deadline
+            // (they share one completion channel), so a probe still held at
+            // this point can never complete: clearing it here is what keeps
+            // start_scan's "administrator access is still being detected"
+            // gate from rejecting every future scan forever.
+            let info_pending = self.system_info_request.take().is_some();
+            let arch_pending = self.architecture_request.take().is_some();
+            if info_pending || arch_pending {
+                let error = "the system worker stopped before answering".to_string();
+                self.snapshot.system_error = Some(error.clone());
+                self.queue
+                    .push(AppEvent::System(SystemEvent::Failed { error }));
+            }
             self.queue.push(AppEvent::WorkerStopped {
                 worker: WorkerKind::System,
                 unexpected: true,
@@ -2829,13 +2855,10 @@ impl AppService {
         // Single-slot request ids: a stale entry makes every later command of
         // the kind answer to a reply that is never coming. (The multi-entry
         // maps — settings/export/history — are keyed lookups and cannot wedge
-        // a domain, so they need no release.)
-        if expired(&self.system_info_request) {
-            self.system_info_request = None;
-        }
-        if expired(&self.architecture_request) {
-            self.architecture_request = None;
-        }
+        // a domain, so they need no release. The system probe slots are NOT
+        // here: they share one completion channel with no reply deadline, so
+        // no ReplyTimeout can ever carry their ids — they are released where
+        // that channel disconnects, in drain_system_replies.)
         if expired(&self.process_page_request) {
             self.process_page_request = None;
         }
@@ -2981,8 +3004,6 @@ mod reply_timeout_tests {
         service.snapshot.update.in_flight = true;
         let mut single_slot_ids = Vec::new();
         for held in [
-            &mut service.system_info_request,
-            &mut service.architecture_request,
             &mut service.process_page_request,
             &mut service.process_detail_request,
             &mut service.network_request_id,
@@ -3024,15 +3045,15 @@ mod reply_timeout_tests {
         assert!(service.update_request.is_none());
         assert!(!service.snapshot.update.in_flight);
 
-        // Every single-slot request id releases on its own timeout.
+        // Every deadline-tracked single-slot request id releases on its own
+        // timeout. (The system probe slots are not deadline-tracked at all;
+        // they release when the shared completion channel disconnects.)
         for id in &single_slot_ids {
             service.release_timed_out_request(&ReplyTimeout {
                 worker: WorkerKind::Diagnostics,
                 request: *id,
             });
         }
-        assert!(service.system_info_request.is_none());
-        assert!(service.architecture_request.is_none());
         assert!(service.process_page_request.is_none());
         assert!(service.process_detail_request.is_none());
         assert!(service.network_request_id.is_none());
