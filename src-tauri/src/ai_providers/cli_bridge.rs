@@ -899,7 +899,13 @@ async fn run_sign_in_flow(mut cmd: tokio::process::Command, what: &str) -> Resul
     }
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+        .stderr(Stdio::inherit())
+        // A cancelled or timed-out sign-in must not leave the vendor's login
+        // console alive: killing on drop of `child` (timeout expiry or future
+        // cancellation) matches the native shell's Job Object + KillOnDrop
+        // shape. After a successful wait() the child is already reaped, so
+        // the normal path is unaffected.
+        .kill_on_drop(true);
     #[cfg(windows)]
     {
         // tokio's Command carries its own creation_flags.
