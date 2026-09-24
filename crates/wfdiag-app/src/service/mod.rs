@@ -2819,6 +2819,25 @@ impl AppService {
             self.update_request = None;
             self.snapshot.update.in_flight = false;
         }
+        // Single-slot request ids: a stale entry makes every later command of
+        // the kind answer to a reply that is never coming. (The multi-entry
+        // maps — settings/export/history — are keyed lookups and cannot wedge
+        // a domain, so they need no release.)
+        if expired(&self.system_info_request) {
+            self.system_info_request = None;
+        }
+        if expired(&self.architecture_request) {
+            self.architecture_request = None;
+        }
+        if expired(&self.process_page_request) {
+            self.process_page_request = None;
+        }
+        if expired(&self.process_detail_request) {
+            self.process_detail_request = None;
+        }
+        if expired(&self.network_request_id) {
+            self.network_request_id = None;
+        }
     }
 
     fn maybe_start_delayed_update_check(&mut self) {
@@ -2953,6 +2972,18 @@ mod reply_timeout_tests {
         let update = service.requests.issue().unwrap();
         service.update_request = Some(update);
         service.snapshot.update.in_flight = true;
+        let mut single_slot_ids = Vec::new();
+        for held in [
+            &mut service.system_info_request,
+            &mut service.architecture_request,
+            &mut service.process_page_request,
+            &mut service.process_detail_request,
+            &mut service.network_request_id,
+        ] {
+            let id = service.requests.issue().unwrap();
+            *held = Some(id);
+            single_slot_ids.push(id);
+        }
 
         // A foreign request id releases nothing.
         let stranger = service.requests.issue().unwrap();
@@ -2985,6 +3016,19 @@ mod reply_timeout_tests {
         });
         assert!(service.update_request.is_none());
         assert!(!service.snapshot.update.in_flight);
+
+        // Every single-slot request id releases on its own timeout.
+        for id in &single_slot_ids {
+            service.release_timed_out_request(&ReplyTimeout {
+                worker: WorkerKind::Diagnostics,
+                request: *id,
+            });
+        }
+        assert!(service.system_info_request.is_none());
+        assert!(service.architecture_request.is_none());
+        assert!(service.process_page_request.is_none());
+        assert!(service.process_detail_request.is_none());
+        assert!(service.network_request_id.is_none());
 
         let _ = service.shutdown(Duration::from_secs(2));
     }
