@@ -9,8 +9,10 @@ permissions:
   contents: read
 
 concurrency:
+  # The weekly scan is the only automated one - never cancel it (or a manual
+  # dispatch) mid-flight; a duplicate run merely queues.
   group: codeql-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   analyze:

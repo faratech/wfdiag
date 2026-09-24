@@ -4,10 +4,12 @@ on:
   push:
     paths:
       - '.github/workflows/**'
+      - '.github/ci-policy.yml'
       - '.github/dependabot.yml'
   pull_request:
     paths:
       - '.github/workflows/**'
+      - '.github/ci-policy.yml'
       - '.github/dependabot.yml'
   schedule:
     - cron: '17 4 * * 1'
@@ -16,8 +18,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: actions-policy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   policy:
-    uses: faratech/ci-standards/.github/workflows/actions-policy.yml@main
+    # Pinned to the reviewed commit (the repository equivalent of the
+    # Reactor pin policy): a floating external ref executes whatever lands
+    # on that repo's main branch, in this repo, with this repo's identity.
+    uses: faratech/ci-standards/.github/workflows/actions-policy.yml@78ad532a0594bf3846b91cc42f28cb56e5318226
     with:
       policy_strict: false

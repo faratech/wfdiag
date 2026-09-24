@@ -5,3 +5,15 @@ workflows:
   .github/workflows/reactor-validation.yml: deep
   .github/workflows/claude.yml: event
   .github/workflows/claude-code-review.yml: event
+  # The Windows Store / release family: the most expensive runners in the
+  # repository, previously absent from the mapping entirely.
+  .github/workflows/build-and-publish-store.yml: deep
+  .github/workflows/release-signed.yml: deep
+  .github/workflows/sign-existing.yml: deep
+  .github/workflows/check-store-submission.yml: fast
+  .github/workflows/publish-existing-to-store.yml: deep
+  .github/workflows/migrate-store-draft.yml: fast
+  .github/workflows/test-store-publish.yml: deep
+  .github/workflows/update-release-with-store-signed.yml: fast
+  .github/workflows/update-store-images.yml: fast
+  .github/workflows/update-store-release-notes.yml: fast
