@@ -121,8 +121,13 @@ pub(crate) fn to_openai_tools(tools: &[ToolSpec], strict: bool) -> Vec<ChatCompl
                     // that requires it: nullable-ize optional properties and
                     // list every property in `required`. The canonical specs
                     // stay single-typed so providers with typed-enum schemas
-                    // (Gemini) receive shapes they accept.
-                    parameters: Some(strict_strictify(&tool.parameters)),
+                    // (Gemini) receive shapes they accept, and non-OpenAI
+                    // compat servers keep the untouched wire shape.
+                    parameters: Some(if strict {
+                        strict_strictify(&tool.parameters)
+                    } else {
+                        tool.parameters.clone()
+                    }),
                     strict: strict.then_some(true),
                 },
             })
