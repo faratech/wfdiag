@@ -18,10 +18,6 @@ pub const TURN_TIMEOUT_SECS: u64 = 180;
 pub const MAX_CHAT_SESSIONS: usize = 20;
 pub const MAX_SESSION_MESSAGES: usize = 100;
 pub const MAX_SESSION_CHARS: usize = 512 * 1024;
-/// Cap on one user-typed chat message in the rollback shell's UI projection.
-/// Not the grounding sanitizer's machine-derived query bound — that one is
-/// private to `grounding.rs` (420 chars) and must never be loosened to this.
-pub const MAX_USER_INPUT_CHARS: usize = 16_000;
 pub const MAX_DISPLAY_CHARS: usize = 2_000;
 pub const MAX_CONTEXT_REFS: usize = 8;
 pub const SESSION_MAX_AGE_SECS: u64 = 6 * 60 * 60;
