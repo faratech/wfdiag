@@ -130,9 +130,12 @@ jobs:
       - name: External gates watcher
         if: ${{ inputs.run-external-gates && matrix.arch == 'x64' }}
         shell: pwsh
+        # Informational: actionable findings (a newer crates.io release) are
+        # reviewed through the script's own runs, not gating; a crates.io
+        # outage must not red the validation lane either.
+        continue-on-error: true
         run: |
           python scripts/check-external-gates.py --json
-          # Informational: actionable findings are reviewed, not gating.
 
       - name: Upload validation evidence
         if: always()
