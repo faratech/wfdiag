@@ -273,6 +273,7 @@ def _check_manifest_contract(
         "expected_crate_version": EXPECTED_REACTOR_VERSION,
         "windows_app_runtime_release": EXPECTED_REACTOR_RUNTIME_RELEASE,
         "windows_app_runtime_framework": EXPECTED_REACTOR_FRAMEWORK,
+        "windows_app_runtime_min_version": EXPECTED_REACTOR_RUNTIME_MIN_VERSION,
     }
     mismatches = {
         key: {"expected": expected, "actual": pin.get(key)}
