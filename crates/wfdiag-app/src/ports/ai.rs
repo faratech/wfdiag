@@ -48,8 +48,8 @@ use wfdiag_native_ai_provider::{
     AIProvider, AIProviderPreference, CompatConfigPorts, FoundryEndpointSource,
     ModelCatalogRequest, OllamaSource, ProcessSubscriptionCliStatusSource, ProviderAvailability,
     SettingsProviderKeySource, SharedAiCache, SubscriptionCliStatusSource, SubscriptionConfigPorts,
-    next_auto_local_route, parse_provider_preference, provider_config_fingerprint,
-    resolve_compat_config, resolve_subscription_config,
+    next_auto_route, parse_provider_preference, provider_config_fingerprint, resolve_compat_config,
+    resolve_subscription_config,
 };
 use wfdiag_native_ai_report::{
     NativeReportRuntime, ReportFuture, ReportProviderResolver, ReportResolverFactory,
@@ -549,7 +549,7 @@ impl ReportProviderResolver for ShippingReportResolver {
         preference: AIProviderPreference,
         tried: &[AIProvider],
     ) -> ReportFuture<'_, Option<AIProvider>> {
-        let next = next_auto_local_route(preference, tried, self.availability);
+        let next = next_auto_route(preference, tried, self.availability);
         Box::pin(async move { next })
     }
 

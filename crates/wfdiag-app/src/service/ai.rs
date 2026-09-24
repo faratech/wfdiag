@@ -67,7 +67,7 @@ use wfdiag_native_ai_chat::{
 use wfdiag_native_ai_chat::{SubscriptionAuthState, auth_status_from_probe};
 use wfdiag_native_ai_provider::SubscriptionProbes;
 use wfdiag_native_ai_provider::{
-    AIProvider, AIProviderPreference, AIProviderStatus, ModelCatalogRequest, next_auto_local_route,
+    AIProvider, AIProviderPreference, AIProviderStatus, ModelCatalogRequest, next_auto_route,
     parse_provider_preference,
 };
 use wfdiag_native_ai_report::{ReportGeneration, ReportScan, ReportWorkerEvent};
@@ -1189,13 +1189,12 @@ impl AppService {
         // but generation persistently fails could never complete an
         // interpretation that an explicit-Foundry user gets on the same
         // machine.
-        let provider = if preference == AIProviderPreference::Auto
-            && active == AIProvider::PhiSilica
-        {
-            next_auto_local_route(preference, &[active], status.availability()).unwrap_or(active)
-        } else {
-            active
-        };
+        let provider =
+            if preference == AIProviderPreference::Auto && active == AIProvider::PhiSilica {
+                next_auto_route(preference, &[active], status.availability()).unwrap_or(active)
+            } else {
+                active
+            };
         Ok(AnalysisRoute {
             preference,
             provider,
