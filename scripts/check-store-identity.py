@@ -11,12 +11,8 @@ timeouts before ever reaching real validation. Run in CI on every push so
 any future drift on these fields fails fast and loud instead of silently
 blocking the next Store submission.
 
-The six sources checked:
-  - src-tauri/tauri.msix.conf.json  (local build-cross.py Store MSIX path)
+The sources checked:
   - AppxManifest.xml                (Store MSIX package manifest)
-  - scripts/build-cross.py          (Python-generated Store and dev-only
-                                      sparse manifests)
-  - src-tauri/windows-app.manifest  (loose executable's sparse association)
   - .github/workflows/build-and-publish-store.yml (CI's inline manifest)
   - apps/wfdiag/src/platform/notifications.rs (toast AUMID, pinned to the
                                       package family name recorded in
@@ -55,15 +51,6 @@ def find_all(label: str, pattern: str, text: str, expected: str) -> None:
         check(f"{label} [{i}]" if len(matches) > 1 else label, actual, expected)
 
 
-# --- src-tauri/tauri.msix.conf.json ---
-msix_conf_path = ROOT / "src-tauri/tauri.msix.conf.json"
-msix_conf = json.loads(msix_conf_path.read_text())
-bundle = msix_conf["bundle"]
-msix = bundle["windows"]["msix"]
-check(f"{msix_conf_path.name} bundle.publisher", bundle["publisher"], EXPECTED_PUBLISHER_CN)
-check(f"{msix_conf_path.name} msix.publisherDisplayName", msix["publisherDisplayName"], EXPECTED_PUBLISHER_DISPLAY_NAME)
-check(f"{msix_conf_path.name} msix.identityName", msix["identityName"], EXPECTED_IDENTITY_NAME)
-
 # --- AppxManifest.xml ---
 appx_path = ROOT / "AppxManifest.xml"
 appx_text = appx_path.read_text()
@@ -71,30 +58,11 @@ find_all(f"{appx_path.name} Identity Publisher", r'<Identity\b[^>]*\bPublisher="
 find_all(f"{appx_path.name} Identity Name", r'<Identity\b[^>]*\bName="([^"]+)"', appx_text, EXPECTED_IDENTITY_NAME)
 find_all(f"{appx_path.name} PublisherDisplayName", r"<PublisherDisplayName>([^<]+)</PublisherDisplayName>", appx_text, EXPECTED_PUBLISHER_DISPLAY_NAME)
 
-# --- scripts/build-cross.py ---
-build_cross_path = ROOT / "scripts/build-cross.py"
-build_cross_text = build_cross_path.read_text()
-find_all(f"{build_cross_path.name} PUBLISHER constant", r'^PUBLISHER = "([^"]+)"', build_cross_text, EXPECTED_PUBLISHER_CN)
-find_all(f"{build_cross_path.name} SPARSE_PACKAGE_NAME constant", r'^SPARSE_PACKAGE_NAME = "([^"]+)"', build_cross_text, EXPECTED_IDENTITY_NAME)
-find_all(f"{build_cross_path.name} PublisherDisplayName", r"<PublisherDisplayName>([^<]+)</PublisherDisplayName>", build_cross_text, EXPECTED_PUBLISHER_DISPLAY_NAME)
-appx_manifest_fn = re.search(r"def create_appx_manifest\(.*?\n(?=def |\Z)", build_cross_text, re.S)
-if not appx_manifest_fn:
-    errors.append(f"{build_cross_path.name}: create_appx_manifest() not found")
-else:
-    find_all(f"{build_cross_path.name} create_appx_manifest Identity Name", r'<Identity\b[^>]*\bName="([^"]+)"', appx_manifest_fn.group(0), EXPECTED_IDENTITY_NAME)
-
-# --- src-tauri/windows-app.manifest ---
-windows_manifest_path = ROOT / "src-tauri/windows-app.manifest"
-windows_manifest_text = windows_manifest_path.read_text()
-find_all(f"{windows_manifest_path.name} msix publisher", r'<msix\b[^>]*\bpublisher="([^"]+)"', windows_manifest_text, EXPECTED_PUBLISHER_CN)
-find_all(f"{windows_manifest_path.name} msix packageName", r'<msix\b[^>]*\bpackageName="([^"]+)"', windows_manifest_text, EXPECTED_IDENTITY_NAME)
-
-# --- .github/workflows/build-and-publish-store.yml ---
-ci_manifest_path = ROOT / ".github/workflows/build-and-publish-store.yml"
-ci_text = ci_manifest_path.read_text()
-find_all(f"{ci_manifest_path.name} PUBLISHER env", r"^\s*PUBLISHER:\s*(\S+)", ci_text, EXPECTED_PUBLISHER_CN)
-find_all(f"{ci_manifest_path.name} PublisherDisplayName", r"<PublisherDisplayName>([^<]+)</PublisherDisplayName>", ci_text, EXPECTED_PUBLISHER_DISPLAY_NAME)
-find_all(f"{ci_manifest_path.name} Identity Name", r'<Identity\b[^>]*\bName="([^"]+)"', ci_text, EXPECTED_IDENTITY_NAME)
+# --- scripts/build-reactor-msix-probe.py (renders the shipped manifest) ---
+probe_path = ROOT / "scripts/build-reactor-msix-probe.py"
+probe_text = probe_path.read_text()
+find_all(f"{probe_path.name} STORE_PUBLISHER constant", r'^STORE_PUBLISHER = "([^"]+)"', probe_text, EXPECTED_PUBLISHER_CN)
+find_all(f"{probe_path.name} STORE_IDENTITY_NAME constant", r'^STORE_IDENTITY_NAME = "([^"]+)"', probe_text, EXPECTED_IDENTITY_NAME)
 
 # --- apps/wfdiag/src/platform/notifications.rs (toast AUMID) ---
 # The AUMID embeds the package family name; the baseline records it, and

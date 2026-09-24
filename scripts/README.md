@@ -24,34 +24,25 @@ python3 scripts/bump-version.py 2.5.9 --dry-run  # preview
 node scripts/update-version.js 2.5.9             # equivalent
 ```
 
-### Files updated (11)
+### Files updated (5)
 
 | # | File | What changes |
 | --- | --- | --- |
 | 1 | `version.json` | the source of truth |
-| 2 | `package.json` | npm package version |
-| 3 | `package-lock.json` | root `version` and `packages[""].version` |
-| 4 | `apps/wfdiag/Cargo.toml` | **native shell** `[package].version` |
-| 5 | `src-tauri/Cargo.toml` | Tauri rollback shell `[package].version` |
-| 6 | `src-tauri/tauri.conf.json` | Tauri config version |
-| 7 | `AppxManifest.xml` | MSIX `Identity` version only (gets the `.0` suffix) |
-| 8 | `src/components/AboutDialog.tsx` | version display (Tauri UI) |
-| 9 | `src/App.tsx` | `APP_VERSION` constant (Tauri UI) |
-| 10 | `src-tauri/tauri.msix.conf.json` | nested `msixVersion` (X.Y.Z.0) |
-| 11 | `README.md` | version badges and headings |
+| 2 | `apps/wfdiag/Cargo.toml` | **native shell** `[package].version` |
+| 3 | `AppxManifest.xml` | MSIX `Identity` version only (gets the `.0` suffix) |
+| 4 | `README.md` | version badges and headings |
+| — | `Cargo.lock` | counted write: refreshed via `cargo update --offline -p wfdiag` |
 
-Items 4 and 5 share one lock refresh: the script runs
-`cargo update --offline -p wfdiag-tauri -p wfdiag` so the root `Cargo.lock` stops the next
-`--locked` build from failing. If `cargo` is not on `PATH` the script warns and you must run
-that command yourself before committing.
+If `cargo` is not on `PATH` the script warns and you must run
+`cargo update --offline -p wfdiag` yourself before committing.
 
 `bump-version.py` also reads `reactor-baselines/manifest.json` → `reactor_pin` for the
 Windows App Runtime framework name and minimum version, so the Store manifest cannot drift
 from the pinned Reactor runtime. Never hand-edit those values in `AppxManifest.xml`.
 
-`check-version-sync.py` verifies every one of those files plus **both** `Cargo.lock` package
-entries (`wfdiag` and `wfdiag-tauri`) and the native shell's version source
-(`apps/wfdiag/build.rs` → `main.rs`). CI and release builds run it before packaging, and Rust
+`check-version-sync.py` verifies every one of those files plus the `wfdiag` `Cargo.lock`
+entry and the native shell's version source (`apps/wfdiag/build.rs` → `main.rs`). CI and release builds run it before packaging, and Rust
 build commands use `--locked` so a release cannot silently resolve a different dependency
 graph.
 
@@ -75,23 +66,17 @@ the shipped package and the local probe cannot diverge.
 Each rendered manifest derives from the canonical `AppxManifest.xml` and changes only the
 executable, architecture, and Windows App Runtime dependency
 (`Microsoft.WindowsAppRuntime.2`, minimum `2.4.0.0`). No app-local DLLs are staged: the obsolete bootstrap shim,
-Windows App Runtime/WinUI DLLs and the stale `src-tauri/resources/ai-sdk`
-AI DLLs are rejected before and after packing. The script has no sign, install, registration,
+Windows App Runtime/WinUI DLLs and any app-local AI DLLs are rejected before and after
+packing. The script has no sign, install, registration,
 upload, or publishing operation. See `docs/REACTOR_STORE_PROBE.md`.
 
 `python3 -m unittest scripts/test_build_reactor_msix_probe.py` runs in CI (`store-identity`).
 
-### Tauri rollback package
-
-`python3 scripts/build-cross.py build-all --build-msix` builds the legacy Tauri Store/Phi
-Silica MSIX. Microsoft signs the package distributed through the Store; `--sign` is only for
-locally sideloadable test bundles. `src-tauri/tauri.msix.conf.json` is kept in version sync
-only for basic Tauri MSIX experiments — it does not represent the Store package manifest.
-
-`crates/wfdiag-native-phi/src/windows_ai_bindings.rs` is reviewed, tracked generated source.
-Ordinary builds never rewrite it. Regenerate it explicitly with
-`python3 scripts/build-cross.py generate-bindings`, review the diff, and commit the result
-separately from a release build.
+`crates/wfdiag-native-phi/src/windows_ai_bindings.rs` is reviewed, tracked generated
+source, and ordinary builds never rewrite it. The old `build-cross.py generate-bindings`
+lane was removed with the Tauri shell; if the Phi API surface ever changes (the Aion
+Instruct transition), reinstate a windows-bindgen invocation with the matching WinMD set
+before regenerating.
 
 ## Readiness and external-gate checkers
 
@@ -242,13 +227,12 @@ closing that child, the evidence identifies the exact PID for manual cleanup.
    `python3 scripts/check-version-sync.py` to confirm all 11 files and both `Cargo.lock`
    entries agree.
 2. Review and commit with an explicit pathspec — never `git add -A`:
-   `git diff` → `git commit -- version.json package.json package-lock.json Cargo.lock ...`
+   `git diff` → `git commit -- version.json Cargo.lock apps/wfdiag/Cargo.toml AppxManifest.xml README.md`
 3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. That triggers
    `.github/workflows/build-and-publish-store.yml`, which builds `wfdiag.exe` for x64 and
-   ARM64 and packages them through `build-reactor-msix-probe.py`. `workflow_dispatch` accepts
-   a `shell` input (`reactor` — the default and the product — or `tauri` for the rollback).
+   ARM64 and packages them through `build-reactor-msix-probe.py`.
 4. The workflow uploads an **unsigned** bundle; Microsoft signs the package delivered through
-   the Store. `--sign` in `build-cross.py` is only for locally sideloadable test bundles.
+   the Store.
 
 ## Store baseline and submission helpers
 

@@ -135,7 +135,7 @@ windows-reactor-setup = "{readiness.EXPECTED_REACTOR_VERSION}"
         self.write_text(
             "Cargo.toml",
             '''[workspace]
-members = ["apps/wfdiag", "crates/*", "src-tauri"]
+members = ["apps/wfdiag", "crates/*"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -151,10 +151,6 @@ serde = "1"
             "\n".join(
                 [
                     "version = 4",
-                    "",
-                    "[[package]]",
-                    'name = "windows-core"',
-                    'version = "0.61.2"',
                     "",
                     "[[package]]",
                     'name = "windows-core"',

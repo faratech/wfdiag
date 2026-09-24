@@ -73,42 +73,6 @@ def update_json_file(file_path: Path, new_version: str, dry_run: bool) -> bool:
         return False
 
 
-def update_package_lock(file_path: Path, new_version: str, dry_run: bool) -> bool:
-    """Update package-lock.json root and packages[""].version fields."""
-    if not file_path.exists():
-        print(f"  Warning: File not found: {file_path}")
-        return False
-
-    try:
-        data = json.loads(file_path.read_text(encoding='utf-8'))
-        old_root = data.get('version', 'unknown')
-        packages = data.get('packages')
-        root_package = packages.get('') if isinstance(packages, dict) else None
-        old_package = root_package.get('version', 'unknown') if isinstance(root_package, dict) else 'missing'
-
-        if old_root == new_version and old_package == new_version:
-            print(f"  Skipped (already {new_version}): {file_path}")
-            return True
-
-        if dry_run:
-            print(
-                f"  [DRY RUN] Would update: {file_path} "
-                f"(root {old_root} -> {new_version}, package {old_package} -> {new_version})"
-            )
-        else:
-            data['version'] = new_version
-            if isinstance(root_package, dict):
-                root_package['version'] = new_version
-            file_path.write_text(json.dumps(data, indent=4) + '\n', encoding='utf-8')
-            print(
-                f"  Updated: {file_path} "
-                f"(root {old_root} -> {new_version}, package {old_package} -> {new_version})"
-            )
-        return True
-    except Exception as e:
-        print(f"  Error updating {file_path}: {e}")
-        return False
-
 
 def update_cargo_toml(file_path: Path, new_version: str, dry_run: bool) -> bool:
     """Update version in Cargo.toml."""
@@ -151,7 +115,7 @@ def refresh_cargo_lock(cargo_dir: Path, dry_run: bool) -> bool:
         return True
     try:
         subprocess.run(
-            ["cargo", "update", "--offline", "-p", "wfdiag-tauri", "-p", "wfdiag"],
+            ["cargo", "update", "--offline", "-p", "wfdiag"],
             cwd=cargo_dir,
             check=True,
             capture_output=True,
@@ -161,49 +125,12 @@ def refresh_cargo_lock(cargo_dir: Path, dry_run: bool) -> bool:
         return True
     except FileNotFoundError:
         print("  Warning: cargo not found on PATH — Cargo.lock was not refreshed; run "
-              "'cargo update -p wfdiag-tauri -p wfdiag' manually before committing")
+              "'cargo update -p wfdiag' manually before committing")
         return False
     except subprocess.CalledProcessError as e:
         print(f"  Warning: failed to refresh Cargo.lock: {e.stderr.strip() if e.stderr else e}")
         return False
 
-
-def update_msix_conf(file_path: Path, new_version: str, dry_run: bool) -> bool:
-    """Update the nested msixVersion (X.Y.Z.0) in tauri.msix.conf.json.
-
-    The generic JSON helper only rewrites a root-level "version" key, which
-    this file does not have.
-    """
-    if not file_path.exists():
-        print(f"  Warning: File not found: {file_path}")
-        return False
-
-    try:
-        content = file_path.read_text(encoding='utf-8')
-        version_with_suffix = f"{new_version}.0"
-        pattern = r'("msixVersion"\s*:\s*)"[^"]+"'
-
-        match = re.search(pattern, content)
-        if not match:
-            print(f"  Warning: msixVersion not found in: {file_path}")
-            return False
-
-        old_version = re.search(r'"msixVersion"\s*:\s*"([^"]+)"', content).group(1)
-        if old_version == version_with_suffix:
-            print(f"  Skipped (already {version_with_suffix}): {file_path}")
-            return True
-
-        if dry_run:
-            print(f"  [DRY RUN] Would update: {file_path} ({old_version} -> {version_with_suffix})")
-        else:
-            new_content = re.sub(pattern, f'\\g<1>"{version_with_suffix}"', content, count=1)
-            file_path.write_text(new_content, encoding='utf-8')
-            print(f"  Updated: {file_path} ({old_version} -> {version_with_suffix})")
-
-        return True
-    except Exception as e:
-        print(f"  Error updating {file_path}: {e}")
-        return False
 
 
 def validate_appx_manifest_version_invariants(content: str, file_path: Path) -> bool:
@@ -361,68 +288,24 @@ def main():
     if update_json_file(script_dir / 'version.json', new_version, dry_run):
         success_count += 1
 
-    # 2. package.json
+    # 2. apps/wfdiag/Cargo.toml (native shell) shares the app version with
+    #    version.json; one lock refresh keeps Cargo.lock in step.
     total_count += 1
-    if update_json_file(script_dir / 'package.json', new_version, dry_run):
-        success_count += 1
-
-    # 3. package-lock.json
-    total_count += 1
-    if update_package_lock(script_dir / 'package-lock.json', new_version, dry_run):
-        success_count += 1
-
-    # 4. src-tauri/Cargo.toml (Tauri rollback shell) and apps/wfdiag/Cargo.toml
-    #    (native shell) share the app version; one lock refresh covers both.
-    total_count += 2
-    tauri_updated = update_cargo_toml(script_dir / 'src-tauri' / 'Cargo.toml', new_version, dry_run)
     shell_updated = update_cargo_toml(script_dir / 'apps' / 'wfdiag' / 'Cargo.toml', new_version, dry_run)
-    success_count += int(tauri_updated) + int(shell_updated)
-    if tauri_updated or shell_updated:
+    success_count += int(shell_updated)
+    if shell_updated:
         # Counted like every other write: a stale lock must fail the run,
         # or the next --locked build rejects the bump after a green exit.
         total_count += 1
         if refresh_cargo_lock(script_dir, dry_run):
             success_count += 1
 
-    # 5. src-tauri/tauri.conf.json
-    total_count += 1
-    if update_json_file(script_dir / 'src-tauri' / 'tauri.conf.json', new_version, dry_run):
-        success_count += 1
-
-    # 6. AppxManifest.xml
+    # 3. AppxManifest.xml
     total_count += 1
     if update_appx_manifest(script_dir / 'AppxManifest.xml', new_version, dry_run):
         success_count += 1
 
-    # 7. src/components/AboutDialog.tsx - Version X.Y.Z
-    total_count += 1
-    if update_tsx_file(
-        script_dir / 'src' / 'components' / 'AboutDialog.tsx',
-        new_version,
-        [(r'Version\s+[\d.]+', 'Version VERSION')],
-        dry_run
-    ):
-        success_count += 1
-
-    # 8. src/App.tsx - APP_VERSION constant (rendered in the nav rail and status bar)
-    total_count += 1
-    if update_tsx_file(
-        script_dir / 'src' / 'App.tsx',
-        new_version,
-        # Capture groups keep the identifier out of the replacement text —
-        # a literal "APP_VERSION = '...'" template would have its own
-        # VERSION substring rewritten by the placeholder substitution.
-        [(r"(APP_VERSION = ')[\d.]+(')", r"\g<1>VERSION\g<2>")],
-        dry_run
-    ):
-        success_count += 1
-
-    # 9. src-tauri/tauri.msix.conf.json - nested msixVersion (X.Y.Z.0)
-    total_count += 1
-    if update_msix_conf(script_dir / 'src-tauri' / 'tauri.msix.conf.json', new_version, dry_run):
-        success_count += 1
-
-    # 10. README.md
+    # 4. README.md
     total_count += 1
     if update_tsx_file(
         script_dir / 'README.md',
@@ -445,9 +328,8 @@ def main():
         print("Next steps:")
         print("  1. Review changes: git diff")
         print("  2. Commit changes with explicit pathspecs (never 'git add -A'):")
-        print(f"     git commit -m 'Bump version to {new_version}' -- version.json Cargo.lock package.json src-tauri apps src README.md")
-        print("  3. Build release: python3 build-cross.py build-all")
-
+        print(f"     git commit -m 'Bump version to {new_version}' -- version.json Cargo.lock apps/wfdiag/Cargo.toml AppxManifest.xml README.md")
+        
     sys.exit(0 if success_count == total_count else 1)
 
 

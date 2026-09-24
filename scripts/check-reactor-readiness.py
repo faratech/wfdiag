@@ -72,7 +72,6 @@ WINDOWS_062_SHELL_DIRECTORIES = (
 # outside these major.minor families means a third type system (or an
 # unexpected crates.io windows-core edge in the shell) has appeared.
 ALLOWED_WINDOWS_CORE_LOCK_FAMILIES = {
-    "0.61",
     "0.62",
     "0.100",
 }
@@ -508,13 +507,6 @@ def _check_native_ui(
                     continue
                 relative = str(member_manifest.relative_to(root))
                 if relative == relative_manifest:
-                    continue
-                if relative == str(Path("src-tauri") / "Cargo.toml"):
-                    # The rollback shell keeps its Tauri dependencies by
-                    # design (CLAUDE.md: kept buildable; deletion is a later
-                    # release). Rule 3 bans web UI in apps/wfdiag and
-                    # crates/, not in the rollback shell; counting it here
-                    # would block ui.native forever and bury real hits.
                     continue
                 try:
                     document = tomllib.loads(

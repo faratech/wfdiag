@@ -64,8 +64,6 @@ def main() -> int:
     if not re.fullmatch(r"\d+\.\d+\.\d+", canonical):
         print(f"ERROR: version.json contains invalid SemVer {canonical!r}", file=sys.stderr)
         return 1
-    package_lock = read_json("package-lock.json")
-    cargo_toml = tomllib.loads((ROOT / "src-tauri/Cargo.toml").read_text(encoding="utf-8"))
     shell_toml = tomllib.loads((ROOT / "apps/wfdiag/Cargo.toml").read_text(encoding="utf-8"))
     cargo_lock = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
     appx = (ROOT / "AppxManifest.xml").read_text(encoding="utf-8")
@@ -90,13 +88,10 @@ def main() -> int:
             None,
         )
 
-    cargo_lock_version = lock_version("wfdiag-tauri")
     shell_lock_version = lock_version("wfdiag")
-    msix_version = read_json("src-tauri/tauri.msix.conf.json")["bundle"]["windows"]["msix"]["msixVersion"]
     appx_version = appx_match.group(1)
     expected_windows_version = f"{canonical}.0"
     windows_versions = {
-        "src-tauri/tauri.msix.conf.json": msix_version,
         "AppxManifest.xml": appx_version,
     }
     invalid_windows_versions = {
@@ -115,20 +110,8 @@ def main() -> int:
 
     sources = {
         "version.json": canonical,
-        "package.json": read_json("package.json")["version"],
-        "package-lock.json (root)": package_lock["version"],
-        "package-lock.json": package_lock["packages"][""]["version"],
-        "src-tauri/Cargo.toml": cargo_toml["package"]["version"],
         "apps/wfdiag/Cargo.toml": shell_toml["package"]["version"],
-        "Cargo.lock (wfdiag-tauri)": cargo_lock_version,
         "Cargo.lock (wfdiag)": shell_lock_version,
-        "src-tauri/tauri.conf.json": read_json("src-tauri/tauri.conf.json")["version"],
-        "src/App.tsx": extract(
-            "src/App.tsx", r"const\s+APP_VERSION\s*=\s*['\"]([\d.]+)['\"]", "App UI"
-        ),
-        "src/components/AboutDialog.tsx": extract(
-            "src/components/AboutDialog.tsx", r"Version\s+([\d.]+)", "About dialog"
-        ),
         "README.md (heading)": extract(
             "README.md", r"^#\s+WF Diagnostics v([\d.]+)\b", "README heading"
         ),
