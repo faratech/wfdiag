@@ -25,12 +25,11 @@ pub const HEADLESS_STDERR_LIMIT: usize = 256 * 1024;
 #[cfg(windows)]
 const WORKDIR_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(super) const SUBSCRIPTION_OVERRIDE_ENV_VARS: &[&str] = &[
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "CODEX_API_KEY",
-    "OPENAI_API_KEY",
-];
+// Single-sourced with the probe-side list in wfdiag-native-ai-provider
+// (`local_probes`): a vendor override var added to one but not the other
+// would either leak the host key into a bridge child or misreport account
+// state. Re-exported so the scrub sites keep reading `cli_bridge::…`.
+pub(super) use wfdiag_native_ai_provider::SUBSCRIPTION_OVERRIDE_ENV_VARS;
 
 static VALIDATED_WORKDIR: OnceLock<PathBuf> = OnceLock::new();
 

@@ -33,9 +33,9 @@ use tokio_util::sync::CancellationToken;
 pub use wfdiag_native_ai_chat::{
     ChatContextRef, ChatEmitter, ChatProvider, ChatSendAck, ChatSessionSnapshot, DeltaPayload,
     DonePayload, ErrorPayload, FallbackRequiredPayload, MAX_CHAT_SESSIONS, MAX_CONTEXT_REFS,
-    MAX_DISPLAY_CHARS, MAX_QUERY_CHARS, PendingFallbackView, ProposalPayload, ScanRequestPayload,
-    ToolPayload, TurnStatus, build_system_prompt, cancel_pending_fallback, claim_pending_fallback,
-    plan_context, project_session, prune_sessions, run_chat_turn,
+    MAX_DISPLAY_CHARS, MAX_USER_INPUT_CHARS, PendingFallbackView, ProposalPayload,
+    ScanRequestPayload, ToolPayload, TurnStatus, build_system_prompt, cancel_pending_fallback,
+    claim_pending_fallback, plan_context, project_session, prune_sessions, run_chat_turn,
 };
 #[cfg(test)]
 use wfdiag_native_ai_chat::{
@@ -1104,10 +1104,10 @@ pub async fn ai_chat_send(
     if query.is_empty() {
         return Err("Cannot send an empty message".to_string());
     }
-    if query.chars().count() > MAX_QUERY_CHARS {
+    if query.chars().count() > MAX_USER_INPUT_CHARS {
         return Err(format!(
             "Message is too long (maximum {} characters)",
-            MAX_QUERY_CHARS
+            MAX_USER_INPUT_CHARS
         ));
     }
     let display_text = display_text

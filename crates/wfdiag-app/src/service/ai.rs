@@ -922,14 +922,6 @@ impl AppService {
                 detail: "a report is already being generated".to_string(),
             });
         }
-        self.workers
-            .ensure_optional("report", &self.ports, &self.settings_service, &self.queue);
-        if self.workers.report.is_none() {
-            return DispatchOutcome::Rejected(unavailable(
-                "report",
-                self.workers.ai_error("report"),
-            ));
-        }
         match PendingAiProviderGate::evaluate(
             self.snapshot.settings.ai_enabled,
             self.snapshot.provider_loading,
@@ -958,6 +950,17 @@ impl AppService {
                 let reason = self.provider_not_ready("generating");
                 return DispatchOutcome::Rejected(reason);
             }
+        }
+        // Lazy start: the runtime is only built once the gate has accepted,
+        // so a first request with AI disabled never leaves a resident report
+        // runtime behind (every sibling domain gates first).
+        self.workers
+            .ensure_optional("report", &self.ports, &self.settings_service, &self.queue);
+        if self.workers.report.is_none() {
+            return DispatchOutcome::Rejected(unavailable(
+                "report",
+                self.workers.ai_error("report"),
+            ));
         }
         if self.scan.snapshot().results.is_empty() {
             let scan_busy = self.snapshot.scan_busy();
