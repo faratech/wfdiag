@@ -188,11 +188,11 @@ impl BoundedToolCatalog {
                             "enum": remediation_ids,
                         },
                         "issue_id": {
-                            "type": ["string", "null"],
-                            "description": "Detected issue ID when the remediation is issue-bound; null for standalone maintenance actions",
+                            "type": "string",
+                            "description": "Detected issue ID when the remediation is issue-bound",
                         }
                     },
-                    "required": ["remediation_id", "issue_id"],
+                    "required": ["remediation_id"],
                     "additionalProperties": false,
                 }),
             },
@@ -413,32 +413,26 @@ mod tests {
     }
 
     #[test]
-    fn every_tool_schema_is_openai_strict_compliant() {
-        // OpenAI strict mode (to_openai_tools with strict=true for the OpenAI
-        // provider) requires `additionalProperties: false` and every property
-        // listed in `required`. A tool spec that violates either makes every
-        // tools-bearing OpenAI request 400 (#AI-gate F2).
+    fn every_tool_schema_stays_single_typed_and_closed() {
+        // The canonical specs ship raw to providers with typed-enum schemas
+        // (Gemini's Schema.type is a single value, not an array), so every
+        // property must carry ONE string type. OpenAI strict mode's
+        // nullable-array transform is applied per-transport in
+        // to_openai_tools and pinned there.
         for spec in catalog().specs() {
-            let properties = spec.parameters["properties"]
-                .as_object()
-                .unwrap_or_else(|| panic!("{}: parameters are not an object", spec.name));
             assert_eq!(
                 spec.parameters["additionalProperties"],
                 json!(false),
                 "{name}: additionalProperties must be false",
                 name = spec.name
             );
-            let required = spec.parameters["required"]
-                .as_array()
-                .unwrap_or_else(|| panic!("{}: required is not a list", spec.name));
-            let required: std::collections::BTreeSet<&str> = required
-                .iter()
-                .map(|value| value.as_str().expect("required entries are strings"))
-                .collect();
-            for name in properties.keys() {
+            let properties = spec.parameters["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{}: parameters are not an object", spec.name));
+            for (name, property) in properties {
                 assert!(
-                    required.contains(name.as_str()),
-                    "{}: property {name:?} is not in required - OpenAI strict mode would 400",
+                    property["type"].is_string(),
+                    "{}: property {name:?} must have a single string type",
                     spec.name
                 );
             }

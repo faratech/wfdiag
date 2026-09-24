@@ -27,6 +27,7 @@ use async_openai::{
     },
 };
 use futures::StreamExt;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
@@ -116,12 +117,58 @@ pub(crate) fn to_openai_tools(tools: &[ToolSpec], strict: bool) -> Vec<ChatCompl
                 function: FunctionObject {
                     name: tool.name.clone(),
                     description: Some(tool.description.clone()),
-                    parameters: Some(tool.parameters.clone()),
+                    // The strict transform lives HERE, in the one transport
+                    // that requires it: nullable-ize optional properties and
+                    // list every property in `required`. The canonical specs
+                    // stay single-typed so providers with typed-enum schemas
+                    // (Gemini) receive shapes they accept.
+                    parameters: Some(strict_strictify(&tool.parameters)),
                     strict: strict.then_some(true),
                 },
             })
         })
         .collect()
+}
+
+/// `OpenAI` strict mode requires `additionalProperties: false` and every
+/// property in `required`. Optional values are expressed as a nullable type
+/// array, which only this transport ever sees.
+fn strict_strictify(parameters: &Value) -> Value {
+    let mut schema = parameters.clone();
+    let existing_required: Vec<String> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
+        return schema;
+    };
+    let mut required = existing_required;
+    for (name, property) in properties.iter_mut() {
+        let already_nullable = property
+            .get("type")
+            .and_then(Value::as_array)
+            .is_some_and(|types| types.iter().any(|t| t.as_str() == Some("null")));
+        if !already_nullable
+            && required.iter().all(|entry| entry != name)
+            && let Some(base) = property
+                .get("type")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        {
+            property["type"] = json!([base, "null"]);
+        }
+        if !required.iter().any(|entry| entry == name) {
+            required.push(name.clone());
+        }
+    }
+    schema["required"] = json!(required);
+    schema
 }
 
 /// GPT-5.6 function tools on Chat Completions require effective reasoning
@@ -467,6 +514,32 @@ pub async fn chat_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_tools_nullable_optional_properties_and_require_them_all() {
+        // The canonical specs are single-typed (Gemini-safe); the OpenAI
+        // strict transform must nullable-ize optional properties and list
+        // every property in required, or the request 400s before any turn.
+        let catalog = crate::bounded_tools::BoundedToolCatalog::new(vec![], vec![]);
+        for spec in catalog.specs() {
+            let strict = strict_strictify(&spec.parameters);
+            let properties = strict["properties"].as_object().expect("props object");
+            let required: std::collections::BTreeSet<&str> = strict["required"]
+                .as_array()
+                .expect("required list")
+                .iter()
+                .map(|value| value.as_str().expect("required entries are strings"))
+                .collect();
+            for name in properties.keys() {
+                assert!(
+                    required.contains(name.as_str()),
+                    "{}: strict mode would 400 - {name:?} is not required",
+                    spec.name
+                );
+            }
+        }
+    }
+
     use serde_json::json;
 
     fn spec() -> ToolSpec {

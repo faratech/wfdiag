@@ -431,8 +431,9 @@ impl AppService {
 
     /// Why no provider is ready, as the user should hear it: a sign-in
     /// requirement names the CLI and the way out; otherwise the generic
-    /// "set up a provider". Pure; see `provider_not_ready` for the event.
-    fn provider_not_ready_reason(&self, verb: &str) -> RejectReason {
+    /// "set up a provider". Takes `&mut self` because the no-status-yet arm
+    /// kicks a fresh status probe; see `provider_not_ready` for the event.
+    fn provider_not_ready_reason(&mut self, verb: &str) -> RejectReason {
         let preference = parse_provider_preference(&self.snapshot.settings.preferred_ai_provider);
         let requirement = self
             .snapshot
@@ -440,9 +441,19 @@ impl AppService {
             .as_ref()
             .and_then(|status| sign_in_requirement(preference, status));
         if requirement.is_none() && self.snapshot.provider_status.is_none() {
-            // No status yet: the first probe is still in flight, so the
-            // providers are being checked rather than missing - "set up a
-            // provider" would mislead a user who just opened the page.
+            // No status yet. While a probe is in flight the providers are
+            // being checked; after a probe ERROR nothing re-probes on its
+            // own, so this dispatch kicks a fresh one instead of letting
+            // "try again in a moment" repeat forever (the chat/report gates
+            // already re-probe via their Refresh arm).
+            if !self.snapshot.provider_loading {
+                let _ = self.request_provider_status();
+                return RejectReason::NotReady {
+                    detail: format!(
+                        "AI providers could not be checked — try {verb} again in a moment"
+                    ),
+                };
+            }
             return RejectReason::NotReady {
                 detail: format!("Checking AI providers — try {verb} again in a moment"),
             };
@@ -1163,10 +1174,10 @@ impl AppService {
 
     // ---- analysis, prioritisation, fix plan ------------------------------
 
-    fn analysis_route(&self) -> Result<AnalysisRoute, RejectReason> {
-        let status = self
-            .provider_status()
-            .ok_or_else(|| self.provider_not_ready_reason("interpreting"))?;
+    fn analysis_route(&mut self) -> Result<AnalysisRoute, RejectReason> {
+        let Some(status) = self.provider_status() else {
+            return Err(self.provider_not_ready_reason("interpreting"));
+        };
         let preference = parse_provider_preference(&self.snapshot.settings.preferred_ai_provider);
         let active = self.effective_ai_provider(status);
         // Workload routing, mirroring the fix-plan policy (fix_plan.rs
