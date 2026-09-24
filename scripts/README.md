@@ -15,8 +15,8 @@ The version is defined once in `/version.json`:
 }
 ```
 
-`bump-version.py` is the implementation; `update-version.js` and `update-version.ps1` are
-thin entry points that delegate to it.
+`bump-version.py` is the implementation; `update-version.js` (the `npm run update-version`
+entry point) delegates to it. There is no PowerShell entry point.
 
 ```bash
 python3 scripts/bump-version.py 2.5.9            # apply
@@ -249,3 +249,14 @@ closing that child, the evidence identifies the exact PID for manual cleanup.
    a `shell` input (`reactor` — the default and the product — or `tauri` for the rollback).
 4. The workflow uploads an **unsigned** bundle; Microsoft signs the package delivered through
    the Store. `--sign` in `build-cross.py` is only for locally sideloadable test bundles.
+
+## Store baseline and submission helpers
+
+Not part of the validation lanes; these drive the Store release process by hand:
+
+- `capture-store-baselines.ps1` — captures repeatable visual baselines from the installed
+  Microsoft Store build (the oracle the Reactor parity/visual scripts compare against).
+- `migrate-store-draft.py` — safely migrates a Partner Center draft into an API-owned
+  Store submission.
+- `store-release-as-secret.ps1` — uploads a store release file (e.g. the PFX) as a GitHub
+  Actions secret.
