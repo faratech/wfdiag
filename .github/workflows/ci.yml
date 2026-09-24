@@ -36,23 +36,6 @@ jobs:
       - run: python3 scripts/check-store-identity.py
       - run: python3 -m unittest scripts/test_build_reactor_msix_probe.py -v
 
-  frontend:
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
-      - run: npm ci
-      - run: npx tsc --noEmit
-      - run: npx eslint .
-      - run: npx vitest run
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
-
   rust-portable:
     if: github.event_name != 'schedule'
     # The engine crates must build and test with no GUI and no Windows: this
@@ -68,9 +51,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: portable
-      - run: cargo check --locked --workspace --all-targets --exclude wfdiag --exclude wfdiag-tauri
-      - run: cargo clippy --locked --workspace --all-targets --exclude wfdiag --exclude wfdiag-tauri -- -D warnings
-      - run: cargo test --locked --workspace --exclude wfdiag --exclude wfdiag-tauri
+      - run: cargo check --locked --workspace --all-targets --exclude wfdiag
+      - run: cargo clippy --locked --workspace --all-targets --exclude wfdiag -- -D warnings
+      - run: cargo test --locked --workspace --exclude wfdiag
 
   rust:
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
@@ -82,14 +65,6 @@ jobs:
       __COMPAT_LAYER: RunAsInvoker
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
-      - run: npm ci
-      # tauri-build embeds ../dist via the default custom-protocol feature and
-      # dist/ is untracked, so the frontend must be built first
-      - run: npm run build
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: clippy,rustfmt
@@ -114,12 +89,6 @@ jobs:
       __COMPAT_LAYER: RunAsInvoker
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
-      - run: npm ci
-      - run: npm run build
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: aarch64-pc-windows-msvc

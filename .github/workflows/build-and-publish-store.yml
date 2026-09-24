@@ -4,12 +4,11 @@ name: Build and Publish to Microsoft Store
 # All version tags will build, create release, AND publish to Microsoft Store
 #
 # Manual dispatch is available for testing without creating tags. The
-# `shell` input selects which shell is packaged: the native WinUI 3 shell
-# (apps/wfdiag, wfdiag.exe, framework-dependent on Microsoft.WindowsAppRuntime.2)
-# is the product; the Tauri shell (src-tauri) is kept as a rollback. The native
-# package manifest, layout, and MSIX contract come from
-# scripts/build-reactor-msix-probe.py so the shipped package and the probe can
-# never disagree.
+# packaged product is the native WinUI 3 shell (apps/wfdiag, wfdiag.exe,
+# framework-dependent on Microsoft.WindowsAppRuntime.2). The package
+# manifest, layout, and MSIX contract come from
+# scripts/build-reactor-msix-probe.py so the shipped package and the probe
+# can never disagree.
 
 on:
   push:
@@ -28,19 +27,9 @@ on:
         description: 'Create GitHub Release'
         type: boolean
         default: true
-      shell:
-        description: 'Shell to package: reactor (native WinUI 3, the product) or tauri (rollback)'
-        type: choice
-        options:
-          - reactor
-          - tauri
-        default: reactor
 
 env:
   CARGO_TERM_COLOR: always
-  # Tag pushes always package the native shell; workflow_dispatch may select
-  # the Tauri rollback shell. Both keep the same Store identity and version.
-  SHELL_KIND: ${{ github.event.inputs.shell || 'reactor' }}
   PROJECT_NAME: WindowsForum_Diagnostics
   PUBLISHER: CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4
 
@@ -64,7 +53,6 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       publish_to_store: ${{ steps.version.outputs.publish_to_store }}
       create_release: ${{ steps.version.outputs.create_release }}
-      shell: ${{ env.SHELL_KIND }}
     steps:
       - uses: actions/checkout@v4
 
@@ -88,7 +76,7 @@ jobs:
             $publishToStore = "true"
             Write-Host "Tag release detected: $tagName"
           } else {
-            $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+            $version = (Get-Content version.json | ConvertFrom-Json).version
           }
 
           if ($version -notmatch '^\d+\.\d+\.\d+$') {
@@ -112,17 +100,9 @@ jobs:
           Write-Host "Building version: $version"
           Write-Host "Publish to store: $publishToStore"
           Write-Host "Create release: $createRelease"
-          Write-Host "Shell: $env:SHELL_KIND"
 
       - name: Verify source and requested versions match
         run: python scripts/check-version-sync.py --expected "${{ steps.version.outputs.version }}"
-
-      - name: Setup Node.js
-        if: env.SHELL_KIND == 'tauri'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: 'npm'
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.98.0
@@ -133,53 +113,19 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
-          key: x64-${{ env.SHELL_KIND }}
-
-      - name: Install dependencies
-        if: env.SHELL_KIND == 'tauri'
-        shell: pwsh
-        run: npm ci
-
-      - name: Build frontend
-        if: env.SHELL_KIND == 'tauri'
-        run: npm run build
+          key: x64
 
       - name: Build native shell (x64)
-        if: env.SHELL_KIND == 'reactor'
         # Framework-dependent: no app-local bootstrap DLL; Reactor uses OS package-dependency APIs.
         run: cargo build --locked --release -p wfdiag --target x86_64-pc-windows-msvc
 
-      - name: Build x64 executable (Tauri rollback)
-        if: env.SHELL_KIND == 'tauri'
-        working-directory: src-tauri
-        run: cargo build --locked --release --target x86_64-pc-windows-msvc
-        env:
-          # Match the ARM64 job: statically link the VC++ runtime so the
-          # portable exe doesn't need the redistributable on a clean machine.
-          RUSTFLAGS: -C target-feature=+crt-static
-
       - name: Upload native payload (x64)
-        if: env.SHELL_KIND == 'reactor'
         uses: actions/upload-artifact@v4
         with:
           name: exe-x64
           if-no-files-found: error
           path: |
             target/x86_64-pc-windows-msvc/release/wfdiag.exe
-
-      - name: Upload x64 executable (Tauri rollback)
-        if: env.SHELL_KIND == 'tauri'
-        uses: actions/upload-artifact@v4
-        with:
-          name: exe-x64
-          path: target/x86_64-pc-windows-msvc/release/wfdiag-tauri.exe
-
-      - name: Upload frontend dist
-        if: env.SHELL_KIND == 'tauri'
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-dist
-          path: dist/
 
   # =============================================================================
   # Build ARM64 executable
@@ -191,13 +137,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        if: env.SHELL_KIND == 'tauri'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: 'npm'
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.98.0
         with:
@@ -207,7 +146,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
-          key: arm64-${{ env.SHELL_KIND }}
+          key: arm64
 
       - name: Check ARM64 build tools
         shell: pwsh
@@ -228,32 +167,10 @@ jobs:
             Get-ChildItem "$vsPath\VC\Tools\MSVC\*\bin\Hostx64" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
           }
 
-      - name: Install dependencies
-        if: env.SHELL_KIND == 'tauri'
-        shell: pwsh
-        run: npm ci
-
-      - name: Build frontend
-        if: env.SHELL_KIND == 'tauri'
-        run: npm run build
-
       - name: Build native shell (ARM64)
-        if: env.SHELL_KIND == 'reactor'
         run: cargo build --locked --release -p wfdiag --target aarch64-pc-windows-msvc
 
-      - name: Build ARM64 executable (Tauri rollback)
-        if: env.SHELL_KIND == 'tauri'
-        working-directory: src-tauri
-        shell: pwsh
-        run: |
-          # Set up environment for ARM64 cross-compilation
-          cargo build --locked --release --target aarch64-pc-windows-msvc
-        env:
-          # Ensure linker can find ARM64 libs
-          RUSTFLAGS: -C target-feature=+crt-static
-
       - name: Upload native payload (ARM64)
-        if: env.SHELL_KIND == 'reactor'
         uses: actions/upload-artifact@v4
         with:
           name: exe-arm64
@@ -261,22 +178,14 @@ jobs:
           path: |
             target/aarch64-pc-windows-msvc/release/wfdiag.exe
 
-      - name: Upload ARM64 executable (Tauri rollback)
-        if: env.SHELL_KIND == 'tauri'
-        uses: actions/upload-artifact@v4
-        with:
-          name: exe-arm64
-          path: target/aarch64-pc-windows-msvc/release/wfdiag-tauri.exe
-
   # =============================================================================
-  # Create MSIX Bundle (native shell: probe-rendered manifest + executable;
-  # Tauri rollback: inline manifest + dist + app-local AI DLLs)
+  # Create MSIX Bundle (probe-rendered manifest + executable)
   # =============================================================================
   create-msix-bundle:
     needs: [build-x64, build-arm64]
     runs-on: windows-latest
     outputs:
-      bundle_path: ${{ steps.bundle-native.outputs.bundle_path || steps.bundle.outputs.bundle_path }}
+      bundle_path: ${{ steps.bundle-native.outputs.bundle_path }}
     steps:
       - uses: actions/checkout@v4
 
@@ -292,21 +201,12 @@ jobs:
           name: exe-arm64
           path: artifacts/arm64
 
-      - name: Download frontend dist
-        if: env.SHELL_KIND == 'tauri'
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-dist
-          path: artifacts/dist
-
       - name: Setup Python
-        if: env.SHELL_KIND == 'reactor'
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
       - name: Stage, pack, and bundle the native Store packages
-        if: env.SHELL_KIND == 'reactor'
         id: bundle-native
         shell: pwsh
         run: |
@@ -336,7 +236,6 @@ jobs:
           echo "bundle_path=$bundlePath" >> $env:GITHUB_OUTPUT
 
       - name: Validate native Store bundle contents
-        if: env.SHELL_KIND == 'reactor'
         shell: pwsh
         run: |
           $version = "${{ needs.build-x64.outputs.version }}"
@@ -385,219 +284,6 @@ jobs:
             throw "Bundle architectures are '$($foundArchitectures -join ',')', expected x64 and arm64"
           }
           Write-Host "Validated native Store identity, capabilities, WindowsAppRuntime.2 dependency, payload, and both architectures."
-
-      - name: Prepare MSIX package directories (Tauri rollback)
-        if: env.SHELL_KIND == 'tauri'
-        id: bundle
-        shell: pwsh
-        run: |
-          $version = "${{ needs.build-x64.outputs.version }}"
-          $projectName = "${{ env.PROJECT_NAME }}"
-          $publisher = "${{ env.PUBLISHER }}"
-
-          Write-Host "Creating MSIX bundle v$version"
-
-          # Create directories
-          $msixDir = "msix-build"
-          $x64Dir = "$msixDir/x64"
-          $arm64Dir = "$msixDir/arm64"
-          $bundleDir = "$msixDir/bundle"
-
-          New-Item -ItemType Directory -Force -Path $x64Dir, $arm64Dir, $bundleDir
-
-          # Process each architecture
-          foreach ($arch in @("x64", "arm64")) {
-            $targetDir = "$msixDir/$arch"
-            $exeSource = "artifacts/$arch/wfdiag-tauri.exe"
-
-            Write-Host "`nPreparing $arch package..."
-
-            # Copy executable
-            Copy-Item $exeSource "$targetDir/$projectName.exe"
-
-            # Copy frontend dist
-            Copy-Item -Recurse "artifacts/dist" "$targetDir/dist"
-
-            # Copy icons (use PNG versions)
-            Copy-Item "src-tauri/icons/icon.png" "$targetDir/Logo.png"
-            Copy-Item "src-tauri/icons/192x192.png" "$targetDir/Square150x150Logo.png"
-            Copy-Item "src-tauri/icons/44x44.png" "$targetDir/Square44x44Logo.png"
-            Copy-Item "src-tauri/icons/Wide310x150Logo.png" "$targetDir/Wide310x150Logo.png"
-
-            # Copy Windows App SDK AI DLLs if they exist
-            $aiSdkDir = "src-tauri/resources/ai-sdk/$arch"
-            if (Test-Path $aiSdkDir) {
-              Write-Host "  Copying AI SDK DLLs for $arch..."
-              Get-ChildItem "$aiSdkDir/*.dll" | ForEach-Object {
-                Copy-Item $_.FullName "$targetDir/$($_.Name)"
-                Write-Host "    - $($_.Name)"
-              }
-            } else {
-              Write-Host "  Note: No AI SDK DLLs found at $aiSdkDir"
-            }
-
-            # Create AppxManifest.xml
-            $manifest = @"
-          <?xml version="1.0" encoding="utf-8"?>
-          <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
-                   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-                   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-                   xmlns:systemai="http://schemas.microsoft.com/appx/manifest/systemai/windows10"
-                   IgnorableNamespaces="uap rescap systemai">
-            <Identity Name="32827MikeFara.WindowsForumDiagnostics"
-                      Publisher="$publisher"
-                      Version="$version.0"
-                      ProcessorArchitecture="$arch" />
-            <Properties>
-              <DisplayName>WindowsForum Diagnostics</DisplayName>
-              <PublisherDisplayName>WindowsForum.com</PublisherDisplayName>
-              <Logo>Logo.png</Logo>
-            </Properties>
-            <Dependencies>
-              <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.26100.0" MaxVersionTested="10.0.26226.0" />
-              <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26226.0" />
-              <PackageDependency Name="Microsoft.WindowsAppRuntime.1.8"
-                                 MinVersion="8000.675.1142.0"
-                                 Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
-            </Dependencies>
-            <Resources>
-              <Resource Language="en-us" />
-            </Resources>
-            <Applications>
-              <Application Id="App" Executable="$projectName.exe" EntryPoint="Windows.FullTrustApplication">
-                <uap:VisualElements DisplayName="WindowsForum Diagnostics"
-                                    Description="System diagnostics tool for Windows"
-                                    BackgroundColor="transparent"
-                                    Square150x150Logo="Square150x150Logo.png"
-                                    Square44x44Logo="Square44x44Logo.png">
-                  <uap:DefaultTile Wide310x150Logo="Wide310x150Logo.png" />
-                </uap:VisualElements>
-              </Application>
-            </Applications>
-            <Capabilities>
-              <rescap:Capability Name="runFullTrust" />
-              <systemai:Capability Name="systemAIModels"/>
-            </Capabilities>
-          </Package>
-          "@
-            $manifest = $manifest.TrimStart()
-            Set-Content -Path "$targetDir/AppxManifest.xml" -Value $manifest -Encoding utf8
-            $manifestText = Get-Content -Raw "$targetDir/AppxManifest.xml"
-            if (-not $manifestText.StartsWith('<?xml')) {
-              throw "Generated AppxManifest.xml must start with an XML declaration"
-            }
-            [xml]$manifestText | Out-Null
-          }
-
-          # Find Windows SDK
-          $sdkPath = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*" -Directory |
-                     Sort-Object Name -Descending |
-                     Select-Object -First 1
-          $makeAppx = Join-Path $sdkPath.FullName "x64\MakeAppx.exe"
-
-          Write-Host "`nUsing MakeAppx from: $makeAppx"
-
-          # Create individual MSIX packages
-          foreach ($arch in @("x64", "arm64")) {
-            $msixPath = "$bundleDir/${projectName}_${version}_$arch.msix"
-            Write-Host "`nCreating $arch MSIX..."
-            & $makeAppx pack /d "$msixDir/$arch" /p $msixPath /o
-            if ($LASTEXITCODE -ne 0) { throw "Failed to create $arch MSIX" }
-          }
-
-          # Create MSIX bundle
-          $bundlePath = "$msixDir/${projectName}_${version}.msixbundle"
-          Write-Host "`nCreating MSIX bundle..."
-          & $makeAppx bundle /d $bundleDir /p $bundlePath /o
-          if ($LASTEXITCODE -ne 0) { throw "Failed to create MSIX bundle" }
-
-          Write-Host "`nBundle created: $bundlePath"
-          echo "bundle_path=$bundlePath" >> $env:GITHUB_OUTPUT
-
-      - name: Validate Store bundle contents (Tauri rollback)
-        if: env.SHELL_KIND == 'tauri'
-        shell: pwsh
-        run: |
-          $version = "${{ needs.build-x64.outputs.version }}"
-          $bundle = "msix-build/${{ env.PROJECT_NAME }}_${version}.msixbundle"
-          if (-not (Test-Path $bundle)) { throw "Bundle not found: $bundle" }
-
-          $sdkPath = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*" -Directory |
-                     Sort-Object Name -Descending |
-                     Select-Object -First 1
-          $makeAppx = Join-Path $sdkPath.FullName "x64\MakeAppx.exe"
-          $inspectRoot = "msix-build/inspect"
-          Remove-Item $inspectRoot -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path "$inspectRoot/bundle" | Out-Null
-
-          & $makeAppx unbundle /p $bundle /d "$inspectRoot/bundle" /o
-          if ($LASTEXITCODE -ne 0) { throw "MakeAppx could not unpack the bundle" }
-
-          $packages = @(Get-ChildItem "$inspectRoot/bundle" -Filter "*.msix")
-          if ($packages.Count -ne 2) {
-            throw "Expected two architecture packages; found $($packages.Count)"
-          }
-
-          $requiredFiles = @(
-            "dist/index.html",
-            "Logo.png",
-            "Square150x150Logo.png",
-            "Square44x44Logo.png",
-            "Wide310x150Logo.png",
-            "Microsoft.Windows.AI.Text.dll",
-            "Microsoft.WindowsAppRuntime.dll",
-            "Microsoft.WindowsAppRuntime.Bootstrap.dll"
-          )
-          $foundArchitectures = @()
-
-          foreach ($package in $packages) {
-            $unpacked = Join-Path $inspectRoot $package.BaseName
-            New-Item -ItemType Directory -Force -Path $unpacked | Out-Null
-            & $makeAppx unpack /p $package.FullName /d $unpacked /o
-            if ($LASTEXITCODE -ne 0) { throw "Could not unpack $($package.Name)" }
-
-            [xml]$manifest = Get-Content -Raw (Join-Path $unpacked "AppxManifest.xml")
-            $identity = $manifest.SelectSingleNode("/*[local-name()='Package']/*[local-name()='Identity']")
-            $identityName = $identity.GetAttribute("Name")
-            $publisher = $identity.GetAttribute("Publisher")
-            $packageVersion = $identity.GetAttribute("Version")
-            $architecture = $identity.GetAttribute("ProcessorArchitecture")
-            if ($identityName -ne "32827MikeFara.WindowsForumDiagnostics") {
-              throw "$($package.Name): wrong package identity '$identityName'"
-            }
-            if ($publisher -ne "${{ env.PUBLISHER }}") {
-              throw "$($package.Name): wrong publisher '$publisher'"
-            }
-            if ($packageVersion -ne "$version.0") {
-              throw "$($package.Name): version '$packageVersion' does not match '$version.0'"
-            }
-            if ($architecture -notin @("x64", "arm64")) {
-              throw "$($package.Name): unexpected architecture '$architecture'"
-            }
-            $foundArchitectures += $architecture
-
-            $capabilities = @($manifest.SelectNodes("//*[local-name()='Capability']") | ForEach-Object { $_.GetAttribute("Name") })
-            foreach ($requiredCapability in @("runFullTrust", "systemAIModels")) {
-              if ($requiredCapability -notin $capabilities) {
-                throw "$($package.Name): missing $requiredCapability capability"
-              }
-            }
-
-            $framework = $manifest.SelectSingleNode("//*[local-name()='PackageDependency' and @Name='Microsoft.WindowsAppRuntime.1.8']")
-            if (-not $framework) { throw "$($package.Name): missing Windows App Runtime 1.8 dependency" }
-
-            @($requiredFiles + "${{ env.PROJECT_NAME }}.exe") | ForEach-Object {
-              if (-not (Test-Path (Join-Path $unpacked $_))) {
-                throw "$($package.Name): missing required file $_"
-              }
-            }
-          }
-
-          $architectureSet = @($foundArchitectures | Sort-Object -Unique) -join ','
-          if ($architectureSet -ne 'arm64,x64') {
-            throw "Bundle architectures are '$($foundArchitectures -join ',')', expected x64 and arm64"
-          }
-          Write-Host "Validated Store identity, capabilities, framework, assets, AI DLLs, and both architectures."
 
       - name: Upload unsigned bundle
         uses: actions/upload-artifact@v4
@@ -711,9 +397,6 @@ jobs:
           The Microsoft Store package installs it for you.
           NOTE
               (cd "exe-$ARCH" && zip -q "../WindowsForum_Diagnostics_${VERSION}_${ARCH}.zip" wfdiag.exe README.txt)
-            elif [ -f "exe-$ARCH/wfdiag-tauri.exe" ]; then
-              mv "exe-$ARCH/wfdiag-tauri.exe" "WindowsForum_Diagnostics_${VERSION}_${ARCH}.exe"
-            fi
           done
 
           # Clean up staging directories
@@ -747,11 +430,7 @@ jobs:
             echo
             echo "### Alternative Downloads"
             echo "- **MSIX Bundle**: Unsigned Store-submission artifact; it is not directly installable"
-            if [ "${{ needs.build-x64.outputs.shell }}" = "reactor" ]; then
-              echo "- **Zip (x64 / ARM64)**: wfdiag.exe and runtime setup instructions; requires the Windows App Runtime 2.x framework (see README.txt inside)"
-            else
-              echo "- **Portable EXE**: Standalone executables for x64 and ARM64, no installation required"
-            fi
+            echo "- **Zip (x64 / ARM64)**: wfdiag.exe and runtime setup instructions; requires the Windows App Runtime 2.x framework (see README.txt inside)"
           } > release/RELEASE_NOTES.md
 
       - name: Create Release
