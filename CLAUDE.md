@@ -10,27 +10,22 @@ checks, live monitoring, process inspection, deterministic issue detection with 
 remediation, encrypted scan history, exports, and an optional multi-provider AI assistant.
 Ships through the Microsoft Store (package `32827MikeFara.WindowsForumDiagnostics`).
 
-### Two shells, one engine
+### One shell, one engine
 
 The product is a Rust **workspace**: framework-neutral engine crates under `crates/`, and
-two shells that only *drive* them.
+one shell that drives them.
 
-| | `apps/wfdiag` (**the product**) | `src-tauri` (rollback) |
-| --- | --- | --- |
-| Package / binary | `wfdiag` / `wfdiag.exe` | `wfdiag-tauri` / `wfdiag_tauri` |
-| UI | native WinUI 3 via `windows-reactor` | Tauri v2 + React (`src/`) |
-| Status | shipping as of the 2026-09-01 cutover decision | kept buildable as a rollback; deletion is a later release |
-| Packaged by | Store workflow default (`shell: reactor`) | Store workflow `shell: tauri` input only |
-
-The cutover decision is recorded in
+`apps/wfdiag` is **the product**: native WinUI 3 via `windows-reactor`, shipped as
+`wfdiag.exe` in package `32827MikeFara.WindowsForumDiagnostics`. The Tauri rollback shell
+(`src-tauri`) and its React frontend were deleted on 2026-09-23, after the owner signed off
+on the cutover recorded in
 [`docs/REACTOR_MIGRATION.md#cutover-decision-2026-09-01`](docs/REACTOR_MIGRATION.md).
-Neither shell contains engine logic: both call the same crates, so behaviour cannot drift.
+The shell contains no engine logic: it calls the same crates any host would.
 
 ## Workspace map
 
-Root `Cargo.toml`: `members = ["crates/*", "apps/wfdiag", "src-tauri"]`,
-`default-members` = engine crates + the native shell (so an unqualified cargo command skips
-the Tauri shell; on Linux, exclude both shells — see Commands).
+Root `Cargo.toml`: `members = ["crates/*", "apps/wfdiag"]`,
+`default-members` = the same (on Linux, exclude the native shell — see Commands).
 Centralized `[workspace.dependencies]` (one version per dep), `[workspace.lints]`
 (`unsafe_code = "deny"`, clippy `all` + `pedantic` = warn) which each engine crate opts into
 with `[lints] workspace = true`, release/dev profiles at the root, one `Cargo.lock`, one
@@ -146,21 +141,17 @@ Cargo features (release artifacts enable **none** of them):
 From the repository root unless stated.
 
 ```bash
-# Native (Linux) — engine crates only; the two shells are Windows-only
-cargo check  --workspace --all-targets --exclude wfdiag --exclude wfdiag-tauri
-cargo clippy --workspace --all-targets --exclude wfdiag --exclude wfdiag-tauri -- -D warnings
-cargo test   --workspace --exclude wfdiag --exclude wfdiag-tauri
+# Native (Linux) — engine crates only; the shell is Windows-only
+cargo check  --workspace --all-targets --exclude wfdiag
+cargo clippy --workspace --all-targets --exclude wfdiag -- -D warnings
+cargo test   --workspace --exclude wfdiag
 cargo test -p wfdiag-app                 # the headless integration suites
 cargo fmt --all
 
-# Cross-check the Windows shells from this Linux/WSL box (the /usr/bin/clang*
+# Cross-check the Windows shell from this Linux/WSL box (the /usr/bin/clang*
 # symlinks are broken llvm-21 — the PATH prefix is required)
 PATH=/usr/lib/llvm-20/bin:$PATH cargo xwin check  --workspace --target x86_64-pc-windows-msvc
 PATH=/usr/lib/llvm-20/bin:$PATH cargo xwin clippy --workspace --target aarch64-pc-windows-msvc
-
-# Frontend (Tauri rollback shell only). `npm run build` must precede any cargo command
-# that includes wfdiag-tauri: tauri-build embeds the untracked ../dist.
-npm ci && npx tsc --noEmit && npx eslint . && npx vitest run && npm run build
 
 # Script checks
 python3 scripts/check-version-sync.py
@@ -169,7 +160,7 @@ python3 scripts/check-reactor-readiness.py [--json]   # exit 1 while a gate is b
 python3 scripts/check-external-gates.py               # exit 1 when an external change is actionable
 python3 -m unittest scripts/test_check_reactor_readiness.py
 
-# Version bump — 11 files (see scripts/README.md)
+# Version bump — 5 files (see scripts/README.md)
 python3 scripts/bump-version.py 2.5.9 [--dry-run]
 ```
 
@@ -177,9 +168,6 @@ Windows-only (PowerShell, real hardware):
 `scripts/validate-reactor.ps1 -Suite startup|live-system|about|flows|visual|x64|readiness|gates|all`
 (reports land in `validation-reports/`), `capture-reactor-baselines.ps1`,
 `capture-reactor-variants.ps1`, and the focused `test-reactor-*.ps1` suites.
-
-`src-tauri/.cargo/config.toml` is an **untracked, WSL-only** cross-compile config
-(`.gitignore:152`). Never commit it.
 
 ## CI
 
@@ -207,8 +195,7 @@ remediation UIA suites.
 ## Release
 
 Tag push (`v2.5.9`) → `.github/workflows/build-and-publish-store.yml`. `workflow_dispatch`
-takes a `shell` input: **`reactor`** (default, the product) or `tauri` (rollback). Both keep
-the same Store identity and version.
+takes version/publish/release inputs; the packaged product is always the native shell.
 
 1. Per-arch build: `cargo build --locked --release -p wfdiag --target {x86_64,aarch64}-pc-windows-msvc`.
 2. Package through the probe script, which is the single manifest renderer for both the
@@ -239,17 +226,16 @@ from the manifest and need no edit — plus the `EXPECTED_REACTOR_*` constants i
 `check-external-gates.py` watches crates.io for anything newer than the adopted release.
 
 **Type-system boundary (#213).** The workspace therefore links two distinct windows-rs type
-systems in shipped code: crates.io `windows`/`windows-core` 0.62 (engine crates, `src-tauri`,
-and the shell's Win32 edges) and the pinned 0.100.0 revision (`windows-reactor`, its companion
-crates, and the shell's `windows_core`). The lock graph carries a third family — `windows-core`
-0.61 — pulled in solely by the rollback shell's WebView stack (`tao`/`wry`/`webview2-com`);
-`check-reactor-readiness.py` allowlists exactly {0.61, 0.62, 0.100} and fails on any other. Their types are disjoint and no typed value may cross between them —
+systems: crates.io `windows`/`windows-core` 0.62 (engine crates and the shell's Win32 edges)
+and the pinned 0.100.0 revision (`windows-reactor`, its companion crates, and the shell's
+`windows_core`). `check-reactor-readiness.py` allowlists exactly {0.62, 0.100} and fails on
+any other windows-core family in the lock. Their types are disjoint and no typed value may cross between them —
 crossing is raw ABI only (`*mut c_void`, vtable pointers, as in `wfdiag-native-phi`'s deliberate
 `DllGetActivationFactory` bridge); never `?`, never `impl Interface`, never a shared struct. In
 `apps/wfdiag/src`, 0.100 `windows_core` may appear only in `platform/focus.rs` and the generated
 `platform/winui_focus_bindings.rs`, and `windows::Win32` only under `platform/`.
 `check-reactor-readiness.py` (`types.boundary`) enforces both halves and surveys `Cargo.lock`
-so a third windows-core type system fails a gate instead of a review.
+so any third windows-core family fails a gate instead of a review.
 
 ## Readiness and validation gates
 
@@ -437,10 +423,9 @@ several conclusions there are explicitly marked "do not re-litigate".
 
 ## Rules for contributors
 
-1. **No `#[path]` includes.** Engine code compiles once, in its crate. `src-tauri` keeps only
-   one-line `pub use` shims over the crates — with one deliberate exception: the vendored
-   `src-tauri/src/ai_providers/` rollback bridge (issue #284), which is excluded from the
-   headless lanes and whose drift from the engine crates is tracked (#250, #251, #255).
+1. **No `#[path]` includes.** Engine code compiles once, in its crate; shells keep only
+   one-line re-exports over the crates. (The vendored `src-tauri/src/ai_providers/` bridge
+   that rule used to carve out was deleted with the rollback shell on 2026-09-23.)
 2. **No engine logic in `apps/`.** If a rule, parse, policy, or projection can be tested
    without a window, it belongs in a crate. `apps/wfdiag` may depend on the crates, `windows`,
    and `windows-reactor`; nothing else.

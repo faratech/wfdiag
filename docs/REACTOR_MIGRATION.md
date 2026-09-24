@@ -2,12 +2,14 @@
 
 ## Status
 
-**Cutover decided (2026-09-01).** The native WinUI 3 shell `apps/wfdiag` (package and binary
-`wfdiag` / `wfdiag.exe`) is the shipping product. The Tauri + React shell (`src-tauri`,
-`src/`) is kept buildable as a rollback and is packaged only through the Store workflow's
-`shell: tauri` input; removing it is a later release. The full decision record, including the
-three gates that were waiting on Microsoft rather than on this repository, is at the bottom
-of this document: [Cutover decision (2026-09-01)](#cutover-decision-2026-09-01).
+**Cutover decided (2026-09-01); rollback shell deleted (2026-09-23).** The native WinUI 3
+shell `apps/wfdiag` (package and binary `wfdiag` / `wfdiag.exe`) is the shipping product.
+The Tauri + React shell (`src-tauri`, `src/`) — kept buildable as a rollback until the owner
+called the deletion — was removed on 2026-09-23 together with its frontend, the legacy
+`build-cross.py` lane, and the Store workflow's `shell: tauri` input. The rest of this
+runbook is the historical record. The full decision record, including the three gates that
+were waiting on Microsoft rather than on this repository, is at the bottom of this
+document: [Cutover decision (2026-09-01)](#cutover-decision-2026-09-01).
 
 The direction is unchanged from the original plan: a pure-native WinUI 3 application that
 composes native controls directly. It does not host WebView2, load the React bundle, execute

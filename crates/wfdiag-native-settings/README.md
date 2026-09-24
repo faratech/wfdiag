@@ -1,5 +1,10 @@
 # WFDiag native settings seam
 
+> **2026-09-23:** the Tauri rollback shell (`src-tauri`) and its React frontend
+> were deleted. Passages below that compare against or mention the Tauri shell
+> are historical context from the migration era; the native WinUI 3 shell
+> (`apps/wfdiag`) is the only host of this crate.
+
 `wfdiag-native-settings` owns the UI-framework-neutral `AppSettings` schema,
 closed provider-key identifiers, shipping persistence adapters, typed settings
 mutations, and the background command/event worker intended for WinUI/Reactor.

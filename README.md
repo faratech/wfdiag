@@ -8,7 +8,7 @@
 
 A Windows diagnostics application written in Rust. It combines native system checks, live monitoring, issue detection and guided remediation, encrypted scan history, process inspection, and an optional multi-provider AI assistant.
 
-The shipping UI is a **native WinUI 3 shell** (`apps/wfdiag`, binary `wfdiag.exe`, built on `windows-reactor`); the original Tauri v2 + React shell (`src-tauri`, `src/`) is kept buildable as a rollback and will be removed in a later release. Both shells are thin hosts over the same framework-neutral engine crates in `crates/`, so behaviour cannot drift between them. See `docs/REACTOR_MIGRATION.md` for the migration record and the 2026-09-01 cutover decision.
+The UI is a **native WinUI 3 shell** (`apps/wfdiag`, binary `wfdiag.exe`, built on `windows-reactor`). It is a thin host over the framework-neutral engine crates in `crates/`. The original Tauri v2 + React shell was deleted on 2026-09-23 after the 2026-09-01 cutover; see `docs/REACTOR_MIGRATION.md` for the migration record.
 
 ## 🚀 Key Features
 
@@ -46,13 +46,13 @@ The registry currently contains 49 checks. `crates/wfdiag-native-diagnostics/src
 
 ## 🛠️ Architecture
 
-One Cargo workspace: framework-neutral engine crates plus two shells that only drive them.
+One Cargo workspace: framework-neutral engine crates plus one shell that only drives them.
 
 ```
-apps/wfdiag  (SHIPPING)                  src-tauri + src/  (ROLLBACK)
-native WinUI 3 / windows-reactor         Tauri v2 + React
-        │                                        │
-        └──────────────┬─────────────────────────┘
+apps/wfdiag  (SHIPPING)
+native WinUI 3 / windows-reactor
+        │
+        └──────────────┬──────────────
                        │
               crates/wfdiag-app
    AppService { start, snapshot, dispatch, drain, shutdown }
@@ -82,7 +82,6 @@ Engine crates build and test on Linux with no Windows and no GUI (CI job `rust-p
 - **Windows 10/11** on x64 or ARM64
 - **Rust MSVC toolchain** (pinned in `rust-toolchain.toml`) and Visual Studio C++ build tools
 - **Windows App Runtime 2.4+** to run the native shell (the Store package declares it as a framework dependency)
-- **Node.js** only for the Tauri rollback shell: `winget install OpenJS.NodeJS`
 - **Optional Phi Silica:** Copilot+ PC, Windows 11 24H2+, and the Microsoft Store package identity
 
 ### **Development Setup**
@@ -95,29 +94,22 @@ cargo run   -p wfdiag --target x86_64-pc-windows-msvc
 cargo build -p wfdiag --release --target aarch64-pc-windows-msvc
 
 # Engine crates: build and test anywhere, no Windows required
-cargo test --workspace --exclude wfdiag --exclude wfdiag-tauri
-
-# Tauri rollback shell (needs Node)
-npm install
-npm run tauri dev
-npm run tauri build
+cargo test --workspace --exclude wfdiag
 ```
 
 The Microsoft Store package is produced by `.github/workflows/build-and-publish-store.yml` on a
 version tag: it builds `wfdiag.exe` per architecture and packages it with
-`python3 scripts/build-reactor-msix-probe.py stage|pack|bundle|validate-msix`. Manual dispatch
-accepts a `shell` input (`reactor`, the default, or `tauri` for the rollback). The workflow
+`python3 scripts/build-reactor-msix-probe.py stage|pack|bundle|validate-msix`. The workflow
 uploads an unsigned bundle; Microsoft signs the package delivered through the Store.
 
 `AppxManifest.xml` launches `wfdiag.exe` and depends on `Microsoft.WindowsAppRuntime.2`
-(MinVersion 2.4.0.0), single-sourced from `reactor-baselines/manifest.json`. The legacy
-`src-tauri/tauri.msix.conf.json` is a basic Tauri MSIX experiment, not the Store package.
+(MinVersion 2.4.0.0), single-sourced from `reactor-baselines/manifest.json`.
 
 ## 🎯 Application API
 
 The native shell drives the engine through one facade — `AppService::dispatch(AppCommand)` in
-`crates/wfdiag-app` — and reads `AppEvent`s back from `drain()`. The Tauri rollback shell
-exposes the equivalent surface as IPC commands, listed below for reference.
+`crates/wfdiag-app` — and reads `AppEvent`s back from `drain()`. The command surface is
+listed below for reference.
 
 ### **Core Diagnostics**
 - `start_diagnostics(task_ids)` - Begin diagnostic session

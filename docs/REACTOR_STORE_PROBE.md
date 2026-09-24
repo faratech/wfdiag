@@ -20,18 +20,15 @@ build-reactor-msix-probe.py validate-msix --target x64 <package.msix>
 
 Signing still happens in the separate signing workflows; `validate-msix`
 deliberately rejects a signed package because it inspects unsigned CI
-artifacts. The Tauri shell remains packageable as a rollback through the
-workflow's `shell: tauri` input with its original inline manifest.
-
 The probe builds the default, framework-dependent Reactor target for x64 and
 ARM64. Each clean package layout contains:
 
 - `wfdiag.exe`
 - the canonical Store manifest and its four referenced image assets
 
-No app-local DLL is allowed, including the obsolete bootstrap shim. In particular, the probe does not copy anything from
-`src-tauri/resources/ai-sdk`; it rejects app-local
-`Microsoft.WindowsAppRuntime.dll`, WinUI/XAML runtime DLLs, and Windows AI DLLs.
+No app-local DLL is allowed, including the obsolete bootstrap shim. In particular, the
+probe rejects app-local `Microsoft.WindowsAppRuntime.dll`, WinUI/XAML runtime DLLs, and
+Windows AI DLLs.
 The executable PE machine is checked independently for x64 and ARM64.
 
 ### Bootstrap correction (2.5.9)

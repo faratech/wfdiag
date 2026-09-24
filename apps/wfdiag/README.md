@@ -4,8 +4,8 @@ This crate is **the shipping WFDiag application** as of the owner's 2026-09-01 c
 decision (`docs/REACTOR_MIGRATION.md#cutover-decision-2026-09-01`). It is a pure-native
 WinUI 3 shell built on `windows-reactor`: its chrome and all six screens are assembled
 manually from native controls. It does not host WebView2, load the React application,
-execute JavaScript, or use a web/native UI bridge. The Tauri + React shell (`src-tauri`,
-`src/`) is kept buildable as a rollback until a later cleanup release.
+execute JavaScript, or use a web/native UI bridge. The Tauri + React rollback shell was
+deleted on 2026-09-23; this crate is the only host.
 
 `scripts/check-reactor-readiness.py` enforces that boundary by scanning this crate's direct
 Cargo dependencies and `src` tree. A WebView/browser-host dependency, a WebView API marker,
@@ -218,7 +218,7 @@ native geometry and styling but are not production parity approvals: light/syste
 themes, DPI variants, accessibility modes, and x64 visual evidence still require matched review.
 See `design-qa.md` for the detailed assessment.
 
-## Live backend surfaces (wired, no Tauri IPC)
+## Live backend surfaces (wired)
 
 Beyond the original monitor/diagnostics/process inventory, the following now run against the
 real backend through the framework-neutral crates:
