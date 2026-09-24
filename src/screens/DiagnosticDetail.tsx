@@ -19,7 +19,12 @@ export interface DiagItem extends DiagnosticTask {
 // Keep the two in step — 2026-09-03 audit found three disagreeing copies.
 export function isSafeLinkTarget(url: string): boolean {
   try {
-    if (url.length > 2048 || /[\u0000-\u0020]/.test(url)) return false
+    // Reject C0 control characters and space (the Rust policy's
+    // \u{0000}-\u{0020} range) without a control-char regex literal, which
+    // eslint's no-control-regex rule rejects.
+    if (url.length > 2048 || Array.from(url).some((c) => c.charCodeAt(0) <= 0x20)) {
+      return false
+    }
     const parsed = new URL(url)
     // mailto: carries its target in the path (WHATWG hostname is ''), which
     // the Rust policy accepts as long as it is not empty or
