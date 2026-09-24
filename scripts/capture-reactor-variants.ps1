@@ -142,6 +142,10 @@ try {
                 WFDIAG_REACTOR_THEME = $theme
                 WFDIAG_REACTOR_WIDTH = [string]$configuration.Width
                 WFDIAG_REACTOR_HEIGHT = [string]$configuration.Height
+                # Hermetic capture: never touch the developer's real settings.
+                WFDIAG_REACTOR_SETTINGS_TEST_PATH =
+                    (Join-Path $outputDirectory "$state-$theme-settings.json")
+                WFDIAG_NO_TRAY = "1"
             }
             if ($configuration.Contains("Fixture")) {
                 $variables.WFDIAG_REACTOR_FIXTURE = $configuration["Fixture"]

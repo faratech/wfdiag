@@ -10,6 +10,15 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot "lib\ReactorUia.psm1") -Force
+# The WFDIAG_REACTOR_* knobs below are compile-time fixtures: without the
+# validation feature the candidate ignores them and this suite "passes"
+# while exercising none of its states. The bounded version probe fails
+# fast on such a build.
+$candidateVersion = Get-ReactorApplicationVersion -Executable $Executable `
+    -ProbeFile (Join-Path $env:TEMP "wfdiag-reactor-startup-version.json")
+Write-Host "Candidate version: $candidateVersion"
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes

@@ -123,7 +123,11 @@ $environmentNames = @(
     "WFDIAG_REACTOR_FIXTURE",
     "WFDIAG_REACTOR_SETTINGS",
     "WFDIAG_REACTOR_WIDTH",
-    "WFDIAG_REACTOR_HEIGHT"
+    "WFDIAG_REACTOR_HEIGHT",
+    # Hermetic capture: settings go to a scratch file and the tray never
+    # starts, so baseline maintenance never writes the developer's real store.
+    "WFDIAG_REACTOR_SETTINGS_TEST_PATH",
+    "WFDIAG_NO_TRAY"
 )
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) {
@@ -146,6 +150,10 @@ try {
         [Environment]::SetEnvironmentVariable("WFDIAG_REACTOR_SETTINGS", [string]$state.Settings, "Process")
         [Environment]::SetEnvironmentVariable("WFDIAG_REACTOR_WIDTH", [string]$width, "Process")
         [Environment]::SetEnvironmentVariable("WFDIAG_REACTOR_HEIGHT", [string]$height, "Process")
+        [Environment]::SetEnvironmentVariable(
+            "WFDIAG_REACTOR_SETTINGS_TEST_PATH",
+            (Join-Path $OutputDirectory "$id-settings.json"), "Process")
+        [Environment]::SetEnvironmentVariable("WFDIAG_NO_TRAY", "1", "Process")
 
         $outputPath = Join-Path $OutputDirectory "$id-reactor-final.png"
         $process = Start-Process -FilePath $Executable -PassThru
