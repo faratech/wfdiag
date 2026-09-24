@@ -1,12 +1,17 @@
 name: CI
 
 on:
+  # No branch filter on pull_request: stacked PRs (feature -> feature) must
+  # run the same gates as PRs into main.
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  push:
     branches: [main]
     paths-ignore:
       - '**.md'
       - 'docs/**'
-      - 'validation-reports/**'
   workflow_dispatch:
   schedule:
     - cron: '47 3 * * 1'
@@ -14,13 +19,15 @@ on:
 permissions:
   contents: read
 
+# Pull requests supersede their own earlier runs; push, schedule, and
+# dispatch runs on main are never cancelled mid-flight by each other.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   store-identity:
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -30,7 +37,7 @@ jobs:
       - run: python3 -m unittest scripts/test_build_reactor_msix_probe.py -v
 
   frontend:
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -47,7 +54,7 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
   rust-portable:
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'schedule'
     # The engine crates must build and test with no GUI and no Windows: this
     # job is the headless guarantee. Only the two shells (WinUI / Tauri) are
     # excluded; wfdiag-native-monitor compiles to an empty library off-Windows.

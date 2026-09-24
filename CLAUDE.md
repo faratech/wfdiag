@@ -182,18 +182,22 @@ Windows-only (PowerShell, real hardware):
 
 ## CI
 
-`.github/workflows/ci.yml` (PRs unfiltered + pushes to `main`):
+`.github/workflows/ci.yml` — PRs unfiltered (stacked PRs included) and pushes to `main`.
+The cheap ubuntu lanes run on every PR, push, and dispatch; the expensive Windows lanes
+are event-limited (a direct push to `main` skips the Windows x64 double-pass — cross-check
+with `cargo xwin clippy` locally before pushing Windows-only changes):
 
-| Job | Runner | What |
-| --- | --- | --- |
-| `store-identity` | ubuntu | `check-version-sync.py`, `check-store-identity.py`, probe unit tests |
-| `frontend` | ubuntu | `npm ci`, `tsc --noEmit`, `eslint`, `vitest run`, `npm audit --omit=dev` |
-| `rust-portable` | ubuntu | check / clippy `-D warnings` / **test** the workspace minus the two shells — the headless guarantee |
-| `rust` | windows | `cargo fmt --check`, then clippy + `cargo test` over the **whole** workspace with `--features wfdiag/validation`, **and again with no `wfdiag` features** — the release shape, and the only configuration in which the shell's `production_defaults` knob test compiles (#186, #212) |
-| `rust-arm64` | windows | check + clippy `-D warnings` for `aarch64-pc-windows-msvc`, `--features wfdiag/validation` |
-| `cargo-audit` | ubuntu | advisory (`continue-on-error`) |
+| Job | Runner | Runs on | What |
+| --- | --- | --- | --- |
+| `store-identity` | ubuntu | PR, push, dispatch | `check-version-sync.py`, `check-store-identity.py`, probe unit tests |
+| `frontend` | ubuntu | PR, push, dispatch | `npm ci`, `tsc --noEmit`, `eslint`, `vitest run`, `npm audit --omit=dev` |
+| `rust-portable` | ubuntu | PR, push, dispatch | check / clippy `-D warnings` / **test** the workspace minus the two shells — the headless guarantee |
+| `rust` | windows | PR, dispatch | `cargo fmt --check`, then clippy + `cargo test` over the **whole** workspace with `--features wfdiag/validation`, then clippy again with no features and `cargo test -p wfdiag` with none — the release shape, and the only configuration in which the shell's `production_defaults` knob test compiles (#186, #212) |
+| `rust-arm64` | windows | weekly schedule, dispatch | check + clippy `-D warnings` for `aarch64-pc-windows-msvc`, `--features wfdiag/validation` |
+| `cargo-audit` | ubuntu | weekly schedule, dispatch | advisory (`continue-on-error`) |
 
-Every cargo invocation in CI uses `--locked`.
+Every cargo invocation in CI uses `--locked`. PR runs cancel the previous run for the same
+ref; push/schedule/dispatch runs are never cancelled mid-flight.
 `.github/workflows/reactor-validation.yml` is the x64 (`windows-latest`) + ARM64
 (`windows-11-arm`, best-effort) matrix: hermetic AI engine/report tests, a self-contained
 validation release build, version probe, then the AI-flow, live-system, chat, report, and
@@ -444,7 +448,9 @@ several conclusions there are explicitly marked "do not re-litigate".
    behaviour. A plain OS path lookup (`%LOCALAPPDATA%` in `platform/crash.rs`) is not a knob;
    anything that *changes behaviour* is.
 5. **Lints are the contract**: a new crate gets `[lints] workspace = true`; CI runs clippy
-   `-D warnings` on Windows x64, Windows ARM64, and Linux, plus `cargo fmt --all --check`.
+   `-D warnings` on Linux with every PR and push, on Windows x64 with PRs/dispatch, and on
+   Windows ARM64 on the weekly schedule/dispatch, plus `cargo fmt --all --check`. Cross-check
+   both Windows targets locally (`cargo xwin clippy`) before pushing Windows-only changes.
 6. **Commit per step, with pathspecs.** One reviewable change per commit
    (`git commit -- <paths>`), never `git add -A`. Do not commit or push unless asked.
 7. **Bug convention**: title `Reactor audit <date> <id>: …`, labels `bug` plus one of
