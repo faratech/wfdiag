@@ -2800,16 +2800,20 @@ impl AppService {
             // gate from rejecting every future scan forever.
             let info_pending = self.system_info_request.take().is_some();
             let arch_pending = self.architecture_request.take().is_some();
+            // WorkerStopped first, the specific failure last: both reach the
+            // shell in this batch, and the status line keeps whichever text
+            // arrived latest — the user should see why, not the generic
+            // "stopped unexpectedly".
+            self.queue.push(AppEvent::WorkerStopped {
+                worker: WorkerKind::System,
+                unexpected: true,
+            });
             if info_pending || arch_pending {
                 let error = "the system worker stopped before answering".to_string();
                 self.snapshot.system_error = Some(error.clone());
                 self.queue
                     .push(AppEvent::System(SystemEvent::Failed { error }));
             }
-            self.queue.push(AppEvent::WorkerStopped {
-                worker: WorkerKind::System,
-                unexpected: true,
-            });
         }
     }
 
