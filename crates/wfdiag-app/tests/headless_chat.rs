@@ -232,6 +232,48 @@ fn a_clean_local_failure_asks_before_crossing_into_the_cloud_and_allow_resumes_t
 }
 
 #[test]
+fn a_second_send_while_the_consent_prompt_is_open_is_refused_with_the_typed_reason() {
+    let mut harness = boot_ai("chat_consent_block");
+    harness.mocks.ai.chat.script(
+        AIProvider::Ollama,
+        vec![ScriptedTurn::failure("Ollama is not running")],
+    );
+    harness
+        .mocks
+        .ai
+        .chat
+        .script(AIProvider::OpenAI, vec![ScriptedTurn::text("cloud answer")]);
+    harness.commit_scan();
+
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::ChatSend {
+                prompt: "why is my disk full".to_string(),
+            })
+            .is_accepted()
+    );
+    harness.pump_for("the consent prompt", |event| {
+        matches!(
+            event,
+            AppEvent::Chat(ChatEvent::CloudFallbackRequired { .. })
+        )
+    });
+
+    // The prompt owns the chat domain: a second send must be refused with
+    // the reason that names the prompt, not silently dropped.
+    let second = harness.service.dispatch(AppCommand::ChatSend {
+        prompt: "and my cpu".to_string(),
+    });
+    let wfdiag_app::DispatchOutcome::Rejected(reason) = second else {
+        panic!("a send during an open consent prompt must be refused");
+    };
+    let text = reason.to_string();
+    assert!(text.contains("cloud-fallback prompt"), "{text}");
+    harness.shutdown(Duration::from_secs(2));
+}
+
+#[test]
 fn never_persists_the_refusal_and_ends_the_turn_without_reaching_the_cloud() {
     let mut harness = boot_ai("chat_consent_never");
     harness.mocks.ai.chat.script(

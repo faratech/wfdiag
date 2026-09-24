@@ -251,3 +251,106 @@ fn a_plan_generated_against_evidence_that_moved_on_is_discarded() {
     assert!(harness.service.snapshot().ai.fix_plan.plan.is_none());
     harness.shutdown(Duration::from_secs(2));
 }
+#[test]
+fn a_failed_analysis_surfaces_the_typed_failure_with_its_retry_flag() {
+    let mut harness = boot_with_detected_issue("analysis_task");
+    harness.mocks.ai.analysis.script_analysis(
+        "logical_disk",
+        ScriptedAnalysisOutcome::Failed {
+            message: "the local model did not answer".to_string(),
+            retryable: true,
+        },
+    );
+
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::AnalyzeDiagnostic {
+                task_id: "logical_disk".to_string(),
+                force_refresh: false,
+            })
+            .is_accepted()
+    );
+    let events = harness.pump_for("the analysis failure", |event| {
+        matches!(event, AppEvent::Analysis(AnalysisEvent::Failed { .. }))
+    });
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AppEvent::Analysis(AnalysisEvent::Failed {
+            message, retryable: true, ..
+        }) if message == "the local model did not answer"
+    )));
+    let snapshot = harness.service.snapshot();
+    let entry = snapshot
+        .ai
+        .analyses
+        .get("logical_disk")
+        .expect("the read model keeps the failed entry");
+    assert!(!entry.busy, "the slot must free for a retry");
+    harness.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn a_failed_prioritization_surfaces_the_typed_failure_with_its_retry_flag() {
+    let mut harness = boot_with_detected_issue("analysis_task");
+    harness
+        .mocks
+        .ai
+        .analysis
+        .script_prioritization(ScriptedAnalysisOutcome::Failed {
+            message: "prioritisation transport failed".to_string(),
+            retryable: false,
+        });
+
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::PrioritizeIssues {
+                force_refresh: false
+            })
+            .is_accepted()
+    );
+    let events = harness.pump_for("the prioritisation failure", |event| {
+        matches!(
+            event,
+            AppEvent::Prioritization(PrioritizationEvent::Failed { .. })
+        )
+    });
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AppEvent::Prioritization(PrioritizationEvent::Failed {
+            message, retryable: false, ..
+        }) if message == "prioritisation transport failed"
+    )));
+    harness.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn a_failed_fix_plan_surfaces_the_typed_failure_with_its_retry_flag() {
+    let mut harness = boot_with_detected_issue("analysis_task");
+    harness
+        .mocks
+        .ai
+        .fix_plan
+        .script_failure("the planner did not answer", true);
+
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::GenerateFixPlan)
+            .is_accepted()
+    );
+    let events = harness.pump_for("the fix-plan failure", |event| {
+        matches!(event, AppEvent::FixPlan(FixPlanEvent::Failed { .. }))
+    });
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AppEvent::FixPlan(FixPlanEvent::Failed {
+            message, retryable: true, ..
+        }) if message == "the planner did not answer"
+    )));
+    harness.shutdown(Duration::from_secs(2));
+}
