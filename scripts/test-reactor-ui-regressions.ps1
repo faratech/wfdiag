@@ -42,8 +42,10 @@ $probePath = Join-Path $env:TEMP (
     "wfdiag-reactor-ui-regressions-version-{0}.json" -f [Guid]::NewGuid().ToString("N"))
 $version = Get-ReactorApplicationVersion -Executable $resolvedExecutable -ProbeFile $probePath
 Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
-if ($version -ne "2.5.8") {
-    throw "Candidate version '$version' is not the pinned 2.5.8 oracle."
+$expectedVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot "..\version.json") -Raw |
+    ConvertFrom-Json).version
+if ($version -ne $expectedVersion) {
+    throw "Candidate version '$version' is not the current source version '$expectedVersion'."
 }
 
 $failures = [System.Collections.Generic.List[string]]::new()

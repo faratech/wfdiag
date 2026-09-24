@@ -95,8 +95,10 @@ $outputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 
 $version = Get-ReactorApplicationVersion -Executable $resolvedExecutable `
     -ProbeFile (Join-Path $env:TEMP "wfdiag-reactor-variants-version.json")
-if ($version -ne "2.5.8") {
-    throw "Candidate version '$version' is not the pinned 2.5.8 oracle."
+$expectedVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot "..\version.json") -Raw |
+    ConvertFrom-Json).version
+if ($version -ne $expectedVersion) {
+    throw "Candidate version '$version' is not the current source version '$expectedVersion'."
 }
 
 # State -> (env page, visual state, width, height). Fixture states only:
