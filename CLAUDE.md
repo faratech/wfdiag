@@ -69,6 +69,7 @@ GUI — or a headless test — drives the same engine.
 AppService::start(config: AppConfig, ports: AppPorts) -> Result<(Self, AppEventReceiver), AppStartError>
         .snapshot() -> &AppSnapshot          // the read model
         .dispatch(AppCommand) -> DispatchOutcome   // never blocks
+        .take_snapshot_changes() -> SnapshotChanges // rendering domains to redraw; the rendering host acks here
         .drain() -> Vec<AppEvent>            // only reader of workers, only writer of the snapshot
         .shutdown(budget: Duration) -> ShutdownReport
 ```
@@ -85,7 +86,7 @@ AppService::start(config: AppConfig, ports: AppPorts) -> Result<(Self, AppEventR
 `RefreshIssues`; *history*: `ListHistory`, `LoadHistoryScan`, `CompareHistory`,
 `CompareCurrentToLatest`, `HistoryTaskDiff`, `SaveHistoryLabel`, `SaveHistoryTags`,
 `HistoryTrends`, `ClearHistory`; *monitor*: `MonitorRefresh`, `SetMonitorPaused`,
-`RequestProcessPage`, `RequestNetworkConnections`, `RequestProcessDetail`; *provider*: `RequestProviderStatus`,
+`SetMonitorDemand`, `RequestProcessPage`, `RequestNetworkConnections`, `RequestProcessDetail`; *provider*: `RequestProviderStatus`,
 `SetProviderPreference`, `ClearAiCache`, `ListOllamaModels`, `RefreshModelCatalog`,
 `CancelModelCatalog`; *settings*: `LoadSettings`, `SaveSettings`, `UpdateSetting`,
 `ProviderCredential`; *host*: `ExportResults`, `CheckForUpdates`, `RequestSystemInfo`,
@@ -238,9 +239,11 @@ from the manifest and need no edit — plus the `EXPECTED_REACTOR_*` constants i
 `check-external-gates.py` watches crates.io for anything newer than the adopted release.
 
 **Type-system boundary (#213).** The workspace therefore links two distinct windows-rs type
-systems: crates.io `windows`/`windows-core` 0.62 (engine crates, `src-tauri`, and the shell's
-Win32 edges) and the pinned 0.100.0 revision (`windows-reactor`, its companion crates, and the
-shell's `windows_core`). Their types are disjoint and no typed value may cross between them —
+systems in shipped code: crates.io `windows`/`windows-core` 0.62 (engine crates, `src-tauri`,
+and the shell's Win32 edges) and the pinned 0.100.0 revision (`windows-reactor`, its companion
+crates, and the shell's `windows_core`). The lock graph carries a third family — `windows-core`
+0.61 — pulled in solely by the rollback shell's WebView stack (`tao`/`wry`/`webview2-com`);
+`check-reactor-readiness.py` allowlists exactly {0.61, 0.62, 0.100} and fails on any other. Their types are disjoint and no typed value may cross between them —
 crossing is raw ABI only (`*mut c_void`, vtable pointers, as in `wfdiag-native-phi`'s deliberate
 `DllGetActivationFactory` bridge); never `?`, never `impl Interface`, never a shared struct. In
 `apps/wfdiag/src`, 0.100 `windows_core` may appear only in `platform/focus.rs` and the generated
@@ -435,7 +438,9 @@ several conclusions there are explicitly marked "do not re-litigate".
 ## Rules for contributors
 
 1. **No `#[path]` includes.** Engine code compiles once, in its crate. `src-tauri` keeps only
-   one-line `pub use` shims over the crates.
+   one-line `pub use` shims over the crates — with one deliberate exception: the vendored
+   `src-tauri/src/ai_providers/` rollback bridge (issue #284), which is excluded from the
+   headless lanes and whose drift from the engine crates is tracked (#250, #251, #255).
 2. **No engine logic in `apps/`.** If a rule, parse, policy, or projection can be tested
    without a window, it belongs in a crate. `apps/wfdiag` may depend on the crates, `windows`,
    and `windows-reactor`; nothing else.
@@ -445,8 +450,11 @@ several conclusions there are explicitly marked "do not re-litigate".
    dependency is a blocker, not an alternate route to parity.
 4. **No environment knobs outside `apps/wfdiag/src/fixtures/knobs.rs`**, and everything there
    is behind the `validation` feature, so a release build performs no environment reads for
-   behaviour. A plain OS path lookup (`%LOCALAPPDATA%` in `platform/crash.rs`) is not a knob;
-   anything that *changes behaviour* is.
+   behaviour. The documented exceptions: a plain OS path lookup (`%LOCALAPPDATA%` in
+   `platform/crash.rs`), the `--wfdiag-elevated-relaunch` argument check in `main.rs`, and
+   the engine crates' own `#[cfg(windows)]` reads (`WFDIAG_LAF_TOKEN`, `WFDIAG_AI_LOG`,
+   `WFDIAG_ACTIVATION_ORDER` in `wfdiag-native-phi`), which `knobs.rs` exempts by name;
+   anything that *changes behaviour* outside those is a knob and belongs behind the feature.
 5. **Lints are the contract**: a new crate gets `[lints] workspace = true`; CI runs clippy
    `-D warnings` on Linux with every PR and push, on Windows x64 with PRs/dispatch, and on
    Windows ARM64 on the weekly schedule/dispatch, plus `cargo fmt --all --check`. Cross-check
