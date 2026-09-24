@@ -30,10 +30,26 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 CRATES_IO_URL = "https://crates.io/api/v1/crates/windows-reactor"
-EXPECTED_REACTOR_VERSION = "0.100.0"
-EXPECTED_RUNTIME_FRAMEWORK = "Microsoft.WindowsAppRuntime.2"
-EXPECTED_RUNTIME_RELEASE = "2.4.0"
 PLACEHOLDER_VERSION = "0.0.0"
+
+
+def _reactor_pin() -> dict:
+    # The adopted pin is single-sourced from reactor-baselines/manifest.json
+    # like every other consumer of reactor_pin. A hard-coded copy here made
+    # the watcher report the adopted release itself as "newer than adopted"
+    # forever after any pin move that followed CLAUDE.md's checklist, which
+    # named the probe script (now manifest-driven) but not this one (#331).
+    baseline = Path(__file__).resolve().parent.parent / "reactor-baselines" / "manifest.json"
+    try:
+        return json.loads(baseline.read_text(encoding="utf-8"))["reactor_pin"]
+    except (OSError, json.JSONDecodeError, KeyError) as error:
+        raise SystemExit(f"cannot read reactor pin from {baseline}: {error}") from error
+
+
+_PIN = _reactor_pin()
+ADOPTED_REACTOR_VERSION = _PIN["expected_crate_version"]
+EXPECTED_RUNTIME_FRAMEWORK = _PIN["windows_app_runtime_framework"]
+EXPECTED_RUNTIME_RELEASE = _PIN["windows_app_runtime_release"]
 
 
 def check_crates_io(timeout: float) -> dict:
@@ -59,7 +75,7 @@ def check_crates_io(timeout: float) -> dict:
     def newer_than_adopted(version: str) -> bool:
         def key(value: str) -> list[int]:
             return [int(part) if part.isdigit() else 0 for part in value.split(".")]
-        return key(version) > key(EXPECTED_REACTOR_VERSION)
+        return key(version) > key(ADOPTED_REACTOR_VERSION)
 
     newer = sorted(
         (version for version in versions if version != PLACEHOLDER_VERSION
@@ -72,14 +88,14 @@ def check_crates_io(timeout: float) -> dict:
             "check": "crates_io",
             "status": "actionable",
             "message": (f"windows-reactor has published versions newer than the "
-                        f"adopted {EXPECTED_REACTOR_VERSION}: {newer}. "
+                        f"adopted {ADOPTED_REACTOR_VERSION}: {newer}. "
                         f"Review the release and update the dependency pin."),
             "versions": newer,
         }
     return {
         "check": "crates_io",
         "status": "clear",
-        "message": (f"windows-reactor {EXPECTED_REACTOR_VERSION} is the adopted "
+        "message": (f"windows-reactor {ADOPTED_REACTOR_VERSION} is the adopted "
                     f"release; nothing newer published."),
     }
 

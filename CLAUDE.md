@@ -226,9 +226,11 @@ are **single-sourced** from `reactor-baselines/manifest.json` → `reactor_pin` 
 `reactor-baselines/manifest.json` (`reactor_pin.revision`) as provenance. Adopted
 2026-09-03 when crates.io published the real 0.100.0 (superseding the `0.0.0` placeholder).
 A branch, tag, floating git dependency, or any other version is prohibited. Moving the pin
-means updating, in one reviewed change: the three Cargo dependencies,
-`reactor-baselines/manifest.json` (`reactor_pin`), `scripts/build-reactor-msix-probe.py`,
-and the `EXPECTED_REACTOR_*` constants in `scripts/check-reactor-readiness.py`.
+means updating, in one reviewed change: the three Cargo dependencies and
+`reactor-baselines/manifest.json` (`reactor_pin`) — the single source;
+`scripts/build-reactor-msix-probe.py` and `scripts/check-external-gates.py` read the pin
+from the manifest and need no edit — plus the `EXPECTED_REACTOR_*` constants in
+`scripts/check-reactor-readiness.py`, whose readiness cross-check fails loudly on drift.
 `check-external-gates.py` watches crates.io for anything newer than the adopted release.
 
 **Type-system boundary (#213).** The workspace therefore links two distinct windows-rs type
