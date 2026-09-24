@@ -618,7 +618,16 @@ impl AppService {
             self.snapshot.scan_phase = self.scan.phase();
             self.snapshot.scan = self.scan.snapshot().clone();
         }
+        let scan_phase_before_resume = self.snapshot.scan_phase;
         self.resume_pending_intent();
+        // A resumed intent can start a scan inside this same drain (a parked
+        // report request runs its Quick Scan here), and that begin pushes no
+        // event — without this re-check the host renders one cycle with the
+        // old phase.
+        if self.scan.phase() != scan_phase_before_resume {
+            self.snapshot.scan_phase = self.scan.phase();
+            self.snapshot.scan = self.scan.snapshot().clone();
+        }
         self.publish_pending_work();
         self.queue.take()
     }
