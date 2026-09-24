@@ -139,12 +139,7 @@ async fn send(cfg: &ResolvedProviderConfig, body: &Value) -> Result<reqwest::Res
                 .map(str::to_string)
         })
         .unwrap_or(raw);
-    let hint = match status.as_u16() {
-        401 | 403 => " Check the DeepSeek API key in Settings.",
-        404 => " Check the configured DeepSeek model name.",
-        429 => " Rate limit exceeded — wait a moment and retry.",
-        _ => "",
-    };
+    let hint = status_hint(status.as_u16());
     Err(format!("DeepSeek API error ({status}): {detail}.{hint}"))
 }
 
@@ -489,4 +484,25 @@ mod tests {
                 .contains("resources")
         );
     }
+}
+
+/// Remediation hint appended to a non-2xx chat-completions error. Pure, so
+/// the AI-path gate can pin every user-visible suggestion.
+fn status_hint(status: u16) -> &'static str {
+    match status {
+        401 | 403 => " Check the DeepSeek API key in Settings.",
+        404 => " Check the configured DeepSeek model name.",
+        429 => " Rate limit exceeded — wait a moment and retry.",
+        _ => "",
+    }
+}
+
+#[test]
+fn every_error_class_carries_a_remediation_hint() {
+    for status in [401, 403] {
+        assert!(status_hint(status).contains("API key"));
+    }
+    assert!(status_hint(404).contains("model name"));
+    assert!(status_hint(429).contains("Rate limit"));
+    assert_eq!(status_hint(500), "");
 }

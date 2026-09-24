@@ -379,6 +379,21 @@ fn request_builder(cfg: &ResolvedProviderConfig) -> reqwest::RequestBuilder {
         .timeout(std::time::Duration::from_secs(120))
 }
 
+/// Remediation hint appended to a non-2xx Messages API error. Pure, so the
+/// AI-path gate can pin every user-visible suggestion.
+fn status_hint(status: u16) -> &'static str {
+    match status {
+        400 => {
+            " Check the configured model name and that your endpoint supports the requested features."
+        }
+        401 | 403 => " Check your Anthropic API key in Settings.",
+        404 => " Check the configured Anthropic model name.",
+        429 => " Rate limit exceeded — wait a moment and retry.",
+        529 => " Anthropic is temporarily overloaded — retry shortly.",
+        _ => "",
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)] // `Result::map_err` transfers ownership.
 fn friendly_transport_error(e: reqwest::Error) -> String {
     format!("Anthropic request failed: {e}")
@@ -400,16 +415,7 @@ async fn check_http_status(mut response: reqwest::Response) -> Result<reqwest::R
                 .map(str::to_string)
         })
         .unwrap_or(body);
-    let hint = match status.as_u16() {
-        400 => {
-            " Check the configured model name and that your endpoint supports the requested features."
-        }
-        401 | 403 => " Check your Anthropic API key in Settings.",
-        404 => " Check the configured Anthropic model name.",
-        429 => " Rate limit exceeded — wait a moment and retry.",
-        529 => " Anthropic is temporarily overloaded — retry shortly.",
-        _ => "",
-    };
+    let hint = status_hint(status.as_u16());
     Err(format!("Anthropic API error ({status}): {detail}.{hint}"))
 }
 
@@ -1074,5 +1080,19 @@ mod tests {
                 .unwrap_err()
                 .contains("duplicate")
         );
+    }
+
+    #[test]
+    fn every_error_class_carries_a_remediation_hint() {
+        assert!(status_hint(400).contains("model name"));
+        assert!(status_hint(400).contains("endpoint"));
+        for status in [401, 403] {
+            assert!(status_hint(status).contains("API key"));
+        }
+        assert!(status_hint(404).contains("model name"));
+        assert!(status_hint(429).contains("Rate limit"));
+        assert!(status_hint(529).contains("overloaded"));
+        assert_eq!(status_hint(500), "");
+        assert_eq!(status_hint(200), "");
     }
 }

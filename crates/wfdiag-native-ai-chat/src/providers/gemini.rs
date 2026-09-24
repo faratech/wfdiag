@@ -345,14 +345,7 @@ async fn send_request(
                 .map(str::to_string)
         })
         .unwrap_or(body_text);
-    let hint = match status.as_u16() {
-        400 if detail.contains("API key") => " Check your Gemini API key in Settings.",
-        400 => " Check the request contents and the configured Gemini model name.",
-        401 | 403 => " Check your Gemini API key in Settings.",
-        404 => " Check the configured Gemini model name.",
-        429 => " Rate limit exceeded — wait a moment and retry.",
-        _ => "",
-    };
+    let hint = status_hint(status.as_u16(), &detail);
     Err(format!("Gemini API error ({status}): {detail}.{hint}"))
 }
 
@@ -694,4 +687,29 @@ mod tests {
                 .contains("API key not valid")
         );
     }
+}
+
+/// Remediation hint appended to a non-2xx generateContent error. Pure, so the
+/// AI-path gate can pin every user-visible suggestion.
+fn status_hint(status: u16, detail: &str) -> &'static str {
+    match status {
+        400 if detail.contains("API key") => " Check your Gemini API key in Settings.",
+        400 => " Check the request contents and the configured Gemini model name.",
+        401 | 403 => " Check your Gemini API key in Settings.",
+        404 => " Check the configured Gemini model name.",
+        429 => " Rate limit exceeded — wait a moment and retry.",
+        _ => "",
+    }
+}
+
+#[test]
+fn every_error_class_carries_a_remediation_hint() {
+    assert!(status_hint(400, "API key invalid").contains("API key"));
+    assert!(status_hint(400, "malformed contents").contains("model name"));
+    for status in [401, 403] {
+        assert!(status_hint(status, "").contains("API key"));
+    }
+    assert!(status_hint(404, "").contains("model name"));
+    assert!(status_hint(429, "").contains("Rate limit"));
+    assert_eq!(status_hint(500, ""), "");
 }
