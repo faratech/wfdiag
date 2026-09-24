@@ -43,9 +43,17 @@ function Get-ReactorApplicationVersion {
     try {
         # The candidate is a GUI-subsystem executable: PowerShell does not
         # populate $LASTEXITCODE for it, so read the exit code off the
-        # process object instead.
+        # process object instead. A bounded wait (not -Wait) is required:
+        # the probe flag is compile-time false without the validation
+        # feature, so a plain build ignores it and opens its GUI — -Wait
+        # would hang forever.
         $probe = Start-Process -FilePath $Executable `
-            -ArgumentList "--wfdiag-version-probe" -Wait -PassThru
+            -ArgumentList "--wfdiag-version-probe" -PassThru
+        if (-not $probe.WaitForExit(10000)) {
+            Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue
+            [void]$probe.WaitForExit(5000)
+            throw "Version probe did not exit within 10 seconds; the executable may not support '--wfdiag-version-probe'."
+        }
         if ($probe.ExitCode -ne 0) {
             throw "Version probe exit code $($probe.ExitCode)."
         }
