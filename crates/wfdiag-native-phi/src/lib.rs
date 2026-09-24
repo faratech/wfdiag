@@ -7,7 +7,6 @@
 
 #![allow(clippy::missing_errors_doc)]
 
-use serde::Serialize;
 #[cfg(windows)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -162,8 +161,7 @@ pub const fn has_package_identity() -> bool {
     false
 }
 
-#[derive(Debug, Serialize)]
-#[serde(tag = "type", content = "details")]
+#[derive(Debug)]
 enum PhiError {
     #[cfg(windows)]
     AiUnavailable { provider: String, reason: String },
@@ -183,7 +181,19 @@ impl PhiError {
 
 impl From<PhiError> for String {
     fn from(error: PhiError) -> Self {
-        serde_json::to_string(&error).unwrap_or_else(|_| "Phi Silica operation failed".to_string())
+        match error {
+            #[cfg(windows)]
+            PhiError::AiUnavailable {
+                provider: _,
+                reason,
+            } => {
+                format!("Phi Silica is unavailable: {reason}")
+            }
+            #[cfg(not(windows))]
+            PhiError::PlatformNotSupported { operation } => {
+                format!("{operation} is only available on Windows")
+            }
+        }
     }
 }
 
@@ -249,14 +259,10 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn error_wire_shape_remains_compatible() {
-        let encoded: String = PhiError::ai_unavailable("phi_silica", "not ready").into();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),
-            serde_json::json!({
-                "type": "AiUnavailable",
-                "details": { "provider": "phi_silica", "reason": "not ready" }
-            })
-        );
+    fn phi_errors_render_as_readable_messages() {
+        // The error string is the user-visible chat/analysis failure text;
+        // it used to be a serialized JSON envelope (R4-F4-2).
+        let rendered: String = PhiError::ai_unavailable("phi_silica", "not ready").into();
+        assert_eq!(rendered, "Phi Silica is unavailable: not ready");
     }
 }
