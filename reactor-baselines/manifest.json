@@ -734,7 +734,7 @@
     {
       "id": "official_reactor_release",
       "status": "passed",
-      "summary": "Owner decision 2026-09-01: ship on the reviewed windows-rs revision 1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8 (Reactor 0.100.0 source). crates.io still publishes only the placeholder 0.0.0 for windows-reactor and windows-reactor-setup (re-checked 2026-09-01); the pin is exact (revision, not branch), reviewed, and recorded in the root Cargo.lock. Migrating to an official release is a follow-up, not a cutover blocker.",
+      "summary": "Adopted 2026-09-03: crates.io published the real windows-reactor 0.100.0 and the workspace moved to it, superseding the 2026-09-01 decision to ship on the reviewed revision 1be5649497b59fe7cc2fb0ae5b0ebd7787327cc8 while crates.io still published only the 0.0.0 placeholder. reactor_pin.revision retains the reviewed revision as provenance; the pins are exact (no branch, no floating ref).",
       "evidence": [
         "docs/REACTOR_MIGRATION.md#cutover-decision-2026-09-01",
         "Cargo.lock",
