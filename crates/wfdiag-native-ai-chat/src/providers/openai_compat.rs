@@ -132,7 +132,7 @@ fn requires_none_reasoning(provider: AIProvider, model: &str, has_tools: bool) -
     provider == AIProvider::OpenAI && has_tools && model.starts_with("gpt-5.6")
 }
 
-fn client_for(provider: AIProvider, cfg: &ResolvedProviderConfig) -> Client<OpenAIConfig> {
+fn openai_config(provider: AIProvider, cfg: &ResolvedProviderConfig) -> OpenAIConfig {
     let mut config = OpenAIConfig::new();
     match cfg.api_key.as_deref().filter(|k| !k.is_empty()) {
         Some(key) => config = config.with_api_key(key),
@@ -143,7 +143,24 @@ fn client_for(provider: AIProvider, cfg: &ResolvedProviderConfig) -> Client<Open
     if let Some(endpoint) = cfg.endpoint.as_deref() {
         config = config.with_api_base(format!("{endpoint}/v1"));
     }
-    Client::with_config(config)
+    config
+}
+
+fn client_for(provider: AIProvider, cfg: &ResolvedProviderConfig) -> Client<OpenAIConfig> {
+    Client::with_config(openai_config(provider, cfg))
+}
+
+/// One-shots have no outer turn deadline to bound them (unlike `chat_stream`,
+/// which owns the 180 s turn budget), so the transport itself carries the same
+/// 120 s cap as the native Anthropic/Gemini/DeepSeek one-shot requests.
+/// Without it, a server that accepts the connection and never responds hangs
+/// the analysis/fix-plan worker until the user cancels.
+fn one_shot_client(provider: AIProvider, cfg: &ResolvedProviderConfig) -> Client<OpenAIConfig> {
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .expect("static reqwest client configuration");
+    Client::build(http_client, openai_config(provider, cfg))
 }
 
 fn map_finish(reason: OpenAIFinishReason, has_tool_calls: bool) -> FinishReason {
@@ -316,7 +333,7 @@ pub async fn one_shot(
         tools: Vec::new(),
         max_tokens: None,
     };
-    let client = client_for(provider, cfg);
+    let client = one_shot_client(provider, cfg);
     let chat_request = CreateChatCompletionRequestArgs::default()
         .model(cfg.model_or_err(provider)?)
         .messages(to_openai_messages(

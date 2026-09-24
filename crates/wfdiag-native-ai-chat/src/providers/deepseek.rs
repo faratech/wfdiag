@@ -8,7 +8,7 @@
 
 use super::{
     ChatMessage, ChatRequest, ChatRole, ChatTurn, FinishReason, ResolvedProviderConfig, ToolCall,
-    ToolSpec, sse,
+    ToolSpec, read_text_capped, sse,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -114,7 +114,7 @@ pub(crate) fn build_chat_body(
 }
 
 async fn send(cfg: &ResolvedProviderConfig, body: &Value) -> Result<reqwest::Response, String> {
-    let response = reqwest::Client::new()
+    let mut response = reqwest::Client::new()
         .post(DEEPSEEK_CHAT_URL)
         .bearer_auth(cfg.key())
         .header("content-type", "application/json")
@@ -127,7 +127,9 @@ async fn send(cfg: &ResolvedProviderConfig, body: &Value) -> Result<reqwest::Res
     if status.is_success() {
         return Ok(response);
     }
-    let raw = response.text().await.unwrap_or_default();
+    let raw = read_text_capped(&mut response, sse::MAX_RESPONSE_BYTES)
+        .await
+        .unwrap_or_default();
     let detail = serde_json::from_str::<Value>(&raw)
         .ok()
         .and_then(|value| {
@@ -241,10 +243,11 @@ pub async fn one_shot(
         None,
         false,
     );
-    let response = send(cfg, &body).await?;
-    let value = response
-        .json::<Value>()
+    let mut response = send(cfg, &body).await?;
+    let raw = read_text_capped(&mut response, sse::MAX_RESPONSE_BYTES)
         .await
+        .map_err(|error| format!("Unexpected DeepSeek response: {error}"))?;
+    let value: Value = serde_json::from_str(&raw)
         .map_err(|error| format!("Unexpected DeepSeek response: {error}"))?;
     let turn = parse_chat_response(&value)?;
     match turn.finished {

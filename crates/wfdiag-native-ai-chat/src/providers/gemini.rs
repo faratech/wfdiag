@@ -11,7 +11,7 @@
 
 use super::{
     ChatMessage, ChatRequest, ChatRole, ChatTurn, FinishReason, ResolvedProviderConfig, ToolCall,
-    ToolSpec, sse,
+    ToolSpec, read_text_capped, sse,
 };
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
@@ -320,7 +320,7 @@ async fn send_request(
     url: &str,
     body: &Value,
 ) -> Result<reqwest::Response, String> {
-    let response = reqwest::Client::new()
+    let mut response = reqwest::Client::new()
         .post(url)
         .header("x-goog-api-key", cfg.key())
         .header("content-type", "application/json")
@@ -334,7 +334,9 @@ async fn send_request(
     if status.is_success() {
         return Ok(response);
     }
-    let body_text = response.text().await.unwrap_or_default();
+    let body_text = read_text_capped(&mut response, sse::MAX_RESPONSE_BYTES)
+        .await
+        .unwrap_or_default();
     let detail = serde_json::from_str::<Value>(&body_text)
         .ok()
         .and_then(|v| {
@@ -361,11 +363,12 @@ pub async fn one_shot(
 ) -> Result<String, String> {
     let model = cfg.model_or_err(crate::ai_service::AIProvider::Gemini)?;
     let body = build_generate_body(Some(system), &[ChatMessage::user(prompt)], &[], None);
-    let response = send_request(cfg, &endpoint_url(model, false), &body).await?;
-    let v: Value = response
-        .json()
+    let mut response = send_request(cfg, &endpoint_url(model, false), &body).await?;
+    let raw = read_text_capped(&mut response, sse::MAX_RESPONSE_BYTES)
         .await
         .map_err(|e| format!("Unexpected Gemini response: {e}"))?;
+    let v: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("Unexpected Gemini response: {e}"))?;
     let turn = parse_generate_response(&v)?;
     match turn.finished {
         FinishReason::Stop if !turn.text.trim().is_empty() => Ok(turn.text),

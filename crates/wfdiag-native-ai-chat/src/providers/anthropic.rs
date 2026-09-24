@@ -10,7 +10,7 @@
 
 use super::{
     ChatMessage, ChatRequest, ChatRole, ChatTurn, FinishReason, ProviderReplay,
-    ResolvedProviderConfig, ToolCall, ToolSpec, sse,
+    ResolvedProviderConfig, ToolCall, ToolSpec, read_text_capped, sse,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -82,7 +82,7 @@ async fn fetch_model_runtime_caps(
 ) -> Option<ModelRuntimeCaps> {
     let mut url = reqwest::Url::parse(ANTHROPIC_MODELS_URL).ok()?;
     url.path_segments_mut().ok()?.push(model);
-    let response = reqwest::Client::new()
+    let mut response = reqwest::Client::new()
         .get(url)
         .header("x-api-key", cfg.key())
         .header("anthropic-version", ANTHROPIC_VERSION)
@@ -93,7 +93,10 @@ async fn fetch_model_runtime_caps(
     if !response.status().is_success() {
         return None;
     }
-    let value: Value = response.json().await.ok()?;
+    let raw = read_text_capped(&mut response, sse::MAX_RESPONSE_BYTES)
+        .await
+        .ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
     parse_model_runtime_caps(&value)
 }
 
@@ -381,12 +384,14 @@ fn friendly_transport_error(e: reqwest::Error) -> String {
     format!("Anthropic request failed: {e}")
 }
 
-async fn check_http_status(response: reqwest::Response) -> Result<reqwest::Response, String> {
+async fn check_http_status(mut response: reqwest::Response) -> Result<reqwest::Response, String> {
     let status = response.status();
     if status.is_success() {
         return Ok(response);
     }
-    let body = response.text().await.unwrap_or_default();
+    let body = read_text_capped(&mut response, sse::MAX_RESPONSE_BYTES)
+        .await
+        .unwrap_or_default();
     let detail = serde_json::from_str::<Value>(&body)
         .ok()
         .and_then(|v| {
@@ -430,11 +435,12 @@ pub async fn one_shot(
         .send()
         .await
         .map_err(friendly_transport_error)?;
-    let response = check_http_status(response).await?;
-    let v: Value = response
-        .json()
+    let mut response = check_http_status(response).await?;
+    let raw = read_text_capped(&mut response, sse::MAX_RESPONSE_BYTES)
         .await
         .map_err(|e| format!("Unexpected Anthropic response: {e}"))?;
+    let v: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("Unexpected Anthropic response: {e}"))?;
     let turn = parse_message_response_for_model(&v, model)?;
     match turn.finished {
         FinishReason::Stop if !turn.text.trim().is_empty() => Ok(turn.text),
