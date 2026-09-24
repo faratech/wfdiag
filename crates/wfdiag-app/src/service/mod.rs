@@ -2789,8 +2789,7 @@ impl AppService {
 
     fn poll_replies(&mut self) {
         let batch = self.replies.poll(Instant::now());
-        for timeout in batch.timeouts {
-            self.release_timed_out_request(&timeout);
+        for timeout in &batch.timeouts {
             self.queue.push(AppEvent::ReplyTimedOut {
                 worker: timeout.worker,
                 request: timeout.request,
@@ -2798,6 +2797,14 @@ impl AppService {
         }
         for message in batch.messages {
             self.apply_internal(message);
+        }
+        // The release runs last: an expired entry also arrives as an
+        // Internal failure message whose request-id guard must still see
+        // the held slot, or the domain's own failure report is silently
+        // dropped. Handlers that already cleared the slot make this a
+        // no-op; entries whose expiry carried no message rely on it.
+        for timeout in &batch.timeouts {
+            self.release_timed_out_request(timeout);
         }
     }
 
