@@ -240,6 +240,44 @@ class SubcommandTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             probe.parse_args(["stage", "--target", "ia64", "--executable", "a", "--output", "o"])
 
+    def test_module_defines_every_name_it_loads(self):
+        """No loaded name is unbound anywhere in the module.
+
+        92959d4 deleted BOOTSTRAP_DLL but left its use site in the standalone
+        report builder, so a bare probe run crashed with a NameError only
+        after both cargo builds and the bundle had completed (#321). The
+        subcommand tests never execute that path, so this lints the whole
+        module's bindings instead. Deliberately over-permissive about scope
+        (a binding from any function counts everywhere): that only errs
+        toward passing, and the leftover it hunts is a name bound nowhere.
+        """
+        import ast
+        import builtins
+
+        tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+        bound = set(dir(builtins)) | {
+            # Module dunders the interpreter provides at exec time.
+            "__file__", "__name__", "__doc__", "__package__", "__spec__",
+            "__loader__", "__builtins__", "__cached__", "__path__",
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bound.add(node.name)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                bound.add(node.id)
+            elif isinstance(node, ast.arg):
+                bound.add(node.arg)
+            elif isinstance(node, ast.alias):
+                bound.add(node.asname or node.name.split(".")[0])
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                bound.add(node.name)
+        loaded = {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+        self.assertEqual([], sorted(loaded - bound))
+
 
 if __name__ == "__main__":
     unittest.main()

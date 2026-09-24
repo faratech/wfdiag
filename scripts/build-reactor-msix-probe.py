@@ -818,7 +818,9 @@ def build_probe(args: argparse.Namespace) -> Path:
             "deployment": "framework-dependent",
             "app_local_runtime_present": False,
             "app_local_ai_dll_present": False,
-            "staged_dlls": [BOOTSTRAP_DLL],
+            # Framework-dependent: the runtime comes from the package graph,
+            # so the profile stages no DLLs at all (92959d4).
+            "staged_dlls": [],
         },
         "payloads": payloads,
         "bundle": str(bundle),
