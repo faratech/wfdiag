@@ -519,7 +519,7 @@ impl AppWorkers {
     /// settings last so an in-flight save is not cut short.
     pub(crate) fn stop(&mut self, budget: Duration) -> Vec<WorkerStopRecord> {
         let mut records = Vec::new();
-        self.stop_ai();
+        let _ai = self.stop_ai();
 
         // Live producers first: their event buses are closed so no further
         // events can be published into a queue nobody will drain.
@@ -527,15 +527,19 @@ impl AppWorkers {
             events.clear_wake_handler();
             events.close();
         }
-        drop(self.monitor.take());
-        records.push(WorkerStopRecord::stopped(WorkerKind::Monitor));
+        // A worker that never started is absent from the report rather than
+        // claimed as stopped-within-budget.
+        if self.monitor.take().is_some() {
+            records.push(WorkerStopRecord::stopped(WorkerKind::Monitor));
+        }
 
         if let Some(events) = self.diagnostic_events.take() {
             events.clear_wake_handler();
             events.close();
         }
-        drop(self.diagnostics.take());
-        records.push(WorkerStopRecord::stopped(WorkerKind::Diagnostics));
+        if self.diagnostics.take().is_some() {
+            records.push(WorkerStopRecord::stopped(WorkerKind::Diagnostics));
+        }
 
         if let Some(mut issues) = self.issues.take() {
             records.push(WorkerStopRecord::joined(
@@ -561,12 +565,15 @@ impl AppWorkers {
         }
         self.system_replies = None;
 
-        drop(self.history.take());
-        records.push(WorkerStopRecord::stopped(WorkerKind::History));
-        drop(self.provider.take());
-        records.push(WorkerStopRecord::stopped(WorkerKind::Provider));
-        drop(self.update.take());
-        records.push(WorkerStopRecord::stopped(WorkerKind::Update));
+        if self.history.take().is_some() {
+            records.push(WorkerStopRecord::stopped(WorkerKind::History));
+        }
+        if self.provider.take().is_some() {
+            records.push(WorkerStopRecord::stopped(WorkerKind::Provider));
+        }
+        if self.update.take().is_some() {
+            records.push(WorkerStopRecord::stopped(WorkerKind::Update));
+        }
 
         if let Some(mut settings) = self.settings.take() {
             records.push(WorkerStopRecord::joined(
@@ -585,13 +592,17 @@ impl AppWorkers {
     /// running remediation may still be reading diagnostics or history, and a
     /// bounded `stop_and_join` on each keeps a hung vendor CLI off the
     /// caller's thread.
-    pub(crate) fn stop_ai(&mut self) {
+    pub(crate) fn stop_ai(&mut self) -> bool {
+        // The chat and report runtimes carry no WorkerKind record (their
+        // reapers are detached), so their join outcome travels on the
+        // returned flag instead of being discarded.
+        let mut joined = true;
         if let Some(mut chat) = self.chat.take() {
-            let _ = chat.stop_and_join(AI_STOP_BUDGET);
+            joined &= chat.stop_and_join(AI_STOP_BUDGET);
         }
         self.chat_events = None;
         if let Some(mut report) = self.report.take() {
-            let _ = report.stop_and_join(AI_STOP_BUDGET);
+            joined &= report.stop_and_join(AI_STOP_BUDGET);
         }
         self.report_events = None;
         drop(self.analysis.take());
@@ -607,6 +618,7 @@ impl AppWorkers {
         self.subscription_auth_events = None;
         drop(self.subscription_install.take());
         self.subscription_install_events = None;
+        joined
     }
 }
 

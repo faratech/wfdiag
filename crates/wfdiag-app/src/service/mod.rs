@@ -106,10 +106,15 @@ impl std::error::Error for AppStartError {}
 /// What teardown achieved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShutdownReport {
-    /// Per-worker stop results, in teardown order.
+    /// Per-worker stop results, in teardown order. Workers that never
+    /// started are absent.
     pub workers: Vec<WorkerStopRecord>,
     /// Whether the reply watcher exited inside its budget.
     pub watcher_stopped: bool,
+    /// Whether the AI chat and report runtimes — joined through detached
+    /// reapers, so they carry no `WorkerKind` record — exited inside their
+    /// stop budget. `true` when no AI runtime was running.
+    pub ai_stopped_within_budget: bool,
     /// How long teardown took.
     pub elapsed: Duration,
 }
@@ -119,6 +124,7 @@ impl ShutdownReport {
     #[must_use]
     pub fn is_clean(&self) -> bool {
         self.watcher_stopped
+            && self.ai_stopped_within_budget
             && self
                 .workers
                 .iter()
@@ -628,7 +634,7 @@ impl AppService {
     pub fn shutdown(mut self, budget: Duration) -> ShutdownReport {
         let started = Instant::now();
         self.terminating = true;
-        self.workers.stop_ai();
+        let ai_stopped_within_budget = self.workers.stop_ai();
         for message in self.replies.drain_as_stopped() {
             self.apply_internal(message);
         }
@@ -642,6 +648,7 @@ impl AppService {
         ShutdownReport {
             workers,
             watcher_stopped,
+            ai_stopped_within_budget,
             elapsed: started.elapsed(),
         }
     }
