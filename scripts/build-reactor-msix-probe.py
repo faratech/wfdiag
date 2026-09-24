@@ -39,7 +39,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 REACTOR_MANIFEST = PROJECT_ROOT / "apps/wfdiag" / "Cargo.toml"
 STORE_MANIFEST = PROJECT_ROOT / "AppxManifest.xml"
 VERSION_FILE = PROJECT_ROOT / "version.json"
-ICONS_DIR = PROJECT_ROOT / "src-tauri" / "icons"
+ICONS_DIR = PROJECT_ROOT / "apps" / "wfdiag" / "icons"
 
 STORE_IDENTITY_NAME = "32827MikeFara.WindowsForumDiagnostics"
 STORE_PUBLISHER = "CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4"
