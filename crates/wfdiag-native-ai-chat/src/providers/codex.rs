@@ -209,10 +209,13 @@ fn parse_exec_jsonl(stdout: &str) -> Result<String, String> {
     if let Some(message) = failed {
         return Err(format!("Codex CLI turn failed: {message}"));
     }
-    if malformed_event {
-        return Err("Codex CLI returned malformed JSONL output".to_string());
-    }
     if !completed {
+        // A malformed brace-initial line only matters when the turn never
+        // completed: with a completed turn it was a noise line, and failing
+        // a good answer over it would lose the reply (R3-F3-3).
+        if malformed_event {
+            return Err("Codex CLI returned malformed JSONL output".to_string());
+        }
         return Err(match error {
             Some(message) => format!("Codex CLI did not complete: {message}"),
             None => "Codex CLI ended before turn.completed".to_string(),
@@ -220,6 +223,7 @@ fn parse_exec_jsonl(stdout: &str) -> Result<String, String> {
     }
     match answer.filter(|text| !text.trim().is_empty()) {
         Some(text) => Ok(text),
+        None if malformed_event => Err("Codex CLI returned malformed JSONL output".to_string()),
         None => Err("Codex CLI completed without an answer".to_string()),
     }
 }
@@ -227,6 +231,16 @@ fn parse_exec_jsonl(stdout: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_brace_initial_noise_line_does_not_fail_a_completed_turn() {
+        let stdout = concat!(
+            "{not json\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}\n",
+            "{\"type\":\"turn.completed\"}\n",
+        );
+        assert_eq!(parse_exec_jsonl(stdout).unwrap(), "answer");
+    }
 
     #[test]
     fn upstream_auth_hint_fires_only_on_401_patterns() {

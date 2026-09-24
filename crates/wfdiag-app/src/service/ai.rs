@@ -856,7 +856,7 @@ impl AppService {
         }
     }
 
-    fn finish_chat_failure(&mut self, message: String) {
+    pub(super) fn finish_chat_failure(&mut self, message: String) {
         self.chat_pending = None;
         self.chat_attempt = None;
         self.chat_consent = None;
@@ -2388,6 +2388,7 @@ impl AppService {
     pub(super) fn drain_ai_events(&mut self) {
         let mut chat_delta = String::new();
         let mut report_delta = String::new();
+        let had_chat = self.workers.chat_events.is_some();
         for event in take_events(&mut self.workers.chat_events, &self.queue) {
             self.apply_chat_event(event, &mut chat_delta);
         }
@@ -2396,6 +2397,13 @@ impl AppService {
             self.queue
                 .push(AppEvent::Chat(ChatEvent::Delta { text: chat_delta }));
         }
+        // A worker that dies without emitting its terminal would leave its
+        // domain Busy until restart; the channel disconnect is the death
+        // signal, so it resolves the pending request as a failure instead.
+        if had_chat && self.workers.chat_events.is_none() && self.chat_pending.take().is_some() {
+            self.finish_chat_failure("The chat worker stopped unexpectedly.".to_string());
+        }
+        let had_report = self.workers.report_events.is_some();
         for event in take_events(&mut self.workers.report_events, &self.queue) {
             self.apply_report_event(event, &mut report_delta);
         }
@@ -2409,11 +2417,47 @@ impl AppService {
             self.queue
                 .push(AppEvent::Report(ReportEvent::Delta { text: report_delta }));
         }
+        if had_report
+            && self.workers.report_events.is_none()
+            && self.report_pending.take().is_some()
+        {
+            self.snapshot.ai.report.generating = false;
+            self.queue.push(AppEvent::Report(ReportEvent::Failed {
+                message: "The report worker stopped unexpectedly.".to_string(),
+            }));
+        }
+        let had_analysis = self.workers.analysis_events.is_some();
         for event in take_events(&mut self.workers.analysis_events, &self.queue) {
             self.apply_analysis_event(event);
         }
+        if had_analysis && self.workers.analysis_events.is_none() {
+            if let Some(pending) = self.analysis_pending.take() {
+                self.queue.push(AppEvent::Analysis(AnalysisEvent::Failed {
+                    task_id: pending.task_id,
+                    message: "The analysis worker stopped unexpectedly.".to_string(),
+                    retryable: true,
+                }));
+            }
+            if self.prioritization_pending.take().is_some() {
+                self.queue
+                    .push(AppEvent::Prioritization(PrioritizationEvent::Failed {
+                        message: "The analysis worker stopped unexpectedly.".to_string(),
+                        retryable: true,
+                    }));
+            }
+        }
+        let had_fix_plan = self.workers.fix_plan_events.is_some();
         for event in take_events(&mut self.workers.fix_plan_events, &self.queue) {
             self.apply_fix_plan_event(event);
+        }
+        if had_fix_plan
+            && self.workers.fix_plan_events.is_none()
+            && self.fix_plan_pending.take().is_some()
+        {
+            self.queue.push(AppEvent::FixPlan(FixPlanEvent::Failed {
+                message: "The fix-plan worker stopped unexpectedly.".to_string(),
+                retryable: true,
+            }));
         }
         // Run transitions before command replies: a run's terminal summary
         // arrives on both streams, and applying the reply first would let the

@@ -2493,6 +2493,16 @@ impl AppService {
         if stopped && !self.terminating {
             self.workers.settings_events = None;
             self.workers.settings = None;
+            // A pending consent answer dies with the worker: resolve it as a
+            // chat failure so the domain does not stay Busy on a prompt that
+            // can never be answered (ChatReset remains the manual escape
+            // hatch).
+            if self.chat_policy_write.take().is_some() || self.chat_consent.take().is_some() {
+                self.finish_chat_failure(
+                    "Settings storage stopped before your choice could be saved — send the message again."
+                        .to_string(),
+                );
+            }
             self.queue.push(AppEvent::WorkerStopped {
                 worker: WorkerKind::Settings,
                 unexpected: true,
