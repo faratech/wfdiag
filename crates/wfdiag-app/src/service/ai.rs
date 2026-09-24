@@ -67,7 +67,7 @@ use wfdiag_native_ai_chat::{
 use wfdiag_native_ai_chat::{SubscriptionAuthState, auth_status_from_probe};
 use wfdiag_native_ai_provider::SubscriptionProbes;
 use wfdiag_native_ai_provider::{
-    AIProvider, AIProviderPreference, AIProviderStatus, ModelCatalogRequest,
+    AIProvider, AIProviderPreference, AIProviderStatus, ModelCatalogRequest, next_auto_local_route,
     parse_provider_preference,
 };
 use wfdiag_native_ai_report::{ReportGeneration, ReportScan, ReportWorkerEvent};
@@ -1136,12 +1136,28 @@ impl AppService {
             .provider_status()
             .ok_or_else(|| self.provider_not_ready_reason("interpreting"))?;
         let preference = parse_provider_preference(&self.snapshot.settings.preferred_ai_provider);
-        let provider = self.effective_ai_provider(status);
+        let active = self.effective_ai_provider(status);
+        // Workload routing, mirroring the fix-plan policy (fix_plan.rs
+        // initial_fix_plan_route): in `Auto`, a compact analysis moves from
+        // Phi to the next available private local model when one exists.
+        // Recorded in `fallback_from` so attribution stays transparent and a
+        // later retry cannot route back to the deliberately bypassed Phi.
+        // Without this, an Auto user on a Copilot+ PC where Phi probes ready
+        // but generation persistently fails could never complete an
+        // interpretation that an explicit-Foundry user gets on the same
+        // machine.
+        let provider = if preference == AIProviderPreference::Auto
+            && active == AIProvider::PhiSilica
+        {
+            next_auto_local_route(preference, &[active], status.availability()).unwrap_or(active)
+        } else {
+            active
+        };
         Ok(AnalysisRoute {
             preference,
             provider,
             availability: status.availability(),
-            fallback_from: None,
+            fallback_from: (provider != active).then_some(active),
         })
     }
 
