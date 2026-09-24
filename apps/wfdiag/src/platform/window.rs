@@ -841,7 +841,17 @@ fn taskbar_created_message() -> u32 {
     static TASKBAR_CREATED: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *TASKBAR_CREATED.get_or_init(|| {
         // SAFETY: registers a well-known window message; no side effects.
-        unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) }
+        let registered = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
+        if registered == 0 {
+            // Registration failed: match nothing. 0 is WM_NULL, which the
+            // shell itself posts after every TrackPopupMenu — a 0 here would
+            // cycle the tray on every menu message. u32::MAX degrades to
+            // "never re-add on shell restart", the honest failure mode for a
+            // broadcast that cannot be re-synthesized privately.
+            u32::MAX
+        } else {
+            registered
+        }
     })
 }
 
