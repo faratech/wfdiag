@@ -347,6 +347,7 @@ async fn send_request(
         .unwrap_or(body_text);
     let hint = match status.as_u16() {
         400 if detail.contains("API key") => " Check your Gemini API key in Settings.",
+        400 => " Check the request contents and the configured Gemini model name.",
         401 | 403 => " Check your Gemini API key in Settings.",
         404 => " Check the configured Gemini model name.",
         429 => " Rate limit exceeded — wait a moment and retry.",

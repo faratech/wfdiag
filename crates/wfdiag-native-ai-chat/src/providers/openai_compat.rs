@@ -2,9 +2,8 @@
 //! cloud `OpenAI` chat, the user-configured custom endpoint (`OpenRouter`, Groq,
 //! Gemini's compat layer, …), Ollama, and Foundry Local chat.
 //!
-//! Generic providers do NOT serve `/v1/responses`, which is why chat goes
-//! through chat completions while the OpenAI/Foundry one-shot paths keep the
-//! Responses API. No token cap is sent: `OpenAI`'s current models reject the
+//! Generic providers do NOT serve `/v1/responses`, so chat AND one-shots both
+//! go through chat completions. No token cap is sent: `OpenAI`'s current models reject the
 //! legacy `max_tokens` while several compat servers don't know
 //! `max_completion_tokens` — prompts are budgeted on our side instead.
 

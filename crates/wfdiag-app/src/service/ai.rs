@@ -411,6 +411,14 @@ impl AppService {
             .provider_status
             .as_ref()
             .and_then(|status| sign_in_requirement(preference, status));
+        if requirement.is_none() && self.snapshot.provider_status.is_none() {
+            // No status yet: the first probe is still in flight, so the
+            // providers are being checked rather than missing - "set up a
+            // provider" would mislead a user who just opened the page.
+            return RejectReason::NotReady {
+                detail: format!("Checking AI providers — try {verb} again in a moment"),
+            };
+        }
         RejectReason::NotReady {
             detail: requirement.map_or_else(
                 || format!("Set up an available AI provider before {verb}"),

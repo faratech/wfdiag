@@ -401,6 +401,9 @@ async fn check_http_status(mut response: reqwest::Response) -> Result<reqwest::R
         })
         .unwrap_or(body);
     let hint = match status.as_u16() {
+        400 => {
+            " Check the configured model name and that your endpoint supports the requested features."
+        }
         401 | 403 => " Check your Anthropic API key in Settings.",
         404 => " Check the configured Anthropic model name.",
         429 => " Rate limit exceeded — wait a moment and retry.",
