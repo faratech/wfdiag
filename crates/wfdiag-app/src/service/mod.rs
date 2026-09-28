@@ -36,7 +36,7 @@ use crate::domain::history::{
 };
 use crate::domain::invalidation::Invalidation;
 use crate::domain::issues::IssueTracker;
-use crate::domain::providers::PhiPreferenceGate;
+use crate::domain::providers::OnDevicePreferenceGate;
 use crate::domain::scan::{
     RunOutcome, ScanPolicy, ScanState, select_scan_tasks, task_allowed_by_privacy,
 };
@@ -1567,11 +1567,12 @@ impl AppService {
     }
 
     fn set_provider_preference(&mut self, preference: String) -> DispatchOutcome {
-        let gate = PhiPreferenceGate::evaluate(
+        let gate = OnDevicePreferenceGate::evaluate(
+            &preference,
             self.snapshot.provider_status.as_ref(),
             self.snapshot.provider_loading,
         );
-        if let Err(reason) = gate.validate(&preference) {
+        if let Err(reason) = gate.validate() {
             self.queue
                 .push(AppEvent::Provider(ProviderEvent::PreferenceRejected {
                     reason: reason.clone(),

@@ -6,10 +6,11 @@ use crate::app::consts::{
     AI_PROVIDER_IDS, PROVIDER_SETUP_LABELS, QUICK_SCAN_TASK_IDS, SETTINGS_MAX_CONCURRENT_TASKS,
 };
 use crate::app::policy::{
-    PhiPreferenceGate, codex_model_options, provider_selector_caption, provider_selector_labels,
-    provider_setup_model, provider_setup_provider, selected_setting_index,
-    subscription_account_detail, subscription_account_offers_sign_in, subscription_account_pill,
-    subscription_auth_provider_for_setup, subscription_install_progress_label,
+    OnDevicePreferenceGate, codex_model_options, provider_selector_caption,
+    provider_selector_labels, provider_setup_model, provider_setup_provider,
+    selected_setting_index, subscription_account_detail, subscription_account_offers_sign_in,
+    subscription_account_pill, subscription_auth_provider_for_setup,
+    subscription_install_progress_label,
 };
 use crate::screens::ai::view::primary_button_resources;
 use crate::widgets::badges::status_pill;
@@ -35,7 +36,7 @@ pub(crate) fn settings_dialog(
     bottom: bool,
     dialog_size: (f64, f64),
     settings: &AppSettings,
-    phi_preference_gate: &PhiPreferenceGate,
+    ondevice_preference_gate: &OnDevicePreferenceGate,
     provider_status: Option<&AIProviderStatus>,
     provider_status_loading: bool,
     provider_setup_partial: bool,
@@ -224,7 +225,7 @@ pub(crate) fn settings_dialog(
                                     bottom,
                                     dialog_size,
                                     settings,
-                                    phi_preference_gate,
+                                    ondevice_preference_gate,
                                     provider_status,
                                     provider_status_loading,
                                     provider_setup_partial,
@@ -523,7 +524,10 @@ pub(crate) fn provider_model_catalog_row(
     refresh: Callback<()>,
     cancel: Callback<()>,
 ) -> View {
-    if provider_setup_provider(setup_index) == Some(AIProvider::PhiSilica) {
+    if matches!(
+        provider_setup_provider(setup_index),
+        Some(AIProvider::PhiSilica | AIProvider::AionInstruct)
+    ) {
         return View::empty();
     }
     let state = state.cloned().unwrap_or_default();
@@ -857,7 +861,7 @@ pub(crate) fn provider_setup_fields(
     match provider_setup_index {
         0 => text_row(
             "Phi Silica LAF token",
-            "Optional Microsoft-issued token; generation still requires the Store identity on a Copilot+ PC",
+            "Legacy Phi Silica only. Aion Instruct needs no LAF token. On-device AI requires the Store version on a supported PC",
             settings.phi_silica_laf_token.as_deref(),
             "Leave empty for the built-in token",
             0,
@@ -1014,13 +1018,16 @@ pub(crate) fn provider_setup_fields(
     }
 }
 
-pub(crate) fn settings_phi_preference_status(palette: Palette, gate: &PhiPreferenceGate) -> View {
+pub(crate) fn settings_ondevice_preference_status(
+    palette: Palette,
+    gate: &OnDevicePreferenceGate,
+) -> View {
     let (message, icon) = match gate {
-        PhiPreferenceGate::Checking => {
+        OnDevicePreferenceGate::Checking => {
             (gate.blocking_reason().unwrap_or_default(), FaIcon::Refresh)
         }
-        PhiPreferenceGate::Ready => return View::empty(),
-        PhiPreferenceGate::Blocked(_) => (
+        OnDevicePreferenceGate::Ready => return View::empty(),
+        OnDevicePreferenceGate::Blocked(_) => (
             gate.blocking_reason().unwrap_or_default(),
             FaIcon::CircleInfo,
         ),
@@ -1028,7 +1035,7 @@ pub(crate) fn settings_phi_preference_status(palette: Palette, gate: &PhiPrefere
 
     Border::new()
         .padding(Thickness::new(0.0, 0.0, 0.0, 8.0))
-        .automation_name("Phi Silica availability")
+        .automation_name("On-device AI availability")
         .content(
             StackPanel::new()
                 .orientation(Orientation::Horizontal)
@@ -1083,7 +1090,7 @@ pub(crate) fn settings_content(
     bottom: bool,
     dialog_size: (f64, f64),
     settings: &AppSettings,
-    phi_preference_gate: &PhiPreferenceGate,
+    ondevice_preference_gate: &OnDevicePreferenceGate,
     provider_status: Option<&AIProviderStatus>,
     provider_status_loading: bool,
     provider_setup_partial: bool,
@@ -1161,11 +1168,7 @@ pub(crate) fn settings_content(
     let export_format_index =
         selected_setting_index(&settings.export_format, &["text", "json", "html"]);
     let provider_index = selected_setting_index(&settings.preferred_ai_provider, &AI_PROVIDER_IDS);
-    let provider_labels = provider_selector_labels(
-        phi_preference_gate,
-        provider_status,
-        provider_status_loading,
-    );
+    let provider_labels = provider_selector_labels(provider_status, provider_status_loading);
     let provider_caption =
         provider_selector_caption(&settings.preferred_ai_provider, provider_status);
     let cloud_fallback_index = Some(match settings.cloud_fallback_policy {
@@ -1216,7 +1219,7 @@ pub(crate) fn settings_content(
                             .on_selection_changed(preferred_ai_provider_changed),
                         59.0,
                     ),
-                    settings_phi_preference_status(palette, phi_preference_gate),
+                    settings_ondevice_preference_status(palette, ondevice_preference_gate),
                     settings_provider_selector_caption(palette, provider_caption),
                 )),
                 settings_row(

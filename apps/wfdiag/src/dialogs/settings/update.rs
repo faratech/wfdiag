@@ -22,11 +22,11 @@ use crate::app::consts::{
 };
 use crate::app::message::SettingsDialogAction;
 use crate::app::policy::{
-    configured_provider_setup_index, phi_preference_gate, provider_catalog_draft,
+    configured_provider_setup_index, ondevice_preference_gate, provider_catalog_draft,
     provider_display_name, provider_from_wire, provider_setup_index_for_provider,
     provider_setup_provider, rejection_text, set_provider_key_configured, set_provider_key_value,
     set_provider_setup_model, settings_dialog_callback_is_current, subscription_auth_state_index,
-    subscription_wire_id, validate_phi_preference, window_theme_from_setting, window_theme_setting,
+    subscription_wire_id, window_theme_from_setting, window_theme_setting,
 };
 use crate::dialogs::notice::state::{NoticeKind, NoticeRequest};
 use crate::platform::window;
@@ -185,13 +185,14 @@ impl WfdiagShell {
             }
             SettingsDialogAction::PreferredAiProviderSelectionChanged(Some(index)) => {
                 if let Some(provider) = AI_PROVIDER_IDS.get(index) {
-                    let phi_gate = phi_preference_gate(
+                    let gate = ondevice_preference_gate(
+                        provider,
                         self.ai.provider_status.as_ref(),
                         self.ai.status_loading,
                     );
-                    if let Err(reason) = validate_phi_preference(provider, &phi_gate) {
+                    if let Err(reason) = gate.validate() {
                         self.settings.save_error = Some(reason);
-                        self.shell.status = "Phi Silica preference was not changed".to_string();
+                        self.shell.status = "AI provider preference was not changed".to_string();
                         return;
                     }
                     self.settings.draft.preferred_ai_provider = (*provider).to_string();
@@ -326,13 +327,15 @@ impl WfdiagShell {
         if !self.settings_dialog_is_current(epoch) {
             return;
         }
-        let phi_gate =
-            phi_preference_gate(self.ai.provider_status.as_ref(), self.ai.status_loading);
-        if let Err(reason) =
-            validate_phi_preference(&self.settings.draft.preferred_ai_provider, &phi_gate)
-        {
+        let gate = ondevice_preference_gate(
+            &self.settings.draft.preferred_ai_provider,
+            self.ai.provider_status.as_ref(),
+            self.ai.status_loading,
+        );
+        if let Err(reason) = gate.validate() {
             self.settings.save_error = Some(reason);
-            self.shell.status = "Settings were not saved · Phi Silica is not ready".to_string();
+            self.shell.status =
+                "Settings were not saved · the selected on-device model is not ready".to_string();
             return;
         }
         if self.shell.deterministic_visual {
@@ -627,7 +630,7 @@ impl WfdiagShell {
         match event {
             ProviderEvent::PreferenceRejected { reason } => {
                 self.settings.save_error = Some(reason);
-                self.shell.status = "Phi Silica preference was not changed".to_string();
+                self.shell.status = "AI provider preference was not changed".to_string();
             }
             ProviderEvent::ModelCatalog(event) => self.apply_model_catalog_event(event),
             ProviderEvent::Subscription(event) => self.apply_subscription_event(*event),

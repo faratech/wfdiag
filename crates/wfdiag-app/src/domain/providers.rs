@@ -1,66 +1,87 @@
 //! Provider-selection gates.
 //!
-//! Two decisions are pure and belong here: whether Phi Silica may be selected
+//! Two decisions are pure and belong here: whether on-device AI may be selected
 //! as a preference on this PC, and whether a queued AI intent (a chat message
 //! or a report) may proceed with the provider status currently known.
 
-use wfdiag_native_ai_provider::{AIProvider, AIProviderStatus};
+use wfdiag_native_ai_provider::{
+    AIProvider, AIProviderPreference, AIProviderStatus, parse_provider_preference,
+};
 
-/// Whether Phi Silica may be chosen right now.
+/// Whether the requested on-device provider may be chosen right now.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PhiPreferenceGate {
+pub enum OnDevicePreferenceGate {
     /// The provider probe has not finished.
     Checking,
-    /// Phi Silica is available and ready.
+    /// The selected provider is ready, or is not an on-device provider.
     Ready,
-    /// Phi Silica cannot be used; the string is the user-facing reason.
+    /// The selected provider cannot be used; includes the user-facing reason.
     Blocked(String),
 }
 
-impl PhiPreferenceGate {
+impl OnDevicePreferenceGate {
     /// The reason a selection must be refused, if it must.
     #[must_use]
     pub fn blocking_reason(&self) -> Option<&str> {
         match self {
             Self::Checking => Some(
-                "Checking whether Phi Silica is available on this PC. Wait for the check to finish before selecting it.",
+                "Checking whether on-device AI is available on this PC. Wait for the check to finish before selecting it.",
             ),
             Self::Ready => None,
             Self::Blocked(reason) => Some(reason),
         }
     }
 
-    /// Evaluate the gate from the last provider status.
+    /// Evaluate the requested preference using that model's own probe result.
     #[must_use]
-    pub fn evaluate(status: Option<&AIProviderStatus>, loading: bool) -> Self {
+    pub fn evaluate(preference: &str, status: Option<&AIProviderStatus>, loading: bool) -> Self {
+        let preference = parse_provider_preference(preference);
+        if !matches!(
+            preference,
+            AIProviderPreference::AionInstruct | AIProviderPreference::PhiSilica
+        ) {
+            return Self::Ready;
+        }
         if loading {
             return Self::Checking;
         }
         let Some(status) = status else {
             return Self::Checking;
         };
-        if status.phi_silica_available && status.phi_silica_ready {
+        let (available, ready, message, name) = if preference == AIProviderPreference::AionInstruct
+        {
+            (
+                status.aion_available,
+                status.aion_ready,
+                &status.aion_message,
+                "Aion Instruct",
+            )
+        } else {
+            (
+                status.phi_silica_available,
+                status.phi_silica_ready,
+                &status.phi_silica_message,
+                "Phi Silica",
+            )
+        };
+        if available && ready {
             Self::Ready
         } else {
-            Self::Blocked(status.phi_silica_message.clone().unwrap_or_else(|| {
-                "Phi Silica is unavailable or not ready on this PC.".to_string()
-            }))
+            Self::Blocked(
+                message
+                    .clone()
+                    .unwrap_or_else(|| format!("{name} is unavailable or not ready on this PC.")),
+            )
         }
     }
 
-    /// Validate one requested preference string against this gate.
+    /// Validate the preference used to evaluate this gate.
     ///
     /// # Errors
-    ///
-    /// Returns the user-facing reason when Phi Silica is requested but the
-    /// gate is not [`Self::Ready`].
-    pub fn validate(&self, preference: &str) -> Result<(), String> {
-        if preference.eq_ignore_ascii_case("phi_silica")
-            && let Some(reason) = self.blocking_reason()
-        {
-            return Err(reason.to_string());
-        }
-        Ok(())
+    /// Returns the user-facing reason when the selected model is not ready.
+    pub fn validate(&self) -> Result<(), String> {
+        self.blocking_reason()
+            .map_or(Ok(()), |reason| Err(reason.to_string()))
     }
 }
 
@@ -99,7 +120,7 @@ impl PendingAiProviderGate {
 
 #[cfg(test)]
 mod tests {
-    use super::{PendingAiProviderGate, PhiPreferenceGate};
+    use super::{OnDevicePreferenceGate, PendingAiProviderGate};
     use wfdiag_native_ai_provider::{AIProvider, AIProviderStatus};
 
     fn status(available: bool, ready: bool, active: AIProvider) -> AIProviderStatus {
@@ -123,29 +144,72 @@ mod tests {
     #[test]
     fn phi_cannot_be_selected_before_or_without_a_ready_probe() {
         assert_eq!(
-            PhiPreferenceGate::evaluate(None, true),
-            PhiPreferenceGate::Checking
+            OnDevicePreferenceGate::evaluate("phi_silica", None, true),
+            OnDevicePreferenceGate::Checking
         );
         assert!(
-            PhiPreferenceGate::evaluate(None, false)
-                .validate("phi_silica")
+            OnDevicePreferenceGate::evaluate("phi_silica", None, false)
+                .validate()
                 .is_err()
         );
-        let blocked =
-            PhiPreferenceGate::evaluate(Some(&status(true, false, AIProvider::None)), false);
+        let blocked = OnDevicePreferenceGate::evaluate(
+            "phi_silica",
+            Some(&status(true, false, AIProvider::None)),
+            false,
+        );
         assert_eq!(
-            blocked.validate("phi_silica").unwrap_err(),
+            blocked.validate().unwrap_err(),
             "requires the Microsoft Store version"
         );
-        assert!(blocked.validate("openai").is_ok(), "other providers pass");
+        assert!(
+            OnDevicePreferenceGate::evaluate("openai", None, true)
+                .validate()
+                .is_ok(),
+            "other providers pass"
+        );
     }
 
     #[test]
     fn phi_passes_only_when_available_and_ready() {
-        let gate =
-            PhiPreferenceGate::evaluate(Some(&status(true, true, AIProvider::PhiSilica)), false);
-        assert_eq!(gate, PhiPreferenceGate::Ready);
-        assert!(gate.validate("PHI_SILICA").is_ok());
+        let gate = OnDevicePreferenceGate::evaluate(
+            "phi_silica",
+            Some(&status(true, true, AIProvider::PhiSilica)),
+            false,
+        );
+        assert_eq!(gate, OnDevicePreferenceGate::Ready);
+        assert!(gate.validate().is_ok());
+    }
+
+    #[test]
+    fn each_ondevice_preference_requires_its_own_ready_probe() {
+        for aion_ready in [false, true] {
+            let mut status = status(!aion_ready, !aion_ready, AIProvider::None);
+            status.aion_available = aion_ready;
+            status.aion_ready = aion_ready;
+            for (preference, expected) in [
+                ("aion_instruct", aion_ready),
+                (" AION ", aion_ready),
+                ("phi_silica", !aion_ready),
+                ("PHISILICA", !aion_ready),
+            ] {
+                assert_eq!(
+                    OnDevicePreferenceGate::evaluate(preference, Some(&status), false)
+                        .validate()
+                        .is_ok(),
+                    expected
+                );
+                assert!(
+                    OnDevicePreferenceGate::evaluate(preference, Some(&status), true)
+                        .validate()
+                        .is_err()
+                );
+                assert!(
+                    OnDevicePreferenceGate::evaluate(preference, None, false)
+                        .validate()
+                        .is_err()
+                );
+            }
+        }
     }
 
     #[test]

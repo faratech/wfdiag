@@ -119,59 +119,23 @@ pub(crate) fn configured_provider_setup_index(settings: &AppSettings) -> usize {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum PhiPreferenceGate {
-    Checking,
-    Ready,
-    Blocked(String),
-}
+pub(crate) use wfdiag_app::domain::providers::OnDevicePreferenceGate;
 
-impl PhiPreferenceGate {
-    pub(crate) fn blocking_reason(&self) -> Option<&str> {
-        match self {
-            Self::Checking => Some(
-                "Checking whether Phi Silica is available on this PC. Wait for the check to finish before selecting it.",
-            ),
-            Self::Ready => None,
-            Self::Blocked(reason) => Some(reason),
-        }
-    }
-}
-
-pub(crate) fn phi_preference_gate(
+pub(crate) fn ondevice_preference_gate(
+    preference: &str,
     provider_status: Option<&AIProviderStatus>,
     provider_loading: bool,
-) -> PhiPreferenceGate {
-    if provider_loading || provider_status.is_none() {
-        return PhiPreferenceGate::Checking;
-    }
-    let status = provider_status.expect("provider status checked above");
-    if (status.phi_silica_available && status.phi_silica_ready)
-        || (status.aion_available && status.aion_ready)
-    {
-        PhiPreferenceGate::Ready
-    } else {
-        PhiPreferenceGate::Blocked(
-            status
-                .aion_message
-                .as_ref()
-                .or(status.phi_silica_message.as_ref())
-                .cloned()
-                .unwrap_or_else(|| {
-                    "On-device AI is unavailable or not ready on this PC.".to_string()
-                }),
-        )
-    }
+) -> OnDevicePreferenceGate {
+    OnDevicePreferenceGate::evaluate(preference, provider_status, provider_loading)
 }
 
 /// Per-option suffixes for the Settings provider selector (#25): what each
-/// choice is worth right now. The Phi gate wins for the on-device row — it
-/// knows about package identity, which a probe cannot see — and every other
-/// row reads its `ProviderInfo`. `Auto` names the provider the router would
+/// choice is worth right now. Each on-device row uses the facade's readiness
+/// gate for that model; every other row reads its `ProviderInfo`.
+/// `Auto` names the provider the router would
 /// pick at the moment the status was taken. With no status at all the labels
 /// stay plain unless a refresh is in flight.
 pub(crate) fn provider_selector_labels(
-    gate: &PhiPreferenceGate,
     provider_status: Option<&AIProviderStatus>,
     provider_loading: bool,
 ) -> [String; AI_PROVIDER_IDS.len()] {
@@ -183,13 +147,15 @@ pub(crate) fn provider_selector_labels(
                 None if provider_loading => " — checking…".to_string(),
                 None => String::new(),
             },
-            "phi_silica" | "aion_instruct" => match gate {
-                PhiPreferenceGate::Checking => " — checking".to_string(),
-                PhiPreferenceGate::Blocked(_) => " — unavailable".to_string(),
-                PhiPreferenceGate::Ready => {
-                    provider_row_suffix(provider_status, provider_loading, id)
+            "phi_silica" | "aion_instruct" if provider_status.is_some() || provider_loading => {
+                match ondevice_preference_gate(id, provider_status, provider_loading) {
+                    OnDevicePreferenceGate::Checking => " — checking".to_string(),
+                    OnDevicePreferenceGate::Blocked(_) => " — unavailable".to_string(),
+                    OnDevicePreferenceGate::Ready => {
+                        provider_row_suffix(provider_status, provider_loading, id)
+                    }
                 }
-            },
+            }
             _ => provider_row_suffix(provider_status, provider_loading, id),
         };
         label.push_str(&suffix);
@@ -255,8 +221,8 @@ pub(crate) enum OnboardingAction {
     SignIn(&'static str),
     /// Continue in Settings (local servers need an endpoint or model).
     OpenSettings,
-    /// Make on-device Phi the preference.
-    PreferPhi,
+    /// Make on-device AI (Aion Instruct or Phi Silica) the preference; the payload is the wire id.
+    PreferOnDevice(&'static str),
 }
 
 pub(crate) fn onboarding_candidates(
@@ -282,10 +248,15 @@ pub(crate) fn onboarding_candidates(
                     SubscriptionAuthProvider::ClaudeCode,
                 )),
             }),
+            (AIProvider::AionInstruct, true, true) => candidates.push(OnboardingCandidate {
+                label: "Use on-device AI",
+                detail: "Aion Instruct is ready on this PC",
+                action: OnboardingAction::PreferOnDevice("aion_instruct"),
+            }),
             (AIProvider::PhiSilica, true, true) => candidates.push(OnboardingCandidate {
                 label: "Use on-device AI",
                 detail: "Phi Silica is ready on this PC",
-                action: OnboardingAction::PreferPhi,
+                action: OnboardingAction::PreferOnDevice("phi_silica"),
             }),
             (AIProvider::Ollama, _, true) => candidates.push(OnboardingCandidate {
                 label: "Set up Ollama",
@@ -340,18 +311,6 @@ fn provider_row_suffix(
             }
         }
     }
-}
-
-pub(crate) fn validate_phi_preference(
-    preference: &str,
-    gate: &PhiPreferenceGate,
-) -> Result<(), String> {
-    if preference.eq_ignore_ascii_case("phi_silica")
-        && let Some(reason) = gate.blocking_reason()
-    {
-        return Err(reason.to_string());
-    }
-    Ok(())
 }
 
 /// What the AI page asks the user to do about an installed subscription CLI
@@ -761,8 +720,9 @@ pub(crate) fn subscription_provider_from_wire(wire: &str) -> Option<Subscription
 /// The ids are the ones [`AIProvider`]'s `Display` writes, which is what the
 /// settings document and every engine event carry.
 pub(crate) fn provider_from_wire(wire: &str) -> AIProvider {
-    const PROVIDERS: [AIProvider; 10] = [
+    const PROVIDERS: [AIProvider; 11] = [
         AIProvider::OpenAI,
+        AIProvider::AionInstruct,
         AIProvider::PhiSilica,
         AIProvider::FoundryLocal,
         AIProvider::Ollama,
@@ -1747,36 +1707,14 @@ pub(crate) mod tests {
             phi_silica_available: active_provider == AIProvider::PhiSilica,
             phi_silica_ready: active_provider == AIProvider::PhiSilica,
             phi_silica_message: None,
+            aion_available: active_provider == AIProvider::AionInstruct,
+            aion_ready: active_provider == AIProvider::AionInstruct,
+            aion_message: None,
             foundry_local_available: active_provider == AIProvider::FoundryLocal,
             foundry_local_endpoint: None,
             active_provider,
             providers: Vec::new(),
         }
-    }
-
-    #[test]
-    fn phi_preference_gate_blocks_unknown_and_unready_status_but_never_other_providers() {
-        let checking = phi_preference_gate(None, true);
-        assert_eq!(checking, PhiPreferenceGate::Checking);
-        assert!(validate_phi_preference("phi_silica", &checking).is_err());
-        assert!(validate_phi_preference("codex_cli", &checking).is_ok());
-
-        let mut unavailable = provider_status(AIProvider::None);
-        unavailable.phi_silica_message = Some("model is still preparing".to_string());
-        let blocked = phi_preference_gate(Some(&unavailable), false);
-        assert_eq!(
-            blocked,
-            PhiPreferenceGate::Blocked("model is still preparing".to_string())
-        );
-        assert_eq!(
-            validate_phi_preference("phi_silica", &blocked),
-            Err("model is still preparing".to_string())
-        );
-
-        let ready = provider_status(AIProvider::PhiSilica);
-        let ready_gate = phi_preference_gate(Some(&ready), false);
-        assert_eq!(ready_gate, PhiPreferenceGate::Ready);
-        assert!(validate_phi_preference("phi_silica", &ready_gate).is_ok());
     }
 
     fn selector_row(id: AIProvider, available: bool, configured: bool) -> ProviderInfo {
@@ -1795,6 +1733,8 @@ pub(crate) mod tests {
     #[test]
     fn provider_selector_labels_report_each_providers_state() {
         let mut status = provider_status(AIProvider::Ollama);
+        status.phi_silica_available = true;
+        status.phi_silica_ready = true;
         status.providers = vec![
             selector_row(AIProvider::PhiSilica, true, true),
             selector_row(AIProvider::FoundryLocal, true, true),
@@ -1805,28 +1745,38 @@ pub(crate) mod tests {
             selector_row(AIProvider::Anthropic, false, false),
         ];
 
-        let labels = provider_selector_labels(&PhiPreferenceGate::Ready, Some(&status), false);
+        let labels = provider_selector_labels(Some(&status), false);
 
-        assert_eq!(labels[0], "Auto — uses ollama");
-        assert_eq!(labels[1], "Phi Silica (on-device) ✓");
-        assert_eq!(labels[3], "Ollama (local server) ✓");
+        let label = |id| {
+            &labels[AI_PROVIDER_IDS
+                .iter()
+                .position(|candidate| *candidate == id)
+                .unwrap()]
+        };
         assert_eq!(
-            labels[5],
+            label("aion_instruct"),
+            "Aion Instruct (on-device) — unavailable"
+        );
+        assert_eq!(label("auto"), "Auto — uses ollama");
+        assert_eq!(label("phi_silica"), "Phi Silica (on-device) ✓");
+        assert_eq!(label("ollama"), "Ollama (local server) ✓");
+        assert_eq!(
+            label("codex_cli"),
             "ChatGPT via Codex CLI (subscription) — signed out"
         );
         assert_eq!(
-            labels[6],
+            label("claude_code"),
             "Claude via Claude Code CLI (subscription) — not installed"
         );
-        assert_eq!(labels[7], "OpenAI (cloud) — not reachable");
-        assert_eq!(labels[8], "Anthropic Claude (cloud) — not set up");
+        assert_eq!(label("openai"), "OpenAI (cloud) — not reachable");
+        assert_eq!(label("anthropic"), "Anthropic Claude (cloud) — not set up");
         // Rows the status did not include say nothing rather than inventing state.
-        assert_eq!(labels[9], "Google Gemini (cloud)");
+        assert_eq!(label("gemini"), "Google Gemini (cloud)");
     }
 
     #[test]
     fn provider_selector_labels_without_status_stay_plain_or_checking() {
-        let checking = provider_selector_labels(&PhiPreferenceGate::Checking, None, true);
+        let checking = provider_selector_labels(None, true);
         assert!(checking[0].ends_with("— checking…"));
         assert!(
             checking
@@ -1835,7 +1785,7 @@ pub(crate) mod tests {
                 .all(|label| label.ends_with("checking") || label.ends_with("checking…"))
         );
 
-        let plain = provider_selector_labels(&PhiPreferenceGate::Ready, None, false);
+        let plain = provider_selector_labels(None, false);
         for (label, base) in plain.iter().zip(AI_PROVIDER_LABELS) {
             assert_eq!(label, base);
         }
@@ -1843,13 +1793,19 @@ pub(crate) mod tests {
 
     #[test]
     fn provider_selector_caption_names_the_auto_resolution_only_for_auto() {
-        let status = provider_status(AIProvider::PhiSilica);
-
+        let phi_status = provider_status(AIProvider::PhiSilica);
         assert_eq!(
-            provider_selector_caption("auto", Some(&status)),
+            provider_selector_caption("auto", Some(&phi_status)),
             Some("Auto currently resolves to Phi Silica (on-device).".to_string())
         );
-        assert_eq!(provider_selector_caption("openai", Some(&status)), None);
+
+        let aion_status = provider_status(AIProvider::AionInstruct);
+        assert_eq!(
+            provider_selector_caption("auto", Some(&aion_status)),
+            Some("Auto currently resolves to Aion Instruct (on-device).".to_string())
+        );
+
+        assert_eq!(provider_selector_caption("openai", Some(&phi_status)), None);
         assert_eq!(provider_selector_caption("auto", None), None);
     }
 
@@ -1868,8 +1824,24 @@ pub(crate) mod tests {
 
         assert_eq!(candidates.len(), 3);
         assert_eq!(candidates[0].action, OnboardingAction::SignIn("codex_cli"));
-        assert_eq!(candidates[1].action, OnboardingAction::PreferPhi);
+        assert_eq!(
+            candidates[1].action,
+            OnboardingAction::PreferOnDevice("phi_silica")
+        );
         assert_eq!(candidates[2].action, OnboardingAction::OpenSettings);
+
+        let mut aion_status = provider_status(AIProvider::None);
+        aion_status.providers = vec![
+            selector_row(AIProvider::AionInstruct, true, true),
+            selector_row(AIProvider::OpenAI, false, false),
+        ];
+        let aion_candidates = onboarding_candidates(Some(&aion_status));
+        assert_eq!(aion_candidates.len(), 1);
+        assert_eq!(
+            aion_candidates[0].action,
+            OnboardingAction::PreferOnDevice("aion_instruct")
+        );
+
         // Without a probe there is nothing to offer but also nothing to say.
         assert!(onboarding_candidates(None).is_empty());
     }
@@ -2019,6 +1991,20 @@ pub(crate) mod tests {
         for (index, provider) in PROVIDER_SETUP_PROVIDERS.into_iter().enumerate() {
             assert_eq!(provider_setup_index_for_provider(provider), Some(index));
         }
+        assert_eq!(
+            provider_setup_index_for_provider(AIProvider::AionInstruct),
+            Some(0)
+        );
+        let settings = AppSettings {
+            preferred_ai_provider: "aion_instruct".to_string(),
+            ..AppSettings::default()
+        };
+        assert_eq!(configured_provider_setup_index(&settings), 0);
+        assert!(
+            provider_catalog_draft(0, &settings, &Default::default())
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(provider_setup_index_for_provider(AIProvider::None), None);
     }
 
@@ -2335,6 +2321,7 @@ pub(crate) mod tests {
     fn provider_wire_ids_round_trip_and_unknown_ids_are_none() {
         for provider in [
             AIProvider::OpenAI,
+            AIProvider::AionInstruct,
             AIProvider::PhiSilica,
             AIProvider::FoundryLocal,
             AIProvider::Ollama,

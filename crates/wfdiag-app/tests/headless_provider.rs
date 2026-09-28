@@ -1,4 +1,4 @@
-//! AI provider status, the Phi Silica preference gate, and the cache control.
+//! AI provider status, the on-device preference gate, and the cache control.
 
 mod support;
 
@@ -170,4 +170,74 @@ fn the_ollama_model_list_is_forwarded_verbatim() {
         AppEvent::Provider(ProviderEvent::OllamaModels(models)) if models == &["llama3.3", "qwen3"]
     )));
     harness.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn only_the_ready_ondevice_model_can_be_selected() {
+    for aion in [false, true] {
+        let mocks = MockPorts::new();
+        mocks.provider_backend.set_package_identity(true);
+        mocks.provider_backend.set_probes(ProviderProbeSnapshot {
+            aion_available: aion,
+            aion_ready: aion,
+            phi_silica_available: !aion,
+            phi_silica_ready: !aion,
+            ..ProviderProbeSnapshot::default()
+        });
+        let mut harness = boot_with("ondevice_preference", mocks);
+        let (ready, unavailable, expected) = if aion {
+            (
+                "aion_instruct",
+                "phi_silica",
+                AIProviderPreference::AionInstruct,
+            )
+        } else {
+            (
+                "phi_silica",
+                "aion_instruct",
+                AIProviderPreference::PhiSilica,
+            )
+        };
+        // Even a model that will probe ready must wait for the probe.
+        assert!(
+            harness
+                .service
+                .dispatch(AppCommand::SetProviderPreference {
+                    preference: ready.to_string(),
+                })
+                .rejection()
+                .is_some()
+        );
+        harness.service.dispatch(AppCommand::RequestProviderStatus);
+        harness.pump_for("the on-device status", |event| {
+            matches!(event, AppEvent::Provider(ProviderEvent::Status(_)))
+        });
+        let outcome = harness.service.dispatch(AppCommand::SetProviderPreference {
+            preference: unavailable.to_string(),
+        });
+        assert!(matches!(
+            outcome.rejection(),
+            Some(RejectReason::Invalid { .. })
+        ));
+        assert_eq!(
+            harness.mocks.provider_backend.preference(),
+            AIProviderPreference::Auto
+        );
+        assert!(
+            harness
+                .service
+                .dispatch(AppCommand::SetProviderPreference {
+                    preference: ready.to_string(),
+                })
+                .is_accepted()
+        );
+        harness.pump_for("the on-device preference", |event| {
+            matches!(
+                event,
+                AppEvent::Provider(ProviderEvent::PreferenceApplied { .. })
+            )
+        });
+        assert_eq!(harness.mocks.provider_backend.preference(), expected);
+        harness.shutdown(Duration::from_secs(2));
+    }
 }

@@ -82,7 +82,7 @@ impl AiScreen {
     }
 
     /// #32: one proposal of the one-time connect offer. Signing in routes
-    /// through the vendor CLI's own browser flow; preferring Phi just sets
+    /// through the vendor CLI's own browser flow; preferring on-device AI just sets
     /// the preference. Both mark the offer seen so it never nags again.
     fn onboarding_action(&mut self, action: OnboardingAction, cx: &mut ScreenCx<'_>) {
         if cx.shell.deterministic_visual {
@@ -96,16 +96,18 @@ impl AiScreen {
                 provider: wire.to_string(),
                 operation: SubscriptionOperation::SignIn,
             }),
-            OnboardingAction::PreferPhi => cx.dispatch(AppCommand::SetProviderPreference {
-                preference: "phi_silica".to_string(),
-            }),
+            OnboardingAction::PreferOnDevice(wire) => {
+                cx.dispatch(AppCommand::SetProviderPreference {
+                    preference: wire.to_string(),
+                })
+            }
         };
         match outcome {
             DispatchOutcome::Accepted { .. } => match action {
                 OnboardingAction::SignIn(_) => {
                     cx.status("Complete the sign-in in the browser window the vendor CLI opened");
                 }
-                OnboardingAction::PreferPhi => cx.status("AI will use the on-device model"),
+                OnboardingAction::PreferOnDevice(_) => cx.status("AI will use the on-device model"),
                 OnboardingAction::OpenSettings => {}
             },
             DispatchOutcome::Rejected(reason) => cx.status(rejection_text(&reason)),

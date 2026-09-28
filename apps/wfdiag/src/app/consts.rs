@@ -180,8 +180,9 @@ pub(crate) const WINDOW_HOOK_RETRY_MIN: Duration = Duration::from_millis(100);
 
 pub(crate) const WINDOW_HOOK_RETRY_MAX: Duration = Duration::from_millis(3_200);
 
-pub(crate) const AI_PROVIDER_LABELS: [&str; 11] = [
+pub(crate) const AI_PROVIDER_LABELS: [&str; 12] = [
     "Auto",
+    "Aion Instruct (on-device)",
     "Phi Silica (on-device)",
     "Foundry Local (local server)",
     "Ollama (local server)",
@@ -194,8 +195,9 @@ pub(crate) const AI_PROVIDER_LABELS: [&str; 11] = [
     "DeepSeek (cloud)",
 ];
 
-pub(crate) const AI_PROVIDER_IDS: [&str; 11] = [
+pub(crate) const AI_PROVIDER_IDS: [&str; 12] = [
     "auto",
+    "aion_instruct",
     "phi_silica",
     "foundry_local",
     "ollama",
@@ -211,7 +213,7 @@ pub(crate) const AI_PROVIDER_IDS: [&str; 11] = [
 pub(crate) const CODEX_MODEL_IDS: [&str; 3] = ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.5"];
 
 pub(crate) const PROVIDER_SETUP_LABELS: [&str; 10] = [
-    "Phi Silica (on-device NPU)",
+    "On-device AI (Aion / Phi Silica)",
     "Foundry Local (local server)",
     "Ollama (local server)",
     "ChatGPT via Codex CLI",

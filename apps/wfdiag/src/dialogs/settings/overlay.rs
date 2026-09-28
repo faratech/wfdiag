@@ -6,7 +6,7 @@
 use crate::app::WfdiagShell;
 use crate::app::message::{Message, SettingsDialogAction};
 use crate::app::policy::{
-    phi_preference_gate, settings_dialog_size, subscription_auth_provider_for_setup,
+    ondevice_preference_gate, settings_dialog_size, subscription_auth_provider_for_setup,
     subscription_auth_state_index,
 };
 use crate::app::screen::ShellEnv;
@@ -52,7 +52,11 @@ impl SettingsDialog {
         };
         let settings_editable = !self.loading && !self.saving && !self.subscription_install_busy;
         let settings_can_save = settings_editable && (env.deterministic_visual || engine_running);
-        let settings_phi_gate = phi_preference_gate(provider_status, status_loading);
+        let settings_phi_gate = ondevice_preference_gate(
+            &self.draft.preferred_ai_provider,
+            provider_status,
+            status_loading,
+        );
         let dialog: View = if self.open {
             let epoch = self.epoch;
             let subscription_provider =
