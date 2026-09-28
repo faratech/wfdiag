@@ -61,6 +61,9 @@ pub(crate) fn provider_setup_provider(index: usize) -> Option<AIProvider> {
 }
 
 pub(crate) fn provider_setup_index_for_provider(provider: AIProvider) -> Option<usize> {
+    if provider == AIProvider::AionInstruct {
+        return Some(0);
+    }
     PROVIDER_SETUP_PROVIDERS
         .iter()
         .position(|candidate| *candidate == provider)
@@ -72,6 +75,7 @@ pub(crate) fn configured_provider_setup_index(settings: &AppSettings) -> usize {
         let provider = match explicit {
             AIProviderPreference::Auto => AIProvider::None,
             AIProviderPreference::OpenAI => AIProvider::OpenAI,
+            AIProviderPreference::AionInstruct => AIProvider::AionInstruct,
             AIProviderPreference::PhiSilica => AIProvider::PhiSilica,
             AIProviderPreference::FoundryLocal => AIProvider::FoundryLocal,
             AIProviderPreference::Ollama => AIProvider::Ollama,
@@ -142,13 +146,20 @@ pub(crate) fn phi_preference_gate(
         return PhiPreferenceGate::Checking;
     }
     let status = provider_status.expect("provider status checked above");
-    if status.phi_silica_available && status.phi_silica_ready {
+    if (status.phi_silica_available && status.phi_silica_ready)
+        || (status.aion_available && status.aion_ready)
+    {
         PhiPreferenceGate::Ready
     } else {
         PhiPreferenceGate::Blocked(
-            status.phi_silica_message.clone().unwrap_or_else(|| {
-                "Phi Silica is unavailable or not ready on this PC.".to_string()
-            }),
+            status
+                .aion_message
+                .as_ref()
+                .or(status.phi_silica_message.as_ref())
+                .cloned()
+                .unwrap_or_else(|| {
+                    "On-device AI is unavailable or not ready on this PC.".to_string()
+                }),
         )
     }
 }
@@ -172,7 +183,7 @@ pub(crate) fn provider_selector_labels(
                 None if provider_loading => " — checking…".to_string(),
                 None => String::new(),
             },
-            "phi_silica" => match gate {
+            "phi_silica" | "aion_instruct" => match gate {
                 PhiPreferenceGate::Checking => " — checking".to_string(),
                 PhiPreferenceGate::Blocked(_) => " — unavailable".to_string(),
                 PhiPreferenceGate::Ready => {
@@ -622,7 +633,7 @@ pub(crate) fn provider_catalog_draft(
     let Some(provider) = provider_setup_provider(setup_index) else {
         return Err("The selected provider is not recognized".to_string());
     };
-    if provider == AIProvider::PhiSilica {
+    if provider == AIProvider::PhiSilica || provider == AIProvider::AionInstruct {
         return Ok(None);
     }
     let (api_key, key_configured) = match provider {
@@ -1002,6 +1013,7 @@ impl PackageIdentitySource for ReactorPackageIdentitySource {
 pub(crate) fn provider_display_name(provider: AIProvider) -> &'static str {
     match provider {
         AIProvider::None => "No provider",
+        AIProvider::AionInstruct => "Aion Instruct",
         AIProvider::PhiSilica => "Phi Silica",
         AIProvider::FoundryLocal => "Foundry Local",
         AIProvider::Ollama => "Ollama",

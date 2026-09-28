@@ -66,12 +66,16 @@ pub struct DetectCtx<'a> {
     /// Per-run memo of one task's parsed JSON, shared by every detector:
     /// previously each rule re-parsed the same collector output, up to six
     /// times for one task (2026-09-03 audit).
-    pub parsed_cache: std::cell::RefCell<HashMap<String, Option<serde_json::Value>>>,
+    pub parsed_cache:
+        std::cell::RefCell<HashMap<String, Option<std::sync::Arc<serde_json::Value>>>>,
 }
 
 impl DetectCtx<'_> {
     /// Parse one task's successful output as JSON, memoized per run.
-    pub(crate) fn cached_task_json(&self, task_id: &str) -> Option<serde_json::Value> {
+    pub(crate) fn cached_task_json(
+        &self,
+        task_id: &str,
+    ) -> Option<std::sync::Arc<serde_json::Value>> {
         let result = self.results.get_task_result(task_id)?;
         if !result.success {
             return None;
@@ -79,7 +83,9 @@ impl DetectCtx<'_> {
         if let Some(hit) = self.parsed_cache.borrow().get(task_id) {
             return hit.clone();
         }
-        let parsed = serde_json::from_str::<serde_json::Value>(&result.output).ok();
+        let parsed = serde_json::from_str::<serde_json::Value>(&result.output)
+            .ok()
+            .map(std::sync::Arc::new);
         self.parsed_cache
             .borrow_mut()
             .insert(task_id.to_string(), parsed.clone());

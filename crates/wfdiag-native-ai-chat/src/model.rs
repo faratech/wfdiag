@@ -228,7 +228,7 @@ impl ProviderUse {
     #[must_use]
     pub fn for_provider(provider: AIProvider, fallback_from: Option<AIProvider>) -> Self {
         let execution_class = match provider {
-            AIProvider::PhiSilica => ProviderExecutionClass::OnDevice,
+            AIProvider::PhiSilica | AIProvider::AionInstruct => ProviderExecutionClass::OnDevice,
             AIProvider::FoundryLocal | AIProvider::Ollama => ProviderExecutionClass::LocalServer,
             AIProvider::CodexCli | AIProvider::ClaudeCode => {
                 ProviderExecutionClass::SubscriptionCloud

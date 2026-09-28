@@ -27,6 +27,7 @@ use windows_reactor::*;
 
 #[derive(Clone, PartialEq)]
 pub(crate) struct ProcessViewRow {
+    pub(crate) row_key: String,
     pub(crate) name: String,
     pub(crate) pid: u32,
     pub(crate) start_time: i64,
@@ -54,9 +55,8 @@ impl ProcessViewRow {
     /// different key and forced a full re-render. Keying by the process
     /// identity (PID plus start time) lets Reactor move the realized row
     /// instead, and lets an unchanged row be skipped entirely.
-    pub(crate) fn row_key(&self) -> String {
-        let identity = self.identity();
-        format!("process:{}:{}", identity.pid, identity.start_time)
+    pub(crate) fn row_key(&self) -> &str {
+        &self.row_key
     }
 
     pub(crate) fn icon(&self) -> FaIcon {
@@ -80,6 +80,7 @@ impl ProcessViewRow {
 impl From<&ProcessRow> for ProcessViewRow {
     fn from(process: &ProcessRow) -> Self {
         Self {
+            row_key: format!("process:{}:{}", process.pid, process.start_time),
             name: process.name.clone(),
             pid: process.pid,
             start_time: process.start_time,

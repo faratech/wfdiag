@@ -74,12 +74,20 @@ pub(crate) fn diagnostic_category_progress(
     expected_task_ids: &[String],
     task_statuses: &HashMap<String, TaskProgressStatus>,
 ) -> Vec<DiagnosticCategoryProgress> {
-    let mut categories: Vec<DiagnosticCategoryProgress> = Vec::new();
+    if expected_task_ids.is_empty() {
+        return Vec::new();
+    }
+    let task_to_category: HashMap<&str, &str> = catalog
+        .iter()
+        .map(|task| (task.id.as_str(), task.category.as_str()))
+        .collect();
+
+    let mut categories: Vec<DiagnosticCategoryProgress> = Vec::with_capacity(8);
     for task_id in expected_task_ids {
-        let category = catalog
-            .iter()
-            .find(|task| task.id == *task_id)
-            .map_or("Other", |task| task.category.as_str());
+        let category = task_to_category
+            .get(task_id.as_str())
+            .copied()
+            .unwrap_or("Other");
         let index = categories
             .iter()
             .position(|progress| progress.category == category)

@@ -262,7 +262,7 @@ mod tests {
     fn row_keys_follow_identity_not_position() {
         let mut screen = ProcessesScreen::default();
         screen.set_page(Some(&page(vec![row(10, 5, 1.0), row(10, 9, 2.0)])));
-        let keys: Vec<String> = screen.rows.iter().map(|row| row.row_key()).collect();
+        let keys: Vec<&str> = screen.rows.iter().map(|row| row.row_key()).collect();
         assert_eq!(keys[0], "process:10:5");
         assert_ne!(keys[0], keys[1], "a reused PID is not the same row");
     }

@@ -85,6 +85,7 @@ pub(crate) fn ai_provider_pill_content(
         route_provider(preferred, status.availability())
     });
     let (provider, execution, cloud) = match active {
+        AIProvider::AionInstruct => ("Aion Instruct", "·  On device", false),
         AIProvider::PhiSilica => ("Phi Silica", "·  On device", false),
         AIProvider::FoundryLocal => ("Foundry Local", "·  Local server", false),
         AIProvider::Ollama => ("Ollama", "·  Local server", false),

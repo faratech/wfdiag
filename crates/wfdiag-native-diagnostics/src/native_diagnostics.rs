@@ -168,6 +168,25 @@ impl NativeDiagnostics {
         Ok(Value::Array(json_results))
     }
 
+    pub fn run_wmi_custom_query(&self, wql: &str, namespace: Option<&str>) -> Result<Value> {
+        let wmi_con = if let Some(ns) = namespace {
+            WmiConnection::with_namespace(ns)?
+        } else {
+            WmiConnection::new()?
+        };
+        let results = wmi_con.query(wql)?;
+
+        let json_results: Vec<Value> = results
+            .into_iter()
+            .map(|r| {
+                let obj: serde_json::Map<String, Value> = r.into_iter().collect();
+                Value::Object(obj)
+            })
+            .collect();
+
+        Ok(Value::Array(json_results))
+    }
+
     pub fn get_operating_system_info(&self) -> Result<Value> {
         let mut value = self.run_wmi_query("Win32_OperatingSystem", None)?;
         let registry = self.windows_release_registry_info();
@@ -683,19 +702,6 @@ impl NativeDiagnostics {
             Err(e) => {
                 eprintln!("Failed to query Win32_PnPSignedDriver: {e}");
             }
-        }
-
-        // Try to get legacy VxD drivers (might not exist on modern systems)
-        if let Ok(vxd_results) =
-            wmi_con.query("SELECT Name, DriverVersion, DriverDate, DeviceName FROM Win32_DriverVXD")
-        {
-            for result in vxd_results {
-                let mut driver_info: serde_json::Map<String, Value> = result.into_iter().collect();
-                driver_info.insert("Type".to_string(), json!("VxD"));
-                drivers.push(Value::Object(driver_info));
-            }
-        } else {
-            // VxD drivers not available on this system - this is normal for modern Windows
         }
 
         // If no drivers found, return error

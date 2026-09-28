@@ -89,6 +89,8 @@ pub enum AIProvider {
     None,
     #[serde(rename = "openai", alias = "open_a_i")]
     OpenAI,
+    #[serde(rename = "aion_instruct", alias = "aion")]
+    AionInstruct,
     #[serde(rename = "phi_silica")]
     PhiSilica,
     #[serde(rename = "foundry_local")]
@@ -114,6 +116,7 @@ impl fmt::Display for AIProvider {
         formatter.write_str(match self {
             Self::None => "none",
             Self::OpenAI => "openai",
+            Self::AionInstruct => "aion_instruct",
             Self::PhiSilica => "phi_silica",
             Self::FoundryLocal => "foundry_local",
             Self::Ollama => "ollama",
@@ -135,6 +138,8 @@ pub enum AIProviderPreference {
     Auto,
     #[serde(rename = "openai", alias = "open_a_i")]
     OpenAI,
+    #[serde(rename = "aion_instruct", alias = "aion")]
+    AionInstruct,
     #[serde(rename = "phi_silica")]
     PhiSilica,
     #[serde(rename = "foundry_local")]
@@ -155,8 +160,8 @@ pub enum AIProviderPreference {
     DeepSeek,
 }
 
-/// Explicit Phi selection is valid only for an identified Store process.
-pub const PHI_SILICA_STORE_REQUIRED: &str = "Phi Silica requires the Microsoft Store version of this app (registered package identity with the systemAIModels capability). Select Auto or another available provider in this build.";
+/// Explicit on-device selection is valid only for an identified Store process.
+pub const PHI_SILICA_STORE_REQUIRED: &str = "On-device AI requires the Microsoft Store version of this app (registered package identity with the systemAIModels capability). Select Auto or another available provider in this build.";
 
 /// Parse the historical provider aliases accepted by Settings and IPC.
 /// Unknown values intentionally retain the established Auto fallback.
@@ -164,7 +169,10 @@ pub const PHI_SILICA_STORE_REQUIRED: &str = "Phi Silica requires the Microsoft S
 pub fn parse_provider_preference(preference: &str) -> AIProviderPreference {
     match preference.trim().to_ascii_lowercase().as_str() {
         "openai" => AIProviderPreference::OpenAI,
-        "phi_silica" | "phisilica" => AIProviderPreference::PhiSilica,
+        "aion" | "aion_instruct" | "aioninstruct" => AIProviderPreference::AionInstruct,
+        "phi_silica" | "phisilica" | "on_device" | "ondevice" | "npu" => {
+            AIProviderPreference::PhiSilica
+        }
         "foundry_local" | "foundrylocal" => AIProviderPreference::FoundryLocal,
         "ollama" => AIProviderPreference::Ollama,
         "custom_openai" | "custom" => AIProviderPreference::CustomOpenAI,
@@ -177,12 +185,15 @@ pub fn parse_provider_preference(preference: &str) -> AIProviderPreference {
     }
 }
 
-/// Reject an explicit Phi preference for an unpackaged process.
+/// Reject an explicit on-device preference for an unpackaged process.
 pub fn validate_provider_preference(
     preference: AIProviderPreference,
     has_package_identity: bool,
 ) -> Result<AIProviderPreference, String> {
-    if preference == AIProviderPreference::PhiSilica && !has_package_identity {
+    if (preference == AIProviderPreference::PhiSilica
+        || preference == AIProviderPreference::AionInstruct)
+        && !has_package_identity
+    {
         return Err(PHI_SILICA_STORE_REQUIRED.to_string());
     }
     Ok(preference)
@@ -223,15 +234,15 @@ pub const fn capabilities(provider: AIProvider) -> ProviderCaps {
             supports_streaming: false,
             context_budget_chars: 0,
         },
+        AIProvider::AionInstruct | AIProvider::FoundryLocal => ProviderCaps {
+            supports_tools: false,
+            supports_streaming: true,
+            context_budget_chars: 12_000,
+        },
         AIProvider::PhiSilica => ProviderCaps {
             supports_tools: false,
             supports_streaming: false,
             context_budget_chars: 2_500,
-        },
-        AIProvider::FoundryLocal => ProviderCaps {
-            supports_tools: false,
-            supports_streaming: true,
-            context_budget_chars: 12_000,
         },
         AIProvider::Ollama => ProviderCaps {
             supports_tools: true,
@@ -267,6 +278,7 @@ pub const fn capabilities(provider: AIProvider) -> ProviderCaps {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProviderAvailability {
+    pub aion: bool,
     pub phi: bool,
     pub foundry: bool,
     pub ollama: bool,
@@ -345,6 +357,12 @@ pub struct AIProviderStatus {
     pub phi_silica_ready: bool,
     pub phi_silica_message: Option<String>,
     #[serde(default)]
+    pub aion_available: bool,
+    #[serde(default)]
+    pub aion_ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aion_message: Option<String>,
+    #[serde(default)]
     pub foundry_local_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foundry_local_endpoint: Option<String>,
@@ -369,6 +387,7 @@ impl AIProviderStatus {
         if self.providers.is_empty() {
             // Pre-`providers` wire payload: bridge from the legacy flags.
             return ProviderAvailability {
+                aion: self.aion_ready,
                 phi: self.phi_silica_ready,
                 foundry: self.foundry_local_available,
                 openai: self.openai_available,
@@ -382,6 +401,7 @@ impl AIProviderStatus {
                 .is_some_and(|info| info.available)
         };
         ProviderAvailability {
+            aion: row_available(AIProvider::AionInstruct),
             phi: row_available(AIProvider::PhiSilica),
             foundry: row_available(AIProvider::FoundryLocal),
             ollama: row_available(AIProvider::Ollama),
@@ -411,9 +431,13 @@ pub struct CliProbeSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderProbeSnapshot {
     pub openai_available: bool,
+    pub aion_available: bool,
+    pub aion_ready: bool,
+    pub aion_message: Option<String>,
     pub phi_silica_available: bool,
     pub phi_silica_ready: bool,
     pub phi_silica_message: Option<String>,
+    pub ondevice_model_name: Option<String>,
     pub foundry_endpoint: Option<String>,
     pub ollama_endpoint: Option<String>,
     pub custom_endpoint: Option<String>,
@@ -504,6 +528,7 @@ pub fn project_provider_status(input: ProviderStatusInput) -> AIProviderStatus {
         defaults,
     } = input;
     let availability = ProviderAvailability {
+        aion: probes.aion_ready,
         phi: probes.phi_silica_ready,
         foundry: probes.foundry_endpoint.is_some(),
         ollama: probes.ollama_endpoint.is_some(),
@@ -525,6 +550,13 @@ pub fn project_provider_status(input: ProviderStatusInput) -> AIProviderStatus {
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty());
     let providers = vec![
+        provider_info(
+            AIProvider::AionInstruct,
+            probes.aion_ready,
+            probes.aion_available,
+            None,
+            None,
+        ),
         provider_info(
             AIProvider::PhiSilica,
             probes.phi_silica_ready,
@@ -612,6 +644,9 @@ pub fn project_provider_status(input: ProviderStatusInput) -> AIProviderStatus {
         phi_silica_available: probes.phi_silica_available,
         phi_silica_ready: probes.phi_silica_ready,
         phi_silica_message: probes.phi_silica_message,
+        aion_available: probes.aion_available,
+        aion_ready: probes.aion_ready,
+        aion_message: probes.aion_message,
         foundry_local_available: probes.foundry_endpoint.is_some(),
         foundry_local_endpoint: probes.foundry_endpoint,
         active_provider: active,

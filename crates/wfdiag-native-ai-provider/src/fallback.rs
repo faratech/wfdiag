@@ -10,7 +10,8 @@ use crate::{AIProvider, AIProviderPreference, ProviderAvailability};
 ///
 /// `None` is a status sentinel and is intentionally absent: every value in
 /// this array is an executable provider candidate.
-pub const AUTO_FALLBACK_ORDER: [AIProvider; 10] = [
+pub const AUTO_FALLBACK_ORDER: [AIProvider; 11] = [
+    AIProvider::AionInstruct,
     AIProvider::PhiSilica,
     AIProvider::FoundryLocal,
     AIProvider::Ollama,
@@ -52,6 +53,7 @@ impl ProviderAvailability {
     pub const fn contains(self, provider: AIProvider) -> bool {
         match provider {
             AIProvider::None => false,
+            AIProvider::AionInstruct => self.aion,
             AIProvider::PhiSilica => self.phi,
             AIProvider::FoundryLocal => self.foundry,
             AIProvider::Ollama => self.ollama,
@@ -75,9 +77,10 @@ impl ProviderAvailability {
 pub const fn provider_trust_zone(provider: AIProvider) -> Option<ProviderTrustZone> {
     match provider {
         AIProvider::None => None,
-        AIProvider::PhiSilica | AIProvider::FoundryLocal | AIProvider::Ollama => {
-            Some(ProviderTrustZone::Local)
-        }
+        AIProvider::AionInstruct
+        | AIProvider::PhiSilica
+        | AIProvider::FoundryLocal
+        | AIProvider::Ollama => Some(ProviderTrustZone::Local),
         AIProvider::CustomOpenAI
         | AIProvider::CodexCli
         | AIProvider::ClaudeCode
@@ -105,6 +108,7 @@ const fn explicit_provider(preference: AIProviderPreference) -> Option<AIProvide
     match preference {
         AIProviderPreference::Auto => None,
         AIProviderPreference::OpenAI => Some(AIProvider::OpenAI),
+        AIProviderPreference::AionInstruct => Some(AIProvider::AionInstruct),
         AIProviderPreference::PhiSilica => Some(AIProvider::PhiSilica),
         AIProviderPreference::FoundryLocal => Some(AIProvider::FoundryLocal),
         AIProviderPreference::Ollama => Some(AIProvider::Ollama),
@@ -211,6 +215,7 @@ mod tests {
     use super::*;
 
     const ALL_AVAILABLE: ProviderAvailability = ProviderAvailability {
+        aion: true,
         phi: true,
         foundry: true,
         ollama: true,
@@ -223,7 +228,8 @@ mod tests {
         deepseek: true,
     };
 
-    const EXPLICIT_PAIRS: [(AIProviderPreference, AIProvider); 10] = [
+    const EXPLICIT_PAIRS: [(AIProviderPreference, AIProvider); 11] = [
+        (AIProviderPreference::AionInstruct, AIProvider::AionInstruct),
         (AIProviderPreference::PhiSilica, AIProvider::PhiSilica),
         (AIProviderPreference::FoundryLocal, AIProvider::FoundryLocal),
         (AIProviderPreference::Ollama, AIProvider::Ollama),
@@ -240,6 +246,7 @@ mod tests {
         let mut availability = ProviderAvailability::default();
         match provider {
             AIProvider::None => {}
+            AIProvider::AionInstruct => availability.aion = true,
             AIProvider::PhiSilica => availability.phi = true,
             AIProvider::FoundryLocal => availability.foundry = true,
             AIProvider::Ollama => availability.ollama = true,
@@ -321,6 +328,7 @@ mod tests {
             Some(AIProvider::PhiSilica),
             &[
                 AIProvider::None,
+                AIProvider::AionInstruct,
                 AIProvider::PhiSilica,
                 AIProvider::PhiSilica,
                 AIProvider::FoundryLocal,
@@ -346,6 +354,7 @@ mod tests {
     #[test]
     fn trust_zone_and_local_to_cloud_boundary_are_exhaustive() {
         for provider in [
+            AIProvider::AionInstruct,
             AIProvider::PhiSilica,
             AIProvider::FoundryLocal,
             AIProvider::Ollama,
@@ -376,6 +385,10 @@ mod tests {
             AIProvider::CustomOpenAI
         ));
         assert!(!crosses_local_to_cloud(
+            AIProvider::AionInstruct,
+            AIProvider::PhiSilica
+        ));
+        assert!(!crosses_local_to_cloud(
             AIProvider::PhiSilica,
             AIProvider::FoundryLocal
         ));
@@ -396,6 +409,7 @@ mod tests {
     #[test]
     fn next_candidate_marks_only_an_actual_local_to_cloud_transition() {
         let tried_local = [
+            AIProvider::AionInstruct,
             AIProvider::PhiSilica,
             AIProvider::FoundryLocal,
             AIProvider::Ollama,
@@ -424,6 +438,7 @@ mod tests {
             AIProviderPreference::Auto,
             Some(AIProvider::CustomOpenAI),
             &[
+                AIProvider::AionInstruct,
                 AIProvider::PhiSilica,
                 AIProvider::FoundryLocal,
                 AIProvider::Ollama,

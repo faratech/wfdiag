@@ -37,6 +37,7 @@ fn status_input() -> ProviderStatusInput {
 fn provider_and_preference_wire_contracts_are_pinned() {
     for (provider, wire) in [
         (AIProvider::None, "\"none\""),
+        (AIProvider::AionInstruct, "\"aion_instruct\""),
         (AIProvider::OpenAI, "\"openai\""),
         (AIProvider::PhiSilica, "\"phi_silica\""),
         (AIProvider::FoundryLocal, "\"foundry_local\""),
@@ -88,6 +89,7 @@ fn preference_aliases_and_store_gate_match_shipping_behavior() {
 #[test]
 fn routing_preserves_complete_auto_priority_and_explicit_no_fallback() {
     let mut availability = ProviderAvailability {
+        aion: true,
         phi: true,
         foundry: true,
         ollama: true,
@@ -100,6 +102,7 @@ fn routing_preserves_complete_auto_priority_and_explicit_no_fallback() {
         deepseek: true,
     };
     for expected in [
+        AIProvider::AionInstruct,
         AIProvider::PhiSilica,
         AIProvider::FoundryLocal,
         AIProvider::Ollama,
@@ -116,6 +119,7 @@ fn routing_preserves_complete_auto_priority_and_explicit_no_fallback() {
             expected
         );
         match expected {
+            AIProvider::AionInstruct => availability.aion = false,
             AIProvider::PhiSilica => availability.phi = false,
             AIProvider::FoundryLocal => availability.foundry = false,
             AIProvider::Ollama => availability.ollama = false,
@@ -152,6 +156,9 @@ fn availability_rows_are_authoritative_and_legacy_flags_bridge_rowless_payloads(
             preferred_provider: AIProvider::None,
             openai_available: true,
             openai_api_key_set: true,
+            aion_available: false,
+            aion_ready: true,
+            aion_message: None,
             phi_silica_available: false,
             phi_silica_ready: true,
             phi_silica_message: None,
@@ -277,7 +284,7 @@ fn status_projection_matches_legacy_shape_order_and_defaults() {
     assert_eq!(status.active_provider, AIProvider::OpenAI);
     assert!(status.openai_available);
     assert!(status.openai_api_key_set);
-    assert_eq!(status.providers.len(), 10);
+    assert_eq!(status.providers.len(), 11);
     assert_eq!(
         status
             .providers
@@ -285,6 +292,7 @@ fn status_projection_matches_legacy_shape_order_and_defaults() {
             .map(|provider| provider.id)
             .collect::<Vec<_>>(),
         vec![
+            AIProvider::AionInstruct,
             AIProvider::PhiSilica,
             AIProvider::FoundryLocal,
             AIProvider::Ollama,
@@ -325,9 +333,18 @@ fn status_projection_matches_legacy_shape_order_and_defaults() {
             "phi_silica_available": false,
             "phi_silica_ready": false,
             "phi_silica_message": "Store package required",
+            "aion_available": false,
+            "aion_ready": false,
             "foundry_local_available": false,
             "active_provider": "openai",
             "providers": [
+                {
+                    "id": "aion_instruct",
+                    "available": false,
+                    "configured": false,
+                    "supports_tools": false,
+                    "supports_streaming": true
+                },
                 {
                     "id": "phi_silica",
                     "available": false,

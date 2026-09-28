@@ -10,19 +10,41 @@
 use crate::evidence::size::format_bytes;
 use crate::issue_catalog::{DetectCtx, Detection, IssueSeverity};
 use serde_json::Value;
+use std::sync::Arc;
+
+#[derive(Clone)]
+struct TaskArray(Arc<Value>);
+
+impl std::ops::Deref for TaskArray {
+    type Target = [Value];
+    fn deref(&self) -> &[Value] {
+        self.0.as_array().map_or(&[], Vec::as_slice)
+    }
+}
+
+impl<'a> IntoIterator for &'a TaskArray {
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.as_array().map_or([].iter(), |v| v.as_slice().iter())
+    }
+}
 
 /// Parse the diagnostic output for `task_id` as a JSON array, if the task
 /// succeeded. The common shape for WMI-backed tasks.
-fn task_array(ctx: &DetectCtx, task_id: &str) -> Option<Vec<Value>> {
-    match ctx.cached_task_json(task_id)? {
-        Value::Array(items) => Some(items),
-        _ => None,
+fn task_array(ctx: &DetectCtx, task_id: &str) -> Option<TaskArray> {
+    let json = ctx.cached_task_json(task_id)?;
+    if json.is_array() {
+        Some(TaskArray(json))
+    } else {
+        None
     }
 }
 
 /// Parse the diagnostic output for `task_id` as a JSON object.
-fn task_object(ctx: &DetectCtx, task_id: &str) -> Option<Value> {
-    ctx.cached_task_json(task_id)
+fn task_object(ctx: &DetectCtx, task_id: &str) -> Option<Arc<Value>> {
+    let json = ctx.cached_task_json(task_id)?;
+    if json.is_object() { Some(json) } else { None }
 }
 
 /// Read a JSON value as u64 whether it arrived as a number OR a numeric
@@ -35,7 +57,7 @@ fn json_u64(v: &Value) -> Option<u64> {
 }
 
 pub fn detect_low_disk_space(ctx: &DetectCtx) -> Option<Detection> {
-    for disk in task_array(ctx, "logical_disk")? {
+    for disk in &task_array(ctx, "logical_disk")? {
         if let (Some(free_space), Some(size)) =
             (json_u64(&disk["FreeSpace"]), json_u64(&disk["Size"]))
             && size > 0
@@ -148,7 +170,7 @@ const ALTERNATE_SPACE_REMEDIATIONS: [&str; 7] = [
 ];
 
 pub fn detect_disk_fragmentation(ctx: &DetectCtx) -> Option<Detection> {
-    for disk in task_array(ctx, "disk_fragmentation")? {
+    for disk in &task_array(ctx, "disk_fragmentation")? {
         if let Some(fragmentation) = json_u64(&disk["fragmentation_percent"])
             && fragmentation > 20
         {
@@ -331,7 +353,7 @@ pub fn detect_windows_update_service_disabled(ctx: &DetectCtx) -> Option<Detecti
 pub fn detect_firewall_disabled(ctx: &DetectCtx) -> Option<Detection> {
     let mut disabled_products = Vec::new();
     let mut enabled_seen = false;
-    for firewall in task_array(ctx, "firewall_status")? {
+    for firewall in &task_array(ctx, "firewall_status")? {
         // Windows Security Center productState is a packed bitfield, NOT a
         // single enum value. The enabled/disabled state is the second byte
         // (bits 8-15): the 0x10 bit set => ON; 0x00/0x01 => OFF.
@@ -376,7 +398,7 @@ pub fn detect_temp_files(ctx: &DetectCtx) -> Option<Detection> {
 /// route) but no DNS servers configured — the network is up but name
 /// resolution will fail.
 pub fn detect_dns_misconfigured(ctx: &DetectCtx) -> Option<Detection> {
-    for adapter in task_array(ctx, "network_adapter")? {
+    for adapter in &task_array(ctx, "network_adapter")? {
         let has_gateway = adapter["DefaultIPGateway"]
             .as_array()
             .is_some_and(|g| !g.is_empty());
@@ -403,7 +425,7 @@ pub fn detect_dns_misconfigured(ctx: &DetectCtx) -> Option<Detection> {
 // Disk & system health
 // ============================================================================
 
-fn network_verdict(ctx: &DetectCtx) -> Option<(String, Value)> {
+fn network_verdict(ctx: &DetectCtx) -> Option<(String, Arc<Value>)> {
     let report = task_object(ctx, "network_path")?;
     let verdict = report["verdict"].as_str()?.to_string();
     Some((verdict, report))

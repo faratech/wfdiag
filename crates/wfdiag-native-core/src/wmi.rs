@@ -33,8 +33,8 @@ thread_local! {
     /// [`WmiConnection`] handed out shares the cached `IWbemServices`
     /// pointer, and dropping a handle never closes the shared connection.
     static REUSED_SERVICES:
-        RefCell<Option<(String, IWbemServices, std::time::Instant)>> =
-        const { RefCell::new(None) };
+        RefCell<Vec<(String, IWbemServices, std::time::Instant)>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 /// Evict the cached connection when older than this: WMI can go away
@@ -123,11 +123,11 @@ impl WmiConnection {
         // Cache hit: hand out another handle to the shared connection.
         if let Some(services) = REUSED_SERVICES.with(|slot| {
             slot.borrow()
-                .as_ref()
-                .and_then(|(cached, services, created)| {
-                    (cached == namespace && created.elapsed() < WMI_CACHE_TTL)
-                        .then(|| services.clone())
+                .iter()
+                .find(|(cached, _, created)| {
+                    cached == namespace && created.elapsed() < WMI_CACHE_TTL
                 })
+                .map(|(_, services, _)| services.clone())
         }) {
             return Ok(Self {
                 services,
@@ -169,13 +169,28 @@ impl WmiConnection {
             )
             .ok();
 
-            // Cache the connection for the next task on this thread.
+            // Cache the connection for subsequent tasks on this thread.
             REUSED_SERVICES.with(|slot| {
-                *slot.borrow_mut() = Some((
-                    namespace.to_string(),
-                    services.clone(),
-                    std::time::Instant::now(),
-                ));
+                let mut entries = slot.borrow_mut();
+                if let Some(existing) = entries
+                    .iter_mut()
+                    .find(|(cached, _, _)| cached == namespace)
+                {
+                    *existing = (
+                        namespace.to_string(),
+                        services.clone(),
+                        std::time::Instant::now(),
+                    );
+                } else {
+                    if entries.len() >= 4 {
+                        entries.remove(0);
+                    }
+                    entries.push((
+                        namespace.to_string(),
+                        services.clone(),
+                        std::time::Instant::now(),
+                    ));
+                }
             });
 
             Ok(Self {
@@ -211,13 +226,8 @@ impl WmiConnection {
                     && let Some(namespace) = &self.namespace
                 {
                     REUSED_SERVICES.with(|slot| {
-                        if slot
-                            .borrow()
-                            .as_ref()
-                            .is_some_and(|(cached, _, _)| cached == namespace)
-                        {
-                            *slot.borrow_mut() = None;
-                        }
+                        slot.borrow_mut()
+                            .retain(|(cached, _, _)| cached != namespace);
                     });
                 }
                 r

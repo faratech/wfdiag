@@ -338,7 +338,7 @@ impl ModelCatalogService {
                     .list_models(SubscriptionCli::ClaudeCode, configured)
                     .await
             }
-            AIProvider::PhiSilica => Ok(ModelCatalog::default()),
+            AIProvider::AionInstruct | AIProvider::PhiSilica => Ok(ModelCatalog::default()),
             AIProvider::None => Err("Unknown provider: none".to_string()),
         }
     }
@@ -442,6 +442,7 @@ pub fn parse_model_catalog_provider(provider: &str) -> Result<AIProvider, String
         "ollama" => Ok(AIProvider::Ollama),
         "codex_cli" | "codexcli" | "codex" => Ok(AIProvider::CodexCli),
         "claude_code" | "claudecode" | "claude" => Ok(AIProvider::ClaudeCode),
+        "aion" | "aion_instruct" | "aioninstruct" => Ok(AIProvider::AionInstruct),
         "phi_silica" | "phisilica" => Ok(AIProvider::PhiSilica),
         other => Err(format!("Unknown provider: {other}")),
     }

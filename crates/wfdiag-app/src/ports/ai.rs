@@ -507,7 +507,7 @@ struct ShippingChatResolver {
 impl ChatResolverPort for ShippingChatResolver {
     fn resolve(&self, provider: AIProvider, cancel: CancellationToken) -> ChatResolveFuture<'_> {
         Box::pin(async move {
-            if provider == AIProvider::PhiSilica {
+            if provider == AIProvider::PhiSilica || provider == AIProvider::AionInstruct {
                 return Ok(phi_provider(Some(cancel)));
             }
             tokio::select! {
@@ -558,7 +558,7 @@ impl ReportProviderResolver for ShippingReportResolver {
         provider: AIProvider,
     ) -> ReportFuture<'_, Result<ResolvedReportProvider, String>> {
         Box::pin(async move {
-            if provider == AIProvider::PhiSilica {
+            if provider == AIProvider::PhiSilica || provider == AIProvider::AionInstruct {
                 return Ok(phi_provider(None));
             }
             self.source.resolve(provider).await

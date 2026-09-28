@@ -121,8 +121,9 @@ pub struct CatalogDraft {
 /// [`AIProvider`]'s `Display` writes, which is also what the settings document
 /// and every host payload use.
 fn parse_provider(wire: &str) -> Result<AIProvider, RejectReason> {
-    const PROVIDERS: [AIProvider; 10] = [
+    const PROVIDERS: [AIProvider; 11] = [
         AIProvider::OpenAI,
+        AIProvider::AionInstruct,
         AIProvider::PhiSilica,
         AIProvider::FoundryLocal,
         AIProvider::Ollama,
@@ -1039,6 +1040,7 @@ impl AppService {
             AIProviderPreference::CustomOpenAI => AIProvider::CustomOpenAI,
             AIProviderPreference::Ollama => AIProvider::Ollama,
             AIProviderPreference::FoundryLocal => AIProvider::FoundryLocal,
+            AIProviderPreference::AionInstruct => AIProvider::AionInstruct,
             AIProviderPreference::PhiSilica => AIProvider::PhiSilica,
             AIProviderPreference::Auto => status.active_provider,
         }
@@ -1191,7 +1193,12 @@ impl AppService {
         // machine.
         let provider =
             if preference == AIProviderPreference::Auto && active == AIProvider::PhiSilica {
-                next_auto_route(preference, &[active], status.availability()).unwrap_or(active)
+                next_auto_route(
+                    preference,
+                    &[AIProvider::AionInstruct, active],
+                    status.availability(),
+                )
+                .unwrap_or(active)
             } else {
                 active
             };

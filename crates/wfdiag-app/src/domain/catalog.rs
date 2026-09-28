@@ -155,7 +155,10 @@ impl RefreshThrottle {
 /// explicit Refresh, not behind a keystroke.
 #[must_use]
 pub const fn auto_discovery_allowed(provider: AIProvider) -> bool {
-    !matches!(provider, AIProvider::PhiSilica | AIProvider::ClaudeCode)
+    !matches!(
+        provider,
+        AIProvider::PhiSilica | AIProvider::AionInstruct | AIProvider::ClaudeCode
+    )
 }
 
 #[cfg(test)]

@@ -23,14 +23,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 )]
 mod windows_ai_bindings;
 
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod laf;
+
 // WinRT/COM work lives here; unsafe is scoped to this module and the
 // package-identity probe below.
 #[allow(unsafe_code)]
 mod runtime;
 
 pub use runtime::{
-    PhiPromptFit, PhiSilicaAnalysisResponse, PhiSilicaStatus, ensure_phi_silica_ready,
-    generate_response, is_phi_silica_available, measure_prompt_fit,
+    OnDeviceAiStatus, OnDeviceModelEngine, PhiPromptFit, PhiSilicaAnalysisResponse,
+    PhiSilicaStatus, ensure_phi_silica_ready, generate_response, is_phi_silica_available,
+    measure_prompt_fit,
 };
 
 use wfdiag_native_ai_chat::{
@@ -120,11 +125,15 @@ impl PhiStatusSource for WindowsPhiStatusSource {
                     available: status.available,
                     ready: status.ready_state.as_deref() == Some("Ready"),
                     message: Some(status.message),
+                    model_name: status.engine.map(|e| e.display_name().to_string()),
+                    is_aion: status.engine == Some(OnDeviceModelEngine::AionInstruct),
                 },
                 Err(error) => PhiStatusSnapshot {
                     available: false,
                     ready: false,
                     message: Some(error),
+                    model_name: None,
+                    is_aion: false,
                 },
             }
         })
@@ -135,7 +144,12 @@ impl PhiStatusSource for WindowsPhiStatusSource {
 pub async fn probe_phi_silica_status() -> Result<PhiSilicaStatus, String> {
     tokio::task::spawn_blocking(is_phi_silica_available)
         .await
-        .map_err(|error| format!("Phi Silica availability check task panicked: {error}"))
+        .map_err(|error| format!("On-device AI availability check task panicked: {error}"))
+}
+
+/// Alias for `probe_phi_silica_status` to reflect dual on-device SLM support.
+pub async fn probe_ondevice_ai_status() -> Result<OnDeviceAiStatus, String> {
+    probe_phi_silica_status().await
 }
 
 /// True when the current process has registered package identity.
@@ -147,11 +161,11 @@ pub async fn probe_phi_silica_status() -> Result<PhiSilicaStatus, String> {
 #[must_use]
 #[allow(unsafe_code)] // one Win32 call: package identity probe
 pub fn has_package_identity() -> bool {
-    use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
-    use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
+    windows_link::link!("kernel32.dll" "system" fn GetCurrentPackageFullName(package_full_name_length: *mut u32, package_full_name: *mut u16) -> u32);
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
     let mut length = 0;
-    let result = unsafe { GetCurrentPackageFullName(&raw mut length, None) };
+    let result = unsafe { GetCurrentPackageFullName(&raw mut length, std::ptr::null_mut()) };
     result == ERROR_INSUFFICIENT_BUFFER
 }
 
@@ -183,11 +197,8 @@ impl From<PhiError> for String {
     fn from(error: PhiError) -> Self {
         match error {
             #[cfg(windows)]
-            PhiError::AiUnavailable {
-                provider: _,
-                reason,
-            } => {
-                format!("Phi Silica is unavailable: {reason}")
+            PhiError::AiUnavailable { provider, reason } => {
+                format!("{provider} is unavailable: {reason}")
             }
             #[cfg(not(windows))]
             PhiError::PlatformNotSupported { operation } => {

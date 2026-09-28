@@ -284,7 +284,9 @@ impl AnalysisConfigSource {
 
     async fn resolve(&self, provider: AIProvider) -> Result<ResolvedProviderConfig, String> {
         match provider {
-            AIProvider::PhiSilica => Ok(ResolvedProviderConfig::default()),
+            AIProvider::PhiSilica | AIProvider::AionInstruct => {
+                Ok(ResolvedProviderConfig::default())
+            }
             AIProvider::CodexCli | AIProvider::ClaudeCode => {
                 resolve_subscription_config(provider, &self.subscription_ports()).await
             }
@@ -872,6 +874,7 @@ fn explicit_provider(preference: AIProviderPreference) -> Option<AIProvider> {
         AIProviderPreference::Auto => None,
         AIProviderPreference::OpenAI => Some(AIProvider::OpenAI),
         AIProviderPreference::PhiSilica => Some(AIProvider::PhiSilica),
+        AIProviderPreference::AionInstruct => Some(AIProvider::AionInstruct),
         AIProviderPreference::FoundryLocal => Some(AIProvider::FoundryLocal),
         AIProviderPreference::Ollama => Some(AIProvider::Ollama),
         AIProviderPreference::CustomOpenAI => Some(AIProvider::CustomOpenAI),
@@ -1008,7 +1011,7 @@ async fn one_shot(
 ) -> Result<String, String> {
     match provider {
         AIProvider::None => Err("No AI provider available".to_string()),
-        AIProvider::PhiSilica => {
+        AIProvider::PhiSilica | AIProvider::AionInstruct => {
             wfdiag_native_phi::generate_response(
                 &format!("{PHI_ONE_SHOT_POLICY}\n\nANALYSIS TASK\n{prompt}"),
                 {

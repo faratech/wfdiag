@@ -34,6 +34,10 @@ tokio-util = "0.7"
 url = "2.5"
 uuid = "1.20.0"
 winreg = "0.56"
+windows-collections = "0.100.0"
+windows-core = "0.100.0"
+windows-future = "0.100.0"
+windows-link = "0.100.0"
 zeroize = "1"
 
 # Workspace crates.

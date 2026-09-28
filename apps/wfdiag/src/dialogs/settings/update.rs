@@ -200,6 +200,7 @@ impl WfdiagShell {
                         let selected_provider = match preference {
                             AIProviderPreference::Auto => AIProvider::None,
                             AIProviderPreference::OpenAI => AIProvider::OpenAI,
+                            AIProviderPreference::AionInstruct => AIProvider::AionInstruct,
                             AIProviderPreference::PhiSilica => AIProvider::PhiSilica,
                             AIProviderPreference::FoundryLocal => AIProvider::FoundryLocal,
                             AIProviderPreference::Ollama => AIProvider::Ollama,
@@ -447,8 +448,13 @@ impl WfdiagShell {
     pub(crate) fn request_provider_model_refresh(&mut self, forced: bool) {
         if self.shell.deterministic_visual
             || !self.settings.open
-            || provider_setup_provider(self.settings.provider_setup_index)
-                == Some(wfdiag_native_ai_provider::AIProvider::PhiSilica)
+            || matches!(
+                provider_setup_provider(self.settings.provider_setup_index),
+                Some(
+                    wfdiag_native_ai_provider::AIProvider::PhiSilica
+                        | wfdiag_native_ai_provider::AIProvider::AionInstruct
+                )
+            )
         {
             return;
         }

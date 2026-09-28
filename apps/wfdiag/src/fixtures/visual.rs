@@ -516,6 +516,11 @@ impl ProcessFixture258 {
 impl From<ProcessFixture258> for ProcessViewRow {
     fn from(process: ProcessFixture258) -> Self {
         Self {
+            row_key: format!(
+                "process:{}:{}",
+                process.pid,
+                ProcessIdentity::UNKNOWN_START_TIME
+            ),
             name: process.name.to_string(),
             pid: process.pid,
             start_time: ProcessIdentity::UNKNOWN_START_TIME,

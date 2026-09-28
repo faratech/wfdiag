@@ -129,13 +129,15 @@ impl SettingsValidator for ProviderPreferenceSettingsValidator {
     }
 }
 
-/// Phi readiness projection. Activation and LAF handling remain in the
-/// injected shipping backend.
+/// On-device AI (Aion Instruct / Phi Silica) readiness projection.
+/// Activation and LAF handling remain in the injected shipping backend.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PhiStatusSnapshot {
     pub available: bool,
     pub ready: bool,
     pub message: Option<String>,
+    pub model_name: Option<String>,
+    pub is_aion: bool,
 }
 
 pub trait PhiStatusSource: Send + Sync + 'static {
@@ -364,9 +366,21 @@ impl ProviderManagementBackend for ProviderManagementService {
                 settings: configuration.status,
                 probes: ProviderProbeSnapshot {
                     openai_available: configuration.openai_available,
-                    phi_silica_available: phi.available,
-                    phi_silica_ready: phi.ready,
-                    phi_silica_message: phi.message,
+                    aion_available: phi.available && phi.is_aion,
+                    aion_ready: phi.ready && phi.is_aion,
+                    aion_message: if phi.is_aion || !phi.available {
+                        phi.message.clone()
+                    } else {
+                        None
+                    },
+                    phi_silica_available: phi.available && !phi.is_aion,
+                    phi_silica_ready: phi.ready && !phi.is_aion,
+                    phi_silica_message: if !phi.is_aion || !phi.available {
+                        phi.message
+                    } else {
+                        None
+                    },
+                    ondevice_model_name: phi.model_name,
                     foundry_endpoint,
                     ollama_endpoint,
                     custom_endpoint,
@@ -451,6 +465,8 @@ mod tests {
                     available: true,
                     ready: false,
                     message: Some("Downloading".to_string()),
+                    model_name: None,
+                    is_aion: false,
                 }
             })
         }
@@ -559,10 +575,10 @@ mod tests {
         assert_eq!(status.active_provider, AIProvider::FoundryLocal);
         assert!(status.phi_silica_available);
         assert!(!status.phi_silica_ready);
-        assert_eq!(status.providers[4].id, AIProvider::CodexCli);
-        assert!(status.providers[4].available);
+        assert_eq!(status.providers[5].id, AIProvider::CodexCli);
+        assert!(status.providers[5].available);
         assert_eq!(
-            status.providers[4].endpoint.as_deref(),
+            status.providers[5].endpoint.as_deref(),
             Some("C:\\Tools\\codex.exe")
         );
 

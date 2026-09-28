@@ -447,7 +447,10 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
             "event_logs" => diagnostics.get_event_logs(),
             "installed_programs" => diagnostics.get_installed_programs(),
             "services" => diagnostics.get_native_services(),
-            "processes" => diagnostics.run_wmi_query("Win32_Process", None),
+            "processes" => diagnostics.run_wmi_custom_query(
+                "SELECT ProcessId, Name, ParentProcessId, ThreadCount, HandleCount, WorkingSetSize, VirtualSize, KernelModeTime, UserModeTime FROM Win32_Process",
+                None,
+            ),
             "dxdiag" => diagnostics.run_dxdiag(),
             "battery_report" => diagnostics.get_battery_report(),
             "minidump" => diagnostics.get_minidumps(),
@@ -495,8 +498,7 @@ pub async fn run_diagnostic_task(task_id: &str) -> TaskResult {
     let result = match native_result {
         Ok(json_value) => TaskResult {
             success: true,
-            output: serde_json::to_string_pretty(&json_value)
-                .unwrap_or_else(|_| json_value.to_string()),
+            output: serde_json::to_string(&json_value).unwrap_or_else(|_| json_value.to_string()),
             error: None,
             duration_ms: 0,
         },

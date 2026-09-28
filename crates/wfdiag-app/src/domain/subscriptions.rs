@@ -268,6 +268,7 @@ pub fn sign_in_requirement(
     // The explicit provider is whatever the preference routes to when
     // everything is available.
     let everything = ProviderAvailability {
+        aion: true,
         phi: true,
         foundry: true,
         ollama: true,
@@ -342,6 +343,9 @@ mod tests {
             phi_silica_available: false,
             phi_silica_ready: false,
             phi_silica_message: None,
+            aion_available: false,
+            aion_ready: false,
+            aion_message: None,
             foundry_local_available: false,
             foundry_local_endpoint: None,
             active_provider: AIProvider::None,
