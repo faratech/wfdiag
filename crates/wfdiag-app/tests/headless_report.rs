@@ -203,3 +203,62 @@ fn a_new_scan_invalidates_the_report_it_described() {
     );
     harness.shutdown(Duration::from_secs(2));
 }
+
+#[test]
+fn auto_aion_report_stays_ondevice_with_foundry_available() {
+    let mocks = wfdiag_app::ports::mock::MockPorts::new();
+    mocks.provider_backend.set_package_identity(true);
+    mocks
+        .provider_backend
+        .set_probes(wfdiag_native_ai_provider::ProviderProbeSnapshot {
+            aion_available: true,
+            aion_ready: true,
+            ondevice_model_name: Some("Aion Instruct".to_string()),
+            foundry_endpoint: Some("http://127.0.0.1:54321".to_string()),
+            ..wfdiag_native_ai_provider::ProviderProbeSnapshot::default()
+        });
+    mocks
+        .ai
+        .report
+        .chat
+        .script(AIProvider::AionInstruct, vec![ScriptedTurn::text(BODY)]);
+    let mut harness = support::boot_ai_with("report_aion", mocks);
+    harness.commit_scan();
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::GenerateReport {
+                force_refresh: false
+            })
+            .is_accepted()
+    );
+    let events = harness.pump_for("the Aion report", |event| {
+        matches!(event, AppEvent::Report(ReportEvent::Done { .. }))
+    });
+    let attribution = events
+        .iter()
+        .find_map(|event| match event {
+            AppEvent::Report(ReportEvent::Done {
+                provider,
+                provider_use,
+                ..
+            }) => {
+                assert_eq!(provider, "aion_instruct");
+                Some(provider_use)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(attribution.provider_id, "aion_instruct");
+    assert_eq!(
+        attribution.execution_class,
+        wfdiag_native_ai_chat::ProviderExecutionClass::OnDevice
+    );
+    assert_eq!(attribution.fallback_from, None);
+    assert_eq!(
+        harness.mocks.ai.report.chat.resolved(),
+        vec![AIProvider::AionInstruct]
+    );
+    assert_eq!(report_deltas(&events), BODY);
+    harness.shutdown(Duration::from_secs(2));
+}

@@ -542,7 +542,8 @@ impl ToolExecutor for NoToolExecutor {
     }
 }
 
-/// Pure provider policy used by both shells and tests.
+/// Auto may move a compact Phi report to another local provider. Aion has a
+/// larger context budget and keeps its on-device route.
 #[must_use]
 pub const fn choose_report_provider(
     preference: AIProviderPreference,
@@ -723,6 +724,27 @@ mod tests {
                 Some(AIProvider::FoundryLocal),
             ),
             AIProvider::OpenAI
+        );
+    }
+
+    #[test]
+    fn aion_reports_keep_the_ondevice_provider_even_with_a_local_alternative() {
+        for preference in [
+            AIProviderPreference::Auto,
+            AIProviderPreference::AionInstruct,
+        ] {
+            assert_eq!(
+                choose_report_provider(
+                    preference,
+                    AIProvider::AionInstruct,
+                    Some(AIProvider::FoundryLocal)
+                ),
+                AIProvider::AionInstruct
+            );
+        }
+        assert_eq!(
+            wfdiag_native_ai_provider::capabilities(AIProvider::AionInstruct).context_budget_chars,
+            12_000
         );
     }
 
