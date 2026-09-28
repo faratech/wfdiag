@@ -646,7 +646,11 @@ fn ondevice_model_names_belong_only_to_the_detected_provider() {
             input.probes.aion_ready = aion;
             input.probes.phi_silica_available = !aion;
             input.probes.phi_silica_ready = !aion;
-            input.probes.ondevice_model_name = name.map(str::to_string);
+            if aion {
+                input.probes.aion_model_name = name.map(str::to_string);
+            } else {
+                input.probes.phi_model_name = name.map(str::to_string);
+            }
             let status = project_provider_status(input);
             for (provider, fallback, detected) in [
                 (AIProvider::AionInstruct, "Aion Instruct", aion),

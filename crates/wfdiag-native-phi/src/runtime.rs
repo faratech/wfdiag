@@ -241,7 +241,7 @@ fn ensure_mta_anchor() {
 /// including the `S_FALSE` "already initialized on this thread" case, which is
 /// exactly what `owns_initialization` tracks.
 #[cfg(windows)]
-struct WinRtApartment {
+pub(super) struct WinRtApartment {
     owns_initialization: bool,
 }
 
@@ -262,7 +262,7 @@ impl Drop for WinRtApartment {
 /// that the outcome is inspected and logged instead of discarded, and only a
 /// successful initialization is ever undone.
 #[cfg(windows)]
-fn enter_winrt_apartment() -> WinRtApartment {
+pub(super) fn enter_winrt_apartment() -> WinRtApartment {
     ensure_mta_anchor();
     // S_OK (initialized by us) and S_FALSE (this thread was already in the
     // apartment) both come back as `Ok` from the binding and both take an
@@ -622,20 +622,13 @@ const DLL_ARCH: &str = "unknown";
 #[allow(clippy::borrow_as_ptr, clippy::cast_ptr_alignment, clippy::ptr_as_ptr)]
 fn framework_package_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
-    let mut buffer_len = 0u32;
-    let mut count = 0u32;
-
-    let res =
-        unsafe { GetCurrentPackageInfo(0, &mut buffer_len, std::ptr::null_mut(), &mut count) };
-    if res != 0 || buffer_len == 0 {
+    let Some((buffer, count)) =
+        crate::package_buffer::query(size_of::<PACKAGE_INFO>(), |length, buffer, count| unsafe {
+            GetCurrentPackageInfo(0, length, buffer, count).cast_unsigned()
+        })
+    else {
         return dirs;
-    }
-
-    let mut buffer = vec![0u8; buffer_len as usize];
-    let res = unsafe { GetCurrentPackageInfo(0, &mut buffer_len, buffer.as_mut_ptr(), &mut count) };
-    if res != 0 || count == 0 {
-        return dirs;
-    }
+    };
 
     let ptr = buffer.as_ptr() as *const PACKAGE_INFO;
     for i in 0..count as usize {
@@ -777,16 +770,6 @@ fn try_direct_dll_activation() -> Result<(), String> {
     }
 }
 
-/// Track if Aion Instruct Preview dynamic framework dependency has been attempted
-#[cfg(windows)]
-static AION_FRAMEWORK_ATTACH_ATTEMPTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Package family name of the Microsoft Aion Instruct Preview framework.
-#[cfg(windows)]
-const AION_PREVIEW_PACKAGE_FAMILY: &str =
-    "Microsoft.AionInstructPreview.Framework.1.0_8wekyb3d8bbwe";
-
 /// Function signatures for Windows `AppModel` Package Dependency APIs in kernelbase.dll
 #[cfg(windows)]
 type TryCreatePackageDependencyFn = unsafe extern "system" fn(
@@ -809,118 +792,76 @@ type AddPackageDependencyFn = unsafe extern "system" fn(
     package_full_name: *mut *mut u16,
 ) -> windows_core::HRESULT;
 
-/// Dynamically attaches the Aion Instruct Preview framework package dependency
-/// to the current process via `kernelbase.dll` (`TryCreatePackageDependency` and
-/// `AddPackageDependency`).
-///
-/// This enables unpackaged and development processes to load Aion Preview DLLs
-/// and activate `WinRT` classes (`AionInstructPreview.Text.LanguageModel`) without
-/// requiring full Store deployment.
-///
-/// This function is completely fault-tolerant: if the API is absent, or if the
-/// preview framework package is not installed, it logs a diagnostic message and
-/// returns cleanly without panic or failure.
+/// Attach an optional installed framework for the process lifetime. Successful
+/// contexts stay attached; failures remain retryable after prerequisite setup.
 #[cfg(windows)]
-fn try_attach_aion_preview_framework() {
-    use std::sync::atomic::Ordering;
-
-    if AION_FRAMEWORK_ATTACH_ATTEMPTED.swap(true, Ordering::SeqCst) {
-        return;
+pub(super) fn attach_framework(family: &str, minimum: u64) -> Result<(), String> {
+    static ATTACHED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut attached = ATTACHED.lock().map_err(|_| "Package graph lock poisoned")?;
+    if attached.iter().any(|entry| entry == family) {
+        return Ok(());
     }
-
-    log_phi_silica("Attempting dynamic attachment of Aion Instruct preview framework...");
-
     unsafe {
-        let find_proc = |proc_name: windows_core::PCSTR| -> Option<*mut std::ffi::c_void> {
-            let kernel32 = GetModuleHandleW(windows_core::w!("kernel32.dll").as_ptr());
-            if !kernel32.is_null() {
-                let p = GetProcAddress(kernel32, proc_name.as_ptr().cast());
-                if !p.is_null() {
-                    return Some(p);
-                }
-            }
-            let kernelbase = GetModuleHandleW(windows_core::w!("kernelbase.dll").as_ptr());
-            if !kernelbase.is_null() {
-                let p = GetProcAddress(kernelbase, proc_name.as_ptr().cast());
-                if !p.is_null() {
-                    return Some(p);
+        let find_proc = |name: windows_core::PCSTR| {
+            for module in [
+                windows_core::w!("kernel32.dll"),
+                windows_core::w!("kernelbase.dll"),
+            ] {
+                let handle = GetModuleHandleW(module.as_ptr());
+                if !handle.is_null() {
+                    let proc = GetProcAddress(handle, name.as_ptr().cast());
+                    if !proc.is_null() {
+                        return Some(proc);
+                    }
                 }
             }
             None
         };
-
-        let (Some(try_create_raw), Some(add_dep_raw)) = (
-            find_proc(windows_core::s!("TryCreatePackageDependency")),
-            find_proc(windows_core::s!("AddPackageDependency")),
-        ) else {
-            log_phi_silica(
-                "Package dependency APIs not found in kernel32/kernelbase (requires Windows 11 22000+)",
-            );
-            return;
-        };
-
-        let try_create: TryCreatePackageDependencyFn = std::mem::transmute(try_create_raw);
-        let add_dep: AddPackageDependencyFn = std::mem::transmute(add_dep_raw);
-
-        let family_wide: Vec<u16> = AION_PREVIEW_PACKAGE_FAMILY
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-
-        let mut dep_id_ptr: *mut u16 = std::ptr::null_mut();
-
-        // minVersion: 0 (any version), arch: 0 (None/current), lifetime: 0 (Process)
-        let hr = try_create(
+        let create: TryCreatePackageDependencyFn = std::mem::transmute(
+            find_proc(windows_core::s!("TryCreatePackageDependency"))
+                .ok_or("Windows package dependency API unavailable")?,
+        );
+        let add: AddPackageDependencyFn = std::mem::transmute(
+            find_proc(windows_core::s!("AddPackageDependency"))
+                .ok_or("Windows package dependency API unavailable")?,
+        );
+        let family_wide: Vec<u16> = family.encode_utf16().chain(Some(0)).collect();
+        let mut id = std::ptr::null_mut();
+        create(
             std::ptr::null(),
-            windows_core::PCWSTR::from_raw(family_wide.as_ptr()),
-            0,
+            windows_core::PCWSTR(family_wide.as_ptr()),
+            minimum,
             0,
             0,
             windows_core::PCWSTR::null(),
             0,
-            &raw mut dep_id_ptr,
-        );
-
-        if hr.is_err() || dep_id_ptr.is_null() {
-            log_phi_silica(&format!(
-                "TryCreatePackageDependency for {} skipped/failed: 0x{:08X}",
-                AION_PREVIEW_PACKAGE_FAMILY,
-                hr.0.cast_unsigned()
-            ));
-            return;
+            &raw mut id,
+        )
+        .ok()
+        .map_err(|error| format!("Install {family}: {error}"))?;
+        if id.is_null() {
+            return Err(format!("No dependency ID returned for {family}"));
         }
-
-        let mut context_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-        let add_hr = add_dep(
-            windows_core::PCWSTR::from_raw(dep_id_ptr),
+        let mut context = std::ptr::null_mut();
+        let result = add(
+            windows_core::PCWSTR(id),
             0,
             0,
-            &raw mut context_ptr,
+            &raw mut context,
             std::ptr::null_mut(),
         );
-
-        if add_hr.is_ok() {
-            log_phi_silica(&format!(
-                "Successfully attached package dependency for {AION_PREVIEW_PACKAGE_FAMILY}"
-            ));
-        } else {
-            log_phi_silica(&format!(
-                "AddPackageDependency failed: 0x{:08X}",
-                add_hr.0.cast_unsigned()
-            ));
-        }
-
-        // Free dep_id_ptr if allocated
-        let heap = GetProcessHeap();
-        if !heap.is_null() && !dep_id_ptr.is_null() {
-            let _ = HeapFree(heap, 0, dep_id_ptr.cast());
-        }
+        let _ = HeapFree(GetProcessHeap(), 0, id.cast());
+        result
+            .ok()
+            .map_err(|error| format!("Cannot attach {family}: {error}"))?;
+        attached.push(family.to_string());
+        Ok(())
     }
 }
 
 /// Resolves an activation factory by class name via `WinRT` `RoGetActivationFactory`.
 #[cfg(windows)]
-fn get_activation_factory_by_name<I: windows_core::Interface>(
+pub(super) fn get_activation_factory_by_name<I: windows_core::Interface>(
     class_name: &str,
 ) -> windows_core::Result<I> {
     let name = windows_core::HSTRING::from(class_name);
@@ -937,7 +878,7 @@ fn get_activation_factory_by_name<I: windows_core::Interface>(
             return Ok(f);
         }
         if hr.0 == 0x8004_01F0_u32.cast_signed() {
-            let _ = enter_winrt_apartment();
+            let _apartment = enter_winrt_apartment();
             let retry_hr = windows_core::imp::RoGetActivationFactory(
                 std::mem::transmute_copy(&name),
                 &I::IID,
@@ -949,57 +890,17 @@ fn get_activation_factory_by_name<I: windows_core::Interface>(
     }
 }
 
-/// Resolves the on-device SLM `ILanguageModelStatics` interface, probing the
-/// Microsoft Aion Instruct preview class (`AionInstructPreview.Text.LanguageModel`)
-/// first, then falling back to retail Windows AI (`Microsoft.Windows.AI.Text.LanguageModel`).
+/// Resolve only the retail contract. Preview has a separate generated backend.
 #[cfg(windows)]
 fn get_language_model_statics()
 -> windows_core::Result<crate::windows_ai_bindings::ILanguageModelStatics> {
-    try_attach_aion_preview_framework();
-
-    // 1. Try Aion Instruct preview class first
-    match get_activation_factory_by_name::<crate::windows_ai_bindings::ILanguageModelStatics>(
-        "AionInstructPreview.Text.LanguageModel",
-    ) {
-        Ok(statics) => {
-            log_phi_silica(
-                "Resolved ILanguageModelStatics from AionInstructPreview.Text.LanguageModel",
-            );
-            return Ok(statics);
-        }
-        Err(e) => {
-            log_phi_silica(&format!(
-                "AionInstructPreview.Text.LanguageModel factory not resolvable (0x{:08X} {}); probing Microsoft.Windows.AI.Text.LanguageModel",
-                e.code().0.cast_unsigned(),
-                e.message()
-            ));
-        }
-    }
-
-    // 2. Try Microsoft Windows AI text class
-    match get_activation_factory_by_name::<crate::windows_ai_bindings::ILanguageModelStatics>(
-        "Microsoft.Windows.AI.Text.LanguageModel",
-    ) {
-        Ok(statics) => {
-            log_phi_silica(
-                "Resolved ILanguageModelStatics from Microsoft.Windows.AI.Text.LanguageModel",
-            );
-            Ok(statics)
-        }
-        Err(e) => {
-            let code = e.code().0.cast_unsigned();
-            log_phi_silica(&format!(
-                "Microsoft.Windows.AI.Text.LanguageModel factory not resolvable: 0x{code:08X} {}",
-                e.message()
-            ));
-            Err(e)
-        }
-    }
+    get_activation_factory_by_name("Microsoft.Windows.AI.Text.LanguageModel")
 }
 
 /// Query ready state from the active on-device SLM static factory.
 #[cfg(windows)]
-fn get_ready_state_dual() -> windows_core::Result<crate::windows_ai_bindings::AIFeatureReadyState> {
+fn get_ready_state_retail() -> windows_core::Result<crate::windows_ai_bindings::AIFeatureReadyState>
+{
     use windows_core::Interface;
 
     let statics = get_language_model_statics()?;
@@ -1014,7 +915,7 @@ fn get_ready_state_dual() -> windows_core::Result<crate::windows_ai_bindings::AI
 
 /// Start preparation for the active on-device SLM static factory.
 #[cfg(windows)]
-fn ensure_ready_async_dual() -> windows_core::Result<
+fn ensure_ready_async_retail() -> windows_core::Result<
     windows_future::IAsyncOperationWithProgress<
         crate::windows_ai_bindings::AIFeatureReadyResult,
         f64,
@@ -1032,15 +933,14 @@ fn ensure_ready_async_dual() -> windows_core::Result<
     }
 }
 
-/// Create `LanguageModel` via standard `WinRT` activation, supporting both
-/// Aion Instruct Preview and retail Windows AI models.
+/// Create the retail `LanguageModel` via standard `WinRT` activation.
 #[cfg(windows)]
 fn create_language_model_winrt(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<crate::windows_ai_bindings::LanguageModel, String> {
     use windows_core::Interface;
 
-    log_phi_silica("Creating LanguageModel via dual WinRT activation...");
+    log_phi_silica("Creating retail LanguageModel via WinRT activation...");
     let statics = get_language_model_statics().map_err(|e| {
         format!(
             "Failed to resolve LanguageModel activation factory: 0x{:08X} {}",
@@ -1181,11 +1081,11 @@ fn prompt_fit_for_model(
 fn ensure_feature_ready(is_cancelled: &dyn Fn() -> bool) -> Result<(), String> {
     use crate::windows_ai_bindings::{AIFeatureReadyResultState, AIFeatureReadyState};
 
-    match get_ready_state_dual() {
+    match get_ready_state_retail() {
         Ok(state) if state == AIFeatureReadyState::Ready => Ok(()),
         Ok(state) if state == AIFeatureReadyState::NotReady => {
             log_phi_silica("On-device AI is not ready; starting EnsureReadyAsync");
-            let operation = ensure_ready_async_dual().map_err(|error| {
+            let operation = ensure_ready_async_retail().map_err(|error| {
                 format!(
                     "Could not start on-device AI preparation: 0x{:08X}: {}",
                     error.code().0.cast_unsigned(),
@@ -1265,9 +1165,7 @@ fn ensure_feature_ready(is_cancelled: &dyn Fn() -> bool) -> Result<(), String> {
 /// apartment it just joined.
 #[cfg(windows)]
 fn prepare_phi_runtime(is_cancelled: &dyn Fn() -> bool) -> Result<WinRtApartment, String> {
-    try_attach_aion_preview_framework();
-    let has_aion = has_aion_preview_framework();
-    if !crate::has_package_identity() && !has_aion {
+    if !crate::has_package_identity() {
         return Err(PhiError::ai_unavailable(
             "on_device",
             "On-device AI requires the Microsoft Store version of this app",
@@ -1287,7 +1185,7 @@ fn prepare_phi_runtime(is_cancelled: &dyn Fn() -> bool) -> Result<WinRtApartment
         Ok(()) => {
             log_phi_silica("On-device AI feature is ready");
         }
-        Err(err) if !laf_ok && !has_aion => {
+        Err(err) if !laf_ok => {
             return Err(format!(
                 "On-device AI feature preparation failed: {err}; LAF unlock: {laf_message}"
             ));
@@ -1451,104 +1349,6 @@ fn create_language_model_direct(
 // AIFeatureReadyState on the success path; error_code carries the HRESULT/LAF string on
 // the failure path. They are kept SEPARATE so the frontend's PhiSilicaStatus.error_code
 // is populated correctly instead of error info being mislabeled into ready_state.
-#[cfg(windows)]
-fn detect_active_engine(laf_unlocked: bool) -> OnDeviceModelEngine {
-    if let Ok(override_val) = std::env::var("WFDIAG_ONDEVICE_MODEL") {
-        if override_val.eq_ignore_ascii_case("phi")
-            || override_val.eq_ignore_ascii_case("phi_silica")
-        {
-            return OnDeviceModelEngine::PhiSilica;
-        }
-        if override_val.eq_ignore_ascii_case("aion")
-            || override_val.eq_ignore_ascii_case("aion_instruct")
-        {
-            return OnDeviceModelEngine::AionInstruct;
-        }
-    }
-    // If LAF was not unlocked or is unavailable, but the model is ready, it is Aion Instruct (which drops LAF).
-    if !laf_unlocked {
-        return OnDeviceModelEngine::AionInstruct;
-    }
-    if let Some(engine) = get_registry_model_override() {
-        return engine;
-    }
-    if has_aion_preview_framework() {
-        return OnDeviceModelEngine::AionInstruct;
-    }
-    let build = get_windows_build().unwrap_or(0);
-    if build >= 26200 {
-        OnDeviceModelEngine::AionInstruct
-    } else {
-        OnDeviceModelEngine::PhiSilica
-    }
-}
-
-#[cfg(windows)]
-#[allow(clippy::borrow_as_ptr, clippy::cast_ptr_alignment, clippy::ptr_as_ptr)]
-fn has_aion_preview_framework() -> bool {
-    if get_activation_factory_by_name::<crate::windows_ai_bindings::ILanguageModelStatics>(
-        "AionInstructPreview.Text.LanguageModel",
-    )
-    .is_ok()
-    {
-        return true;
-    }
-
-    let mut buffer_len = 0u32;
-    let mut count = 0u32;
-    let res =
-        unsafe { GetCurrentPackageInfo(0, &mut buffer_len, std::ptr::null_mut(), &mut count) };
-    if res != 0 || buffer_len == 0 {
-        return false;
-    }
-
-    let mut buffer = vec![0u8; buffer_len as usize];
-    let res = unsafe { GetCurrentPackageInfo(0, &mut buffer_len, buffer.as_mut_ptr(), &mut count) };
-    if res != 0 || count == 0 {
-        return false;
-    }
-
-    let ptr = buffer.as_ptr() as *const PACKAGE_INFO;
-    for i in 0..count as usize {
-        let info = unsafe { &*ptr.add(i) };
-        if !info.package_family_name.is_null() {
-            let family_name = unsafe { pwstr_to_string(info.package_family_name) };
-            if family_name.contains("AionInstruct") || family_name.contains("Aion") {
-                return true;
-            }
-        }
-        if !info.package_full_name.is_null() {
-            let full_name = unsafe { pwstr_to_string(info.package_full_name) };
-            if full_name.contains("AionInstruct") || full_name.contains("Aion") {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-#[cfg(windows)]
-fn get_registry_model_override() -> Option<OnDeviceModelEngine> {
-    use winreg::RegKey;
-    use winreg::enums::HKEY_LOCAL_MACHINE;
-
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let key = hklm.open_subkey("SOFTWARE\\Microsoft\\Windows AI").ok()?;
-    let model: String = key
-        .get_value("ModelOverride")
-        .or_else(|_| key.get_value("ActiveModel"))
-        .ok()?;
-    let model_lower = model.trim().to_ascii_lowercase();
-    if model_lower.contains("aion") {
-        Some(OnDeviceModelEngine::AionInstruct)
-    } else if model_lower.contains("phi") {
-        Some(OnDeviceModelEngine::PhiSilica)
-    } else {
-        None
-    }
-}
-
 /// Check on-device AI availability using `GetReadyState`
 #[cfg(windows)]
 fn check_phi_silica_safe() -> (
@@ -1560,8 +1360,7 @@ fn check_phi_silica_safe() -> (
 ) {
     let has_package_identity = crate::has_package_identity();
     log_phi_silica("=== check_ondevice_ai_safe called ===");
-    try_attach_aion_preview_framework();
-    check_phi_silica_safe_for_environment(has_package_identity, has_aion_preview_framework())
+    check_phi_silica_safe_for_environment(has_package_identity)
 }
 
 #[cfg(windows)]
@@ -1570,7 +1369,6 @@ fn check_phi_silica_safe() -> (
 // a preview runtime installed on the Windows test host.
 fn check_phi_silica_safe_for_environment(
     has_package_identity: bool,
-    has_aion: bool,
 ) -> (
     bool,
     String,
@@ -1580,13 +1378,11 @@ fn check_phi_silica_safe_for_environment(
 ) {
     use crate::windows_ai_bindings::AIFeatureReadyState;
 
-    // Without registered package identity or dynamic preview framework the Windows AI APIs deny access
+    // Without registered package identity the retail Windows AI APIs deny access
     // (0x80070005) on every activation path, so don't probe further — report
     // the real reason and what to do about it.
-    if !has_package_identity && !has_aion {
-        log_phi_silica(
-            "No package identity and no Aion preview framework — On-device AI unavailable",
-        );
+    if !has_package_identity {
+        log_phi_silica("No package identity — on-device AI unavailable");
         return (
             false,
             "On-device AI requires the Microsoft Store version of this app (Windows AI APIs \
@@ -1648,13 +1444,13 @@ fn check_phi_silica_safe_for_environment(
         );
     }
 
-    // Use GetReadyState() - note: Aion Instruct does NOT require LAF, so we probe
-    // GetReadyState regardless of laf_success to support Aion on newer builds.
-    log_phi_silica("Calling dual LanguageModel::GetReadyState()...");
-    match get_ready_state_dual() {
+    // Retail readiness can succeed even when LAF unlock did not. This does
+    // not identify a different model; preview discovery is a separate backend.
+    log_phi_silica("Calling retail LanguageModel::GetReadyState()...");
+    match get_ready_state_retail() {
         Ok(state) => {
             log_phi_silica(&format!("GetReadyState succeeded: state={:?}", state.0));
-            let engine = detect_active_engine(laf_success);
+            let engine = OnDeviceModelEngine::PhiSilica;
             let name = engine.display_name();
             if state == AIFeatureReadyState::Ready {
                 (
@@ -1713,7 +1509,7 @@ fn check_phi_silica_safe_for_environment(
                     "GetReadyState blocked (Ro path); attempting direct DLL activation...",
                 );
                 let Some(mut cached) = try_cached_model_guard() else {
-                    let engine = detect_active_engine(laf_success);
+                    let engine = OnDeviceModelEngine::PhiSilica;
                     return (
                         true,
                         format!(
@@ -1731,7 +1527,7 @@ fn check_phi_silica_safe_for_environment(
                     std::time::Instant::now() > probe_deadline
                 }) {
                     Ok(()) => {
-                        let engine = detect_active_engine(laf_success);
+                        let engine = OnDeviceModelEngine::PhiSilica;
                         log_phi_silica(
                             "Direct DLL activation succeeded — on-device AI IS available",
                         );
@@ -1763,7 +1559,7 @@ fn check_phi_silica_safe_for_environment(
                     Some(format!("0x{code:08X}")),
                     None,
                 )
-            } else if code == 0x8007_0005 && !laf_success && !has_aion {
+            } else if code == 0x8007_0005 && !laf_success {
                 (
                     false,
                     format!(
@@ -1956,7 +1752,7 @@ where
 // Same ownership contract as `wait_for_async_blocking`: the wait consumes the
 // WinRT operation and releases it on return.
 #[allow(clippy::needless_pass_by_value)]
-fn wait_for_async_with_progress_blocking_timeout<T, P>(
+pub(super) fn wait_for_async_with_progress_blocking_timeout<T, P>(
     op: windows_future::IAsyncOperationWithProgress<T, P>,
     timeout: std::time::Duration,
     operation_name: &str,
@@ -1992,22 +1788,24 @@ where
                     .ErrorCode()
                     .map_err(|e| format!("Failed to get error: {}", e.message()))?;
                 return Err(PhiError::ai_unavailable(
-                    "phi_silica",
+                    operation_name,
                     format!("Async operation failed: 0x{:08X}", hr.0.cast_unsigned()),
                 )
                 .into());
             }
             AsyncStatus::Canceled => {
-                return Err(
-                    PhiError::ai_unavailable("phi_silica", "Async operation was canceled").into(),
-                );
+                return Err(PhiError::ai_unavailable(
+                    operation_name,
+                    "Async operation was canceled",
+                )
+                .into());
             }
             AsyncStatus::Started => {
                 let elapsed = started.elapsed();
                 if is_cancelled() {
                     let _ = info.Cancel();
                     return Err(PhiError::ai_unavailable(
-                        "phi_silica",
+                        operation_name,
                         format!("{operation_name} was cancelled"),
                     )
                     .into());
@@ -2015,7 +1813,7 @@ where
                 if elapsed >= timeout {
                     let _ = info.Cancel();
                     return Err(PhiError::ai_unavailable(
-                        "phi_silica",
+                        operation_name,
                         format!(
                             "{operation_name} timed out after {} seconds",
                             timeout.as_secs()
@@ -2027,7 +1825,7 @@ where
             }
             _ => {
                 return Err(PhiError::ai_unavailable(
-                    "phi_silica",
+                    operation_name,
                     format!("Unknown async status: {status:?}"),
                 )
                 .into());
@@ -2140,6 +1938,13 @@ fn log_phi_silica(msg: &str) {
             msg
         );
     }
+}
+
+#[cfg(windows)]
+pub(super) fn prepare_cached_phi(cancel: &dyn Fn() -> bool) -> Result<(), String> {
+    let _apartment = prepare_phi_runtime(cancel)?;
+    let mut cached = cached_model_guard();
+    ensure_cached_model_locked(&mut cached, cancel)
 }
 
 /// Ensure the Phi Silica model is ready
@@ -2414,7 +2219,7 @@ mod windows_tests {
     #[test]
     fn unpackaged_probe_without_preview_returns_before_windows_ai_activation() {
         let (available, message, ready_state, error_code, engine) =
-            check_phi_silica_safe_for_environment(false, false);
+            check_phi_silica_safe_for_environment(false);
 
         assert!(!available);
         assert!(message.contains("requires the Microsoft Store version"));

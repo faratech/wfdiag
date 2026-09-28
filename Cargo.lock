@@ -2625,6 +2625,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "wfdiag-native-ai-chat",
  "wfdiag-native-ai-provider",
  "wfdiag-native-settings",

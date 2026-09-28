@@ -64,6 +64,10 @@ enum ReportCommand {
 /// Typed worker events drained by the host component.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReportWorkerEvent {
+    Preparing {
+        request_id: u64,
+        message: String,
+    },
     Ack {
         request_id: u64,
         provider: String,
@@ -99,7 +103,8 @@ impl ReportWorkerEvent {
     #[must_use]
     pub const fn request_id(&self) -> u64 {
         match self {
-            Self::Ack { request_id, .. }
+            Self::Preparing { request_id, .. }
+            | Self::Ack { request_id, .. }
             | Self::Delta { request_id, .. }
             | Self::Done { request_id, .. }
             | Self::Failed { request_id, .. }
@@ -214,6 +219,22 @@ impl WorkerReportEmitter {
 }
 
 impl ReportEmitter for WorkerReportEmitter {
+    fn preparing(&self, message: &str) {
+        let event = ReportWorkerEvent::Preparing {
+            request_id: self.request_id,
+            message: message.into(),
+        };
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.terminal_sent {
+            return;
+        }
+        if state.acknowledged {
+            self.publish(event);
+        } else {
+            state.pending_events.push(event);
+        }
+    }
+
     fn delta(&self, payload: &ReportDeltaPayload) {
         let event = ReportWorkerEvent::Delta {
             request_id: self.request_id,

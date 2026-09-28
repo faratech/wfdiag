@@ -2504,6 +2504,10 @@ impl AppService {
             return;
         }
         match event {
+            ChatWorkerEvent::Preparing { message, .. } => {
+                self.queue
+                    .push(AppEvent::Chat(ChatEvent::Deferred { reason: message }));
+            }
             ChatWorkerEvent::Delta { text, .. } => delta.push_str(&text),
             ChatWorkerEvent::ToolActivity {
                 activity, history, ..
@@ -2668,6 +2672,10 @@ impl AppService {
                 self.snapshot.ai.report.provider_use = Some(provider_use);
                 self.queue
                     .push(AppEvent::Report(ReportEvent::Started { provider }));
+            }
+            ReportWorkerEvent::Preparing { message, .. } => {
+                self.queue
+                    .push(AppEvent::Report(ReportEvent::Deferred { reason: message }));
             }
             ReportWorkerEvent::Delta { text, .. } => delta.push_str(&text),
             ReportWorkerEvent::Done {

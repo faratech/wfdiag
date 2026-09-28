@@ -23,6 +23,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 )]
 mod windows_ai_bindings;
 
+// Generated from the pinned preview WinMD; regenerate with scripts/aion-bindings.
+#[cfg(windows)]
+#[rustfmt::skip]
+#[allow(unsafe_code, non_snake_case, non_camel_case_types, non_upper_case_globals, dead_code, clippy::all, clippy::pedantic)]
+mod aion_bindings;
+#[cfg(windows)]
+mod aion;
+mod ondevice;
+#[cfg(any(windows, test))]
+mod package_buffer;
+#[cfg(any(windows, test))]
+mod stream;
+pub use ondevice::{generate_ondevice_response, prepare_ondevice};
+
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod laf;
@@ -43,27 +57,16 @@ use wfdiag_native_ai_chat::{
 };
 use wfdiag_native_ai_provider::{BackendFuture, PhiStatusSnapshot, PhiStatusSource};
 
-/// Provider-neutral chat adapter over the package-aware Phi runtime.
+/// Chat adapter for an explicitly selected on-device backend.
 ///
-/// Phi exposes a single prompt rather than a message/tool API. The shared
-/// chat engine already constrains its context budget and disables tools, so
-/// this adapter only flattens the retained conversation and emits the one
-/// completed response as a delta. Both desktop shells can therefore select
-/// Phi through the same [`ChatProvider`] boundary as network providers.
-///
-/// `is_cancelled` answers whether the caller's turn-level cancellation has
-/// fired. The shared engine's `select!` already returns a "Cancelled" turn to
-/// the UI the instant that happens, regardless of this adapter, but
-/// forwarding the check into `generate_response` is what lets the abandoned
-/// generation actually release the process-wide model mutex early instead of
-/// idling out its full budget. It's a plain closure rather than
-/// `tokio_util::sync::CancellationToken` so this crate doesn't need that
-/// dependency: construct with [`PhiChatProvider::new`] and
-/// `move || token.is_cancelled()` when a real turn token is available;
-/// `Default` never cancels, for callers (like report/analysis one-shots)
-/// with no per-turn cancellation to forward yet.
+/// Preparation runs before the shared inference deadline. Aion forwards preview
+/// progress deltas; retail Phi emits its completed response. Both use flattened
+/// retained prompts, keeping conversation state isolated by the shared engine.
+/// The cancellation callback stops native work; dropping a preview future also
+/// cancels it, including when a report's outer cancellation fires.
 #[derive(Clone)]
 pub struct PhiChatProvider {
+    engine: OnDeviceModelEngine,
     is_cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
@@ -76,6 +79,7 @@ impl std::fmt::Debug for PhiChatProvider {
 impl Default for PhiChatProvider {
     fn default() -> Self {
         Self {
+            engine: OnDeviceModelEngine::PhiSilica,
             is_cancelled: std::sync::Arc::new(|| false),
         }
     }
@@ -83,14 +87,42 @@ impl Default for PhiChatProvider {
 
 impl PhiChatProvider {
     #[must_use]
+    pub fn for_engine(
+        engine: OnDeviceModelEngine,
+        is_cancelled: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            engine,
+            is_cancelled: std::sync::Arc::new(is_cancelled),
+        }
+    }
+
+    #[must_use]
     pub fn new(is_cancelled: impl Fn() -> bool + Send + Sync + 'static) -> Self {
         Self {
+            engine: OnDeviceModelEngine::PhiSilica,
             is_cancelled: std::sync::Arc::new(is_cancelled),
         }
     }
 }
 
 impl ChatProvider for PhiChatProvider {
+    fn preparation_label(&self) -> Option<&str> {
+        (self.engine == OnDeviceModelEngine::AionInstruct)
+            .then_some("Preparing Aion Instruct. First use can take several minutes.")
+    }
+
+    fn prepare(
+        &self,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> BackendFuture<'_, Result<String, String>> {
+        Box::pin(async move {
+            let external = self.is_cancelled.clone();
+            prepare_ondevice(self.engine, move || cancel.is_cancelled() || external()).await?;
+            Ok(String::new())
+        })
+    }
+
     fn stream<'a>(
         &'a self,
         request: &'a ChatRequest,
@@ -99,14 +131,22 @@ impl ChatProvider for PhiChatProvider {
     {
         Box::pin(async move {
             let is_cancelled = self.is_cancelled.clone();
-            let text =
-                generate_response(&flatten_chat_request(request), move || is_cancelled()).await?;
-            let _ = tx.send(text.clone()).await;
+            let text = ondevice::generate_prepared(
+                self.engine,
+                &flatten_chat_request(request),
+                move || is_cancelled(),
+                Some(tx),
+            )
+            .await?;
             Ok(ChatTurn {
                 text,
                 tool_calls: Vec::new(),
                 finished: FinishReason::Stop,
-                actual_models: Vec::new(),
+                actual_models: if self.engine == OnDeviceModelEngine::AionInstruct {
+                    vec!["Aion Instruct Preview".into()]
+                } else {
+                    Vec::new()
+                },
                 provider_replay: None,
             })
         })
@@ -118,6 +158,23 @@ impl ChatProvider for PhiChatProvider {
 pub struct WindowsPhiStatusSource;
 
 impl PhiStatusSource for WindowsPhiStatusSource {
+    fn probe_aion(&self) -> BackendFuture<'_, PhiStatusSnapshot> {
+        Box::pin(async {
+            #[cfg(windows)]
+            let result = tokio::task::spawn_blocking(aion::probe)
+                .await
+                .unwrap_or_else(|e| Err(format!("Aion probe failed: {e}")));
+            #[cfg(not(windows))]
+            let result: Result<(), String> = Err("Aion Instruct requires Windows".into());
+            PhiStatusSnapshot {
+                available: result.is_ok(), ready: result.is_ok(),
+                message: Some(result.map_or_else(|error| error, |()|
+                    "Aion Preview is installed. Model preparation on first use can take several minutes; QNN prerequisites must be installed.".into())),
+                model_name: Some("Aion Instruct Preview".into()), is_aion: true,
+            }
+        })
+    }
+
     fn probe(&self) -> BackendFuture<'_, PhiStatusSnapshot> {
         Box::pin(async {
             match probe_phi_silica_status().await {
@@ -125,7 +182,7 @@ impl PhiStatusSource for WindowsPhiStatusSource {
                     available: status.available,
                     ready: status.ready_state.as_deref() == Some("Ready"),
                     message: Some(status.message),
-                    model_name: status.engine.map(|e| e.display_name().to_string()),
+                    model_name: None, // Retail API exposes no actual model/version identity.
                     is_aion: status.engine == Some(OnDeviceModelEngine::AionInstruct),
                 },
                 Err(error) => PhiStatusSnapshot {
@@ -198,7 +255,13 @@ impl From<PhiError> for String {
         match error {
             #[cfg(windows)]
             PhiError::AiUnavailable { provider, reason } => {
-                format!("{provider} is unavailable: {reason}")
+                let label = match provider.as_str() {
+                    "phi_silica" => "Phi Silica",
+                    "aion_instruct" => "Aion Instruct",
+                    "on_device" => "On-device AI",
+                    other => other,
+                };
+                format!("{label} is unavailable: {reason}")
             }
             #[cfg(not(windows))]
             PhiError::PlatformNotSupported { operation } => {

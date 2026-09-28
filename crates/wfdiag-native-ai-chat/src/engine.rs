@@ -15,6 +15,7 @@ pub const MAX_TOOL_CALLS_PER_TURN: usize = 8;
 pub const TOOL_TIMEOUT_SECS: u64 = 45;
 pub const TOOL_CONCURRENCY: usize = 3;
 pub const TURN_TIMEOUT_SECS: u64 = 180;
+pub const PREPARATION_TIMEOUT_SECS: u64 = 11 * 60;
 pub const MAX_CHAT_SESSIONS: usize = 20;
 pub const MAX_SESSION_MESSAGES: usize = 100;
 pub const MAX_SESSION_CHARS: usize = 512 * 1024;
@@ -39,6 +40,14 @@ const FULL_SCAN_REQUEST_QUESTION: &str = "Would you like me to run the Full Scan
 
 /// Provider adapter consumed by the shared model/tool loop.
 pub trait ChatProvider: Send + Sync {
+    /// Preparation has a separate, cancellable budget before inference starts.
+    fn preparation_label(&self) -> Option<&str> {
+        None
+    }
+    fn prepare(&self, _cancel: CancellationToken) -> ToolFuture<'_> {
+        Box::pin(async { Ok(String::new()) })
+    }
+
     fn stream<'a>(
         &'a self,
         request: &'a ChatRequest,
@@ -715,7 +724,6 @@ pub async fn run_chat_turn(
     let mut forced_final = false;
     let mut staged_remediation = false;
     let mut requested_full_scan = false;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(TURN_TIMEOUT_SECS);
 
     let done =
         |provider_use: &ProviderUse, finish_reason: &str, tool_call_count: usize| DonePayload {
@@ -726,6 +734,36 @@ pub async fn run_chat_turn(
             provider_use: provider_use.clone(),
             tool_call_count,
         };
+
+    if let Some(label) = chat.preparation_label() {
+        emitter.preparing(label);
+    }
+    let preparation = tokio::select! {
+        biased;
+        () = cancel.cancelled() => {
+            emitter.done(&done(provider_use, "cancelled", 0));
+            return Ok(TurnStatus::Cancelled);
+        }
+        result = tokio::time::timeout(std::time::Duration::from_secs(PREPARATION_TIMEOUT_SECS), chat.prepare(cancel.clone())) => {
+            result.unwrap_or_else(|_| Err("Model preparation timed out".into()))
+        }
+    };
+    if let Err(message) = preparation {
+        if allow_fallback {
+            return Err(message);
+        }
+        emitter.error(&ErrorPayload {
+            session_id: session_id.into(),
+            message_id: message_id.into(),
+            message,
+        });
+        emitter.done(&done(provider_use, "error", 0));
+        return Ok(TurnStatus::Error);
+    }
+    if chat.preparation_label().is_some() {
+        emitter.preparing("Generating response…");
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(TURN_TIMEOUT_SECS);
 
     for round in 0..=MAX_TOOL_ITERATIONS {
         let final_round = !use_tools
@@ -1358,6 +1396,9 @@ mod tests {
     }
 
     impl ChatEmitter for RecordingEmitter {
+        fn preparing(&self, message: &str) {
+            self.push(format!("preparing:{message}"));
+        }
         fn delta(&self, payload: &crate::DeltaPayload) {
             self.push(format!("delta:{}", payload.text));
         }
@@ -1473,6 +1514,86 @@ mod tests {
             );
             assert!(plan.tool_result_chars <= plan.tool_data_chars.max(1));
         }
+    }
+
+    struct ColdProvider;
+    impl ChatProvider for ColdProvider {
+        fn preparation_label(&self) -> Option<&str> {
+            Some("Loading model")
+        }
+        fn prepare(&self, _cancel: CancellationToken) -> ToolFuture<'_> {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_mins(5)).await;
+                Ok(String::new())
+            })
+        }
+        fn stream<'a>(
+            &'a self,
+            request: &'a ChatRequest,
+            tx: mpsc::Sender<String>,
+        ) -> Pin<Box<dyn Future<Output = Result<ChatTurn, String>> + Send + 'a>> {
+            PlainProvider.stream(request, tx)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn five_minute_preparation_does_not_consume_inference_deadline() {
+        let emitter = RecordingEmitter::default();
+        let start = tokio::time::Instant::now();
+        let status = run_chat_turn(
+            &mut ProviderUse::for_provider(AIProvider::AionInstruct, None),
+            caps(false),
+            &ColdProvider,
+            "s",
+            "m",
+            &mut vec![ChatMessage::user("hello")],
+            "system",
+            &[],
+            &EchoExecutor,
+            &emitter,
+            CancellationToken::new(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(status, TurnStatus::Completed { .. }));
+        assert!(start.elapsed() >= Duration::from_mins(5));
+        assert!(
+            emitter
+                .events()
+                .contains(&"preparing:Generating response…".into())
+        );
+        assert!(emitter.events().iter().any(|e| e.starts_with("delta:")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_during_preparation_never_starts_inference() {
+        let emitter = RecordingEmitter::default();
+        let cancel = CancellationToken::new();
+        let signal = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            signal.cancel();
+        });
+        let status = run_chat_turn(
+            &mut ProviderUse::for_provider(AIProvider::AionInstruct, None),
+            caps(false),
+            &ColdProvider,
+            "s",
+            "m",
+            &mut vec![ChatMessage::user("hello")],
+            "system",
+            &[],
+            &EchoExecutor,
+            &emitter,
+            cancel,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, TurnStatus::Cancelled);
+        assert!(!emitter.events().iter().any(|e| e.starts_with("delta:")));
+        assert_eq!(emitter.events().last().unwrap(), "done:cancelled");
     }
 
     #[tokio::test]

@@ -78,6 +78,9 @@ pub struct ScanRequestPayload {
 /// Shell-supplied event sink. Native Reactor can deliver these through its
 /// command channel while Tauri maps them to the established event names.
 pub trait ChatEmitter: Send + Sync {
+    /// Provider lifecycle status, separate from model-authored tool activity.
+    fn preparing(&self, _message: &str) {}
+
     fn delta(&self, payload: &DeltaPayload);
     fn tool(&self, payload: &ToolPayload);
     fn done(&self, payload: &DonePayload);

@@ -519,7 +519,12 @@ async fn one_shot(
     match provider {
         AIProvider::None => Err("No AI provider available".to_string()),
         AIProvider::PhiSilica | AIProvider::AionInstruct => {
-            wfdiag_native_phi::generate_response(
+            wfdiag_native_phi::generate_ondevice_response(
+                if provider == AIProvider::AionInstruct {
+                    wfdiag_native_phi::OnDeviceModelEngine::AionInstruct
+                } else {
+                    wfdiag_native_phi::OnDeviceModelEngine::PhiSilica
+                },
                 &format!("{PLAN_SYSTEM}\n\nPLAN TASK\n{prompt}"),
                 {
                     let cancel = cancel.clone();

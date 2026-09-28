@@ -142,6 +142,17 @@ pub struct PhiStatusSnapshot {
 
 pub trait PhiStatusSource: Send + Sync + 'static {
     fn probe(&self) -> BackendFuture<'_, PhiStatusSnapshot>;
+    /// Independent preview probe; default preserves older injected sources.
+    fn probe_aion(&self) -> BackendFuture<'_, PhiStatusSnapshot> {
+        Box::pin(async {
+            let result = self.probe().await;
+            if result.is_aion {
+                result
+            } else {
+                PhiStatusSnapshot::default()
+            }
+        })
+    }
 }
 
 pub trait FoundryEndpointSource: Send + Sync + 'static {
@@ -330,6 +341,7 @@ impl ProviderManagementBackend for ProviderManagementService {
                     .await
                     .unwrap_or_default();
             let phi_probe = self.probes.phi.probe();
+            let aion_probe = self.probes.phi.probe_aion();
             let foundry_probe = self
                 .probes
                 .foundry
@@ -353,8 +365,9 @@ impl ProviderManagementBackend for ProviderManagementService {
             // Every source owns its shipping timeout. Poll them concurrently
             // so an unavailable CLI or local server cannot serialize all
             // provider discovery behind its individual deadline.
-            let (phi, foundry_endpoint, ollama_endpoint, custom_endpoint, codex, claude) = tokio::join!(
+            let (phi, aion, foundry_endpoint, ollama_endpoint, custom_endpoint, codex, claude) = tokio::join!(
                 phi_probe,
+                aion_probe,
                 foundry_probe,
                 ollama_probe,
                 custom_probe,
@@ -366,13 +379,9 @@ impl ProviderManagementBackend for ProviderManagementService {
                 settings: configuration.status,
                 probes: ProviderProbeSnapshot {
                     openai_available: configuration.openai_available,
-                    aion_available: phi.available && phi.is_aion,
-                    aion_ready: phi.ready && phi.is_aion,
-                    aion_message: if phi.is_aion || !phi.available {
-                        phi.message.clone()
-                    } else {
-                        None
-                    },
+                    aion_available: aion.available,
+                    aion_ready: aion.ready,
+                    aion_message: aion.message,
                     phi_silica_available: phi.available && !phi.is_aion,
                     phi_silica_ready: phi.ready && !phi.is_aion,
                     phi_silica_message: if !phi.is_aion || !phi.available {
@@ -380,7 +389,8 @@ impl ProviderManagementBackend for ProviderManagementService {
                     } else {
                         None
                     },
-                    ondevice_model_name: phi.model_name,
+                    aion_model_name: aion.model_name,
+                    phi_model_name: if phi.is_aion { None } else { phi.model_name },
                     foundry_endpoint,
                     ollama_endpoint,
                     custom_endpoint,
@@ -592,6 +602,54 @@ mod tests {
         );
         service.clear_cache(Some("session"));
         assert_eq!(cache.get("session:key"), None);
+    }
+
+    struct BothOnDevice;
+    impl PhiStatusSource for BothOnDevice {
+        fn probe(&self) -> BackendFuture<'_, PhiStatusSnapshot> {
+            Box::pin(async {
+                PhiStatusSnapshot {
+                    available: true,
+                    ready: true,
+                    model_name: Some("Retail Windows AI".into()),
+                    ..Default::default()
+                }
+            })
+        }
+        fn probe_aion(&self) -> BackendFuture<'_, PhiStatusSnapshot> {
+            Box::pin(async {
+                PhiStatusSnapshot {
+                    available: true,
+                    ready: true,
+                    is_aion: true,
+                    model_name: Some("Aion Instruct Preview".into()),
+                    ..Default::default()
+                }
+            })
+        }
+    }
+    #[tokio::test]
+    async fn side_by_side_backends_remain_independently_selectable() {
+        let mut service = service(SharedAiCache::new(10));
+        service.probes.phi = Arc::new(BothOnDevice);
+        for (preference, expected) in [
+            (AIProviderPreference::AionInstruct, AIProvider::AionInstruct),
+            (AIProviderPreference::PhiSilica, AIProvider::PhiSilica),
+        ] {
+            service.set_preference(preference);
+            let status = project_provider_status(service.status_input().await);
+            assert!(status.aion_available && status.phi_silica_available);
+            assert!(status.aion_ready && status.phi_silica_ready);
+            assert_eq!(status.active_provider, expected);
+            assert_eq!(
+                status.providers[0].model.as_deref(),
+                Some("Aion Instruct Preview")
+            );
+            assert_eq!(
+                status.providers[1].model.as_deref(),
+                Some("Retail Windows AI")
+            );
+        }
     }
 
     struct RawSettings(Vec<u8>);

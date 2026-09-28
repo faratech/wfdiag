@@ -861,7 +861,7 @@ pub(crate) fn provider_setup_fields(
     match provider_setup_index {
         0 => text_row(
             "Phi Silica LAF token",
-            "Legacy Phi Silica only. Aion Instruct needs no LAF token. On-device AI requires the Store version on a supported PC",
+            "Legacy Phi Silica only. Aion Preview needs no token, but requires the Store version, a Snapdragon ARM64 PC and Microsoft’s preview/QNN packages. First use can take several minutes.",
             settings.phi_silica_laf_token.as_deref(),
             "Leave empty for the built-in token",
             0,

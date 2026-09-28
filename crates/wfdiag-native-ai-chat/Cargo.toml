@@ -29,7 +29,7 @@ windows = { version = "0.62", features = ["Win32_System_Threading"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "test-util"] }
 
 [lints]
 workspace = true

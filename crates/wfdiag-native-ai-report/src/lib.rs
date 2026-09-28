@@ -102,6 +102,7 @@ pub struct ReportErrorPayload {
 /// Shell event boundary. Implementations normally marshal these events to a
 /// `WinUI` dispatcher or map them to the established `Tauri` event names.
 pub trait ReportEmitter: Send + Sync + 'static {
+    fn preparing(&self, _message: &str) {}
     fn delta(&self, payload: &ReportDeltaPayload);
     fn done(&self, payload: &ReportDonePayload);
     fn error(&self, payload: &ReportErrorPayload);
@@ -504,6 +505,9 @@ struct ReportChatEmitter {
 }
 
 impl ChatEmitter for ReportChatEmitter {
+    fn preparing(&self, message: &str) {
+        self.inner.preparing(message);
+    }
     fn delta(&self, payload: &DeltaPayload) {
         self.inner.delta(&ReportDeltaPayload {
             report_id: payload.message_id.clone(),

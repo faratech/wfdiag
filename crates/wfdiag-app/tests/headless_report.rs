@@ -213,7 +213,7 @@ fn auto_aion_report_stays_ondevice_with_foundry_available() {
         .set_probes(wfdiag_native_ai_provider::ProviderProbeSnapshot {
             aion_available: true,
             aion_ready: true,
-            ondevice_model_name: Some("Aion Instruct".to_string()),
+            aion_model_name: Some("Aion Instruct".to_string()),
             foundry_endpoint: Some("http://127.0.0.1:54321".to_string()),
             ..wfdiag_native_ai_provider::ProviderProbeSnapshot::default()
         });

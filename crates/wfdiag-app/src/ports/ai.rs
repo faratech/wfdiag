@@ -488,15 +488,20 @@ impl ProviderConfigSource {
     }
 }
 
-fn phi_provider(cancel: Option<CancellationToken>) -> ResolvedChatProvider {
-    let chat: Arc<dyn ChatProvider> = cancel.map_or_else(
-        || Arc::new(PhiChatProvider::default()) as Arc<dyn ChatProvider>,
-        |cancel| Arc::new(PhiChatProvider::new(move || cancel.is_cancelled())),
-    );
+fn phi_provider(provider: AIProvider, cancel: Option<CancellationToken>) -> ResolvedChatProvider {
+    let engine = if provider == AIProvider::AionInstruct {
+        wfdiag_native_phi::OnDeviceModelEngine::AionInstruct
+    } else {
+        wfdiag_native_phi::OnDeviceModelEngine::PhiSilica
+    };
+    let chat: Arc<dyn ChatProvider> = Arc::new(PhiChatProvider::for_engine(engine, move || {
+        cancel.as_ref().is_some_and(CancellationToken::is_cancelled)
+    }));
     ResolvedChatProvider {
         chat,
-        config_fingerprint: "provider=phi_silica;runtime=windows_ai".to_string(),
-        requested_model: None,
+        config_fingerprint: format!("provider={provider};runtime={engine:?};contract=1"),
+        requested_model: (provider == AIProvider::AionInstruct)
+            .then(|| "Aion Instruct Preview".into()),
     }
 }
 
@@ -508,7 +513,7 @@ impl ChatResolverPort for ShippingChatResolver {
     fn resolve(&self, provider: AIProvider, cancel: CancellationToken) -> ChatResolveFuture<'_> {
         Box::pin(async move {
             if provider == AIProvider::PhiSilica || provider == AIProvider::AionInstruct {
-                return Ok(phi_provider(Some(cancel)));
+                return Ok(phi_provider(provider, Some(cancel)));
             }
             tokio::select! {
                 biased;
@@ -559,7 +564,7 @@ impl ReportProviderResolver for ShippingReportResolver {
     ) -> ReportFuture<'_, Result<ResolvedReportProvider, String>> {
         Box::pin(async move {
             if provider == AIProvider::PhiSilica || provider == AIProvider::AionInstruct {
-                return Ok(phi_provider(None));
+                return Ok(phi_provider(provider, None));
             }
             self.source.resolve(provider).await
         })
@@ -845,3 +850,22 @@ impl SubscriptionPort for ShippingSubscriptions {
 
 /// The per-worker teardown budget every AI runtime is stopped inside.
 pub(crate) const AI_STOP_BUDGET: Duration = Duration::from_secs(2);
+
+#[cfg(test)]
+mod ondevice_tests {
+    use super::*;
+
+    #[test]
+    fn native_resolvers_preserve_backend_and_cache_identity() {
+        let phi = phi_provider(AIProvider::PhiSilica, None);
+        let aion = phi_provider(AIProvider::AionInstruct, None);
+        assert_ne!(phi.config_fingerprint, aion.config_fingerprint);
+        assert_eq!(
+            aion.requested_model.as_deref(),
+            Some("Aion Instruct Preview")
+        );
+        assert!(phi.requested_model.is_none());
+        assert!(aion.chat.preparation_label().unwrap().contains("Aion"));
+        assert!(phi.chat.preparation_label().is_none());
+    }
+}

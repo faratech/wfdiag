@@ -352,6 +352,10 @@ impl ChatToolHistory {
 /// Typed worker events drained by the host component.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatWorkerEvent {
+    Preparing {
+        request_id: u64,
+        message: String,
+    },
     Delta {
         request_id: u64,
         text: String,
@@ -407,7 +411,8 @@ impl ChatWorkerEvent {
     #[must_use]
     pub const fn request_id(&self) -> u64 {
         match self {
-            Self::Delta { request_id, .. }
+            Self::Preparing { request_id, .. }
+            | Self::Delta { request_id, .. }
             | Self::ToolActivity { request_id, .. }
             | Self::Proposal { request_id, .. }
             | Self::FullScanRequested { request_id, .. }
@@ -531,7 +536,8 @@ impl WorkerEmitter {
                     | ChatWorkerEvent::Cancelled { tool_history, .. } => {
                         *tool_history = history;
                     }
-                    ChatWorkerEvent::Delta { .. }
+                    ChatWorkerEvent::Preparing { .. }
+                    | ChatWorkerEvent::Delta { .. }
                     | ChatWorkerEvent::ToolActivity { .. }
                     | ChatWorkerEvent::Proposal { .. }
                     | ChatWorkerEvent::FullScanRequested { .. } => {}
@@ -552,6 +558,13 @@ impl WorkerEmitter {
 }
 
 impl ChatEmitter for WorkerEmitter {
+    fn preparing(&self, message: &str) {
+        self.publish(ChatWorkerEvent::Preparing {
+            request_id: self.request_id,
+            message: message.into(),
+        });
+    }
+
     fn delta(&self, payload: &DeltaPayload) {
         self.publish(ChatWorkerEvent::Delta {
             request_id: self.request_id,

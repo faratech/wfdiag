@@ -437,7 +437,8 @@ pub struct ProviderProbeSnapshot {
     pub phi_silica_available: bool,
     pub phi_silica_ready: bool,
     pub phi_silica_message: Option<String>,
-    pub ondevice_model_name: Option<String>,
+    pub aion_model_name: Option<String>,
+    pub phi_model_name: Option<String>,
     pub foundry_endpoint: Option<String>,
     pub ollama_endpoint: Option<String>,
     pub custom_endpoint: Option<String>,
@@ -549,8 +550,7 @@ pub fn project_provider_status(input: ProviderStatusInput) -> AIProviderStatus {
             .custom_model
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty());
-    // The shared on-device probe names only the detected engine. Keep the
-    // other row's own name even when that engine is unavailable.
+    // Each backend owns its model name, including when both are installed.
     let providers = vec![
         provider_info(
             AIProvider::AionInstruct,
@@ -559,8 +559,7 @@ pub fn project_provider_status(input: ProviderStatusInput) -> AIProviderStatus {
             Some(
                 nonempty(
                     probes
-                        .ondevice_model_name
-                        .clone()
+                        .aion_model_name
                         .filter(|_| probes.aion_available || probes.aion_ready),
                 )
                 .unwrap_or_else(|| "Aion Instruct".to_string()),
@@ -574,7 +573,7 @@ pub fn project_provider_status(input: ProviderStatusInput) -> AIProviderStatus {
             Some(
                 nonempty(
                     probes
-                        .ondevice_model_name
+                        .phi_model_name
                         .filter(|_| probes.phi_silica_available || probes.phi_silica_ready),
                 )
                 .unwrap_or_else(|| "Phi Silica".to_string()),
