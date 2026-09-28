@@ -340,6 +340,7 @@ fn status_projection_matches_legacy_shape_order_and_defaults() {
             "providers": [
                 {
                     "id": "aion_instruct",
+                    "model": "Aion Instruct",
                     "available": false,
                     "configured": false,
                     "supports_tools": false,
@@ -347,6 +348,7 @@ fn status_projection_matches_legacy_shape_order_and_defaults() {
                 },
                 {
                     "id": "phi_silica",
+                    "model": "Phi Silica",
                     "available": false,
                     "configured": false,
                     "supports_tools": false,
@@ -633,4 +635,33 @@ async fn native_worker_enforces_phi_identity_gate_before_mutating_backend() {
         .unwrap_err();
     assert_eq!(error, PHI_SILICA_STORE_REQUIRED);
     assert_eq!(*backend.preference.lock().unwrap(), None);
+}
+
+#[test]
+fn ondevice_model_names_belong_only_to_the_detected_provider() {
+    for aion in [false, true] {
+        for name in [None, Some(""), Some("  "), Some("Detected model revision")] {
+            let mut input = status_input();
+            input.probes.aion_available = aion;
+            input.probes.aion_ready = aion;
+            input.probes.phi_silica_available = !aion;
+            input.probes.phi_silica_ready = !aion;
+            input.probes.ondevice_model_name = name.map(str::to_string);
+            let status = project_provider_status(input);
+            for (provider, fallback, detected) in [
+                (AIProvider::AionInstruct, "Aion Instruct", aion),
+                (AIProvider::PhiSilica, "Phi Silica", !aion),
+            ] {
+                let row = status
+                    .providers
+                    .iter()
+                    .find(|row| row.id == provider)
+                    .unwrap();
+                let expected = name
+                    .filter(|name| detected && !name.trim().is_empty())
+                    .unwrap_or(fallback);
+                assert_eq!(row.model.as_deref(), Some(expected));
+            }
+        }
+    }
 }

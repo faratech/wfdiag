@@ -549,19 +549,36 @@ pub fn project_provider_status(input: ProviderStatusInput) -> AIProviderStatus {
             .custom_model
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty());
+    // The shared on-device probe names only the detected engine. Keep the
+    // other row's own name even when that engine is unavailable.
     let providers = vec![
         provider_info(
             AIProvider::AionInstruct,
             probes.aion_ready,
             probes.aion_available,
-            None,
+            Some(
+                nonempty(
+                    probes
+                        .ondevice_model_name
+                        .clone()
+                        .filter(|_| probes.aion_available || probes.aion_ready),
+                )
+                .unwrap_or_else(|| "Aion Instruct".to_string()),
+            ),
             None,
         ),
         provider_info(
             AIProvider::PhiSilica,
             probes.phi_silica_ready,
             probes.phi_silica_available,
-            None,
+            Some(
+                nonempty(
+                    probes
+                        .ondevice_model_name
+                        .filter(|_| probes.phi_silica_available || probes.phi_silica_ready),
+                )
+                .unwrap_or_else(|| "Phi Silica".to_string()),
+            ),
             None,
         ),
         provider_info(
