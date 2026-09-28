@@ -4,6 +4,16 @@ Moved verbatim from CLAUDE.md on 2026-09-01 (Reactor cutover) so the agent guide
 The code lives in `crates/wfdiag-native-phi`; the Tauri shell keeps only command adapters over it.
 Historical notes below reference `src-tauri/src/phi_silica.rs` and `sparse_identity.rs` — those are now thin shims.
 
+## Aion Preview implementation update (2026-09-28)
+
+The released preview is not ABI-compatible with the retail API described below.
+WFDiag uses separate generated preview bindings, explicit backend selection and
+cancellable model preparation. Retail OS/LAF state never identifies Aion.
+See [Aion preview setup](AION_PREVIEW_SETUP.md) and the
+[SDK integration review](AION_INTEGRATION_REVIEW.md) for the current deployment
+profile, contract provenance and pending hardware evidence. The historical
+investigation below remains the record for legacy Phi.
+
 ## Phi Silica (On-Device AI) Integration
 
 ### Overview

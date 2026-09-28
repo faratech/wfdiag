@@ -74,9 +74,12 @@ upload, or publishing operation. See `docs/REACTOR_STORE_PROBE.md`.
 
 `crates/wfdiag-native-phi/src/windows_ai_bindings.rs` is reviewed, tracked generated
 source, and ordinary builds never rewrite it. The old `build-cross.py generate-bindings`
-lane was removed with the Tauri shell; if the Phi API surface ever changes (the Aion
-Instruct transition), reinstate a windows-bindgen invocation with the matching WinMD set
-before regenerating.
+lane was removed with the Tauri shell. Aion Preview now has a **separate** generator
+and pinned WinMD under `scripts/aion-bindings` and `crates/wfdiag-native-phi/metadata`.
+Run `python3 scripts/check-aion-bindings.py` and
+`cargo run --locked --manifest-path scripts/aion-bindings/Cargo.toml -- --check`
+to verify its ABI and reproducibility. See `docs/AION_PREVIEW_SETUP.md` for the optional
+preview deployment profile and `check-aion-prerequisites.ps1` for read-only machine checks.
 
 ## Readiness and external-gate checkers
 

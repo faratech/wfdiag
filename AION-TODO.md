@@ -1,15 +1,15 @@
 # Aion Instruct Integration TODO
 
-This document tracks Aion Instruct source integration across WFDiag. The implementation checklist is complete; real Windows UI execution and Copilot+ device validation remain separate release gates.
+This document tracks Aion Instruct source integration across WFDiag. The UI/provider checklist and the source fixes from the official SDK review are implemented. See [the integration review](docs/AION_INTEGRATION_REVIEW.md) for evidence and [preview setup](docs/AION_PREVIEW_SETUP.md) for deployment requirements. Live preview inference and Store/device validation remain release gates.
 
 ---
 
 ## 1. Status Overview
 
-- [x] **Engine Layer (`wfdiag-native-phi`)**: Implemented in the preceding engine commits; live-device validation remains pending.
+- [x] **Engine Layer (`wfdiag-native-phi`)**: Separate generated preview backend implemented; live preview inference remains pending.
   - [x] Native dynamic package attachment (`kernel32.dll` with `kernelbase.dll` fallback)
   - [x] Full `windows-core` 0.100 and `windows-link` 0.100 unification
-  - [x] Dual activation pathways (`AionInstructPreview.Text.LanguageModel` and `Microsoft.Windows.AI.Text.LanguageModel`)
+  - [x] Separate preview and retail activation contracts (`AionInstructPreview.Text.LanguageModel` and `Microsoft.Windows.AI.Text.LanguageModel`); class-name switching alone is insufficient
   - [x] WinAppSDK 2.x `IncompatibleLowRankAdapter` (error 7) handling
 - [x] **UI Shell (`apps/wfdiag`)**: Implemented.
   - [x] Shell wire parser recognizes `aion_instruct`
@@ -19,7 +19,7 @@ This document tracks Aion Instruct source integration across WFDiag. The impleme
   - [x] Settings dialog suppresses model catalog dropdown for Aion Instruct
   - [x] Settings setup tab clarifies Aion Instruct requires no LAF token
 - [x] **Provider & Facade Projection (`wfdiag-native-ai-provider`)**: Implemented.
-  - [x] `project_provider_status` passes `ondevice_model_name` for Aion Instruct and Phi Silica UI badges
+  - [x] `project_provider_status` projects independent `aion_model_name` / `phi_model_name` fields for the two UI badges
 - [x] **Workload Routing (`wfdiag-native-ai-report`)**: Implemented.
   - [x] `choose_report_provider` preserves `AIProvider::AionInstruct` on-device without forced local fallback
 
@@ -51,7 +51,7 @@ This document tracks Aion Instruct source integration across WFDiag. The impleme
 
 ### Step 5: Provider Status Model Badges (`crates/wfdiag-native-ai-provider/src/lib.rs`)
 
-- [x] Pass nonblank `probes.ondevice_model_name` only to the matching detected provider; use `"Aion Instruct"` / `"Phi Silica"` defaults without copying one model name to both rows
+- [x] Pass each backend’s own nonblank model name only to its provider; use `"Aion Instruct"` / `"Phi Silica"` defaults without copying one model name to both rows
 
 ### Step 6: Report Generation Auto-Routing (`crates/wfdiag-native-ai-report/src/lib.rs`)
 
@@ -66,7 +66,7 @@ This document tracks Aion Instruct source integration across WFDiag. The impleme
 - [x] Reuse the facade gate in Settings and `SetProviderPreference`; include existing preference aliases and preserve package identity validation.
 - [x] Replace stale onboarding handlers, add missing Aion fields to shell test fixtures, and look up selector assertions by wire ID.
 - [x] Cover mixed Aion/Phi availability through real facade workers and complete a mocked Auto Aion report with Foundry also available.
-- [x] Repair the Windows engine test's five-value result destructuring. Inject package identity and preview availability into its existing check so the test cannot activate a runtime installed on the test host; production probe ordering is preserved.
+- [x] Repair the Windows engine test's five-value result destructuring. Inject package identity into the retail check so the test cannot activate a runtime installed on the test host; preview probing now lives in its own backend.
 
 ---
 
@@ -104,7 +104,31 @@ cargo fmt --all -- --check
 ## 4. Pending Windows and hardware evidence
 
 - [ ] Execute native shell tests on Windows in production and validation configurations. Cross-compilation type-checks these tests but does not execute them.
-- [ ] Validate Aion chat and report generation, model attribution, selector/onboarding behavior and legacy Phi behavior on real Copilot+ x64 and ARM64 devices under the Store identity.
+- [ ] Validate preview chat, reports, analysis, fix plans, attribution and UI on supported ARM64 Copilot+ hardware under Store identity. Validate legacy Phi separately; keep x64 Aion runtime evidence pending until a supported runtime is available.
 - [ ] Complete the existing baseline, native-control, packaging and distribution readiness gates through their documented evidence protocols.
 
 `check-reactor-readiness.py --json` still reports `ready: false` (exit 1), including baseline provenance/assets, backend parity, Aion Store validation and packaging/distribution evidence. No gate or baseline was changed to make this report pass. Mocked reports do not establish actual model activation, streaming behavior or device readiness.
+
+## 5. Reopened by official SDK review (2026-09-28)
+
+These source corrections address the review findings; hardware closure is tracked separately above. Evidence and pinned sources are in [AION_INTEGRATION_REVIEW.md](docs/AION_INTEGRATION_REVIEW.md).
+
+- [x] **AION-01:** Generated separate preview bindings from pinned official WinMD; preview interfaces, async types and status values stay separate from retail. Added hash/ABI checks and a reproducible generator.
+- [x] **AION-02:** Optional process dependencies attach the preview framework and Runtime 1.8 at their SDK floors. Added actionable errors, a read-only prerequisite checker and the documented Microsoft QNN setup flow; production Store pin unchanged.
+- [x] **AION-03:** Separate cancellable model preparation (ten-minute native budget, eleven-minute outer budget) precedes the existing inference deadline. Chat/report lifecycle status reaches the shell. A simulated five-minute load regression passes.
+- [x] **AION-04:** Explicit backend selection and distinct caches/fingerprints reach chat, report, analysis, prioritization and fix-plan generation. Removed OS/LAF/registry/environment identity guesses; independent probes and model fields support side-by-side installation.
+- [x] **AION-05:** Retained the apartment guard through activation retry; repaired aligned package enumeration and size-query handling with growth retries. Removed the heuristic preview enumeration path entirely.
+- [x] **AION-06:** Preview progress callbacks feed a bounded coalescing stream, preserve Unicode, reconcile final text, propagate cancellation and attribute successful preview responses. Prompt-only generation isolates conversation state across workloads and resets.
+- [x] **AION-07:** Retained Store-only product policy consistently in probe, preparation and preference validation. Documented the deliberate difference from Microsoft's unpackaged examples and explicitly rejected unsupported x64 preview execution.
+
+### Fix verification
+
+- Portable workspace Clippy with `-D warnings` and 861 tests passed.
+- Windows ARM64 native `wfdiag-native-phi` tests: 14 passed, including generated preview contract assertions. This run also found and fixed the existing Windows-only readable-error formatting failure.
+- Windows x64/ARM64 workspace Clippy: production and validation configurations checked.
+- Pinned metadata/ABI checks and exact binding regeneration passed.
+- Version synchronization and Store identity checks passed; readiness still has the existing hardware/evidence blockers.
+- Connected Windows host: ARM64, Runtime 1.8 installed, preview framework absent, QNN 1.8.30.0 installed (older than the SDK's documented 1.8.41 generation). Live preview inference was not attempted.
+- PowerShell prerequisite checker syntax passed. Direct execution from the unsigned WSL share was rejected by the host's execution policy; equivalent read-only package queries supplied the inventory above. No execution policy was changed.
+
+Mocked tests, ABI assertions and compilation do not establish actual preview model activation, NPU streaming or packaged DLL resolution. Those remain in the Windows/hardware checklist.
