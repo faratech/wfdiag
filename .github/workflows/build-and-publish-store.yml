@@ -105,7 +105,7 @@ jobs:
         run: python scripts/check-version-sync.py --expected "${{ steps.version.outputs.version }}"
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98.0
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           targets: x86_64-pc-windows-msvc
 
@@ -138,7 +138,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98.0
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           targets: aarch64-pc-windows-msvc
 

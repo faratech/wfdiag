@@ -234,7 +234,7 @@ fn enter_winrt_apartment() -> WinRtApartment {
         Ok(()) => WinRtApartment {
             owns_initialization: true,
         },
-        Err(error) if error.code() == windows_core::HRESULT(RPC_E_CHANGED_MODE) => {
+        Err(error) if error.code().0 == RPC_E_CHANGED_MODE => {
             log_phi_silica(
                 "Thread is already a single-threaded apartment (RPC_E_CHANGED_MODE); \
                  continuing without changing it",
@@ -321,7 +321,6 @@ fn try_cached_model_guard()
 fn try_unlock_laf() -> (bool, String) {
     use std::sync::atomic::Ordering;
     use windows::ApplicationModel::{LimitedAccessFeatureStatus, LimitedAccessFeatures};
-    use windows_core::HSTRING;
 
     // Only try once
     if LAF_UNLOCKED.load(Ordering::SeqCst) {
@@ -334,13 +333,13 @@ fn try_unlock_laf() -> (bool, String) {
         "LAF unlock: token source={primary_source}, publisher id={publisher_id}"
     ));
 
-    let feature_id = HSTRING::from(LAF_FEATURE_ID);
-    let attestation = HSTRING::from(format!(
+    let feature_id = windows::core::HSTRING::from(LAF_FEATURE_ID);
+    let attestation = windows::core::HSTRING::from(format!(
         "{publisher_id} has registered their use of {LAF_FEATURE_ID} with Microsoft and agrees to the terms of use."
     ));
 
     let try_token = |token_value: &str| {
-        let token = HSTRING::from(token_value);
+        let token = windows::core::HSTRING::from(token_value);
         match LimitedAccessFeatures::TryUnlockFeature(&feature_id, &token, &attestation) {
             Ok(result) => {
                 let status = result
@@ -573,7 +572,8 @@ fn load_ai_dll(
     use windows::Win32::System::LibraryLoader::{
         LOAD_WITH_ALTERED_SEARCH_PATH, LoadLibraryExW, LoadLibraryW,
     };
-    use windows_core::{HSTRING, PCWSTR};
+    use windows::core::PCWSTR;
+    use windows_core::HSTRING;
 
     // Bare name FIRST — with package identity this resolves from the package
     // graph (framework package or the MSIX's own root), the supported path.
@@ -824,7 +824,7 @@ fn ensure_feature_ready(is_cancelled: &dyn Fn() -> bool) -> Result<(), String> {
             let display = result
                 .ErrorDisplayText()
                 .ok()
-                .map(|message| message.to_string())
+                .map(|message| message.to_string_lossy())
                 .filter(|message| !message.trim().is_empty());
             Err(format!(
                 "Phi Silica preparation failed (status {}). error={} extended={}{}",
@@ -965,7 +965,8 @@ fn create_language_model_direct(
     let mut factory_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
 
     log_phi_silica(&format!(
-        "Calling DllGetActivationFactory with class: {class_name}"
+        "Calling DllGetActivationFactory with class: {}",
+        class_name.display()
     ));
 
     let hr = unsafe { get_factory(hstring_raw, &raw mut factory_ptr) };
@@ -1796,7 +1797,7 @@ fn complete_generation_response(
     if status == LanguageModelResponseStatus::Complete {
         return response
             .Text()
-            .map(|text| text.to_string())
+            .map(|text| text.to_string_lossy())
             .map_err(|error| {
                 GenerationFailure::runtime(format!(
                     "Failed to read Phi Silica response text: 0x{:08X}: {}",

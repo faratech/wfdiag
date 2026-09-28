@@ -45,7 +45,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -65,7 +65,7 @@ jobs:
       __COMPAT_LAYER: RunAsInvoker
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -89,7 +89,7 @@ jobs:
       __COMPAT_LAYER: RunAsInvoker
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           targets: aarch64-pc-windows-msvc
           components: clippy

@@ -19,9 +19,9 @@ wfdiag-native-settings = { workspace = true }
 # Resolves %LOCALAPPDATA% for the opt-in debug log (#217).
 dirs = { workspace = true }
 winreg = { workspace = true }
-windows-core = "0.62"
-windows-future = "0.3"
-windows-collections = "0.3"
+windows-core = "0.100.0"
+windows-future = "0.100.0"
+windows-collections = "0.100.0"
 windows = { version = "0.62", features = [
     "ApplicationModel",
     "Foundation",

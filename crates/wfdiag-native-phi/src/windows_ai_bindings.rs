@@ -94,8 +94,8 @@ impl AIFeatureReadyResultState {
     pub const Success: Self = Self(1i32);
     pub const Failure: Self = Self(2i32);
 }
-impl windows_core::TypeKind for AIFeatureReadyResultState {
-    type TypeKind = windows_core::CopyType;
+impl windows_core::imp::TypeKind for AIFeatureReadyResultState {
+    type TypeKind = windows_core::imp::CopyType;
 }
 impl windows_core::RuntimeType for AIFeatureReadyResultState {
     const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
@@ -111,8 +111,8 @@ impl AIFeatureReadyState {
     pub const NotSupportedOnCurrentSystem: Self = Self(2i32);
     pub const DisabledByUser: Self = Self(3i32);
 }
-impl windows_core::TypeKind for AIFeatureReadyState {
-    type TypeKind = windows_core::CopyType;
+impl windows_core::imp::TypeKind for AIFeatureReadyState {
+    type TypeKind = windows_core::imp::CopyType;
 }
 impl windows_core::RuntimeType for AIFeatureReadyState {
     const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
@@ -978,8 +978,8 @@ impl InputKind {
     pub const GeneralConversation: Self = Self(0i32);
     pub const Email: Self = Self(1i32);
 }
-impl windows_core::TypeKind for InputKind {
-    type TypeKind = windows_core::CopyType;
+impl windows_core::imp::TypeKind for InputKind {
+    type TypeKind = windows_core::imp::CopyType;
 }
 impl windows_core::RuntimeType for InputKind {
     const SIGNATURE: windows_core::imp::ConstBuffer =
@@ -1019,7 +1019,7 @@ impl LanguageModel {
                 core::mem::transmute_copy(prompt),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         }
     }
     pub fn GenerateResponseAsync2<P1>(
@@ -1044,7 +1044,7 @@ impl LanguageModel {
                 options.param().abi(),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         }
     }
     pub fn GenerateResponseAsync3<P0, P2>(
@@ -1072,7 +1072,7 @@ impl LanguageModel {
                 options.param().abi(),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         }
     }
     pub fn GenerateEmbeddingVectors(
@@ -1087,7 +1087,7 @@ impl LanguageModel {
                 core::mem::transmute_copy(prompt),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         }
     }
     pub fn GetUsablePromptLength(
@@ -1144,7 +1144,7 @@ impl LanguageModel {
                 windows_core::Interface::as_raw(this),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         }
     }
     pub fn CreateContext2(
@@ -1159,7 +1159,7 @@ impl LanguageModel {
                 core::mem::transmute_copy(systemprompt),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         }
     }
     pub fn GetReadyState() -> windows_core::Result<AIFeatureReadyState> {
@@ -1181,7 +1181,7 @@ impl LanguageModel {
                 windows_core::Interface::as_raw(this),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         })
     }
     pub fn CreateAsync() -> windows_core::Result<windows_future::IAsyncOperation<LanguageModel>> {
@@ -1191,7 +1191,7 @@ impl LanguageModel {
                 windows_core::Interface::as_raw(this),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         })
     }
     fn ILanguageModelStatics<R, F: FnOnce(&ILanguageModelStatics) -> windows_core::Result<R>>(
@@ -1461,8 +1461,8 @@ impl LanguageModelResponseStatus {
     pub const ResponseBlockedByContentModeration: Self = Self(5i32);
     pub const Error: Self = Self(6i32);
 }
-impl windows_core::TypeKind for LanguageModelResponseStatus {
-    type TypeKind = windows_core::CopyType;
+impl windows_core::imp::TypeKind for LanguageModelResponseStatus {
+    type TypeKind = windows_core::imp::CopyType;
 }
 impl windows_core::RuntimeType for LanguageModelResponseStatus {
     const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
@@ -1479,8 +1479,8 @@ impl TextRewriteTone {
     pub const Concise: Self = Self(3i32);
     pub const Formal: Self = Self(4i32);
 }
-impl windows_core::TypeKind for TextRewriteTone {
-    type TypeKind = windows_core::CopyType;
+impl windows_core::imp::TypeKind for TextRewriteTone {
+    type TypeKind = windows_core::imp::CopyType;
 }
 impl windows_core::RuntimeType for TextRewriteTone {
     const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
@@ -1513,7 +1513,7 @@ impl TextRewriter {
                 core::mem::transmute_copy(text),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         }
     }
     pub fn RewriteAsync2(
@@ -1535,7 +1535,7 @@ impl TextRewriter {
                 tone,
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         }
     }
     pub fn RewriteCustomAsync(
@@ -1557,7 +1557,7 @@ impl TextRewriter {
                 core::mem::transmute_copy(customtone),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         }
     }
     pub fn CreateInstance<P0>(languagemodel: P0) -> windows_core::Result<TextRewriter>
@@ -1571,7 +1571,7 @@ impl TextRewriter {
                 languagemodel.param().abi(),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         })
     }
     fn ITextRewriterFactory<R, F: FnOnce(&ITextRewriterFactory) -> windows_core::Result<R>>(
@@ -1621,7 +1621,7 @@ impl TextSummarizer {
                 core::mem::transmute_copy(text),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         }
     }
     pub fn SummarizeParagraphAsync(
@@ -1641,7 +1641,7 @@ impl TextSummarizer {
                 core::mem::transmute_copy(text),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         }
     }
     pub fn SummarizeConversationAsync<P0, P1>(
@@ -1667,7 +1667,7 @@ impl TextSummarizer {
                 options.param().abi(),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         }
     }
     pub fn IsPromptLargerThanContext<P1>(
@@ -1721,7 +1721,7 @@ impl TextSummarizer {
                 languagemodel.param().abi(),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         })
     }
     fn ITextSummarizerFactory<R, F: FnOnce(&ITextSummarizerFactory) -> windows_core::Result<R>>(
@@ -1771,7 +1771,7 @@ impl TextToTableConverter {
                 core::mem::transmute_copy(text),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         }
     }
     pub fn CreateInstance<P0>(languagemodel: P0) -> windows_core::Result<TextToTableConverter>
@@ -1785,7 +1785,7 @@ impl TextToTableConverter {
                 languagemodel.param().abi(),
                 &mut result__,
             )
-            .and_then(|| windows_core::Type::from_abi(result__))
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
         })
     }
     fn ITextToTableConverterFactory<
