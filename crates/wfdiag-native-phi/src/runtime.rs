@@ -831,45 +831,30 @@ fn try_attach_aion_preview_framework() {
     log_phi_silica("Attempting dynamic attachment of Aion Instruct preview framework...");
 
     unsafe {
-        let module_ptr = {
-            let m = GetModuleHandleW(windows_core::w!("kernelbase.dll").as_ptr());
-            if m.is_null() {
-                let m = LoadLibraryW(windows_core::w!("kernelbase.dll").as_ptr());
-                if m.is_null() {
-                    log_phi_silica("kernelbase.dll not accessible for package dependency");
-                    return;
+        let find_proc = |proc_name: windows_core::PCSTR| -> Option<*mut std::ffi::c_void> {
+            let kernel32 = GetModuleHandleW(windows_core::w!("kernel32.dll").as_ptr());
+            if !kernel32.is_null() {
+                let p = GetProcAddress(kernel32, proc_name.as_ptr().cast());
+                if !p.is_null() {
+                    return Some(p);
                 }
-                m
-            } else {
-                m
             }
+            let kernelbase = GetModuleHandleW(windows_core::w!("kernelbase.dll").as_ptr());
+            if !kernelbase.is_null() {
+                let p = GetProcAddress(kernelbase, proc_name.as_ptr().cast());
+                if !p.is_null() {
+                    return Some(p);
+                }
+            }
+            None
         };
 
-        let try_create_ptr = GetProcAddress(
-            module_ptr,
-            windows_core::s!("TryCreatePackageDependency")
-                .as_ptr()
-                .cast(),
-        );
-        let add_dep_ptr = GetProcAddress(
-            module_ptr,
-            windows_core::s!("AddPackageDependency").as_ptr().cast(),
-        );
-
         let (Some(try_create_raw), Some(add_dep_raw)) = (
-            if try_create_ptr.is_null() {
-                None
-            } else {
-                Some(try_create_ptr)
-            },
-            if add_dep_ptr.is_null() {
-                None
-            } else {
-                Some(add_dep_ptr)
-            },
+            find_proc(windows_core::s!("TryCreatePackageDependency")),
+            find_proc(windows_core::s!("AddPackageDependency")),
         ) else {
             log_phi_silica(
-                "Package dependency APIs not found in kernelbase.dll (requires Windows 11 22000+)",
+                "Package dependency APIs not found in kernel32/kernelbase (requires Windows 11 22000+)",
             );
             return;
         };
