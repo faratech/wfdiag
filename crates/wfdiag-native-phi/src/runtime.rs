@@ -1558,13 +1558,19 @@ fn check_phi_silica_safe() -> (
     Option<String>,
     Option<OnDeviceModelEngine>,
 ) {
-    check_phi_silica_safe_for_identity(crate::has_package_identity())
+    let has_package_identity = crate::has_package_identity();
+    log_phi_silica("=== check_ondevice_ai_safe called ===");
+    try_attach_aion_preview_framework();
+    check_phi_silica_safe_for_environment(has_package_identity, has_aion_preview_framework())
 }
 
 #[cfg(windows)]
 #[allow(clippy::too_many_lines)]
-fn check_phi_silica_safe_for_identity(
+// Keep the environment facts injectable so the identity test cannot activate
+// a preview runtime installed on the Windows test host.
+fn check_phi_silica_safe_for_environment(
     has_package_identity: bool,
+    has_aion: bool,
 ) -> (
     bool,
     String,
@@ -1573,11 +1579,6 @@ fn check_phi_silica_safe_for_identity(
     Option<OnDeviceModelEngine>,
 ) {
     use crate::windows_ai_bindings::AIFeatureReadyState;
-
-    log_phi_silica("=== check_ondevice_ai_safe called ===");
-
-    try_attach_aion_preview_framework();
-    let has_aion = has_aion_preview_framework();
 
     // Without registered package identity or dynamic preview framework the Windows AI APIs deny access
     // (0x80070005) on every activation path, so don't probe further — report
@@ -2411,14 +2412,15 @@ mod windows_tests {
     use super::*;
 
     #[test]
-    fn unpackaged_probe_returns_before_windows_ai_activation() {
-        let (available, message, ready_state, error_code) =
-            check_phi_silica_safe_for_identity(false);
+    fn unpackaged_probe_without_preview_returns_before_windows_ai_activation() {
+        let (available, message, ready_state, error_code, engine) =
+            check_phi_silica_safe_for_environment(false, false);
 
         assert!(!available);
         assert!(message.contains("requires the Microsoft Store version"));
         assert_eq!(ready_state, None);
         assert_eq!(error_code.as_deref(), Some("NO_PACKAGE_IDENTITY"));
+        assert_eq!(engine, None);
     }
 }
 
