@@ -274,6 +274,7 @@ pub struct ProviderManagementService {
     selection: ProviderSelectionState,
     cache: Arc<dyn ProviderCacheControl>,
     defaults: ProviderModelDefaults,
+    chatgpt: Option<Arc<wfdiag_native_chatgpt::ChatGptService>>,
 }
 
 impl fmt::Debug for ProviderManagementService {
@@ -299,7 +300,14 @@ impl ProviderManagementService {
             selection,
             cache,
             defaults,
+            chatgpt: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_chatgpt(mut self, service: Arc<wfdiag_native_chatgpt::ChatGptService>) -> Self {
+        self.chatgpt = Some(service);
+        self
     }
 
     #[must_use]
@@ -340,6 +348,17 @@ impl ProviderManagementBackend for ProviderManagementService {
                 tokio::task::spawn_blocking(move || configuration_source.snapshot())
                     .await
                     .unwrap_or_default();
+            let chatgpt = if let Some(service) = &self.chatgpt {
+                let _ = service
+                    .execute(
+                        wfdiag_native_chatgpt::AccountCommand::Refresh,
+                        tokio_util::sync::CancellationToken::new(),
+                    )
+                    .await;
+                service.snapshot()
+            } else {
+                wfdiag_native_chatgpt::AccountSnapshot::default()
+            };
             let phi_probe = self.probes.phi.probe();
             let aion_probe = self.probes.phi.probe_aion();
             let foundry_probe = self
@@ -378,6 +397,11 @@ impl ProviderManagementBackend for ProviderManagementService {
                 preference: self.selection.get(),
                 settings: configuration.status,
                 probes: ProviderProbeSnapshot {
+                    chatgpt_ready: chatgpt
+                        .selected()
+                        .is_some_and(|a| a.state == wfdiag_native_chatgpt::AccountState::Ready),
+                    chatgpt_connected: chatgpt.connected() || chatgpt.storage_unavailable,
+                    chatgpt_model: chatgpt.selected().and_then(|a| a.model.clone()),
                     openai_available: configuration.openai_available,
                     aion_available: aion.available,
                     aion_ready: aion.ready,
@@ -585,10 +609,10 @@ mod tests {
         assert_eq!(status.active_provider, AIProvider::FoundryLocal);
         assert!(status.phi_silica_available);
         assert!(!status.phi_silica_ready);
-        assert_eq!(status.providers[5].id, AIProvider::CodexCli);
-        assert!(status.providers[5].available);
+        assert_eq!(status.providers[6].id, AIProvider::CodexCli);
+        assert!(status.providers[6].available);
         assert_eq!(
-            status.providers[5].endpoint.as_deref(),
+            status.providers[6].endpoint.as_deref(),
             Some("C:\\Tools\\codex.exe")
         );
 

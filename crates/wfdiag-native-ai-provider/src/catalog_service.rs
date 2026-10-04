@@ -170,6 +170,7 @@ pub struct ModelCatalogService {
     ollama: Arc<dyn OllamaSource>,
     subscriptions: Arc<dyn SubscriptionModelCatalogSource>,
     http: Arc<dyn ModelCatalogHttpSource>,
+    chatgpt: Option<Arc<wfdiag_native_chatgpt::ChatGptService>>,
 }
 
 impl ModelCatalogService {
@@ -188,7 +189,14 @@ impl ModelCatalogService {
             ollama,
             subscriptions,
             http: Arc::new(ReqwestModelCatalogHttpSource),
+            chatgpt: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_chatgpt(mut self, service: Arc<wfdiag_native_chatgpt::ChatGptService>) -> Self {
+        self.chatgpt = Some(service);
+        self
     }
 
     #[cfg(test)]
@@ -214,6 +222,27 @@ impl ModelCatalogService {
     #[allow(clippy::too_many_lines)]
     async fn list_inner(&self, request: ModelCatalogRequest) -> Result<ModelCatalog, String> {
         match request.provider {
+            AIProvider::ChatGPT => {
+                let service = self
+                    .chatgpt
+                    .as_ref()
+                    .ok_or("Connect a ChatGPT account first")?;
+                let models = service
+                    .refresh_models(&tokio_util::sync::CancellationToken::new())
+                    .await?;
+                Ok(ModelCatalog {
+                    default_model: service.snapshot().selected().and_then(|a| a.model.clone()),
+                    models: models
+                        .into_iter()
+                        .map(|m| ModelCatalogEntry {
+                            id: m.slug,
+                            label: Some(m.display_name),
+                            description: None,
+                            metadata: None,
+                        })
+                        .collect(),
+                })
+            }
             AIProvider::OpenAI => {
                 let key =
                     self.require_key(request.draft_api_key, ProviderKeyId::OpenAI, "OpenAI")?;

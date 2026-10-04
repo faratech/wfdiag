@@ -15,6 +15,11 @@ use std::thread;
 use zeroize::Zeroizing;
 
 mod persistence;
+mod protected_document;
+pub use protected_document::{
+    MemoryProtectedDocumentStorage, ProtectedDocumentGuard, ProtectedDocumentStorage,
+    WindowsDpapiDocumentStorage,
+};
 
 pub use persistence::{
     DPAPI_ADDITIONAL_ENTROPY, ShippingSettingsStorage, WindowsDpapiCredentialStorage,

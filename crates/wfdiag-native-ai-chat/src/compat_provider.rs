@@ -28,6 +28,9 @@ impl ChatProvider for CompatChatProvider {
     ) -> Pin<Box<dyn Future<Output = Result<ChatTurn, String>> + Send + 'a>> {
         Box::pin(async move {
             match self.provider {
+                AIProvider::ChatGPT => {
+                    crate::providers::chatgpt::chat_stream(&self.cfg, request, tx).await
+                }
                 AIProvider::OpenAI
                 | AIProvider::FoundryLocal
                 | AIProvider::Ollama

@@ -272,6 +272,8 @@ pub fn sign_in_requirement(
         phi: true,
         foundry: true,
         ollama: true,
+        chatgpt: true,
+        chatgpt_connected: false,
         custom: true,
         codex: true,
         claude: true,

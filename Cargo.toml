@@ -39,12 +39,17 @@ windows-core = "0.100.0"
 windows-future = "0.100.0"
 windows-link = "0.100.0"
 zeroize = "1"
+base64 = "0.23"
+getrandom = "0.4"
+jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_crypto"] }
+sha2 = "0.11"
 
 # Workspace crates.
 wfdiag-app = { path = "crates/wfdiag-app" }
 wfdiag-native-ai-analysis = { path = "crates/wfdiag-native-ai-analysis" }
 wfdiag-native-ai-chat = { path = "crates/wfdiag-native-ai-chat" }
 wfdiag-native-ai-provider = { path = "crates/wfdiag-native-ai-provider" }
+wfdiag-native-chatgpt = { path = "crates/wfdiag-native-chatgpt" }
 wfdiag-native-ai-report = { path = "crates/wfdiag-native-ai-report" }
 wfdiag-native-core = { path = "crates/wfdiag-native-core" }
 wfdiag-native-diagnostics = { path = "crates/wfdiag-native-diagnostics" }

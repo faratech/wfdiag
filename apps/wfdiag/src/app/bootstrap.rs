@@ -55,9 +55,19 @@ pub(crate) fn start_application_service(
     )));
     let settings_service =
         crate::app::policy::reactor_settings_service(validator.clone() as Arc<_>);
-    let provider_backend =
-        reactor_provider_backend(&settings_service, &identity, SharedAiCache::new(100));
+    let chatgpt = Arc::new(wfdiag_native_chatgpt::ChatGptService::new(
+        wfdiag_native_chatgpt::ChatGptPorts::shipping(Arc::new(
+            crate::platform::external::ReactorChatGptBrowser,
+        )),
+    ));
+    let provider_backend = reactor_provider_backend(
+        &settings_service,
+        &identity,
+        SharedAiCache::new(100),
+        Arc::clone(&chatgpt),
+    );
     let overrides = WindowsPortOverrides {
+        chatgpt: Some(chatgpt),
         settings_storage: crate::app::policy::reactor_settings_storage(),
         settings_validator: Some(validator as Arc<_>),
         update_throttle: crate::app::policy::reactor_update_throttle_port(),

@@ -10,11 +10,12 @@ use crate::{AIProvider, AIProviderPreference, ProviderAvailability};
 ///
 /// `None` is a status sentinel and is intentionally absent: every value in
 /// this array is an executable provider candidate.
-pub const AUTO_FALLBACK_ORDER: [AIProvider; 11] = [
+pub const AUTO_FALLBACK_ORDER: [AIProvider; 12] = [
     AIProvider::AionInstruct,
     AIProvider::PhiSilica,
     AIProvider::FoundryLocal,
     AIProvider::Ollama,
+    AIProvider::ChatGPT,
     AIProvider::CustomOpenAI,
     AIProvider::CodexCli,
     AIProvider::ClaudeCode,
@@ -53,6 +54,7 @@ impl ProviderAvailability {
     pub const fn contains(self, provider: AIProvider) -> bool {
         match provider {
             AIProvider::None => false,
+            AIProvider::ChatGPT => self.chatgpt || self.chatgpt_connected,
             AIProvider::AionInstruct => self.aion,
             AIProvider::PhiSilica => self.phi,
             AIProvider::FoundryLocal => self.foundry,
@@ -81,7 +83,8 @@ pub const fn provider_trust_zone(provider: AIProvider) -> Option<ProviderTrustZo
         | AIProvider::PhiSilica
         | AIProvider::FoundryLocal
         | AIProvider::Ollama => Some(ProviderTrustZone::Local),
-        AIProvider::CustomOpenAI
+        AIProvider::ChatGPT
+        | AIProvider::CustomOpenAI
         | AIProvider::CodexCli
         | AIProvider::ClaudeCode
         | AIProvider::OpenAI
@@ -107,6 +110,7 @@ pub const fn crosses_local_to_cloud(from: AIProvider, to: AIProvider) -> bool {
 const fn explicit_provider(preference: AIProviderPreference) -> Option<AIProvider> {
     match preference {
         AIProviderPreference::Auto => None,
+        AIProviderPreference::ChatGPT => Some(AIProvider::ChatGPT),
         AIProviderPreference::OpenAI => Some(AIProvider::OpenAI),
         AIProviderPreference::AionInstruct => Some(AIProvider::AionInstruct),
         AIProviderPreference::PhiSilica => Some(AIProvider::PhiSilica),
@@ -156,6 +160,9 @@ pub fn next_fallback_candidate(
     tried: &[AIProvider],
     availability: ProviderAvailability,
 ) -> Option<FallbackCandidate> {
+    if current == Some(AIProvider::ChatGPT) || tried.contains(&AIProvider::ChatGPT) {
+        return None;
+    }
     let provider = provider_fallback_plan(preference, availability)
         .into_iter()
         .find(|provider| !tried.contains(provider))?;
@@ -202,7 +209,7 @@ pub fn next_auto_route(
     tried: &[AIProvider],
     availability: ProviderAvailability,
 ) -> Option<AIProvider> {
-    if preference != AIProviderPreference::Auto {
+    if preference != AIProviderPreference::Auto || tried.contains(&AIProvider::ChatGPT) {
         return None;
     }
     provider_fallback_plan(preference, availability)
@@ -219,6 +226,8 @@ mod tests {
         phi: true,
         foundry: true,
         ollama: true,
+        chatgpt: true,
+        chatgpt_connected: false,
         custom: true,
         codex: true,
         claude: true,
@@ -228,11 +237,12 @@ mod tests {
         deepseek: true,
     };
 
-    const EXPLICIT_PAIRS: [(AIProviderPreference, AIProvider); 11] = [
+    const EXPLICIT_PAIRS: [(AIProviderPreference, AIProvider); 12] = [
         (AIProviderPreference::AionInstruct, AIProvider::AionInstruct),
         (AIProviderPreference::PhiSilica, AIProvider::PhiSilica),
         (AIProviderPreference::FoundryLocal, AIProvider::FoundryLocal),
         (AIProviderPreference::Ollama, AIProvider::Ollama),
+        (AIProviderPreference::ChatGPT, AIProvider::ChatGPT),
         (AIProviderPreference::CustomOpenAI, AIProvider::CustomOpenAI),
         (AIProviderPreference::CodexCli, AIProvider::CodexCli),
         (AIProviderPreference::ClaudeCode, AIProvider::ClaudeCode),
@@ -250,6 +260,7 @@ mod tests {
             AIProvider::PhiSilica => availability.phi = true,
             AIProvider::FoundryLocal => availability.foundry = true,
             AIProvider::Ollama => availability.ollama = true,
+            AIProvider::ChatGPT => availability.chatgpt = true,
             AIProvider::CustomOpenAI => availability.custom = true,
             AIProvider::CodexCli => availability.codex = true,
             AIProvider::ClaudeCode => availability.claude = true,
@@ -382,7 +393,7 @@ mod tests {
 
         assert!(crosses_local_to_cloud(
             AIProvider::Ollama,
-            AIProvider::CustomOpenAI
+            AIProvider::ChatGPT
         ));
         assert!(!crosses_local_to_cloud(
             AIProvider::AionInstruct,
@@ -420,8 +431,8 @@ mod tests {
             &tried_local,
             ALL_AVAILABLE,
         )
-        .expect("custom provider is the first cloud candidate");
-        assert_eq!(crossing.provider, AIProvider::CustomOpenAI);
+        .expect("ChatGPT is the first cloud candidate");
+        assert_eq!(crossing.provider, AIProvider::ChatGPT);
         assert_eq!(crossing.trust_zone, ProviderTrustZone::Cloud);
         assert!(crossing.crosses_local_to_cloud);
 
@@ -444,11 +455,55 @@ mod tests {
                 AIProvider::Ollama,
                 AIProvider::CustomOpenAI,
             ],
-            ALL_AVAILABLE,
+            ProviderAvailability {
+                chatgpt: false,
+                ..ALL_AVAILABLE
+            },
         )
         .expect("Codex is next");
         assert_eq!(within_cloud.provider, AIProvider::CodexCli);
         assert!(!within_cloud.crosses_local_to_cloud);
+    }
+
+    #[test]
+    fn connected_chatgpt_is_a_persistent_cloud_barrier_but_local_and_explicit_routes_work() {
+        let blocked = ProviderAvailability {
+            chatgpt_connected: true,
+            codex: true,
+            openai: true,
+            custom: true,
+            ..ProviderAvailability::default()
+        };
+        assert_eq!(
+            route_provider(AIProviderPreference::Auto, blocked),
+            AIProvider::ChatGPT
+        );
+        assert_eq!(
+            route_provider(AIProviderPreference::OpenAI, blocked),
+            AIProvider::OpenAI
+        );
+        assert_eq!(
+            route_provider(
+                AIProviderPreference::Auto,
+                ProviderAvailability {
+                    ollama: true,
+                    ..blocked
+                }
+            ),
+            AIProvider::Ollama
+        );
+        assert!(
+            next_auto_route(AIProviderPreference::Auto, &[AIProvider::ChatGPT], blocked).is_none()
+        );
+        assert!(
+            next_fallback_candidate(
+                AIProviderPreference::Auto,
+                Some(AIProvider::ChatGPT),
+                &[],
+                blocked
+            )
+            .is_none()
+        );
     }
 
     #[test]

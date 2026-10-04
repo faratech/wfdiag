@@ -175,7 +175,7 @@ pub(crate) fn build_messages_body(
                             requested_model,
                             content_blocks,
                         } if requested_model == model => Some(content_blocks.clone()),
-                        ProviderReplay::Anthropic { .. } => None,
+                        ProviderReplay::Anthropic { .. } | ProviderReplay::ChatGPT { .. } => None,
                     });
                 if let Some(content_blocks) = replay {
                     wire_messages.push(json!({
@@ -903,7 +903,10 @@ mod tests {
         let ProviderReplay::Anthropic {
             requested_model,
             content_blocks,
-        } = turn.provider_replay.unwrap();
+        } = turn.provider_replay.unwrap()
+        else {
+            panic!("expected Anthropic replay")
+        };
         assert_eq!(requested_model, "claude-opus-5");
         assert_eq!(content_blocks[0]["signature"], "sig");
         assert_eq!(content_blocks[1]["data"], "opaque");
@@ -987,7 +990,9 @@ mod tests {
         let turn = stream.finish("claude-opus-5").unwrap();
         assert_eq!(turn.text, "Checking.");
         assert_eq!(turn.tool_calls[0].arguments["task_id"], "os_info");
-        let ProviderReplay::Anthropic { content_blocks, .. } = turn.provider_replay.unwrap();
+        let ProviderReplay::Anthropic { content_blocks, .. } = turn.provider_replay.unwrap() else {
+            panic!("expected Anthropic replay")
+        };
         assert_eq!(content_blocks[0]["signature"], "sig-1");
         assert_eq!(content_blocks[1]["data"], "opaque");
         assert_eq!(content_blocks[2]["text"], "Checking.");

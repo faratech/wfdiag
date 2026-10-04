@@ -250,6 +250,7 @@ struct AnalysisConfigSource {
     foundry: Arc<dyn FoundryEndpointSource>,
     ollama: Arc<dyn OllamaSource>,
     subscription: Arc<dyn SubscriptionCliStatusSource>,
+    chatgpt: Arc<wfdiag_native_chatgpt::ChatGptService>,
 }
 
 impl AnalysisConfigSource {
@@ -263,7 +264,15 @@ impl AnalysisConfigSource {
             foundry,
             ollama,
             subscription: Arc::new(ProcessSubscriptionCliStatusSource::new()),
+            chatgpt: Arc::new(wfdiag_native_chatgpt::ChatGptService::new(
+                wfdiag_native_chatgpt::ChatGptPorts::mock(),
+            )),
         }
+    }
+
+    fn with_chatgpt(mut self, service: Arc<wfdiag_native_chatgpt::ChatGptService>) -> Self {
+        self.chatgpt = service;
+        self
     }
 
     fn compat_ports(&self) -> CompatConfigPorts {
@@ -284,6 +293,9 @@ impl AnalysisConfigSource {
 
     async fn resolve(&self, provider: AIProvider) -> Result<ResolvedProviderConfig, String> {
         match provider {
+            AIProvider::ChatGPT => {
+                wfdiag_native_ai_provider::resolve_chatgpt_config(&self.chatgpt).await
+            }
             AIProvider::PhiSilica | AIProvider::AionInstruct => {
                 Ok(ResolvedProviderConfig::default())
             }
@@ -670,6 +682,7 @@ impl WorkerState {
         retryable: bool,
     ) {
         clear_active_request(&self.active, request_id);
+        let retryable = retryable && route.provider != AIProvider::ChatGPT;
         self.emit(AnalysisWorkerEvent::Failed {
             request_id,
             route,
@@ -729,6 +742,30 @@ impl NativeAnalysisRuntime {
         cache: SharedAiCache,
         wake: WakeHandler,
     ) -> std::io::Result<(Self, std_mpsc::Receiver<AnalysisWorkerEvent>)> {
+        Self::start_with_chatgpt(
+            settings,
+            foundry,
+            ollama,
+            cache,
+            wake,
+            Arc::new(wfdiag_native_chatgpt::ChatGptService::new(
+                wfdiag_native_chatgpt::ChatGptPorts::mock(),
+            )),
+        )
+    }
+
+    /// Start workers with the application’s shared `ChatGPT` account session.
+    ///
+    /// # Errors
+    /// Returns an error if the worker thread or runtime cannot start.
+    pub fn start_with_chatgpt(
+        settings: SettingsService,
+        foundry: Arc<dyn FoundryEndpointSource>,
+        ollama: Arc<dyn OllamaSource>,
+        cache: SharedAiCache,
+        wake: WakeHandler,
+        chatgpt: Arc<wfdiag_native_chatgpt::ChatGptService>,
+    ) -> std::io::Result<(Self, std_mpsc::Receiver<AnalysisWorkerEvent>)> {
         let (commands, command_rx) = std_mpsc::channel::<AnalysisCommand>();
         let (events, event_rx) = std_mpsc::channel::<AnalysisWorkerEvent>();
         let active = active_slot();
@@ -738,7 +775,8 @@ impl NativeAnalysisRuntime {
             .name("wfdiag-reactor-analysis".to_string())
             .spawn(move || {
                 let state = WorkerState {
-                    config: AnalysisConfigSource::new(settings, foundry, ollama),
+                    config: AnalysisConfigSource::new(settings, foundry, ollama)
+                        .with_chatgpt(chatgpt),
                     cache,
                     events,
                     wake,
@@ -873,6 +911,7 @@ fn explicit_provider(preference: AIProviderPreference) -> Option<AIProvider> {
     match preference {
         AIProviderPreference::Auto => None,
         AIProviderPreference::OpenAI => Some(AIProvider::OpenAI),
+        AIProviderPreference::ChatGPT => Some(AIProvider::ChatGPT),
         AIProviderPreference::PhiSilica => Some(AIProvider::PhiSilica),
         AIProviderPreference::AionInstruct => Some(AIProvider::AionInstruct),
         AIProviderPreference::FoundryLocal => Some(AIProvider::FoundryLocal),
@@ -1010,6 +1049,9 @@ async fn one_shot(
     cancel: CancellationToken,
 ) -> Result<String, String> {
     match provider {
+        AIProvider::ChatGPT => {
+            wfdiag_native_ai_chat::providers::chatgpt::one_shot(cfg, SYSTEM_PROMPT, prompt).await
+        }
         AIProvider::None => Err("No AI provider available".to_string()),
         AIProvider::PhiSilica | AIProvider::AionInstruct => {
             wfdiag_native_phi::generate_ondevice_response(
@@ -1152,6 +1194,7 @@ mod tests {
     fn cache_identity_matches_shipping_shape_and_changes_with_grounding() {
         let request = generation();
         let cfg = ResolvedProviderConfig {
+            chatgpt_session: None,
             api_key: Some("never-emit-this-secret".to_string()),
             endpoint: None,
             model: Some("gpt-5-nano".to_string()),

@@ -84,6 +84,13 @@ impl SettingsDialog {
                 env.deterministic_visual,
                 self.provider_setup_index,
                 self.provider_catalogs.get(self.provider_setup_index),
+                crate::dialogs::settings::view::chatgpt_accounts_view(
+                    env.palette,
+                    &self.chatgpt,
+                    self.provider_setup_index == 10,
+                    settings_editable,
+                    vc,
+                ),
                 subscription_state,
                 self.subscription_auth_error.as_deref(),
                 subscription_install_active,

@@ -16,6 +16,7 @@ use wfdiag_native_settings::{AppSettings, ProviderCredentialTransaction, Provide
 /// Everything the Settings dialog renders.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct SettingsDialog {
+    pub(crate) chatgpt: wfdiag_native_chatgpt::AccountSnapshot,
     pub(crate) open: bool,
     pub(crate) draft: AppSettings,
     pub(crate) epoch: u64,
@@ -46,6 +47,7 @@ impl SettingsDialog {
     /// The first frame's dialog, before anything is edited.
     pub(crate) fn new(defaults: AppSettings, open: bool, provider_setup_index: usize) -> Self {
         Self {
+            chatgpt: Default::default(),
             open,
             draft: defaults,
             epoch: u64::from(open),

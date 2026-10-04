@@ -47,6 +47,9 @@ impl WfdiagShell {
             match event {
                 AppEvent::Started { .. } | AppEvent::Terminated => {}
                 AppEvent::Scan(event) => self.apply_scan_event(&event, context),
+                AppEvent::ChatGptAccount(wfdiag_native_chatgpt::AccountEvent::Notice(message)) => {
+                    self.shell.status = message;
+                }
                 AppEvent::Provider(event) => self.apply_provider_event(event),
                 AppEvent::Settings(event) => self.apply_settings_event(event),
                 AppEvent::Export(event) => self.apply_export_event(event, context),
@@ -154,6 +157,10 @@ impl WfdiagShell {
 
             // ---- providers -----------------------------------------------
             if changes.contains(wfdiag_app::SnapshotChanges::PROVIDERS) {
+                self.settings
+                    .chatgpt
+                    .clone_from(&snapshot.provider_setup.chatgpt);
+                self.ai.chatgpt.clone_from(&snapshot.provider_setup.chatgpt);
                 self.ai.provider_status = snapshot.provider_status.clone();
                 self.ai.status_loading = snapshot.provider_loading;
                 self.ai.sign_in_required = snapshot.provider_setup.sign_in_required;

@@ -170,6 +170,8 @@ pub struct ActionsSnapshot {
 /// The provider-setup read model.
 #[derive(Clone, Debug, Default)]
 pub struct ProviderSetupSnapshot {
+    /// Native `ChatGPT` registrations; credentials never enter this read model.
+    pub chatgpt: wfdiag_native_chatgpt::AccountSnapshot,
     /// Model catalogs, keyed by provider wire id.
     pub catalogs: BTreeMap<String, CatalogState>,
     /// Subscription CLI accounts, keyed by provider wire id.

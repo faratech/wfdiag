@@ -42,6 +42,7 @@ pub(crate) fn settings_dialog(
     provider_setup_partial: bool,
     provider_setup_index: usize,
     provider_catalog_state: Option<&ProviderCatalogUiState>,
+    chatgpt_accounts: View,
     subscription_auth_state: Option<&SubscriptionAuthUiState>,
     subscription_auth_runtime_error: Option<&str>,
     subscription_install_active: bool,
@@ -231,6 +232,7 @@ pub(crate) fn settings_dialog(
                                     provider_setup_partial,
                                     provider_setup_index,
                                     provider_catalog_state,
+                                    chatgpt_accounts,
                                     subscription_auth_state,
                                     subscription_auth_runtime_error,
                                     subscription_install_active,
@@ -526,7 +528,7 @@ pub(crate) fn provider_model_catalog_row(
 ) -> View {
     if matches!(
         provider_setup_provider(setup_index),
-        Some(AIProvider::PhiSilica | AIProvider::AionInstruct)
+        Some(AIProvider::PhiSilica | AIProvider::AionInstruct | AIProvider::ChatGPT)
     ) {
         return View::empty();
     }
@@ -656,7 +658,7 @@ pub(crate) fn subscription_auth_row(
     let state = state.cloned().unwrap_or_default();
     let (label, hint) = match provider {
         SubscriptionAuthProvider::Codex => (
-            "ChatGPT account",
+            "Codex CLI account",
             "Uses the Codex CLI login; this app never stores an OpenAI token",
         ),
         SubscriptionAuthProvider::ClaudeCode => (
@@ -859,6 +861,7 @@ pub(crate) fn provider_setup_fields(
         )
     };
     match provider_setup_index {
+        10 => View::empty(),
         0 => text_row(
             "Phi Silica LAF token",
             "Legacy Phi Silica only. Aion Preview needs no token, but requires the Store version, a Snapdragon ARM64 PC and Microsoft’s preview/QNN packages. First use can take several minutes.",
@@ -1096,6 +1099,7 @@ pub(crate) fn settings_content(
     provider_setup_partial: bool,
     provider_setup_index: usize,
     provider_catalog_state: Option<&ProviderCatalogUiState>,
+    chatgpt_accounts: View,
     subscription_auth_state: Option<&SubscriptionAuthUiState>,
     subscription_auth_runtime_error: Option<&str>,
     subscription_install_active: bool,
@@ -1296,7 +1300,7 @@ pub(crate) fn settings_content(
                         .on_selection_changed(provider_setup_changed),
                     100.0,
                 ),
-                provider_setup_fields(
+                StackPanel::new().children((chatgpt_accounts, provider_setup_fields(
                     palette,
                     settings,
                     provider_setup_index,
@@ -1310,7 +1314,7 @@ pub(crate) fn settings_content(
                     key_draft_changed,
                     key_store,
                     key_clear,
-                ),
+                ))),
                 subscription_auth_row(
                     palette,
                     provider_setup_index,
@@ -1830,6 +1834,167 @@ pub(crate) fn settings_check_row(
                         .content(checkbox),
                 )),
         )
+}
+
+/// The account engine exposes labels and model slugs only; credentials stay in DPAPI.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn chatgpt_accounts_view(
+    palette: Palette,
+    snapshot: &wfdiag_native_chatgpt::AccountSnapshot,
+    visible: bool,
+    editable: bool,
+    vc: &mut ViewContext<crate::app::WfdiagShell>,
+) -> View {
+    use crate::app::message::Message;
+    use crate::dialogs::settings::msg::SettingsMsg;
+    use wfdiag_native_chatgpt::{AccountCommand, AccountState};
+    if !visible {
+        return View::empty();
+    }
+    let enabled = editable && !snapshot.busy;
+    let selected = snapshot.selected();
+    let account_ids: Vec<_> = snapshot.accounts.iter().map(|a| a.id.clone()).collect();
+    let account_labels: Vec<_> = snapshot.accounts.iter().map(|a| a.label.clone()).collect();
+    let active = snapshot
+        .accounts
+        .iter()
+        .position(|a| Some(&a.id) == snapshot.active.as_ref());
+    let reconnect = selected.map(|a| a.id.clone());
+    let consent = selected.is_some_and(|a| a.state == AccountState::ConsentRequired);
+    let signout = reconnect.clone().unwrap_or_default();
+    let model_labels: Vec<_> = selected.map_or_else(Vec::new, |a| {
+        a.models.iter().map(|m| m.display_name.clone()).collect()
+    });
+    let model_ids: Vec<_> = selected.map_or_else(Vec::new, |a| {
+        a.models.iter().map(|m| m.slug.clone()).collect()
+    });
+    let model_index = selected.and_then(|a| {
+        a.models
+            .iter()
+            .position(|m| Some(&m.slug) == a.model.as_ref())
+    });
+    let status = selected.map_or("Continue with ChatGPT to connect your plan.", |a| {
+        match a.state {
+            AccountState::Ready => "Using ChatGPT plan",
+            AccountState::ConsentRequired => "Connected. Enable plan usage to use AI features.",
+            AccountState::SignedOut | AccountState::ReconnectRequired => {
+                "Reconnect this ChatGPT account."
+            }
+            AccountState::Paused => {
+                "ChatGPT usage is paused. Manage usage, then reconnect when available."
+            }
+            AccountState::Restricted => "ChatGPT access is restricted. Check your plan permission.",
+            AccountState::Unavailable => "ChatGPT is temporarily unavailable. Try again later.",
+        }
+    });
+    let detail = snapshot.error.clone().or_else(|| {
+        selected
+            .and_then(|a| a.failure.as_ref())
+            .map(ToString::to_string)
+    });
+    let button = |label: &str, enabled: bool, callback: Callback<()>| {
+        Button::new()
+            .is_enabled(enabled)
+            .on_click(callback)
+            .content(label)
+    };
+    let welcome: View = if snapshot.welcome {
+        StackPanel::new().spacing(8.0).children((
+            TextBlock::new().text("ChatGPT is connected. AI requests share your ChatGPT plan allowance and send your question and selected diagnostic context to OpenAI. You can manage usage or disconnect here. Your preferred provider stays the same.").text_wrapping(TextWrapping::Wrap).foreground(palette.muted),
+            button("Got it", enabled, vc.callback(|()| Message::Settings(SettingsMsg::ChatGpt(AccountCommand::DismissWelcome)))),
+        ))
+    } else {
+        View::empty()
+    };
+    StackPanel::new()
+        .spacing(10.0)
+        .automation_name("ChatGPT plan account")
+        .children((
+            TextBlock::new()
+                .text(status)
+                .text_wrapping(TextWrapping::Wrap),
+            welcome,
+            ComboBox::new()
+                .items_source(account_labels)
+                .selected_index(active)
+                .is_enabled(enabled && !account_ids.is_empty())
+                .automation_name("ChatGPT account")
+                .on_selection_changed(vc.callback(move |index: Option<usize>| {
+                    Message::Settings(SettingsMsg::ChatGpt(
+                        index
+                            .and_then(|i| account_ids.get(i).cloned())
+                            .map_or(AccountCommand::Refresh, AccountCommand::SelectAccount),
+                    ))
+                })),
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(8.0)
+                .children((
+                    button(
+                        if consent {
+                            "Enable ChatGPT plan usage"
+                        } else if selected.is_some() {
+                            "Reconnect"
+                        } else {
+                            "Continue with ChatGPT"
+                        },
+                        enabled,
+                        vc.callback(move |()| {
+                            Message::Settings(SettingsMsg::ChatGpt(AccountCommand::Connect {
+                                account: reconnect.clone(),
+                                consent,
+                            }))
+                        }),
+                    ),
+                    button(
+                        "Add account",
+                        enabled,
+                        vc.callback(|()| {
+                            Message::Settings(SettingsMsg::ChatGpt(AccountCommand::Connect {
+                                account: None,
+                                consent: false,
+                            }))
+                        }),
+                    ),
+                    button(
+                        "Sign out",
+                        enabled && selected.is_some(),
+                        vc.callback(move |()| {
+                            Message::Settings(SettingsMsg::ChatGpt(AccountCommand::SignOut(
+                                signout.clone(),
+                            )))
+                        }),
+                    ),
+                    button(
+                        "Cancel",
+                        snapshot.busy,
+                        vc.callback(|()| {
+                            Message::Settings(SettingsMsg::ChatGpt(AccountCommand::Cancel))
+                        }),
+                    ),
+                )),
+            ComboBox::new()
+                .items_source(model_labels)
+                .selected_index(model_index)
+                .is_enabled(enabled && !model_ids.is_empty())
+                .automation_name("ChatGPT model")
+                .on_selection_changed(vc.callback(move |index: Option<usize>| {
+                    Message::Settings(SettingsMsg::ChatGpt(
+                        index
+                            .and_then(|i| model_ids.get(i).cloned())
+                            .map_or(AccountCommand::Refresh, AccountCommand::SelectModel),
+                    ))
+                })),
+            button(
+                "Manage usage in ChatGPT",
+                true,
+                vc.callback(|()| Message::Settings(SettingsMsg::ChatGptUsage)),
+            ),
+            TextBlock::new()
+                .text(detail.unwrap_or_default())
+                .text_wrapping(TextWrapping::Wrap)
+                .foreground(palette.muted),
+        ))
 }
 
 #[cfg(test)]

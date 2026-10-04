@@ -274,6 +274,8 @@ pub fn windows_ports(
 /// `None` keeps the shipping default.
 #[derive(Clone, Default)]
 pub struct WindowsPortOverrides {
+    /// Shared native `ChatGPT` account manager and browser port.
+    pub chatgpt: Option<Arc<wfdiag_native_chatgpt::ChatGptService>>,
     /// Where the settings document lives.
     pub settings_storage: Option<Arc<dyn wfdiag_native_settings::SettingsStorage>>,
     /// The admission policy applied before a settings document is saved.
@@ -289,6 +291,7 @@ impl std::fmt::Debug for WindowsPortOverrides {
             .field("settings_storage", &self.settings_storage.is_some())
             .field("settings_validator", &self.settings_validator.is_some())
             .field("update_throttle", &self.update_throttle.is_some())
+            .field("chatgpt", &self.chatgpt.is_some())
             .finish()
     }
 }
@@ -316,7 +319,7 @@ pub fn windows_ports_with(
         .unwrap_or_else(|| Arc::new(AllowAllSettings));
     // The AI resolvers read live settings and DPAPI keys per request, so they
     // are built from the same storages the service's own settings service uses.
-    let ai = AiPorts::shipping(
+    let ai = AiPorts::shipping_with_chatgpt(
         SettingsService::new(
             Arc::clone(&settings_storage),
             Arc::clone(&credentials),
@@ -325,6 +328,13 @@ pub fn windows_ports_with(
         Arc::new(FoundryCliEndpointSource::new()),
         Arc::new(ReqwestOllamaSource),
         SharedAiCache::new(32),
+        overrides.chatgpt.unwrap_or_else(|| {
+            Arc::new(wfdiag_native_chatgpt::ChatGptService::new(
+                wfdiag_native_chatgpt::ChatGptPorts::shipping(Arc::new(
+                    wfdiag_native_chatgpt::UnavailableBrowser,
+                )),
+            ))
+        }),
     );
     AppPorts {
         diagnostics: Arc::new(wfdiag_native_diagnostics::NativeDiagnosticExecutor),

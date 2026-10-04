@@ -47,6 +47,7 @@ with `[lints] workspace = true`, release/dev profiles at the root, one `Cargo.lo
 | `wfdiag-native-system` | host identity, Windows version, elevation, CPU architecture/emulation | yes |
 | `wfdiag-native-update` | GitHub-release update policy + `UpdateOutcome` | yes |
 | `wfdiag-native-ai-provider` | provider enum/wire names, `capabilities()`, `route_provider()`, model catalogs, local probes, `SettingsProviderKeySource` | yes |
+| `wfdiag-native-chatgpt` | native browser OAuth/PKCE, protected account registrations, serialized rotating renewal, account-specific model catalogs | yes |
 | `wfdiag-native-ai-chat` | chat state, bounded tool loop, `providers/` transports, `src/grounding.rs` (the single sanitizer), `runtime`, `tools`, `workers/` | yes |
 | `wfdiag-native-ai-report` | one-click scan report: `src/evidence.rs` assembly + `src/runtime.rs` | yes |
 | `wfdiag-native-ai-analysis` | per-task analysis, issue prioritization, fix-plan workers, prompts/budgets | yes |
@@ -333,6 +334,7 @@ transports live in `crates/wfdiag-native-ai-chat/src/providers/` (plus the share
 | `foundry_local` | local server | none | no | yes | 12,000 |
 | `ollama` | local server | none | yes | yes | 12,000 |
 | `custom_openai` | any `/v1/chat/completions` server | optional key | yes | yes | 24,000 |
+| `chatgpt` | cloud via public Responses API | native browser sign-in; current-user DPAPI | yes | yes | 48,000 |
 | `codex_cli` | cloud via installed Codex CLI | CLI-owned sign-in | no | no | 24,000 |
 | `claude_code` | cloud via installed Claude Code CLI | CLI-owned sign-in | no | yes | 24,000 |
 | `openai` | cloud | API key | yes | yes | 48,000 |
@@ -341,7 +343,7 @@ transports live in `crates/wfdiag-native-ai-chat/src/providers/` (plus the share
 | `deepseek` | cloud (OpenAI-compatible) | API key | yes | yes | 48,000 |
 
 Auto routing is local-first — `AUTO_FALLBACK_ORDER` in `crates/wfdiag-native-ai-provider/src/fallback.rs`:
-Phi → Foundry → Ollama → custom → Codex CLI → Claude Code → OpenAI → Anthropic → Gemini →
+Aion → Phi → Foundry → Ollama → ChatGPT → custom → Codex CLI → Claude Code → OpenAI → Anthropic → Gemini →
 DeepSeek. The pure decision is `route_provider(preference, ProviderAvailability)`; probing
 stays lazy. **An explicit (non-Auto) preference never falls back.** Auto clean-failure
 retries honour the persisted Ask/Allow/Never cloud-consent policy and disclose the
@@ -367,6 +369,7 @@ Gotchas encoded in the clients — do not relearn these:
   Never hardcode it.
 * **Ollama** has no default model: the `ollamaModel` setting, else the first entry from
   `/api/tags`, else an error telling the user to pull one.
+* **Native ChatGPT** (`wfdiag-native-chatgpt`, `providers/chatgpt.rs`): a distinct OAuth provider, never a reader of vendor CLI caches. A shared session reaches all AI workflows. Only completed streamed Responses may cache or execute tools; original continuation items are private. Account/model changes invalidate conversation, derived projections and caches. Connected ChatGPT failures stop Auto at that cloud billing boundary across turns/restarts. See [`docs/CHATGPT_PLAN.md`](docs/CHATGPT_PLAN.md).
 * **Subscription CLI bridges** (`crates/wfdiag-native-ai-chat/src/cli_bridge.rs`,
   `providers/{codex,claude_cli,acp_bridge}.rs`): we implement NO OAuth and store NO tokens —
   the installed CLI owns sign-in and usage bills to the user's plan. Never extract

@@ -365,6 +365,8 @@ pub trait SubscriptionPort: Send + Sync {
 /// Every AI-domain seam, in one bundle.
 #[derive(Clone)]
 pub struct AiPorts {
+    /// Shared native `ChatGPT` account and session owner.
+    pub chatgpt: Arc<wfdiag_native_chatgpt::ChatGptService>,
     /// Resolves each chat turn's transport.
     pub chat_resolver: Arc<dyn ChatResolverPort>,
     /// Builds each report generation's resolver.
@@ -402,8 +404,33 @@ impl AiPorts {
         ollama: Arc<dyn OllamaSource>,
         cache: SharedAiCache,
     ) -> Self {
-        let source = Arc::new(ProviderConfigSource::new(settings, foundry, ollama));
+        Self::shipping_with_chatgpt(
+            settings,
+            foundry,
+            ollama,
+            cache,
+            Arc::new(wfdiag_native_chatgpt::ChatGptService::new(
+                wfdiag_native_chatgpt::ChatGptPorts::shipping(Arc::new(
+                    wfdiag_native_chatgpt::UnavailableBrowser,
+                )),
+            )),
+        )
+    }
+
+    /// Compose every shipping AI worker with the same renewable `ChatGPT` session.
+    #[must_use]
+    pub fn shipping_with_chatgpt(
+        settings: SettingsService,
+        foundry: Arc<dyn FoundryEndpointSource>,
+        ollama: Arc<dyn OllamaSource>,
+        cache: SharedAiCache,
+        chatgpt: Arc<wfdiag_native_chatgpt::ChatGptService>,
+    ) -> Self {
+        let mut source = ProviderConfigSource::new(settings, foundry, ollama);
+        source.chatgpt = Arc::clone(&chatgpt);
+        let source = Arc::new(source);
         Self {
+            chatgpt,
             chat_resolver: Arc::new(ShippingChatResolver {
                 source: Arc::clone(&source),
             }),
@@ -435,6 +462,7 @@ pub(crate) struct ProviderConfigSource {
     foundry: Arc<dyn FoundryEndpointSource>,
     ollama: Arc<dyn OllamaSource>,
     subscription: Arc<dyn SubscriptionCliStatusSource>,
+    chatgpt: Arc<wfdiag_native_chatgpt::ChatGptService>,
 }
 
 impl ProviderConfigSource {
@@ -448,6 +476,9 @@ impl ProviderConfigSource {
             foundry,
             ollama,
             subscription: Arc::new(ProcessSubscriptionCliStatusSource::new()),
+            chatgpt: Arc::new(wfdiag_native_chatgpt::ChatGptService::new(
+                wfdiag_native_chatgpt::ChatGptPorts::mock(),
+            )),
         }
     }
 
@@ -472,6 +503,9 @@ impl ProviderConfigSource {
             return Err("No AI provider is available".to_string());
         }
         let cfg = match provider {
+            AIProvider::ChatGPT => {
+                wfdiag_native_ai_provider::resolve_chatgpt_config(&self.chatgpt).await?
+            }
             AIProvider::CodexCli | AIProvider::ClaudeCode => {
                 resolve_subscription_config(provider, &self.subscription_ports()).await?
             }
@@ -624,12 +658,13 @@ impl AnalysisPort for ShippingAnalysis {
         cache: SharedAiCache,
         wake: AiWake,
     ) -> Result<AnalysisSession, String> {
-        NativeAnalysisRuntime::start(
+        NativeAnalysisRuntime::start_with_chatgpt(
             settings,
             Arc::clone(&self.source.foundry),
             Arc::clone(&self.source.ollama),
             cache,
             wake,
+            Arc::clone(&self.source.chatgpt),
         )
         .map(|(runtime, events)| AnalysisSession {
             handle: Box::new(NativeAnalysisHandle(runtime)),
@@ -657,11 +692,12 @@ impl FixPlanHandle for NativeFixPlanHandle {
 
 impl FixPlanPort for ShippingFixPlan {
     fn start(&self, settings: SettingsService, wake: AiWake) -> Result<FixPlanSession, String> {
-        NativeFixPlanRuntime::start(
+        NativeFixPlanRuntime::start_with_chatgpt(
             settings,
             Arc::clone(&self.source.foundry),
             Arc::clone(&self.source.ollama),
             wake,
+            Arc::clone(&self.source.chatgpt),
         )
         .map(|(runtime, events)| FixPlanSession {
             handle: Box::new(NativeFixPlanHandle(runtime)),
@@ -750,10 +786,11 @@ impl ModelCatalogPort for ShippingModelCatalog {
         settings: SettingsService,
         wake: AiWake,
     ) -> Result<ModelCatalogSession, String> {
-        ProviderSetupRuntime::start(
+        ProviderSetupRuntime::start_with_chatgpt(
             settings,
             Arc::clone(&self.source.foundry),
             Arc::clone(&self.source.ollama),
+            Arc::clone(&self.source.chatgpt),
             wake,
         )
         .map(|(runtime, events)| ModelCatalogSession {

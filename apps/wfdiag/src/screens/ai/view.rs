@@ -89,6 +89,7 @@ pub(crate) fn ai_provider_pill_content(
         AIProvider::PhiSilica => ("Phi Silica", "·  On device", false),
         AIProvider::FoundryLocal => ("Foundry Local", "·  Local server", false),
         AIProvider::Ollama => ("Ollama", "·  Local server", false),
+        AIProvider::ChatGPT => ("Using ChatGPT plan", "·  Subscription cloud", true),
         AIProvider::CustomOpenAI => ("Custom endpoint", "·  API cloud", true),
         AIProvider::CodexCli => ("ChatGPT via Codex", "·  Subscription cloud", true),
         AIProvider::ClaudeCode => ("Claude Code", "·  Subscription cloud", true),
@@ -118,6 +119,27 @@ impl AiScreen {
     /// Paint the page from the screen's own state plus the chrome's env.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn view(&self, env: &ShellEnv<'_>, vc: &mut ViewContext<WfdiagShell>) -> View {
+        let chatgpt_controls = if env.deterministic_visual {
+            View::empty()
+        } else {
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(8.0)
+                .children((
+                    Button::new()
+                        .height(32.0)
+                        .on_click(vc.message(Message::Settings(SettingsMsg::OpenChatGpt)))
+                        .content(if self.chatgpt.connected() {
+                            "ChatGPT account"
+                        } else {
+                            "Continue with ChatGPT"
+                        }),
+                    Button::new()
+                        .height(32.0)
+                        .on_click(vc.message(Message::Settings(SettingsMsg::ChatGptUsage)))
+                        .content("Manage usage"),
+                ))
+        };
         ai_page(
             &env.settings.preferred_ai_provider,
             env.palette,
@@ -180,6 +202,7 @@ impl AiScreen {
             ),
             vc.callback(|action| Message::Ai(AiMsg::SignInBannerAction(action))),
             vc.message(Message::Ai(AiMsg::DismissSignInBanner)),
+            chatgpt_controls,
         )
     }
 }
@@ -236,6 +259,7 @@ pub(crate) fn ai_page(
     sign_in_banner: Option<SignInBanner>,
     sign_in_banner_action: Callback<SignInBannerAction>,
     dismiss_sign_in_banner: Callback<()>,
+    chatgpt_controls: View,
 ) -> View {
     // #32: the one-time connect offer, derived from the probed rows. It only
     // applies to an enabled profile that has not dismissed it before.
@@ -506,7 +530,7 @@ pub(crate) fn ai_page(
     };
 
     StackPanel::new().spacing(16.0).children((
-        page_header(palette, Page::Ai, View::empty()),
+        page_header(palette, Page::Ai, chatgpt_controls),
         banner,
         mode_bar,
         workspace,

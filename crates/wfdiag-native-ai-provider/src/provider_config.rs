@@ -9,10 +9,27 @@ use crate::AIProvider;
 /// DPAPI/keyring, endpoint and model from settings (with provider defaults).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ResolvedProviderConfig {
+    pub chatgpt_session: Option<wfdiag_native_chatgpt::SessionBinding>,
     pub api_key: Option<String>,
     /// Base URL for local/custom providers (no `/v1` suffix)
     pub endpoint: Option<String>,
     pub model: Option<String>,
+}
+
+pub async fn resolve_chatgpt_config(
+    service: &std::sync::Arc<wfdiag_native_chatgpt::ChatGptService>,
+) -> Result<ResolvedProviderConfig, String> {
+    let lease = service
+        .lease(&tokio_util::sync::CancellationToken::new())
+        .await?;
+    Ok(ResolvedProviderConfig {
+        model: Some(lease.model.clone()),
+        chatgpt_session: Some(wfdiag_native_chatgpt::SessionBinding {
+            service: std::sync::Arc::clone(service),
+            lease,
+        }),
+        ..ResolvedProviderConfig::default()
+    })
 }
 
 impl std::fmt::Debug for ResolvedProviderConfig {
@@ -25,7 +42,7 @@ impl std::fmt::Debug for ResolvedProviderConfig {
             .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
             .field("endpoint", &self.endpoint)
             .field("model", &self.model)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

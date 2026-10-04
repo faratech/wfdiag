@@ -75,6 +75,7 @@ pub(crate) fn configured_provider_setup_index(settings: &AppSettings) -> usize {
         let provider = match explicit {
             AIProviderPreference::Auto => AIProvider::None,
             AIProviderPreference::OpenAI => AIProvider::OpenAI,
+            AIProviderPreference::ChatGPT => AIProvider::ChatGPT,
             AIProviderPreference::AionInstruct => AIProvider::AionInstruct,
             AIProviderPreference::PhiSilica => AIProvider::PhiSilica,
             AIProviderPreference::FoundryLocal => AIProvider::FoundryLocal,
@@ -720,8 +721,9 @@ pub(crate) fn subscription_provider_from_wire(wire: &str) -> Option<Subscription
 /// The ids are the ones [`AIProvider`]'s `Display` writes, which is what the
 /// settings document and every engine event carry.
 pub(crate) fn provider_from_wire(wire: &str) -> AIProvider {
-    const PROVIDERS: [AIProvider; 11] = [
+    const PROVIDERS: [AIProvider; 12] = [
         AIProvider::OpenAI,
+        AIProvider::ChatGPT,
         AIProvider::AionInstruct,
         AIProvider::PhiSilica,
         AIProvider::FoundryLocal,
@@ -763,6 +765,7 @@ pub(crate) fn reactor_provider_backend(
     settings: &SettingsService,
     identity: &Arc<dyn PackageIdentitySource>,
     cache: SharedAiCache,
+    chatgpt: Arc<wfdiag_native_chatgpt::ChatGptService>,
 ) -> Arc<dyn ProviderManagementBackend> {
     // Seed the selection from the persisted setting: without this, the first
     // status refresh after a relaunch projected the Auto route as
@@ -781,18 +784,21 @@ pub(crate) fn reactor_provider_backend(
         Arc::new(FoundryCliEndpointSource::new()),
         Arc::new(ProcessSubscriptionCliStatusSource::new()),
     );
-    Arc::new(ProviderManagementService::new(
-        probes,
-        selection,
-        Arc::new(cache),
-        ProviderModelDefaults {
-            foundry: "phi-4-mini".to_string(),
-            openai: "gpt-5-nano".to_string(),
-            anthropic: "claude-sonnet-5".to_string(),
-            gemini: "gemini-3.6-flash".to_string(),
-            deepseek: "deepseek-v4-flash".to_string(),
-        },
-    ))
+    Arc::new(
+        ProviderManagementService::new(
+            probes,
+            selection,
+            Arc::new(cache),
+            ProviderModelDefaults {
+                foundry: "phi-4-mini".to_string(),
+                openai: "gpt-5-nano".to_string(),
+                anthropic: "claude-sonnet-5".to_string(),
+                gemini: "gemini-3.6-flash".to_string(),
+                deepseek: "deepseek-v4-flash".to_string(),
+            },
+        )
+        .with_chatgpt(chatgpt),
+    )
 }
 
 /// The settings store the engine should use, when it is not the shipping one.
@@ -977,6 +983,7 @@ pub(crate) fn provider_display_name(provider: AIProvider) -> &'static str {
         AIProvider::PhiSilica => "Phi Silica",
         AIProvider::FoundryLocal => "Foundry Local",
         AIProvider::Ollama => "Ollama",
+        AIProvider::ChatGPT => "ChatGPT plan",
         AIProvider::CustomOpenAI => "Custom endpoint",
         AIProvider::CodexCli => "Codex CLI",
         AIProvider::ClaudeCode => "Claude Code",

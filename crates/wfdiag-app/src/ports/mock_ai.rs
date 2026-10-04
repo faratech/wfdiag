@@ -1552,6 +1552,9 @@ impl MockAiPorts {
     #[must_use]
     pub fn to_ports(&self) -> AiPorts {
         AiPorts {
+            chatgpt: Arc::new(wfdiag_native_chatgpt::ChatGptService::new(
+                wfdiag_native_chatgpt::ChatGptPorts::mock(),
+            )),
             chat_resolver: Arc::new(self.chat.clone()),
             report_resolvers: Arc::new(self.report.clone()),
             analysis: Arc::new(self.analysis.clone()),

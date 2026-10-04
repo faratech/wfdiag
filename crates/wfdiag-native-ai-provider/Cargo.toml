@@ -8,6 +8,8 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+wfdiag-native-chatgpt.workspace = true
+tokio-util.workspace = true
 reqwest = { workspace = true, features = ["json", "native-tls", "query"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

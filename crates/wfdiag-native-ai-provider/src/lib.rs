@@ -72,7 +72,7 @@ pub use network::{
     parse_ollama_capabilities, parse_ollama_tags, probe_http_endpoint, probe_http_endpoint_async,
     resolve_ollama_model,
 };
-pub use provider_config::ResolvedProviderConfig;
+pub use provider_config::{ResolvedProviderConfig, resolve_chatgpt_config};
 pub use subscription_spec::{
     CLAUDE_CODE_SPEC, CODEX_CLI_SPEC, StatusVerdict, SubscriptionCliSpec, parse_status_output,
     subscription_cli_spec,
@@ -87,6 +87,8 @@ pub enum AIProvider {
     #[default]
     #[serde(rename = "none")]
     None,
+    #[serde(rename = "chatgpt")]
+    ChatGPT,
     #[serde(rename = "openai", alias = "open_a_i")]
     OpenAI,
     #[serde(rename = "aion_instruct", alias = "aion")]
@@ -115,6 +117,7 @@ impl fmt::Display for AIProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::None => "none",
+            Self::ChatGPT => "chatgpt",
             Self::OpenAI => "openai",
             Self::AionInstruct => "aion_instruct",
             Self::PhiSilica => "phi_silica",
@@ -136,6 +139,8 @@ pub enum AIProviderPreference {
     #[default]
     #[serde(rename = "auto")]
     Auto,
+    #[serde(rename = "chatgpt")]
+    ChatGPT,
     #[serde(rename = "openai", alias = "open_a_i")]
     OpenAI,
     #[serde(rename = "aion_instruct", alias = "aion")]
@@ -168,6 +173,7 @@ pub const PHI_SILICA_STORE_REQUIRED: &str = "On-device AI requires the Microsoft
 #[must_use]
 pub fn parse_provider_preference(preference: &str) -> AIProviderPreference {
     match preference.trim().to_ascii_lowercase().as_str() {
+        "chatgpt" => AIProviderPreference::ChatGPT,
         "openai" => AIProviderPreference::OpenAI,
         "aion" | "aion_instruct" | "aioninstruct" => AIProviderPreference::AionInstruct,
         "phi_silica" | "phisilica" | "on_device" | "ondevice" | "npu" => {
@@ -264,13 +270,15 @@ pub const fn capabilities(provider: AIProvider) -> ProviderCaps {
             supports_streaming: true,
             context_budget_chars: 24_000,
         },
-        AIProvider::OpenAI | AIProvider::Anthropic | AIProvider::Gemini | AIProvider::DeepSeek => {
-            ProviderCaps {
-                supports_tools: true,
-                supports_streaming: true,
-                context_budget_chars: 48_000,
-            }
-        }
+        AIProvider::ChatGPT
+        | AIProvider::OpenAI
+        | AIProvider::Anthropic
+        | AIProvider::Gemini
+        | AIProvider::DeepSeek => ProviderCaps {
+            supports_tools: true,
+            supports_streaming: true,
+            context_budget_chars: 48_000,
+        },
     }
 }
 
@@ -278,6 +286,9 @@ pub const fn capabilities(provider: AIProvider) -> ProviderCaps {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProviderAvailability {
+    pub chatgpt: bool,
+    /// A connected account stops Auto at its cloud billing boundary, even while paused.
+    pub chatgpt_connected: bool,
     pub aion: bool,
     pub phi: bool,
     pub foundry: bool,
@@ -401,6 +412,11 @@ impl AIProviderStatus {
                 .is_some_and(|info| info.available)
         };
         ProviderAvailability {
+            chatgpt: row_available(AIProvider::ChatGPT),
+            chatgpt_connected: self
+                .providers
+                .iter()
+                .any(|p| p.id == AIProvider::ChatGPT && p.configured),
             aion: row_available(AIProvider::AionInstruct),
             phi: row_available(AIProvider::PhiSilica),
             foundry: row_available(AIProvider::FoundryLocal),
@@ -430,6 +446,9 @@ pub struct CliProbeSnapshot {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderProbeSnapshot {
+    pub chatgpt_ready: bool,
+    pub chatgpt_connected: bool,
+    pub chatgpt_model: Option<String>,
     pub openai_available: bool,
     pub aion_available: bool,
     pub aion_ready: bool,
@@ -529,6 +548,8 @@ pub fn project_provider_status(input: ProviderStatusInput) -> AIProviderStatus {
         defaults,
     } = input;
     let availability = ProviderAvailability {
+        chatgpt: probes.chatgpt_ready,
+        chatgpt_connected: probes.chatgpt_connected,
         aion: probes.aion_ready,
         phi: probes.phi_silica_ready,
         foundry: probes.foundry_endpoint.is_some(),
@@ -593,6 +614,13 @@ pub fn project_provider_status(input: ProviderStatusInput) -> AIProviderStatus {
             true,
             settings.ollama_model,
             probes.ollama_endpoint,
+        ),
+        provider_info(
+            AIProvider::ChatGPT,
+            probes.chatgpt_ready,
+            probes.chatgpt_connected,
+            probes.chatgpt_model,
+            None,
         ),
         provider_info(
             AIProvider::CustomOpenAI,

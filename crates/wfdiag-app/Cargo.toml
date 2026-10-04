@@ -8,6 +8,7 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+wfdiag-native-chatgpt.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
 wfdiag-native-diagnostics = { workspace = true }
 wfdiag-native-export = { workspace = true }

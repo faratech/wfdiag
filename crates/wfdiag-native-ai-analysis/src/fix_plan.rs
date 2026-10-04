@@ -219,6 +219,7 @@ struct FixPlanConfigSource {
     foundry: Arc<dyn FoundryEndpointSource>,
     ollama: Arc<dyn OllamaSource>,
     subscription: Arc<dyn SubscriptionCliStatusSource>,
+    chatgpt: Arc<wfdiag_native_chatgpt::ChatGptService>,
 }
 
 impl FixPlanConfigSource {
@@ -232,7 +233,15 @@ impl FixPlanConfigSource {
             foundry,
             ollama,
             subscription: Arc::new(ProcessSubscriptionCliStatusSource::new()),
+            chatgpt: Arc::new(wfdiag_native_chatgpt::ChatGptService::new(
+                wfdiag_native_chatgpt::ChatGptPorts::mock(),
+            )),
         }
+    }
+
+    fn with_chatgpt(mut self, service: Arc<wfdiag_native_chatgpt::ChatGptService>) -> Self {
+        self.chatgpt = service;
+        self
     }
 
     fn compat_ports(&self) -> CompatConfigPorts {
@@ -253,6 +262,9 @@ impl FixPlanConfigSource {
 
     async fn resolve(&self, provider: AIProvider) -> Result<ResolvedProviderConfig, String> {
         match provider {
+            AIProvider::ChatGPT => {
+                wfdiag_native_ai_provider::resolve_chatgpt_config(&self.chatgpt).await
+            }
             AIProvider::PhiSilica | AIProvider::AionInstruct => {
                 Ok(ResolvedProviderConfig::default())
             }
@@ -388,6 +400,7 @@ impl WorkerState {
         retryable: bool,
     ) {
         clear_active_request(&self.active, request_id);
+        let retryable = retryable && route.provider != AIProvider::ChatGPT;
         self.emit(FixPlanWorkerEvent::Failed {
             request_id,
             route,
@@ -458,6 +471,7 @@ fn explicit_provider(preference: AIProviderPreference) -> Option<AIProvider> {
     match preference {
         AIProviderPreference::Auto => None,
         AIProviderPreference::OpenAI => Some(AIProvider::OpenAI),
+        AIProviderPreference::ChatGPT => Some(AIProvider::ChatGPT),
         AIProviderPreference::PhiSilica => Some(AIProvider::PhiSilica),
         AIProviderPreference::AionInstruct => Some(AIProvider::AionInstruct),
         AIProviderPreference::FoundryLocal => Some(AIProvider::FoundryLocal),
@@ -517,6 +531,9 @@ async fn one_shot(
     cancel: CancellationToken,
 ) -> Result<String, String> {
     match provider {
+        AIProvider::ChatGPT => {
+            wfdiag_native_ai_chat::providers::chatgpt::one_shot(cfg, PLAN_SYSTEM, prompt).await
+        }
         AIProvider::None => Err("No AI provider available".to_string()),
         AIProvider::PhiSilica | AIProvider::AionInstruct => {
             wfdiag_native_phi::generate_ondevice_response(
@@ -587,6 +604,28 @@ impl NativeFixPlanRuntime {
         ollama: Arc<dyn OllamaSource>,
         wake: WakeHandler,
     ) -> std::io::Result<(Self, std_mpsc::Receiver<FixPlanWorkerEvent>)> {
+        Self::start_with_chatgpt(
+            settings,
+            foundry,
+            ollama,
+            wake,
+            Arc::new(wfdiag_native_chatgpt::ChatGptService::new(
+                wfdiag_native_chatgpt::ChatGptPorts::mock(),
+            )),
+        )
+    }
+
+    /// Start workers with the application’s shared `ChatGPT` account session.
+    ///
+    /// # Errors
+    /// Returns an error if the worker thread or runtime cannot start.
+    pub fn start_with_chatgpt(
+        settings: SettingsService,
+        foundry: Arc<dyn FoundryEndpointSource>,
+        ollama: Arc<dyn OllamaSource>,
+        wake: WakeHandler,
+        chatgpt: Arc<wfdiag_native_chatgpt::ChatGptService>,
+    ) -> std::io::Result<(Self, std_mpsc::Receiver<FixPlanWorkerEvent>)> {
         let (commands, command_rx) = std_mpsc::channel::<FixPlanCommand>();
         let (events, event_rx) = std_mpsc::channel::<FixPlanWorkerEvent>();
         let active = active_slot();
@@ -596,7 +635,8 @@ impl NativeFixPlanRuntime {
             .name("wfdiag-reactor-fix-plan".to_string())
             .spawn(move || {
                 let state = WorkerState {
-                    config: FixPlanConfigSource::new(settings, foundry, ollama),
+                    config: FixPlanConfigSource::new(settings, foundry, ollama)
+                        .with_chatgpt(chatgpt),
                     events,
                     wake,
                     active: worker_active,
@@ -686,6 +726,8 @@ mod tests {
             phi: true,
             foundry: true,
             ollama: true,
+            chatgpt: true,
+            chatgpt_connected: false,
             custom: true,
             codex: true,
             claude: true,

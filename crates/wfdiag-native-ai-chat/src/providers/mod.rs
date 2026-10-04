@@ -6,6 +6,7 @@
 //! process bridge, and the prompt-flattening shim through `super::…`; the
 //! re-exports below are what make those paths resolve.
 
+pub mod chatgpt;
 pub mod openai_compat;
 
 pub mod anthropic;

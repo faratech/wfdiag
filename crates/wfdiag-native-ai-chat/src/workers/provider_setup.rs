@@ -73,17 +73,23 @@ struct ProviderSetupPorts {
     foundry: Arc<dyn FoundryEndpointSource>,
     ollama: Arc<dyn OllamaSource>,
     subscriptions: Arc<dyn SubscriptionModelCatalogSource>,
+    chatgpt: Option<Arc<wfdiag_native_chatgpt::ChatGptService>>,
 }
 
 impl ProviderSetupPorts {
     fn service(&self) -> ModelCatalogService {
-        ModelCatalogService::new(
+        let service = ModelCatalogService::new(
             self.settings.load_nonsecret_settings().unwrap_or_default(),
             Arc::new(SettingsProviderKeySource(self.settings.clone())),
             Arc::clone(&self.foundry),
             Arc::clone(&self.ollama),
             Arc::clone(&self.subscriptions),
-        )
+        );
+        if let Some(session) = &self.chatgpt {
+            service.with_chatgpt(Arc::clone(session))
+        } else {
+            service
+        }
     }
 }
 
@@ -166,11 +172,43 @@ impl ProviderSetupRuntime {
         )
     }
 
+    /// Start catalog discovery using the application's shared `ChatGPT` account session.
+    ///
+    /// # Errors
+    /// Returns an error if the worker cannot start.
+    pub fn start_with_chatgpt(
+        settings: SettingsService,
+        foundry: Arc<dyn FoundryEndpointSource>,
+        ollama: Arc<dyn OllamaSource>,
+        chatgpt: Arc<wfdiag_native_chatgpt::ChatGptService>,
+        wake: WorkerWake,
+    ) -> std::io::Result<(Self, mpsc::Receiver<ProviderSetupWorkerEvent>)> {
+        Self::start_internal(
+            settings,
+            foundry,
+            ollama,
+            Arc::new(ProcessSubscriptionModelCatalogSource::new()),
+            Some(chatgpt),
+            wake,
+        )
+    }
+
     fn start_with_subscriptions(
         settings: SettingsService,
         foundry: Arc<dyn FoundryEndpointSource>,
         ollama: Arc<dyn OllamaSource>,
         subscriptions: Arc<dyn SubscriptionModelCatalogSource>,
+        wake: WorkerWake,
+    ) -> std::io::Result<(Self, mpsc::Receiver<ProviderSetupWorkerEvent>)> {
+        Self::start_internal(settings, foundry, ollama, subscriptions, None, wake)
+    }
+
+    fn start_internal(
+        settings: SettingsService,
+        foundry: Arc<dyn FoundryEndpointSource>,
+        ollama: Arc<dyn OllamaSource>,
+        subscriptions: Arc<dyn SubscriptionModelCatalogSource>,
+        chatgpt: Option<Arc<wfdiag_native_chatgpt::ChatGptService>>,
         wake: WorkerWake,
     ) -> std::io::Result<(Self, mpsc::Receiver<ProviderSetupWorkerEvent>)> {
         let (commands, command_rx) = mpsc::channel::<ProviderSetupCommand>();
@@ -187,6 +225,7 @@ impl ProviderSetupRuntime {
                         foundry,
                         ollama,
                         subscriptions,
+                        chatgpt,
                     },
                     events,
                     wake,

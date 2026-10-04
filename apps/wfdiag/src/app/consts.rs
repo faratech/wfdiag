@@ -180,7 +180,7 @@ pub(crate) const WINDOW_HOOK_RETRY_MIN: Duration = Duration::from_millis(100);
 
 pub(crate) const WINDOW_HOOK_RETRY_MAX: Duration = Duration::from_millis(3_200);
 
-pub(crate) const AI_PROVIDER_LABELS: [&str; 12] = [
+pub(crate) const AI_PROVIDER_LABELS: [&str; 13] = [
     "Auto",
     "Aion Instruct (on-device)",
     "Phi Silica (on-device)",
@@ -193,9 +193,10 @@ pub(crate) const AI_PROVIDER_LABELS: [&str; 12] = [
     "Anthropic Claude (cloud)",
     "Google Gemini (cloud)",
     "DeepSeek (cloud)",
+    "ChatGPT plan",
 ];
 
-pub(crate) const AI_PROVIDER_IDS: [&str; 12] = [
+pub(crate) const AI_PROVIDER_IDS: [&str; 13] = [
     "auto",
     "aion_instruct",
     "phi_silica",
@@ -208,11 +209,12 @@ pub(crate) const AI_PROVIDER_IDS: [&str; 12] = [
     "anthropic",
     "gemini",
     "deepseek",
+    "chatgpt",
 ];
 
 pub(crate) const CODEX_MODEL_IDS: [&str; 3] = ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.5"];
 
-pub(crate) const PROVIDER_SETUP_LABELS: [&str; 10] = [
+pub(crate) const PROVIDER_SETUP_LABELS: [&str; 11] = [
     "On-device AI (Aion / Phi Silica)",
     "Foundry Local (local server)",
     "Ollama (local server)",
@@ -223,9 +225,10 @@ pub(crate) const PROVIDER_SETUP_LABELS: [&str; 10] = [
     "Google Gemini",
     "DeepSeek",
     "Custom OpenAI-compatible endpoint",
+    "ChatGPT plan (Continue with ChatGPT)",
 ];
 
-pub(crate) const PROVIDER_SETUP_PROVIDERS: [AIProvider; 10] = [
+pub(crate) const PROVIDER_SETUP_PROVIDERS: [AIProvider; 11] = [
     AIProvider::PhiSilica,
     AIProvider::FoundryLocal,
     AIProvider::Ollama,
@@ -236,4 +239,5 @@ pub(crate) const PROVIDER_SETUP_PROVIDERS: [AIProvider; 10] = [
     AIProvider::Gemini,
     AIProvider::DeepSeek,
     AIProvider::CustomOpenAI,
+    AIProvider::ChatGPT,
 ];

@@ -249,13 +249,13 @@ impl SettingsStorage for ShippingSettingsStorage {
 /// Secret encryption seam. Plaintext crosses it inside [`Zeroizing`] so a
 /// decrypted API key is wiped from the heap as soon as it goes out of scope
 /// instead of lingering in freed memory (#218).
-trait SecretProtector: Send + Sync + 'static {
+pub(crate) trait SecretProtector: Send + Sync + 'static {
     fn protect(&self, plaintext: &str) -> Result<Vec<u8>, SettingsError>;
     fn unprotect(&self, protected: &[u8]) -> Result<Zeroizing<String>, SettingsError>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct DpapiProtector;
+pub(crate) struct DpapiProtector;
 
 #[cfg(windows)]
 impl SecretProtector for DpapiProtector {

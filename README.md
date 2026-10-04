@@ -27,7 +27,8 @@ The UI is a **native WinUI 3 shell** (`apps/wfdiag`, binary `wfdiag.exe`, built 
 
 ### **Optional AI Assistant** 🧠
 - **Local/self-hosted options:** Phi Silica in the Microsoft Store build, Foundry Local, Ollama, and custom OpenAI-compatible servers
-- **Subscription bridges:** Codex CLI and Claude Code CLI use their own installed sign-in; wfdiag does not extract or store subscription tokens
+- **ChatGPT plan:** Native browser sign-in, account-specific models, protected renewable sessions and streaming AI workflows. See [ChatGPT plan setup](docs/CHATGPT_PLAN.md).
+- **Subscription bridges:** Codex CLI and Claude Code CLI use their own installed sign-in; the CLI bridges do not extract or store the CLIs’ subscription tokens
 - **Cloud APIs:** OpenAI, Anthropic, Gemini, and DeepSeek with per-provider keys stored outside `settings.json`
 - **Privacy controls:** WindowsForum network grounding is opt-in, and local-to-cloud fallback follows the saved Ask/Allow/Never policy
 - **Two focused views:** Assistant conversation and Scan Report; provider configuration stays in Settings
@@ -132,7 +133,7 @@ listed below for reference.
 
 ## 🧠 AI Capabilities
 
-Auto routing is local-first: Phi Silica → Foundry Local → Ollama → custom OpenAI-compatible → Codex CLI → Claude Code → OpenAI → Anthropic → Gemini → DeepSeek. An explicit provider selection never silently routes elsewhere. `wfdiag_native_ai_provider::capabilities()` is the authoritative source for provider capabilities and context budgets; the routing decision itself is the pure, unit-tested `route_provider()`.
+Auto routing is local-first: Aion Instruct → Phi Silica → Foundry Local → Ollama → ChatGPT plan → custom OpenAI-compatible → Codex CLI → Claude Code → OpenAI → Anthropic → Gemini → DeepSeek. An explicit provider selection never silently routes elsewhere. `wfdiag_native_ai_provider::capabilities()` is the authoritative source for provider capabilities and context budgets; the routing decision itself is the pure, unit-tested `route_provider()`.
 
 ## 🔄 Version History
 

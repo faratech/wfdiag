@@ -16,6 +16,21 @@ impl WfdiagShell {
         _context: &ComponentContext<Self>,
     ) {
         match message {
+            SettingsMsg::OpenChatGpt => {
+                self.open_settings();
+                self.settings.provider_setup_index = 10;
+            }
+            SettingsMsg::ChatGpt(command) => {
+                let outcome = self.dispatch(wfdiag_app::AppCommand::ChatGptAccount(command));
+                if let Some(reason) = outcome.rejection() {
+                    self.shell.status = crate::app::policy::rejection_text(reason);
+                }
+            }
+            SettingsMsg::ChatGptUsage => {
+                if let Err(error) = crate::platform::external::launch_chatgpt_usage() {
+                    self.shell.status = error;
+                }
+            }
             SettingsMsg::ProviderKeyDraftChanged(index, value) => {
                 if let Some(draft) = self.settings.provider_key_drafts.get_mut(index) {
                     *draft = value;

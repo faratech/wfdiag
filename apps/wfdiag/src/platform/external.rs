@@ -364,6 +364,41 @@ pub fn launch_external_action(
     }
 }
 
+/// Only the account engine can construct an authorization target.
+pub(crate) struct ReactorChatGptBrowser;
+
+impl wfdiag_native_chatgpt::BrowserLauncher for ReactorChatGptBrowser {
+    fn open(&self, target: &wfdiag_native_chatgpt::AuthorizationUrl) -> Result<(), String> {
+        open_chatgpt_browser(target.as_str())
+    }
+}
+
+pub(crate) fn launch_chatgpt_usage() -> Result<(), String> {
+    open_chatgpt_browser(wfdiag_native_chatgpt::USAGE_URL)
+}
+
+fn open_chatgpt_browser(target: &str) -> Result<(), String> {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::PCWSTR;
+    let target: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            PCWSTR(target.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as isize <= 32 {
+        Err("Windows could not open the ChatGPT browser window".into())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

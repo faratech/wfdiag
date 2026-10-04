@@ -65,11 +65,11 @@ use wfdiag_native_ai_chat::{
     ChatWorkerEvent, SubscriptionAuthOperation, SubscriptionAuthProvider, SubscriptionInstallMethod,
 };
 use wfdiag_native_ai_chat::{SubscriptionAuthState, auth_status_from_probe};
-use wfdiag_native_ai_provider::SubscriptionProbes;
 use wfdiag_native_ai_provider::{
     AIProvider, AIProviderPreference, AIProviderStatus, ModelCatalogRequest, next_auto_route,
     parse_provider_preference,
 };
+use wfdiag_native_ai_provider::{ProviderCacheControl, SubscriptionProbes};
 use wfdiag_native_ai_report::{ReportGeneration, ReportScan, ReportWorkerEvent};
 use wfdiag_native_history::ComparisonResult;
 use wfdiag_native_issues::IssueStatus;
@@ -1034,6 +1034,7 @@ impl AppService {
             AIProviderPreference::CodexCli => AIProvider::CodexCli,
             AIProviderPreference::ClaudeCode => AIProvider::ClaudeCode,
             AIProviderPreference::OpenAI => AIProvider::OpenAI,
+            AIProviderPreference::ChatGPT => AIProvider::ChatGPT,
             AIProviderPreference::Anthropic => AIProvider::Anthropic,
             AIProviderPreference::Gemini => AIProvider::Gemini,
             AIProviderPreference::DeepSeek => AIProvider::DeepSeek,
@@ -2396,6 +2397,100 @@ impl AppService {
             self.subscription_install_pending = None;
         }
         DispatchOutcome::accepted()
+    }
+
+    pub(super) fn start_chatgpt_accounts(&mut self) {
+        let wake_queue = Arc::clone(&self.queue);
+        self.ports
+            .ai
+            .chatgpt
+            .set_wake_handler(Arc::new(move || wake_queue.wake()));
+        let _ = self.chatgpt_account(wfdiag_native_chatgpt::AccountCommand::Refresh);
+    }
+    pub(super) fn chatgpt_account(
+        &mut self,
+        command: wfdiag_native_chatgpt::AccountCommand,
+    ) -> DispatchOutcome {
+        use wfdiag_native_chatgpt::AccountCommand;
+        let account_snapshot = &self.snapshot.provider_setup.chatgpt;
+        if matches!(&command, AccountCommand::SelectAccount(id) if account_snapshot.active.as_ref() == Some(id))
+            || matches!(&command, AccountCommand::SelectModel(model) if account_snapshot.selected().and_then(|a| a.model.as_ref()) == Some(model))
+        {
+            return DispatchOutcome::Ignored {
+                detail: "the ChatGPT selection is already active",
+            };
+        }
+        if matches!(command, AccountCommand::Cancel) {
+            if let Some((_, cancel)) = &self.chatgpt_pending {
+                cancel.cancel();
+            }
+            return DispatchOutcome::accepted();
+        }
+        if self.chatgpt_pending.is_some() {
+            return DispatchOutcome::Rejected(RejectReason::Busy {
+                detail: "A ChatGPT account action is already running".into(),
+            });
+        }
+        let Some(request) = self.requests.issue() else {
+            return DispatchOutcome::Rejected(RejectReason::IdentityExhausted);
+        };
+        if matches!(
+            command,
+            AccountCommand::SelectAccount(_)
+                | AccountCommand::SelectModel(_)
+                | AccountCommand::SignOut(_)
+        ) {
+            self.invalidate_chatgpt_context();
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.chatgpt_pending = Some((request, cancel.clone()));
+        let refresh_provider = matches!(
+            command,
+            AccountCommand::Connect { .. }
+                | AccountCommand::SelectAccount(_)
+                | AccountCommand::SelectModel(_)
+                | AccountCommand::SignOut(_)
+        );
+        let service = Arc::clone(&self.ports.ai.chatgpt);
+        let sender = self.internal_tx.clone();
+        let queue = Arc::clone(&self.queue);
+        self.spawn(async move {
+            let _ = service.execute(command, cancel).await;
+            let _ = sender.send(super::Internal::ChatGptAccount {
+                request,
+                refresh_provider,
+            });
+            queue.wake();
+        });
+        DispatchOutcome::accepted_request(request)
+    }
+
+    fn invalidate_chatgpt_context(&mut self) {
+        self.ports.ai.chatgpt.cancel_generations();
+        let _ = self.chat_cancel();
+        let _ = self.chat_reset();
+        self.apply_derived_invalidation(Invalidation::all());
+        self.ports.ai.cache.clear(None);
+    }
+
+    pub(super) fn drain_chatgpt_accounts(&mut self) {
+        for event in self.ports.ai.chatgpt.take_events() {
+            if let wfdiag_native_chatgpt::AccountEvent::Changed(snapshot) = &event {
+                let previous = &self.snapshot.provider_setup.chatgpt;
+                let identity_changed = previous.active != snapshot.active
+                    || previous.selected().zip(snapshot.selected()).is_some_and(
+                        |(previous, next)| {
+                            previous.generation != next.generation
+                                || (previous.model.is_some() && previous.model != next.model)
+                        },
+                    );
+                self.snapshot.provider_setup.chatgpt = snapshot.clone();
+                if identity_changed {
+                    self.invalidate_chatgpt_context();
+                }
+            }
+            self.queue.push(AppEvent::ChatGptAccount(event));
+        }
     }
 
     // ---- draining ---------------------------------------------------------

@@ -8,6 +8,7 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+wfdiag-native-chatgpt.workspace = true
 # Shared chat-completions client for the OpenAI-compatible providers
 agent-client-protocol = { workspace = true }
 async-openai = { workspace = true, features = ["native-tls", "chat-completion"] }

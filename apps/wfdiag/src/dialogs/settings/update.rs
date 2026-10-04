@@ -201,6 +201,7 @@ impl WfdiagShell {
                         let selected_provider = match preference {
                             AIProviderPreference::Auto => AIProvider::None,
                             AIProviderPreference::OpenAI => AIProvider::OpenAI,
+                            AIProviderPreference::ChatGPT => AIProvider::ChatGPT,
                             AIProviderPreference::AionInstruct => AIProvider::AionInstruct,
                             AIProviderPreference::PhiSilica => AIProvider::PhiSilica,
                             AIProviderPreference::FoundryLocal => AIProvider::FoundryLocal,

@@ -24,6 +24,7 @@ settings-test-path = []
 validation = ["settings-test-path"]
 
 [dependencies]
+wfdiag-native-chatgpt.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
 wfdiag-app = { workspace = true }
 wfdiag-native-ai-analysis = { workspace = true }

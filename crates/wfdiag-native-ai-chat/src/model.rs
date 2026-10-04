@@ -115,6 +115,11 @@ impl ChatMessage {
 /// redacts provider blocks because they can contain hidden reasoning.
 #[derive(Clone)]
 pub enum ProviderReplay {
+    ChatGPT {
+        session_fingerprint: String,
+        requested_model: String,
+        output_items: Vec<serde_json::Value>,
+    },
     Anthropic {
         requested_model: String,
         content_blocks: Vec<serde_json::Value>,
@@ -125,6 +130,9 @@ impl ProviderReplay {
     #[must_use]
     pub fn char_count(&self) -> usize {
         match self {
+            Self::ChatGPT { output_items, .. } => {
+                serde_json::to_string(output_items).map_or(0, |json| json.chars().count())
+            }
             Self::Anthropic { content_blocks, .. } => {
                 serde_json::to_string(content_blocks).map_or(0, |json| json.chars().count())
             }
@@ -135,6 +143,18 @@ impl ProviderReplay {
 impl std::fmt::Debug for ProviderReplay {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ChatGPT {
+                requested_model,
+                output_items,
+                ..
+            } => formatter
+                .debug_struct("ChatGPTReplay")
+                .field("requested_model", requested_model)
+                .field(
+                    "output_items",
+                    &format_args!("<redacted:{}>", output_items.len()),
+                )
+                .finish_non_exhaustive(),
             Self::Anthropic {
                 requested_model,
                 content_blocks,
@@ -230,7 +250,7 @@ impl ProviderUse {
         let execution_class = match provider {
             AIProvider::PhiSilica | AIProvider::AionInstruct => ProviderExecutionClass::OnDevice,
             AIProvider::FoundryLocal | AIProvider::Ollama => ProviderExecutionClass::LocalServer,
-            AIProvider::CodexCli | AIProvider::ClaudeCode => {
+            AIProvider::ChatGPT | AIProvider::CodexCli | AIProvider::ClaudeCode => {
                 ProviderExecutionClass::SubscriptionCloud
             }
             AIProvider::None

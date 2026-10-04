@@ -138,7 +138,7 @@ pub(crate) fn to_openai_tools(tools: &[ToolSpec], strict: bool) -> Vec<ChatCompl
 /// `OpenAI` strict mode requires `additionalProperties: false` and every
 /// property in `required`. Optional values are expressed as a nullable type
 /// array, which only this transport ever sees.
-fn strict_strictify(parameters: &Value) -> Value {
+pub(crate) fn strict_strictify(parameters: &Value) -> Value {
     let mut schema = parameters.clone();
     let existing_required: Vec<String> = schema
         .get("required")
@@ -706,6 +706,7 @@ mod tests {
 
     fn config_with(model: &str) -> ResolvedProviderConfig {
         ResolvedProviderConfig {
+            chatgpt_session: None,
             endpoint: Some("http://127.0.0.1:61341".into()),
             model: Some(model.into()),
             ..Default::default()

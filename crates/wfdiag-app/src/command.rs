@@ -97,6 +97,8 @@ pub enum ProviderCredentialCommand {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum AppCommand {
+    /// Native `ChatGPT` account, consent, model, and sign-out control.
+    ChatGptAccount(wfdiag_native_chatgpt::AccountCommand),
     // ---- lifecycle -----------------------------------------------------
     /// The host is ready. Arms the startup-scan gate and schedules the
     /// passive update check.

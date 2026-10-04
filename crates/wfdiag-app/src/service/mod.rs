@@ -147,6 +147,10 @@ enum HistoryPayload {
 /// A message produced by a worker reply or a background task, before any
 /// staleness guard has run.
 enum Internal {
+    ChatGptAccount {
+        refresh_provider: bool,
+        request: RequestId,
+    },
     ScanStarted {
         session_id: String,
         kind: ScanKind,
@@ -238,6 +242,7 @@ enum SettingsRequestKind {
 // couple domains that have nothing to do with each other.
 #[allow(clippy::struct_excessive_bools)]
 pub struct AppService {
+    chatgpt_pending: Option<(RequestId, tokio_util::sync::CancellationToken)>,
     config: AppConfig,
     ports: AppPorts,
     settings_service: SettingsService,
@@ -428,12 +433,14 @@ impl AppService {
             catalog_pending: None,
             catalog_throttle: RefreshThrottle::new(),
             catalog_retry: None,
+            chatgpt_pending: None,
             subscription_auth_pending: None,
             subscription_install_pending: None,
         };
         service.adopt_rehydrated_actions();
         service.record_ai_worker_errors();
         service.request_system_identity();
+        service.start_chatgpt_accounts();
         Ok((service, receiver))
     }
 
@@ -505,6 +512,7 @@ impl AppService {
             AppCommand::RequestNetworkConnections => self.request_network_connections(),
             AppCommand::RequestProcessDetail { pid } => self.request_process_detail(pid),
 
+            AppCommand::ChatGptAccount(command) => self.chatgpt_account(command),
             AppCommand::RequestProviderStatus => self.request_provider_status(),
             AppCommand::SetProviderPreference { preference } => {
                 self.set_provider_preference(preference)
@@ -601,6 +609,7 @@ impl AppService {
     /// and return the resulting events.
     pub fn drain(&mut self) -> Vec<AppEvent> {
         self.drain_internal();
+        self.drain_chatgpt_accounts();
         self.drain_diagnostic_events();
         self.drain_monitor_events();
         self.drain_settings_events();
@@ -642,6 +651,10 @@ impl AppService {
     #[must_use]
     pub fn shutdown(mut self, budget: Duration) -> ShutdownReport {
         let started = Instant::now();
+        if let Some((_, cancel)) = &self.chatgpt_pending {
+            cancel.cancel();
+        }
+        self.ports.ai.chatgpt.cancel_generations();
         self.terminating = true;
         let ai_stopped_within_budget = self.workers.stop_ai();
         for message in self.replies.drain_as_stopped() {
@@ -699,6 +712,10 @@ impl AppService {
                 detail: "shutdown already began",
             };
         }
+        if let Some((_, cancel)) = &self.chatgpt_pending {
+            cancel.cancel();
+        }
+        self.ports.ai.chatgpt.cancel_generations();
         self.terminating = true;
         self.snapshot.terminating = true;
         if self.scan.is_busy() {
@@ -1953,6 +1970,21 @@ impl AppService {
     #[allow(clippy::too_many_lines)]
     fn apply_internal(&mut self, message: Internal) {
         match message {
+            Internal::ChatGptAccount {
+                request,
+                refresh_provider,
+            } => {
+                if self
+                    .chatgpt_pending
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == request)
+                {
+                    self.chatgpt_pending = None;
+                    if refresh_provider && !self.terminating {
+                        let _ = self.request_provider_status();
+                    }
+                }
+            }
             Internal::ScanStarted {
                 session_id,
                 kind,

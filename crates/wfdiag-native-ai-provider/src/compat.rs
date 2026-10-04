@@ -73,6 +73,7 @@ pub async fn resolve_compat_config(
 ) -> Result<ResolvedProviderConfig, String> {
     let settings = &ports.settings;
     match provider {
+        AIProvider::ChatGPT => Err("ChatGPT requires its own renewable account session".into()),
         AIProvider::OpenAI => {
             let api_key = ports.keys.load(ProviderKeyId::OpenAI).ok_or_else(|| {
                 String::from(
@@ -80,6 +81,7 @@ pub async fn resolve_compat_config(
                 )
             })?;
             Ok(ResolvedProviderConfig {
+                chatgpt_session: None,
                 api_key: Some(api_key),
                 endpoint: None,
                 model: Some(configured_model(
@@ -101,6 +103,7 @@ pub async fn resolve_compat_config(
                     "No local AI endpoint available. Install Foundry Local and run 'foundry server start', or configure an endpoint in Settings.",
                 ))?;
             Ok(ResolvedProviderConfig {
+                chatgpt_session: None,
                 api_key: None,
                 endpoint: Some(endpoint),
                 model: Some(configured_model(
@@ -121,6 +124,7 @@ pub async fn resolve_compat_config(
                 crate::network::resolve_ollama_model(&endpoint, settings.ollama_model.as_deref())
                     .await?;
             Ok(ResolvedProviderConfig {
+                chatgpt_session: None,
                 api_key: None,
                 endpoint: Some(endpoint),
                 model: Some(model),
@@ -143,6 +147,7 @@ pub async fn resolve_compat_config(
                     "No model configured for the custom endpoint. Set a model name in Settings (e.g. the model id your provider documents).",
                 ))?;
             Ok(ResolvedProviderConfig {
+                chatgpt_session: None,
                 api_key: ports.keys.load(ProviderKeyId::Custom),
                 endpoint: Some(endpoint),
                 model: Some(model.to_string()),
@@ -155,6 +160,7 @@ pub async fn resolve_compat_config(
                 )
             })?;
             Ok(ResolvedProviderConfig {
+                chatgpt_session: None,
                 api_key: Some(api_key),
                 endpoint: None,
                 model: Some(configured_model(
@@ -172,6 +178,7 @@ pub async fn resolve_compat_config(
             let model =
                 crate::resolve_gemini_model(settings.gemini_model.as_deref(), &api_key).await;
             Ok(ResolvedProviderConfig {
+                chatgpt_session: None,
                 api_key: Some(api_key),
                 endpoint: None,
                 model: Some(model),
@@ -184,6 +191,7 @@ pub async fn resolve_compat_config(
                 )
             })?;
             Ok(ResolvedProviderConfig {
+                chatgpt_session: None,
                 api_key: Some(api_key),
                 endpoint: Some("https://api.deepseek.com".to_string()),
                 model: Some(configured_model(
@@ -231,6 +239,7 @@ pub async fn resolve_subscription_config(
         return Err(subscription_obstacle_message(spec, probe.obstacle));
     }
     Ok(ResolvedProviderConfig {
+        chatgpt_session: None,
         api_key: None,
         endpoint: Some(path),
         model: configured_model
@@ -298,6 +307,10 @@ pub fn provider_config_fingerprint(provider: AIProvider, cfg: &ResolvedProviderC
         "wfdiag-ai-key-v1".hash(&mut hasher);
         key.hash(&mut hasher);
         format!("{:016x}", hasher.finish())
+    }
+
+    if let Some(session) = &cfg.chatgpt_session {
+        return session.lease.fingerprint();
     }
 
     let key = cfg

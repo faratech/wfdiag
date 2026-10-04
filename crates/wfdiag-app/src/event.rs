@@ -900,6 +900,8 @@ pub enum SubscriptionEvent {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum AppEvent {
+    /// Sanitized native `ChatGPT` account state or recovery notice.
+    ChatGptAccount(wfdiag_native_chatgpt::AccountEvent),
     /// The service finished starting. The snapshot already carries the
     /// persisted settings, so a first frame can use the right theme.
     Started {

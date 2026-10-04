@@ -14,6 +14,7 @@ use windows_reactor::*;
 /// Everything the AI page renders: the assistant and the scan report.
 #[derive(Default)]
 pub(crate) struct AiScreen {
+    pub(crate) chatgpt: wfdiag_native_chatgpt::AccountSnapshot,
     pub(crate) mode: AiMode,
 
     // ---- assistant --------------------------------------------------------

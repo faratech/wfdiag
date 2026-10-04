@@ -39,6 +39,7 @@ fn provider_and_preference_wire_contracts_are_pinned() {
         (AIProvider::None, "\"none\""),
         (AIProvider::AionInstruct, "\"aion_instruct\""),
         (AIProvider::OpenAI, "\"openai\""),
+        (AIProvider::ChatGPT, "\"chatgpt\""),
         (AIProvider::PhiSilica, "\"phi_silica\""),
         (AIProvider::FoundryLocal, "\"foundry_local\""),
         (AIProvider::Ollama, "\"ollama\""),
@@ -93,6 +94,8 @@ fn routing_preserves_complete_auto_priority_and_explicit_no_fallback() {
         phi: true,
         foundry: true,
         ollama: true,
+        chatgpt: true,
+        chatgpt_connected: false,
         custom: true,
         codex: true,
         claude: true,
@@ -106,6 +109,7 @@ fn routing_preserves_complete_auto_priority_and_explicit_no_fallback() {
         AIProvider::PhiSilica,
         AIProvider::FoundryLocal,
         AIProvider::Ollama,
+        AIProvider::ChatGPT,
         AIProvider::CustomOpenAI,
         AIProvider::CodexCli,
         AIProvider::ClaudeCode,
@@ -123,6 +127,7 @@ fn routing_preserves_complete_auto_priority_and_explicit_no_fallback() {
             AIProvider::PhiSilica => availability.phi = false,
             AIProvider::FoundryLocal => availability.foundry = false,
             AIProvider::Ollama => availability.ollama = false,
+            AIProvider::ChatGPT => availability.chatgpt = false,
             AIProvider::CustomOpenAI => availability.custom = false,
             AIProvider::CodexCli => availability.codex = false,
             AIProvider::ClaudeCode => availability.claude = false,
@@ -284,7 +289,7 @@ fn status_projection_matches_legacy_shape_order_and_defaults() {
     assert_eq!(status.active_provider, AIProvider::OpenAI);
     assert!(status.openai_available);
     assert!(status.openai_api_key_set);
-    assert_eq!(status.providers.len(), 11);
+    assert_eq!(status.providers.len(), 12);
     assert_eq!(
         status
             .providers
@@ -296,6 +301,7 @@ fn status_projection_matches_legacy_shape_order_and_defaults() {
             AIProvider::PhiSilica,
             AIProvider::FoundryLocal,
             AIProvider::Ollama,
+            AIProvider::ChatGPT,
             AIProvider::CustomOpenAI,
             AIProvider::CodexCli,
             AIProvider::ClaudeCode,
@@ -368,6 +374,9 @@ fn status_projection_matches_legacy_shape_order_and_defaults() {
                     "configured": true,
                     "supports_tools": true,
                     "supports_streaming": true
+                },
+                {
+                    "id": "chatgpt", "available": false, "configured": false, "supports_tools": true, "supports_streaming": true
                 },
                 {
                     "id": "custom_openai",

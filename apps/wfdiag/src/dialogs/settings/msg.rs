@@ -10,6 +10,9 @@ use windows_reactor::*;
 /// Everything the Settings dialog can ask for.
 #[derive(Clone)]
 pub(crate) enum SettingsMsg {
+    ChatGpt(wfdiag_native_chatgpt::AccountCommand),
+    ChatGptUsage,
+    OpenChatGpt,
     Open,
     /// One control changed, or the dialog was committed or cancelled.
     Dialog {
