@@ -19,6 +19,7 @@ use std::fmt;
 use std::future::Future;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::pin::Pin;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -339,6 +340,7 @@ struct StoredProposal {
 pub struct ActionGrant {
     authorization_id: String,
     proposal: ActionProposal,
+    consumed: Mutex<HashSet<usize>>,
 }
 
 impl ActionGrant {
@@ -354,12 +356,21 @@ impl ActionGrant {
     }
 
     /// The authorized actions, in approval order.
+    ///
+    /// This getter is a pure projection: it does not consume anything.
+    /// Consumption happens only in [`RealCatalogExecutor::execute`].
     #[must_use]
     pub fn actions(&self) -> impl ExactSizeIterator<Item = AuthorizedAction<'_>> {
         self.proposal
             .actions
             .iter()
-            .map(|preview| AuthorizedAction { preview })
+            .enumerate()
+            .map(|(index, preview)| AuthorizedAction {
+                preview,
+                index,
+                expires_at_ms: self.proposal.expires_at_ms,
+                consumed: &self.consumed,
+            })
     }
 
     #[must_use]
@@ -367,7 +378,12 @@ impl ActionGrant {
         self.proposal
             .actions
             .get(index)
-            .map(|preview| AuthorizedAction { preview })
+            .map(|preview| AuthorizedAction {
+                preview,
+                index,
+                expires_at_ms: self.proposal.expires_at_ms,
+                consumed: &self.consumed,
+            })
     }
 }
 
@@ -380,6 +396,7 @@ impl ActionGrant {
     pub(crate) fn for_tests(actions: Vec<ActionPreview>) -> Self {
         Self {
             authorization_id: opaque_id("test_grant"),
+            consumed: Mutex::new(HashSet::new()),
             proposal: ActionProposal {
                 proposal_id: opaque_id("test_proposal"),
                 approval_scope: if actions.len() == 1 {
@@ -406,6 +423,9 @@ impl ActionGrant {
 #[derive(Clone, Copy, Debug)]
 pub struct AuthorizedAction<'grant> {
     preview: &'grant ActionPreview,
+    index: usize,
+    expires_at_ms: u64,
+    consumed: &'grant Mutex<HashSet<usize>>,
 }
 
 impl<'grant> AuthorizedAction<'grant> {
@@ -417,6 +437,28 @@ impl<'grant> AuthorizedAction<'grant> {
     #[must_use]
     pub fn remediation_id(self) -> &'grant str {
         &self.preview.remediation.id
+    }
+
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.index
+    }
+
+    /// Mark this index consumed. Called only at the execution boundary
+    /// ([`RealCatalogExecutor`]); the `actions()`/`action()` getters never
+    /// call it, so projecting a grant does not burn it.
+    pub(crate) fn try_mark_consumed(self) -> Result<(), String> {
+        if now_ms() >= self.expires_at_ms {
+            return Err("This action preview expired. Review the action again.".to_string());
+        }
+        let mut consumed = self
+            .consumed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !consumed.insert(self.index) {
+            return Err("This action has already been executed".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -557,6 +599,7 @@ impl ActionBroker {
         Ok(ActionGrant {
             authorization_id: opaque_id("grant"),
             proposal: stored.proposal.clone(),
+            consumed: Mutex::new(HashSet::new()),
         })
     }
 
@@ -623,16 +666,25 @@ pub trait AuthorizedActionExecutor: Send + Sync {
 /// an [`AuthorizedAction`] borrowed from a consumed [`ActionGrant`].
 pub struct RealCatalogExecutor;
 
+/// Execution boundary shared by [`RealCatalogExecutor`] and broker tests:
+/// expiry and one-use consumption are enforced here, before any command
+/// is constructed, and a consumed index stays consumed even on failure.
+async fn execute_with_runner(
+    action: AuthorizedAction<'_>,
+    runner: &dyn crate::remediation::CommandRunner,
+    cancel: &CancellationToken,
+) -> Result<FixResult, String> {
+    action.try_mark_consumed()?;
+    crate::remediation::execute_authorized(action.remediation_id(), runner, cancel).await
+}
+
 impl AuthorizedActionExecutor for RealCatalogExecutor {
     fn execute<'a>(
         &'a self,
         action: AuthorizedAction<'a>,
         cancel: &'a CancellationToken,
     ) -> ExecutionFuture<'a> {
-        Box::pin(async move {
-            crate::remediation::execute_authorized(action.remediation_id(), &RealRunner, cancel)
-                .await
-        })
+        Box::pin(async move { execute_with_runner(action, &RealRunner, cancel).await })
     }
 }
 
@@ -1080,6 +1132,102 @@ mod tests {
         assert!(first.starts_with("proposal_"));
         assert_eq!(first.len(), "proposal_".len() + 32);
         assert_ne!(first, second);
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    fn live_grant(broker: &mut ActionBroker) -> ActionGrant {
+        let now = now_ms();
+        let current = snapshot("scan-a", true);
+        let proposal = broker
+            .prepare(request("flush_dns", None), &current, now)
+            .unwrap();
+        broker
+            .authorize(
+                &proposal.proposal_id,
+                &current,
+                ActionApproval::Reviewed,
+                now + 1,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn execution_via_recording_runner_still_works() {
+        let mut broker = ActionBroker::default();
+        let grant = live_grant(&mut broker);
+        // Projection must not consume: enumerate twice before executing.
+        assert_eq!(grant.actions().count(), 1);
+        assert_eq!(grant.actions().count(), 1);
+        let runner = RecordingRunner::default();
+        let cancel = CancellationToken::new();
+        let result = block_on(execute_with_runner(
+            grant.action(0).unwrap(),
+            &runner as &dyn CommandRunner,
+            &cancel,
+        ))
+        .unwrap();
+        assert_eq!(result.completion_status, FixCompletionStatus::Succeeded);
+        assert_eq!(runner.calls(), vec!["run:ipconfig /flushdns".to_string()]);
+    }
+
+    #[test]
+    fn replay_of_same_index_is_rejected_at_execution() {
+        let mut broker = ActionBroker::default();
+        let grant = live_grant(&mut broker);
+        let runner = RecordingRunner::default();
+        let cancel = CancellationToken::new();
+        block_on(execute_with_runner(
+            grant.action(0).unwrap(),
+            &runner as &dyn CommandRunner,
+            &cancel,
+        ))
+        .unwrap();
+        let error = block_on(execute_with_runner(
+            grant.action(0).unwrap(),
+            &runner as &dyn CommandRunner,
+            &cancel,
+        ))
+        .unwrap_err();
+        assert!(error.contains("already been executed"), "{error}");
+        // Also via a fresh iterator over the same grant.
+        let action = grant.actions().next().unwrap();
+        assert!(
+            block_on(execute_with_runner(
+                action,
+                &runner as &dyn CommandRunner,
+                &cancel
+            ))
+            .is_err()
+        );
+        assert_eq!(runner.calls().len(), 1);
+    }
+
+    #[test]
+    fn expired_grant_is_rejected_at_execution() {
+        let spec = find("flush_dns").unwrap();
+        // for_tests expires at 1_000 + TTL, far in the past vs wall clock.
+        let grant = ActionGrant::for_tests(vec![ActionPreview {
+            remediation: spec.summary(),
+            issue_id: None,
+            steps: spec.preview_steps(),
+        }]);
+        let runner = RecordingRunner::default();
+        let cancel = CancellationToken::new();
+        let error = block_on(execute_with_runner(
+            grant.action(0).unwrap(),
+            &runner as &dyn CommandRunner,
+            &cancel,
+        ))
+        .unwrap_err();
+        assert!(error.contains("expired"), "{error}");
+        assert!(runner.calls().is_empty());
     }
 
     #[test]

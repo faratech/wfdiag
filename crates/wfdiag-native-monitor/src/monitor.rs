@@ -594,7 +594,7 @@ pub struct SystemMonitor {
     cached_disks: Arc<Mutex<Option<CachedDiskInfo>>>,
     cached_npu_util: Arc<Mutex<Option<CachedNpuUtilization>>>,
     // Cached fast-changing data
-    cached_fast_stats: Arc<Mutex<Option<FastStats>>>,
+    cached_fast_stats: Arc<Mutex<Option<Arc<FastStats>>>>,
     monitor_profile: Arc<RwLock<MonitorProfile>>,
     // Tick counter for tiered refresh
     tick_count: Arc<AtomicU64>,
@@ -736,7 +736,7 @@ impl SystemMonitor {
             .await
             .ok();
             if let Some(initial) = initial {
-                *self.cached_fast_stats.lock().await = Some(initial);
+                *self.cached_fast_stats.lock().await = Some(Arc::new(initial));
             }
         }
 
@@ -1072,7 +1072,7 @@ async fn collect_stats_optimized(
     previous_processes: &Arc<Mutex<ProcessCpuTimes>>,
     cached_disks: &Arc<Mutex<Option<CachedDiskInfo>>>,
     cached_npu_util: &Arc<Mutex<Option<CachedNpuUtilization>>>,
-    cached_fast_stats: &Arc<Mutex<Option<FastStats>>>,
+    cached_fast_stats: &Arc<Mutex<Option<Arc<FastStats>>>>,
     monitor_profile: &Arc<RwLock<MonitorProfile>>,
     disk_update_in_progress: &Arc<AtomicBool>,
     npu_update_in_progress: &Arc<AtomicBool>,
@@ -1157,7 +1157,7 @@ async fn collect_stats_optimized(
     #[allow(deprecated)]
     SystemStats {
         cpu_utilization: fast_stats.cpu_utilization,
-        per_cpu_utilization: fast_stats.per_cpu_utilization,
+        per_cpu_utilization: fast_stats.per_cpu_utilization.clone(),
         cpu_frequency: fast_stats.cpu_frequency,
         memory_total_gb: fast_stats.memory_total as f64 / (1024.0 * 1024.0 * 1024.0),
         memory_used_gb: fast_stats.memory_used as f64 / (1024.0 * 1024.0 * 1024.0),
@@ -1183,7 +1183,7 @@ async fn collect_stats_optimized(
         npu_utilization,
         npu_memory_used_mb: npu_memory_used as f64 / (1024.0 * 1024.0),
         npu_memory_total_mb: npu_memory_total as f64 / (1024.0 * 1024.0),
-        top_processes: fast_stats.top_processes,
+        top_processes: fast_stats.top_processes.clone(),
         all_processes: Vec::new(),
         timestamp: unix_timestamp_secs(),
     }
@@ -1286,19 +1286,45 @@ fn select_top_processes(
         return selected;
     }
 
-    let mut add_by_metric = |metric: fn(&ProcessInfo) -> f32| {
-        let mut rows: Vec<&ProcessInfo> = processes.iter().collect();
-        rows.sort_by(|a, b| {
-            metric(b)
-                .partial_cmp(&metric(a))
+    // Partition instead of four full sorts. The original stable sort by
+    // metric descending keeps input (CPU) order on ties; ordering by
+    // (metric desc, original index asc) is exactly that total order, so
+    // `select_nth_unstable_by` on it yields the same top-`ADAPTER_ROWS`
+    // set, and sorting only that prefix yields the same order. Metrics
+    // are clamped finite percentages / non-negative memory, so the only
+    // `partial_cmp` `None` case (NaN) cannot occur from the producers.
+    // Filtering `> 0.0` after taking the prefix is identical: positives
+    // sort ahead of non-positives, so no positive lies past a prefix
+    // that already contains a non-positive.
+    let metrics: [fn(&ProcessInfo) -> f32; 4] = [
+        |process| process.gpu_percent,
+        |process| process.gpu_memory_mb as f32,
+        |process| process.npu_percent,
+        |process| process.npu_memory_mb as f32,
+    ];
+    let mut indices: Vec<usize> = Vec::new();
+    for metric in metrics {
+        if selected.len() >= EXTENDED_ROWS || processes.is_empty() {
+            break;
+        }
+        indices.clear();
+        indices.extend(0..processes.len());
+        let take = ADAPTER_ROWS.min(indices.len());
+        let by_metric = |a: &usize, b: &usize| {
+            metric(&processes[*b])
+                .partial_cmp(&metric(&processes[*a]))
                 .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        for process in rows
-            .into_iter()
-            .filter(|process| metric(process) > 0.0)
-            .take(ADAPTER_ROWS)
-        {
+                .then_with(|| a.cmp(b))
+        };
+        if take < indices.len() {
+            indices.select_nth_unstable_by(take - 1, by_metric);
+        }
+        indices[..take].sort_unstable_by(by_metric);
+        for &index in &indices[..take] {
+            let process = &processes[index];
+            if metric(process) <= 0.0 {
+                continue;
+            }
             if selected.len() >= EXTENDED_ROWS {
                 break;
             }
@@ -1306,12 +1332,7 @@ fn select_top_processes(
                 selected.push(process.clone());
             }
         }
-    };
-
-    add_by_metric(|process| process.gpu_percent);
-    add_by_metric(|process| process.gpu_memory_mb as f32);
-    add_by_metric(|process| process.npu_percent);
-    add_by_metric(|process| process.npu_memory_mb as f32);
+    }
 
     selected
 }
@@ -1320,10 +1341,10 @@ async fn get_fast_stats_cached(
     pdh_state: &Arc<std::sync::Mutex<PdhState>>,
     previous_network: &Arc<Mutex<NetworkState>>,
     previous_processes: &Arc<Mutex<ProcessCpuTimes>>,
-    cached: &Arc<Mutex<Option<FastStats>>>,
+    cached: &Arc<Mutex<Option<Arc<FastStats>>>>,
     monitor_profile: &Arc<RwLock<MonitorProfile>>,
     update_in_progress: &Arc<AtomicBool>,
-) -> FastStats {
+) -> Arc<FastStats> {
     let profile = *monitor_profile
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1359,36 +1380,39 @@ async fn get_fast_stats_cached(
                 && current_profile == profile
             {
                 let mut cache_lock = cached_clone.lock().await;
-                *cache_lock = Some(new_stats);
+                *cache_lock = Some(Arc::new(new_stats));
             }
 
             flag_clone.store(false, std::sync::atomic::Ordering::Release);
         });
     }
 
-    // Return cached value or default
+    // Return the shared snapshot (cheap `Arc` clone, not a deep
+    // `FastStats` clone); the caller clones only the `Vec`s it must own.
     let cache = cached.lock().await;
     cache
         .as_ref()
         .filter(|stats| stats.profile == profile)
         .cloned()
-        .unwrap_or(FastStats {
-            profile,
-            captured_at: Instant::now(),
-            cpu_utilization: 0.0,
-            per_cpu_utilization: Vec::new(),
-            cpu_frequency: 0,
-            memory_total: 0,
-            memory_used: 0,
-            memory_available: 0,
-            swap_total: 0,
-            swap_used: 0,
-            network_upload_kb: 0.0,
-            network_download_kb: 0.0,
-            top_processes: Vec::new(),
-            disk_read_bytes: 0,
-            disk_write_bytes: 0,
-            adapter_snapshot: crate::adapter_monitor::AdapterSnapshot::default(),
+        .unwrap_or_else(|| {
+            Arc::new(FastStats {
+                profile,
+                captured_at: Instant::now(),
+                cpu_utilization: 0.0,
+                per_cpu_utilization: Vec::new(),
+                cpu_frequency: 0,
+                memory_total: 0,
+                memory_used: 0,
+                memory_available: 0,
+                swap_total: 0,
+                swap_used: 0,
+                network_upload_kb: 0.0,
+                network_download_kb: 0.0,
+                top_processes: Vec::new(),
+                disk_read_bytes: 0,
+                disk_write_bytes: 0,
+                adapter_snapshot: crate::adapter_monitor::AdapterSnapshot::default(),
+            })
         })
 }
 
@@ -2064,11 +2088,16 @@ async fn get_top_processes_optimized(
         sys_info.dwNumberOfProcessors as usize
     });
 
-    for proc in &native_procs {
+    // Consume the capture so `proc.name` is moved, not cloned twice.
+    // `name_lower`/`command_lower` are owned `String` fields consumed by
+    // pagination sorting/filtering, so their `to_lowercase` allocation
+    // cannot be replaced by a borrowed compare without changing
+    // `ProcessInfo`'s stored shape; only the duplicate clone is removed.
+    for proc in native_procs {
         total_disk_read += proc.read_bytes;
         total_disk_write += proc.write_bytes;
 
-        let cpu_percent = process_cpu_percent(proc, prev.get(&proc.pid), now, cpu_count);
+        let cpu_percent = process_cpu_percent(&proc, prev.get(&proc.pid), now, cpu_count);
 
         let memory_percent = if total_memory > 0 {
             (proc.working_set as f64 / total_memory as f64 * 100.0) as f32
@@ -2093,7 +2122,7 @@ async fn get_top_processes_optimized(
             parent_pid: proc.parent_pid,
             name: proc.name.clone(),
             exe_path: String::new(), // Requires opening process handle - expensive
-            command: proc.name.clone(), // Command line requires separate query
+            command: proc.name,      // Command line requires separate query
             user: String::new(),     // Requires token query - expensive
             cpu_percent,
             memory_percent,
