@@ -125,6 +125,40 @@ fn issue_detection_commits_against_the_scanned_evidence() {
 }
 
 #[test]
+fn a_scan_with_duplicate_task_ids_commits_once_per_task() {
+    let mut harness = boot("duplicate_tasks");
+    assert!(
+        harness
+            .service
+            .dispatch(AppCommand::StartTargetedScan {
+                task_ids: vec![
+                    "processor".to_string(),
+                    "processor".to_string(),
+                    "os_info".to_string(),
+                ],
+            })
+            .is_accepted()
+    );
+    let events = harness.pump_for("the scan to commit", |event| {
+        matches!(event, AppEvent::Scan(ScanEvent::Committed { .. }))
+    });
+    let (_, completed, _, _) = committed(&events).expect("the scan committed");
+    assert_eq!(completed, 2, "duplicates are deduplicated before running");
+    assert_eq!(harness.service.snapshot().scan.results.len(), 2);
+    assert_eq!(
+        harness
+            .mocks
+            .executor
+            .executed()
+            .iter()
+            .filter(|id| id.as_str() == "processor")
+            .count(),
+        1
+    );
+    harness.shutdown(Duration::from_secs(2));
+}
+
+#[test]
 fn a_targeted_rerun_replaces_exactly_one_row_in_the_committed_scan() {
     let mut harness = boot("targeted_rerun");
     harness.service.dispatch(AppCommand::StartScan {

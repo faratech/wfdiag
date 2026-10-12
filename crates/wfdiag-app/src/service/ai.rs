@@ -103,6 +103,7 @@ pub(super) struct PendingSubscriptionAuth {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PendingSubscriptionInstall {
     pub(super) request: RequestId,
+    pub(super) provider: SubscriptionAuthProvider,
     pub(super) method: SubscriptionInstallMethod,
 }
 
@@ -2154,6 +2155,24 @@ impl AppService {
         let Some(request) = self.requests.issue() else {
             return DispatchOutcome::Rejected(RejectReason::IdentityExhausted);
         };
+        // Supersede any pending refresh: cancel its request, clear its
+        // provider's loading flag, and emit its terminal event before the
+        // new request overwrites `catalog_pending`, or the old provider
+        // would stay `loading` forever and its late reply would be
+        // dropped silently.
+        if let Some((old_request, old_provider)) = self.catalog_pending.take() {
+            let _ = runtime.cancel(old_request.get());
+            if let Some(state) = self.snapshot.provider_setup.catalogs.get_mut(&old_provider) {
+                state.loading = false;
+            }
+            let _ = self.catalog_throttle.finished();
+            self.queue
+                .push(AppEvent::Provider(ProviderEvent::ModelCatalog(
+                    ModelCatalogEvent::Cancelled {
+                        provider: old_provider,
+                    },
+                )));
+        }
         let queued = runtime.list_models(
             request.get(),
             ModelCatalogRequest {
@@ -2371,7 +2390,11 @@ impl AppService {
                 detail: "the subscription installer is already busy".to_string(),
             });
         }
-        self.subscription_install_pending = Some(PendingSubscriptionInstall { request, method });
+        self.subscription_install_pending = Some(PendingSubscriptionInstall {
+            request,
+            provider,
+            method,
+        });
         self.snapshot.provider_setup.install_progress = None;
         self.snapshot.provider_setup.install_error = None;
         self.queue
@@ -2421,7 +2444,11 @@ impl AppService {
             };
         }
         if matches!(command, AccountCommand::Cancel) {
-            if let Some((_, cancel)) = &self.chatgpt_pending {
+            // Clear pending immediately: a hung account action must not
+            // keep every later account command Busy. Taking the slot also
+            // invalidates the request id, so the cancelled action's late
+            // completion is dropped by the guard in `apply_internal`.
+            if let Some((_, cancel)) = self.chatgpt_pending.take() {
                 cancel.cancel();
             }
             return DispatchOutcome::accepted();
@@ -2497,6 +2524,7 @@ impl AppService {
 
     /// Read every AI worker, guard every reply, and publish one coalesced
     /// delta per streaming domain.
+    #[allow(clippy::too_many_lines)]
     pub(super) fn drain_ai_events(&mut self) {
         let mut chat_delta = String::new();
         let mut report_delta = String::new();
@@ -2544,16 +2572,24 @@ impl AppService {
         }
         if had_analysis && self.workers.analysis_events.is_none() {
             if let Some(pending) = self.analysis_pending.take() {
+                let message = "The analysis worker stopped unexpectedly.".to_string();
+                if let Some(entry) = self.snapshot.ai.analyses.get_mut(&pending.task_id) {
+                    entry.busy = false;
+                    entry.error = Some(message.clone());
+                }
                 self.queue.push(AppEvent::Analysis(AnalysisEvent::Failed {
                     task_id: pending.task_id,
-                    message: "The analysis worker stopped unexpectedly.".to_string(),
+                    message,
                     retryable: true,
                 }));
             }
             if self.prioritization_pending.take().is_some() {
+                let message = "The analysis worker stopped unexpectedly.".to_string();
+                self.snapshot.ai.prioritization.busy = false;
+                self.snapshot.ai.prioritization.error = Some(message.clone());
                 self.queue
                     .push(AppEvent::Prioritization(PrioritizationEvent::Failed {
-                        message: "The analysis worker stopped unexpectedly.".to_string(),
+                        message,
                         retryable: true,
                     }));
             }
@@ -2566,28 +2602,129 @@ impl AppService {
             && self.workers.fix_plan_events.is_none()
             && self.fix_plan_pending.take().is_some()
         {
+            let message = "The fix-plan worker stopped unexpectedly.".to_string();
+            self.snapshot.ai.fix_plan.busy = false;
+            self.snapshot.ai.fix_plan.error = Some(message.clone());
             self.queue.push(AppEvent::FixPlan(FixPlanEvent::Failed {
-                message: "The fix-plan worker stopped unexpectedly.".to_string(),
+                message,
                 retryable: true,
             }));
         }
         // Run transitions before command replies: a run's terminal summary
         // arrives on both streams, and applying the reply first would let the
         // earlier `Running` transition resurrect a finished run.
+        let had_action_runs = self.workers.action_runs.is_some();
         for event in take_events(&mut self.workers.action_runs, &self.queue) {
             self.apply_action_run(event);
         }
+        let had_action = self.workers.action_events.is_some();
         for event in take_events(&mut self.workers.action_events, &self.queue) {
             self.apply_action_event(event);
         }
+        let mut action_failed = false;
+        if had_action
+            && self.workers.action_events.is_none()
+            && self.action_pending.take().is_some()
+        {
+            action_failed = true;
+            let message = "The remediation worker stopped unexpectedly.".to_string();
+            self.action_pending_review = None;
+            if self.automation.active() && self.automation.pending {
+                self.automation.pending = false;
+                self.snapshot.actions.error = Some(message.clone());
+                self.queue.push(AppEvent::Action(ActionEvent::Rejected {
+                    message: format!("Safe fixes stopped: {message}"),
+                }));
+                self.finish_automation();
+            } else {
+                self.snapshot.actions.error = Some(message.clone());
+                self.queue
+                    .push(AppEvent::Action(ActionEvent::Rejected { message }));
+            }
+        }
+        if had_action_runs
+            && self.workers.action_runs.is_none()
+            && !action_failed
+            && self.snapshot.actions.active_run.take().is_some()
+        {
+            let message = "The remediation worker stopped unexpectedly.".to_string();
+            self.snapshot.actions.error = Some(message.clone());
+            self.queue
+                .push(AppEvent::Action(ActionEvent::Rejected { message }));
+        }
+        let had_catalog = self.workers.model_catalog_events.is_some();
         for event in take_events(&mut self.workers.model_catalog_events, &self.queue) {
             self.apply_catalog_event(event);
         }
+        if had_catalog
+            && self.workers.model_catalog_events.is_none()
+            && let Some((_, provider)) = self.catalog_pending.take()
+        {
+            let message = "The model discovery worker stopped unexpectedly.".to_string();
+            let state = self
+                .snapshot
+                .provider_setup
+                .catalogs
+                .entry(provider.clone())
+                .or_default();
+            state.failed(message.clone());
+            let last = state.catalog.clone();
+            let _ = self.catalog_throttle.finished();
+            self.catalog_retry = None;
+            self.queue
+                .push(AppEvent::Provider(ProviderEvent::ModelCatalog(
+                    ModelCatalogEvent::Failed {
+                        provider,
+                        error: message,
+                        last: last.map(Box::new),
+                    },
+                )));
+        }
+        let had_subscription_auth = self.workers.subscription_auth_events.is_some();
         for event in take_events(&mut self.workers.subscription_auth_events, &self.queue) {
             self.apply_subscription_auth_event(event);
         }
+        if had_subscription_auth
+            && self.workers.subscription_auth_events.is_none()
+            && let Some(pending) = self.subscription_auth_pending.take()
+        {
+            let message = "The subscription account worker stopped unexpectedly.".to_string();
+            let operation = self
+                .snapshot
+                .provider_setup
+                .accounts
+                .get(&subscription_key(pending.provider))
+                .and_then(|account| account.operation)
+                .unwrap_or(SubscriptionAuthOperation::Status);
+            self.record_account(pending.provider, None, Some(message.clone()));
+            self.queue
+                .push(AppEvent::Provider(ProviderEvent::Subscription(Box::new(
+                    SubscriptionEvent::Failed {
+                        provider: pending.provider,
+                        operation,
+                        error: message,
+                    },
+                ))));
+        }
+        let had_subscription_install = self.workers.subscription_install_events.is_some();
         for event in take_events(&mut self.workers.subscription_install_events, &self.queue) {
             self.apply_subscription_install_event(event);
+        }
+        if had_subscription_install
+            && self.workers.subscription_install_events.is_none()
+            && let Some(pending) = self.subscription_install_pending.take()
+        {
+            let message = "The subscription installer stopped unexpectedly.".to_string();
+            self.snapshot.provider_setup.install_progress = None;
+            self.snapshot.provider_setup.install_error = Some(message.clone());
+            self.queue
+                .push(AppEvent::Provider(ProviderEvent::Subscription(Box::new(
+                    SubscriptionEvent::InstallFailed {
+                        provider: pending.provider,
+                        method: pending.method,
+                        error: message,
+                    },
+                ))));
         }
     }
 
@@ -3515,4 +3652,56 @@ fn take_events<T>(
         queue.wake();
     }
     events
+}
+
+#[cfg(test)]
+mod catalog_supersede_tests {
+    use super::*;
+    use crate::AppConfig;
+    use crate::ports::mock::MockPorts;
+    use std::time::Duration;
+
+    #[test]
+    fn superseding_a_catalog_refresh_cancels_the_old_provider() {
+        let mocks = MockPorts::new();
+        mocks.ai.model_catalog.hold();
+        let (mut service, _) = AppService::start(AppConfig::default(), mocks.to_ports()).unwrap();
+        assert!(
+            service
+                .start_catalog_refresh(AIProvider::Ollama, CatalogDraft::default())
+                .is_accepted()
+        );
+        assert!(service.snapshot.provider_setup.catalogs["ollama"].loading);
+        assert!(
+            service
+                .start_catalog_refresh(AIProvider::OpenAI, CatalogDraft::default())
+                .is_accepted()
+        );
+        assert!(
+            !service.snapshot.provider_setup.catalogs["ollama"].loading,
+            "the superseded provider no longer shows loading"
+        );
+        assert!(service.snapshot.provider_setup.catalogs["openai"].loading);
+        assert_eq!(
+            service
+                .catalog_pending
+                .as_ref()
+                .map(|(_, provider)| provider.as_str()),
+            Some("openai")
+        );
+        let events = service.queue.take();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::Provider(ProviderEvent::ModelCatalog(ModelCatalogEvent::Cancelled {
+                provider
+            })) if provider == "ollama"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::Provider(ProviderEvent::ModelCatalog(ModelCatalogEvent::Started {
+                provider
+            })) if provider == "openai"
+        )));
+        let _ = service.shutdown(Duration::from_secs(2));
+    }
 }

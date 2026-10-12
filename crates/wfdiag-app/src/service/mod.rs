@@ -199,6 +199,7 @@ enum Internal {
     },
     ProviderCacheCleared {
         request: RequestId,
+        result: Result<(), String>,
     },
     ProviderOllamaModels {
         request: RequestId,
@@ -266,6 +267,7 @@ pub struct AppService {
     export_requests: Vec<u64>,
     history_latest: HashMap<HistoryRequest, RequestId>,
     provider_status_request: Option<RequestId>,
+    ollama_models_request: Option<RequestId>,
     subscription_accounts_request: Option<RequestId>,
     /// The last sign-in requirement announced, so a refresh that changes
     /// nothing does not re-raise a dismissed banner.
@@ -401,6 +403,7 @@ impl AppService {
             export_requests: Vec::new(),
             history_latest: HashMap::new(),
             provider_status_request: None,
+            ollama_models_request: None,
             subscription_accounts_request: None,
             last_sign_in_requirement: None,
             update_request: None,
@@ -783,6 +786,16 @@ impl AppService {
                 self.snapshot.settings.quick_scan_tasks.as_deref(),
                 self.snapshot.settings.network_tests_enabled,
             ),
+        };
+        // Deduplicate preserving order: a duplicated id would make
+        // `evidence_is_complete` (which requires a unique expected set)
+        // unreachable and the scan would always report Incomplete.
+        let task_ids = {
+            let mut seen = std::collections::HashSet::new();
+            task_ids
+                .into_iter()
+                .filter(|task_id| seen.insert(task_id.clone()))
+                .collect::<Vec<String>>()
         };
         if task_ids.is_empty() {
             return DispatchOutcome::Rejected(RejectReason::Invalid {
@@ -1636,8 +1649,11 @@ impl AppService {
                     return DispatchOutcome::Rejected(RejectReason::IdentityExhausted);
                 };
                 self.replies
-                    .register(WorkerKind::Provider, request, reply, move |_result| {
-                        Internal::ProviderCacheCleared { request }
+                    .register(WorkerKind::Provider, request, reply, move |result| {
+                        Internal::ProviderCacheCleared {
+                            request,
+                            result: result.map_err(failure_text),
+                        }
                     });
                 DispatchOutcome::accepted_request(request)
             }
@@ -1657,6 +1673,7 @@ impl AppService {
                 let Some(request) = self.requests.issue() else {
                     return DispatchOutcome::Rejected(RejectReason::IdentityExhausted);
                 };
+                self.ollama_models_request = Some(request);
                 self.replies
                     .register(WorkerKind::Provider, request, reply, move |result| {
                         Internal::ProviderOllamaModels {
@@ -2152,13 +2169,28 @@ impl AppService {
                     }
                 }
             }
-            Internal::ProviderCacheCleared { request } => {
+            Internal::ProviderCacheCleared { request, result } => {
                 let _ = request;
-                self.queue
-                    .push(AppEvent::Provider(ProviderEvent::CacheCleared));
+                match result {
+                    Ok(()) => {
+                        self.queue
+                            .push(AppEvent::Provider(ProviderEvent::CacheCleared));
+                    }
+                    Err(error) => {
+                        self.queue.push(AppEvent::Provider(ProviderEvent::Failed {
+                            source: crate::event::ProviderFailureSource::CacheClear,
+                            error,
+                        }));
+                    }
+                }
             }
             Internal::ProviderOllamaModels { request, models } => {
-                let _ = request;
+                if self.ollama_models_request != Some(request) {
+                    // A superseded model-list request: only the newest
+                    // issued request may publish its list.
+                    return;
+                }
+                self.ollama_models_request = None;
                 match models {
                     Ok(models) => self
                         .queue
@@ -2526,6 +2558,31 @@ impl AppService {
         if stopped && !self.terminating {
             self.workers.settings_events = None;
             self.workers.settings = None;
+            // Outstanding settings requests can never be answered now:
+            // clear the loading flag and surface a failure per request so
+            // no domain stays Busy/loading until restart.
+            if self.snapshot.settings_loading || !self.settings_requests.is_empty() {
+                self.snapshot.settings_loading = false;
+                let error = "the settings worker stopped before replying".to_string();
+                self.snapshot.settings_error = Some(error.clone());
+                let outstanding = std::mem::take(&mut self.settings_requests);
+                let mut kinds: Vec<(u64, SettingsRequestKind)> = outstanding.into_iter().collect();
+                kinds.sort_by_key(|(request_id, _)| *request_id);
+                for (_, kind) in kinds {
+                    let failure_kind = match kind {
+                        SettingsRequestKind::Load => crate::event::SettingsFailureKind::Load,
+                        SettingsRequestKind::Save(_) => crate::event::SettingsFailureKind::Save,
+                        SettingsRequestKind::Update => crate::event::SettingsFailureKind::Update,
+                        SettingsRequestKind::Credential => {
+                            crate::event::SettingsFailureKind::Credentials
+                        }
+                    };
+                    self.queue.push(AppEvent::Settings(SettingsFact::Failed {
+                        kind: failure_kind,
+                        error: error.clone(),
+                    }));
+                }
+            }
             // A pending consent answer dies with the worker: resolve it as a
             // chat failure so the domain does not stay Busy on a prompt that
             // can never be answered (ChatReset remains the manual escape
@@ -2775,6 +2832,16 @@ impl AppService {
         if stopped && !self.terminating {
             self.workers.export_replies = None;
             self.workers.export = None;
+            // Outstanding exports can never complete: fail each one so a
+            // host waiting on a payload is not stranded.
+            if !self.export_requests.is_empty() {
+                let error = "the export worker stopped before replying".to_string();
+                for _ in std::mem::take(&mut self.export_requests) {
+                    self.queue.push(AppEvent::Export(ExportEvent::Failed {
+                        error: error.clone(),
+                    }));
+                }
+            }
             self.queue.push(AppEvent::WorkerStopped {
                 worker: WorkerKind::Export,
                 unexpected: true,
@@ -2894,6 +2961,9 @@ impl AppService {
         }
         if expired(&self.subscription_accounts_request) {
             self.subscription_accounts_request = None;
+        }
+        if expired(&self.ollama_models_request) {
+            self.ollama_models_request = None;
         }
         if expired(&self.update_request) {
             self.update_request = None;
@@ -3105,6 +3175,263 @@ mod reply_timeout_tests {
         assert!(service.process_detail_request.is_none());
         assert!(service.network_request_id.is_none());
 
+        let _ = service.shutdown(Duration::from_secs(2));
+    }
+}
+
+#[cfg(test)]
+mod pending_death_tests {
+    use super::*;
+
+    fn started_service() -> AppService {
+        let (service, _) = AppService::start(AppConfig::default(), AppPorts::mock()).unwrap();
+        service
+    }
+
+    #[test]
+    fn cache_clear_reports_failure_instead_of_cleared_and_ollama_ignores_superseded() {
+        let mut service = started_service();
+        let request = service.requests.issue().unwrap();
+        service.apply_internal(Internal::ProviderCacheCleared {
+            request,
+            result: Err("worker stopped".to_string()),
+        });
+        let events = service.queue.take();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::Provider(ProviderEvent::Failed {
+                source: crate::event::ProviderFailureSource::CacheClear,
+                ..
+            })
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AppEvent::Provider(ProviderEvent::CacheCleared)))
+        );
+        service.apply_internal(Internal::ProviderCacheCleared {
+            request,
+            result: Ok(()),
+        });
+        assert!(
+            service
+                .queue
+                .take()
+                .iter()
+                .any(|event| matches!(event, AppEvent::Provider(ProviderEvent::CacheCleared)))
+        );
+
+        let old = service.requests.issue().unwrap();
+        let newest = service.requests.issue().unwrap();
+        service.ollama_models_request = Some(newest);
+        service.apply_internal(Internal::ProviderOllamaModels {
+            request: old,
+            models: Ok(vec!["stale".to_string()]),
+        });
+        assert!(
+            service.queue.take().is_empty(),
+            "superseded list is dropped"
+        );
+        service.apply_internal(Internal::ProviderOllamaModels {
+            request: newest,
+            models: Ok(vec!["fresh".to_string()]),
+        });
+        assert!(service.queue.take().iter().any(|event| matches!(
+            event,
+            AppEvent::Provider(ProviderEvent::OllamaModels(models)) if models == &["fresh"]
+        )));
+        assert!(service.ollama_models_request.is_none());
+        let _ = service.shutdown(Duration::from_secs(2));
+    }
+
+    #[test]
+    fn chatgpt_cancel_clears_pending_and_late_completion_is_dropped() {
+        let mut service = started_service();
+        let request = service.requests.issue().unwrap();
+        let token = tokio_util::sync::CancellationToken::new();
+        service.chatgpt_pending = Some((request, token.clone()));
+        let outcome = service.dispatch(AppCommand::ChatGptAccount(
+            wfdiag_native_chatgpt::AccountCommand::Cancel,
+        ));
+        assert!(outcome.is_accepted());
+        assert!(
+            service.chatgpt_pending.is_none(),
+            "cancel frees the slot at once"
+        );
+        assert!(token.is_cancelled());
+        // A subsequent account command is not stuck behind the cancelled one.
+        let next = service.requests.issue().unwrap();
+        let next_token = tokio_util::sync::CancellationToken::new();
+        service.chatgpt_pending = Some((next, next_token));
+        service.apply_internal(Internal::ChatGptAccount {
+            request,
+            refresh_provider: true,
+        });
+        assert!(
+            service
+                .chatgpt_pending
+                .as_ref()
+                .is_some_and(|(held, _)| *held == next),
+            "the late completion of the cancelled action is dropped"
+        );
+        let _ = service.shutdown(Duration::from_secs(2));
+    }
+
+    #[test]
+    fn settings_and_export_disconnects_clear_outstanding_requests() {
+        let mut service = started_service();
+        let (sender, receiver) = mpsc::channel();
+        service.workers.settings_events = Some(receiver);
+        drop(sender);
+        service.snapshot.settings_loading = true;
+        let load_id = service.requests.issue().unwrap();
+        service
+            .settings_requests
+            .insert(load_id.get(), SettingsRequestKind::Load);
+        service.drain_settings_events();
+        assert!(!service.snapshot.settings_loading);
+        assert!(service.settings_requests.is_empty());
+        assert!(service.queue.take().iter().any(|event| matches!(
+            event,
+            AppEvent::Settings(SettingsFact::Failed {
+                kind: crate::event::SettingsFailureKind::Load,
+                ..
+            })
+        )));
+
+        let (sender, receiver) = mpsc::channel();
+        service.workers.export_replies = Some(receiver);
+        drop(sender);
+        service.export_requests = vec![11, 12];
+        service.drain_export_replies();
+        assert!(service.export_requests.is_empty());
+        let failed = service
+            .queue
+            .take()
+            .iter()
+            .filter(|event| matches!(event, AppEvent::Export(ExportEvent::Failed { .. })))
+            .count();
+        assert_eq!(failed, 2, "one failure per outstanding export");
+        let _ = service.shutdown(Duration::from_secs(2));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn ai_worker_deaths_clear_pending_and_reset_busy_flags() {
+        let mut service = started_service();
+        // Analysis + prioritisation share one (now dead) channel.
+        let (tx, rx) = mpsc::channel();
+        service.workers.analysis_events = Some(rx);
+        drop(tx);
+        let analysis_request = service.requests.issue().unwrap();
+        service.analysis_pending = Some(PendingAnalysis {
+            request: analysis_request,
+            task_id: "os_info".to_string(),
+        });
+        service
+            .snapshot
+            .ai
+            .analyses
+            .entry("os_info".to_string())
+            .or_default()
+            .busy = true;
+        let prio_request = service.requests.issue().unwrap();
+        service.prioritization_pending = Some((prio_request, Generation::from_raw(0)));
+        service.snapshot.ai.prioritization.busy = true;
+        // Fix plan.
+        let (tx, rx) = mpsc::channel();
+        service.workers.fix_plan_events = Some(rx);
+        drop(tx);
+        service.fix_plan_pending = Some(service.requests.issue().unwrap());
+        service.snapshot.ai.fix_plan.busy = true;
+        // Model catalog.
+        let (tx, rx) = mpsc::channel();
+        service.workers.model_catalog_events = Some(rx);
+        drop(tx);
+        service.catalog_pending = Some((service.requests.issue().unwrap(), "ollama".to_string()));
+        service
+            .snapshot
+            .provider_setup
+            .catalogs
+            .entry("ollama".to_string())
+            .or_default()
+            .loading = true;
+        // Subscription auth + install.
+        let (tx, rx) = mpsc::channel();
+        service.workers.subscription_auth_events = Some(rx);
+        drop(tx);
+        service.subscription_auth_pending = Some(PendingSubscriptionAuth {
+            request: service.requests.issue().unwrap(),
+            provider: wfdiag_native_ai_chat::SubscriptionAuthProvider::Codex,
+        });
+        service
+            .snapshot
+            .provider_setup
+            .accounts
+            .entry("codex_cli".to_string())
+            .or_default()
+            .operation = Some(wfdiag_native_ai_chat::SubscriptionAuthOperation::SignIn);
+        let (tx, rx) = mpsc::channel();
+        service.workers.subscription_install_events = Some(rx);
+        drop(tx);
+        service.subscription_install_pending = Some(PendingSubscriptionInstall {
+            request: service.requests.issue().unwrap(),
+            provider: wfdiag_native_ai_chat::SubscriptionAuthProvider::Codex,
+            method: wfdiag_native_ai_chat::SubscriptionInstallMethod::Winget,
+        });
+        // Remediation action.
+        let (tx, rx) = mpsc::channel();
+        service.workers.action_events = Some(rx);
+        drop(tx);
+        service.action_pending = Some(service.requests.issue().unwrap());
+
+        service.drain_ai_events();
+        let events = service.queue.take();
+
+        assert!(service.analysis_pending.is_none());
+        assert!(!service.snapshot.ai.analyses["os_info"].busy);
+        assert!(service.prioritization_pending.is_none());
+        assert!(!service.snapshot.ai.prioritization.busy);
+        assert!(service.fix_plan_pending.is_none());
+        assert!(!service.snapshot.ai.fix_plan.busy);
+        assert!(service.catalog_pending.is_none());
+        assert!(
+            !service.snapshot.provider_setup.catalogs["ollama"].loading,
+            "catalog death clears loading"
+        );
+        assert!(service.subscription_auth_pending.is_none());
+        assert!(service.subscription_install_pending.is_none());
+        assert!(service.action_pending.is_none());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::Analysis(crate::AnalysisEvent::Failed { .. })
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::Prioritization(crate::PrioritizationEvent::Failed { .. })
+        )));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AppEvent::FixPlan(crate::FixPlanEvent::Failed { .. })
+            ))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::Provider(ProviderEvent::ModelCatalog(
+                crate::ModelCatalogEvent::Failed { .. }
+            ))
+        )));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AppEvent::Provider(ProviderEvent::Subscription(_))))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AppEvent::Action(ActionEvent::Rejected { .. })))
+        );
         let _ = service.shutdown(Duration::from_secs(2));
     }
 }

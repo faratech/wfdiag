@@ -322,6 +322,8 @@ pub enum ProviderFailureSource {
     Subscription,
     /// The local Ollama model list.
     ModelList,
+    /// Clearing cached AI responses.
+    CacheClear,
 }
 
 /// Settings facts.
@@ -1001,7 +1003,45 @@ impl EventQueue {
             AppEvent::Chat(chat) => {
                 matches!(
                     chat,
-                    crate::event::ChatEvent::Done { .. } | crate::event::ChatEvent::Failed { .. }
+                    crate::event::ChatEvent::Done { .. }
+                        | crate::event::ChatEvent::Failed { .. }
+                        | crate::event::ChatEvent::Cancelled
+                )
+            }
+            AppEvent::Report(report) => {
+                matches!(
+                    report,
+                    crate::event::ReportEvent::Done { .. }
+                        | crate::event::ReportEvent::Failed { .. }
+                        | crate::event::ReportEvent::Cancelled
+                        | crate::event::ReportEvent::Invalidated
+                )
+            }
+            AppEvent::Analysis(analysis) => {
+                matches!(
+                    analysis,
+                    crate::event::AnalysisEvent::Completed { .. }
+                        | crate::event::AnalysisEvent::Failed { .. }
+                        | crate::event::AnalysisEvent::Cancelled { .. }
+                        | crate::event::AnalysisEvent::Invalidated
+                )
+            }
+            AppEvent::Prioritization(prioritization) => {
+                matches!(
+                    prioritization,
+                    crate::event::PrioritizationEvent::Completed { .. }
+                        | crate::event::PrioritizationEvent::Failed { .. }
+                        | crate::event::PrioritizationEvent::Cancelled
+                        | crate::event::PrioritizationEvent::Invalidated
+                )
+            }
+            AppEvent::FixPlan(fix_plan) => {
+                matches!(
+                    fix_plan,
+                    crate::event::FixPlanEvent::Completed { .. }
+                        | crate::event::FixPlanEvent::Failed { .. }
+                        | crate::event::FixPlanEvent::Cancelled
+                        | crate::event::FixPlanEvent::Invalidated
                 )
             }
             AppEvent::Scan(scan) => matches!(scan, crate::event::ScanEvent::Finalized { .. }),
@@ -1042,20 +1082,29 @@ impl EventQueue {
             let evict = state
                 .queue
                 .iter()
-                .position(|queued| Self::is_control_plane(queued) == incoming_control_plane);
-            match evict {
-                Some(index) => {
-                    state.queue.remove(index);
-                    state.dropped = state.dropped.saturating_add(1);
-                }
-                // Queue entirely of the other class: keep the newest of the
-                // incoming class and drop this one (counted).
-                None => {
-                    if !incoming_control_plane {
-                        state.dropped = state.dropped.saturating_add(1);
-                        return;
-                    }
-                }
+                .position(|queued| Self::is_control_plane(queued) == incoming_control_plane)
+                .or_else(|| {
+                    // A control-plane arrival into an all-droppable queue
+                    // evicts the oldest droppable event; it must never push
+                    // the queue past capacity.
+                    incoming_control_plane
+                        .then(|| {
+                            state
+                                .queue
+                                .iter()
+                                .position(|queued| !Self::is_control_plane(queued))
+                        })
+                        .flatten()
+                });
+            if let Some(index) = evict {
+                state.queue.remove(index);
+                state.dropped = state.dropped.saturating_add(1);
+            } else {
+                // Queue entirely of the other class and the incoming event
+                // is droppable: drop this one (counted) rather than evict a
+                // control-plane event.
+                state.dropped = state.dropped.saturating_add(1);
+                return;
             }
         }
         if matches!(event, AppEvent::Terminated) {
@@ -1226,6 +1275,87 @@ mod tests {
             counter.fetch_add(1, Ordering::Relaxed);
         }));
         assert_eq!(wakes.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_control_plane_arrival_into_an_all_droppable_queue_never_exceeds_capacity() {
+        use crate::{MonitorEvent, ReportEvent};
+        let queue = EventQueue::new(2);
+        let receiver = AppEventReceiver::new(Arc::clone(&queue));
+        queue.push(AppEvent::Monitor(MonitorEvent::PausedChanged {
+            paused: true,
+        }));
+        queue.push(AppEvent::Chat(ChatEvent::Delta {
+            text: "token".to_string(),
+        }));
+        assert_eq!(receiver.pending_len(), 2);
+        queue.push(AppEvent::Report(ReportEvent::Failed {
+            message: "boom".to_string(),
+        }));
+        assert_eq!(receiver.pending_len(), 2, "len must never exceed capacity");
+        assert_eq!(receiver.dropped(), 1);
+        let events = receiver.drain();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AppEvent::Report(ReportEvent::Failed { .. }))),
+            "the terminal event survives"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                AppEvent::Monitor(MonitorEvent::PausedChanged { .. })
+            )),
+            "the oldest droppable event was evicted"
+        );
+    }
+
+    #[test]
+    fn a_droppable_arrival_into_an_all_control_queue_is_drop_counted() {
+        let queue = EventQueue::new(2);
+        let receiver = AppEventReceiver::new(Arc::clone(&queue));
+        queue.push(AppEvent::Chat(ChatEvent::Cancelled));
+        queue.push(AppEvent::Chat(ChatEvent::Cancelled));
+        queue.push(AppEvent::Chat(ChatEvent::Delta {
+            text: "token".to_string(),
+        }));
+        assert_eq!(receiver.pending_len(), 2);
+        assert_eq!(receiver.dropped(), 1);
+        assert!(
+            receiver
+                .drain()
+                .iter()
+                .all(|event| matches!(event, AppEvent::Chat(ChatEvent::Cancelled)))
+        );
+    }
+
+    #[test]
+    fn terminal_ai_events_are_control_plane() {
+        use crate::{AnalysisEvent, FixPlanEvent, PrioritizationEvent, ReportEvent};
+        assert!(EventQueue::is_control_plane(&AppEvent::Chat(
+            ChatEvent::Cancelled
+        )));
+        assert!(EventQueue::is_control_plane(&AppEvent::Report(
+            ReportEvent::Failed {
+                message: "x".to_string()
+            }
+        )));
+        assert!(EventQueue::is_control_plane(&AppEvent::Analysis(
+            AnalysisEvent::Cancelled {
+                task_id: "t".to_string()
+            }
+        )));
+        assert!(EventQueue::is_control_plane(&AppEvent::Prioritization(
+            PrioritizationEvent::Cancelled
+        )));
+        assert!(EventQueue::is_control_plane(&AppEvent::FixPlan(
+            FixPlanEvent::Cancelled
+        )));
+        assert!(!EventQueue::is_control_plane(&AppEvent::Chat(
+            ChatEvent::Delta {
+                text: "x".to_string()
+            }
+        )));
     }
 
     #[test]
