@@ -201,6 +201,13 @@ impl ScanStorage {
     }
 
     pub fn save_scan(&self, scan: &ScanRecord) -> Result<(), String> {
+        if scan.id == SUMMARY_INDEX_ID || scan.id == UNREADABLE_INDEX_ID {
+            return Err(DiagError::storage(
+                "save_scan",
+                format!("Scan ID '{}' is reserved", scan.id),
+            )
+            .into());
+        }
         println!("Saving encrypted scan {}", scan.id);
 
         let (retain_history, _) = (self.retention_provider)();
@@ -277,13 +284,13 @@ impl ScanStorage {
             .filter(|id| id != SUMMARY_INDEX_ID && id != UNREADABLE_INDEX_ID)
             .collect();
 
-        if self.encrypted_storage.exists(SUMMARY_INDEX_ID)
+        if self.encrypted_storage.exists_internal(SUMMARY_INDEX_ID)
             && let Ok(mut summaries) = self
                 .encrypted_storage
-                .load::<Vec<ScanSummary>>(SUMMARY_INDEX_ID)
+                .load_internal::<Vec<ScanSummary>>(SUMMARY_INDEX_ID)
             && let Ok(unreadable) = self
                 .encrypted_storage
-                .load::<Vec<String>>(UNREADABLE_INDEX_ID)
+                .load_internal::<Vec<String>>(UNREADABLE_INDEX_ID)
             && summaries.len() + unreadable.len() == stored_scan_ids.len()
             && summaries
                 .iter()
@@ -328,20 +335,20 @@ impl ScanStorage {
         summaries.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
 
         self.encrypted_storage
-            .store(SUMMARY_INDEX_ID, &summaries)
+            .store_internal(SUMMARY_INDEX_ID, &summaries)
             .map_err(|error| DiagError::storage("write_summary_index", error.to_string()))?;
         self.encrypted_storage
-            .store(UNREADABLE_INDEX_ID, &unreadable)
+            .store_internal(UNREADABLE_INDEX_ID, &unreadable)
             .map_err(|error| DiagError::storage("write_unreadable_index", error.to_string()))?;
 
         Ok(summaries)
     }
 
     fn upsert_summary(&self, summary: ScanSummary) -> Result<(), String> {
-        let mut summaries = if self.encrypted_storage.exists(SUMMARY_INDEX_ID) {
+        let mut summaries = if self.encrypted_storage.exists_internal(SUMMARY_INDEX_ID) {
             match self
                 .encrypted_storage
-                .load::<Vec<ScanSummary>>(SUMMARY_INDEX_ID)
+                .load_internal::<Vec<ScanSummary>>(SUMMARY_INDEX_ID)
             {
                 Ok(summaries) => summaries,
                 Err(_) => self.rebuild_summary_index()?,
@@ -353,7 +360,7 @@ impl ScanStorage {
         summaries.push(summary);
         summaries.sort_by_key(|item| std::cmp::Reverse(item.timestamp));
         self.encrypted_storage
-            .store(SUMMARY_INDEX_ID, &summaries)
+            .store_internal(SUMMARY_INDEX_ID, &summaries)
             .map_err(|error| DiagError::storage("write_summary_index", error.to_string()).into())
     }
 
@@ -910,7 +917,7 @@ impl ScanStorage {
             let mut retained: Vec<ScanSummary> = summaries.into_iter().take(max_scans).collect();
             retained.extend(failed_deletions);
             self.encrypted_storage
-                .store(SUMMARY_INDEX_ID, &retained)
+                .store_internal(SUMMARY_INDEX_ID, &retained)
                 .map_err(|error| DiagError::storage("trim_summary_index", error.to_string()))?;
         }
 
@@ -931,7 +938,7 @@ impl ScanStorage {
 
         // Delete each scan - list_files returns the base filename (without .enc)
         for scan_file in scan_files {
-            match self.encrypted_storage.delete(&scan_file) {
+            match self.encrypted_storage.delete_internal(&scan_file) {
                 Ok(()) => {
                     deleted_count += 1;
                     println!("Deleted scan: {scan_file}");
@@ -1123,6 +1130,31 @@ mod tests {
             r#"{"bytes": 9007199254740993}"#
         ));
         assert!(!ScanStorage::outputs_are_equivalent("abc", "abd"));
+    }
+
+    #[test]
+    fn save_scan_rejects_reserved_index_ids() {
+        let dir = std::env::temp_dir().join(format!(
+            "wfdiag_history_reserved_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let storage = ScanStorage::new_in(dir.clone(), || (true, 100), Vec::new).expect("storage");
+        for reserved in ["_scan_summary_index", "_scan_unreadable_index"] {
+            let record = scan(reserved, vec![("os_info", result(true, "ok"))]);
+            assert!(
+                storage.save_scan(&record).is_err(),
+                "save_scan must reject reserved id {reserved}"
+            );
+        }
+        // Normal id still saves and lists.
+        let normal = scan("normal1", vec![("os_info", result(true, "ok"))]);
+        storage.save_scan(&normal).expect("normal save");
+        assert_eq!(storage.list_scans().expect("list").len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -136,7 +136,17 @@ impl EncryptedStorage {
         }
     }
 
+    const RESERVED_IDS: [&str; 2] = ["_scan_summary_index", "_scan_unreadable_index"];
+
     fn validate_filename(filename: &str) -> Result<()> {
+        Self::validate_filename_internal(filename)?;
+        if Self::RESERVED_IDS.contains(&filename) {
+            return Err(anyhow!("Reserved storage id '{filename}' is not allowed"));
+        }
+        Ok(())
+    }
+
+    fn validate_filename_internal(filename: &str) -> Result<()> {
         let valid = !filename.is_empty()
             && !filename.contains("..")
             && filename.chars().all(|character| {
@@ -158,6 +168,15 @@ impl EncryptedStorage {
     /// or filesystem failure.
     pub fn store<T: Serialize>(&self, filename: &str, data: &T) -> Result<()> {
         Self::validate_filename(filename)?;
+        self.store_inner(filename, data)
+    }
+
+    pub(crate) fn store_internal<T: Serialize>(&self, filename: &str, data: &T) -> Result<()> {
+        Self::validate_filename_internal(filename)?;
+        self.store_inner(filename, data)
+    }
+
+    fn store_inner<T: Serialize>(&self, filename: &str, data: &T) -> Result<()> {
         let json_data = serde_json::to_vec(data)
             .map_err(|error| anyhow!("Failed to serialize data: {error}"))?;
 
@@ -188,6 +207,15 @@ impl EncryptedStorage {
     /// DPAPI failure, or deserialization failure.
     pub fn load<T: for<'de> Deserialize<'de>>(&self, filename: &str) -> Result<T> {
         Self::validate_filename(filename)?;
+        self.load_inner(filename)
+    }
+
+    pub(crate) fn load_internal<T: for<'de> Deserialize<'de>>(&self, filename: &str) -> Result<T> {
+        Self::validate_filename_internal(filename)?;
+        self.load_inner(filename)
+    }
+
+    fn load_inner<T: for<'de> Deserialize<'de>>(&self, filename: &str) -> Result<T> {
         let file_path = self.storage_path.join(format!("{filename}.enc"));
         let file_data = fs::read(file_path)
             .map_err(|error| anyhow!("Failed to read encrypted file: {error}"))?;
@@ -230,6 +258,12 @@ impl EncryptedStorage {
             && self.storage_path.join(format!("{filename}.enc")).exists()
     }
 
+    #[must_use]
+    pub(crate) fn exists_internal(&self, filename: &str) -> bool {
+        Self::validate_filename_internal(filename).is_ok()
+            && self.storage_path.join(format!("{filename}.enc")).exists()
+    }
+
     /// Delete one payload when present.
     ///
     /// # Errors
@@ -237,6 +271,15 @@ impl EncryptedStorage {
     /// Returns an error for an invalid ID or filesystem failure.
     pub fn delete(&self, filename: &str) -> Result<()> {
         Self::validate_filename(filename)?;
+        self.delete_inner(filename)
+    }
+
+    pub(crate) fn delete_internal(&self, filename: &str) -> Result<()> {
+        Self::validate_filename_internal(filename)?;
+        self.delete_inner(filename)
+    }
+
+    fn delete_inner(&self, filename: &str) -> Result<()> {
         let file_path = self.storage_path.join(format!("{filename}.enc"));
         if file_path.exists() {
             fs::remove_file(file_path)
@@ -390,6 +433,23 @@ mod tests {
                 .to_string()
                 .contains("Unsupported encryption version: 9")
         );
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn reserved_index_ids_are_rejected_by_store() {
+        let directory = temp_dir("reserved");
+        let storage = EncryptedStorage::new(directory.clone()).expect("create storage");
+        for reserved in ["_scan_summary_index", "_scan_unreadable_index"] {
+            assert!(
+                storage.store(reserved, &42_u8).is_err(),
+                "reserved id {reserved} must be rejected by store"
+            );
+            assert!(
+                storage.load::<u8>(reserved).is_err(),
+                "reserved id {reserved} must be rejected by load"
+            );
+        }
         fs::remove_dir_all(directory).ok();
     }
 

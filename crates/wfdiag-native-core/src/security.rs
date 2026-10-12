@@ -280,7 +280,7 @@ impl SecureCommandExecutor {
                 // For other commands, just check args are in allowed list
                 for arg in args {
                     if !config.allowed_args.contains(&arg.to_string())
-                        && !self.is_safe_argument(arg)
+                        && !self.is_safe_argument(cmd, arg)
                     {
                         return Err(anyhow::anyhow!("Argument '{arg}' not allowed for '{cmd}'"));
                     }
@@ -300,8 +300,22 @@ impl SecureCommandExecutor {
         let temp_dir_canonical = temp_dir.canonicalize().unwrap_or(temp_dir.clone());
         let path_buf = std::path::PathBuf::from(path);
 
+        // A dangling symlink looks absent to exists()/canonicalize(), so
+        // resolve a present symlink final component via symlink_metadata.
+        let resolved: Option<PathBuf> = match fs::symlink_metadata(&path_buf) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if let Ok(canonical) = path_buf.canonicalize() {
+                    Some(canonical)
+                } else {
+                    Some(resolve_dangling_symlink(&path_buf)?)
+                }
+            }
+            Ok(_) => path_buf.canonicalize().ok(),
+            Err(_) => None,
+        };
+
         // Check if path is in temp directory
-        if let Ok(canonical_path) = path_buf.canonicalize() {
+        if let Some(canonical_path) = resolved {
             if !canonical_path.starts_with(&temp_dir_canonical) {
                 return Err(anyhow::anyhow!("Path must be in temp directory"));
             }
@@ -349,9 +363,16 @@ impl SecureCommandExecutor {
     }
 
     #[allow(clippy::unused_self)]
-    fn is_safe_argument(&self, arg: &str) -> bool {
-        // Allow drive letters and basic switches
-        matches!(arg, "C:" | "/status" | "/querysettings" | "-an" | "/all")
+    fn is_safe_argument(&self, cmd: &str, arg: &str) -> bool {
+        // Scoped per command: an argument safe for one command must not
+        // become acceptable for every other fallback command.
+        match cmd {
+            "chkdsk" => arg == "C:",
+            "verifier" => arg == "/querysettings",
+            "dsregcmd" => arg == "/status",
+            "netstat" => arg == "-an",
+            _ => false,
+        }
     }
 
     /// Build a [`Command`] for a trusted, fully-resolved Windows executable.
@@ -360,10 +381,9 @@ impl SecureCommandExecutor {
     /// Returns an error when `executable` contains a path separator or cannot
     /// be found in the trusted OS location.
     // The allowlist lives on the type, not in per-call state; keeping these
-    // helpers as methods preserves the shipping call sites (and the public
-    // API) unchanged.
+    // helpers as methods preserves the shipping call sites unchanged.
     #[allow(clippy::unused_self)]
-    pub fn create_secure_command(&self, executable: &str) -> Result<Command> {
+    pub(crate) fn create_secure_command(&self, executable: &str) -> Result<Command> {
         let program = trusted_system_program(executable)?;
         #[cfg(windows)]
         let mut cmd = Command::new(program);
@@ -435,6 +455,48 @@ impl SecureCommandExecutor {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+}
+
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn resolve_dangling_symlink(path: &Path) -> Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..16 {
+        let target = fs::read_link(&current)?;
+        let parent = current
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Symlink has no parent"))?;
+        let canonical_parent = parent.canonicalize()?;
+        let joined = if target.is_absolute() {
+            target
+        } else {
+            canonical_parent.join(target)
+        };
+        let normalized = normalize_lexically(&joined);
+        if let Ok(metadata) = fs::symlink_metadata(&normalized)
+            && metadata.file_type().is_symlink()
+        {
+            if let Ok(canonical) = normalized.canonicalize() {
+                return Ok(canonical);
+            }
+            current = normalized;
+            continue;
+        }
+        return Ok(normalized);
+    }
+    Err(anyhow::anyhow!("Too many levels of symbolic links"))
 }
 
 struct TempOutputFiles {
@@ -636,6 +698,60 @@ mod tests {
                 .validate_temp_path("C:\\Windows\\wfdiag_evil.html")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn fallback_arguments_are_scoped_per_command() {
+        let executor = SecureCommandExecutor::new();
+        let cases: [(&str, &str); 4] = [
+            ("chkdsk", "C:"),
+            ("verifier", "/querysettings"),
+            ("dsregcmd", "/status"),
+            ("netstat", "-an"),
+        ];
+        for (cmd, good) in cases {
+            let config = &executor.allowed_commands[cmd];
+            assert!(
+                executor.validate_arguments(cmd, &[good], config).is_ok(),
+                "{cmd} must accept {good}"
+            );
+            for (_, other) in cases {
+                if other != good {
+                    let config = &executor.allowed_commands[cmd];
+                    assert!(
+                        executor.validate_arguments(cmd, &[other], config).is_err(),
+                        "{cmd} must reject other command's argument {other}"
+                    );
+                }
+            }
+            // Global-union leak: /all belongs to ipconfig only.
+            let config = &executor.allowed_commands[cmd];
+            assert!(
+                executor.validate_arguments(cmd, &["/all"], config).is_err(),
+                "{cmd} must reject /all"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_temp_path_rejects_dangling_symlink_to_outside() {
+        use std::os::unix::fs::symlink;
+        let executor = SecureCommandExecutor::new();
+        let dir = std::env::temp_dir().join(format!(
+            "wfdiag_validate_temp_dangling_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("wfdiag_link.html");
+        // Dangling absolute target outside temp.
+        symlink("/wfdiag-outside-target/wfdiag_evil.html", &link).unwrap();
+        assert!(
+            executor.validate_temp_path(link.to_str().unwrap()).is_err(),
+            "dangling symlink to outside temp must be rejected"
+        );
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::renderer::ReportFormat;
@@ -509,6 +509,55 @@ pub fn safe_report_filename(filename: &str) -> Result<&str, ExportPathError> {
     Ok(name)
 }
 
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn resolve_dangling_symlink(path: &Path) -> Result<PathBuf, ExportPathError> {
+    let mut current = path.to_path_buf();
+    for _ in 0..16 {
+        let target = std::fs::read_link(&current).map_err(|error| {
+            ExportPathError::new(path, ExportPathErrorKind::Canonicalize(error.to_string()))
+        })?;
+        let parent = current
+            .parent()
+            .ok_or_else(|| ExportPathError::new(path, ExportPathErrorKind::NoParent))?;
+        let canonical_parent = parent.canonicalize().map_err(|error| {
+            ExportPathError::new(path, ExportPathErrorKind::Canonicalize(error.to_string()))
+        })?;
+        let joined = if target.is_absolute() {
+            target
+        } else {
+            canonical_parent.join(target)
+        };
+        let normalized = normalize_lexically(&joined);
+        if let Ok(metadata) = std::fs::symlink_metadata(&normalized)
+            && metadata.file_type().is_symlink()
+        {
+            if let Ok(canonical) = normalized.canonicalize() {
+                return Ok(canonical);
+            }
+            current = normalized;
+            continue;
+        }
+        return Ok(normalized);
+    }
+    Err(ExportPathError::new(
+        path,
+        ExportPathErrorKind::Canonicalize("too many levels of symbolic links".to_string()),
+    ))
+}
+
 /// Resolve the path that will actually be written.
 ///
 /// An existing destination is canonicalized outright. A new one canonicalizes
@@ -522,10 +571,22 @@ pub fn canonical_candidate(path: &Path) -> Result<PathBuf, ExportPathError> {
     if !path.is_absolute() {
         return Err(ExportPathError::new(path, ExportPathErrorKind::NotAbsolute));
     }
-    if path.exists() {
-        return path.canonicalize().map_err(|error| {
-            ExportPathError::new(path, ExportPathErrorKind::Canonicalize(error.to_string()))
-        });
+    // `exists()` follows symlinks, so a dangling symlink looks absent and
+    // would fall through to the parent-join branch, hiding its target.
+    // `symlink_metadata` sees the link itself regardless of its target.
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if let Ok(canonical) = path.canonicalize() {
+                return Ok(canonical);
+            }
+            return resolve_dangling_symlink(path);
+        }
+        Ok(_) => {
+            return path.canonicalize().map_err(|error| {
+                ExportPathError::new(path, ExportPathErrorKind::Canonicalize(error.to_string()))
+            });
+        }
+        Err(_) => {}
     }
     let parent = path
         .parent()
@@ -999,6 +1060,74 @@ mod tests {
         assert!(paths.revalidate_with(&policy).is_err());
 
         fs::remove_dir_all(allowed).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_to_outside_is_rejected_and_inside_is_accepted() {
+        use std::os::unix::fs::symlink;
+        let root = scratch("dangling-root");
+        let outside = scratch("dangling-outside");
+        let policy = policy(&root, None);
+        // Dangling: target does not exist, so exists() is false.
+        symlink(
+            outside.join("target.txt"),
+            root.join("wf-diagnostics-2026-08-30.txt"),
+        )
+        .unwrap();
+        assert!(
+            validate_export_path_with_policy(
+                &root.join("wf-diagnostics-2026-08-30.txt"),
+                ReportFormat::Text,
+                &policy
+            )
+            .is_err(),
+            "dangling symlink to outside must be rejected"
+        );
+        // Dangling symlink whose resolved target is inside the allowed root.
+        symlink(
+            root.join("real-target.txt"),
+            root.join("wf-diagnostics-inside.txt"),
+        )
+        .unwrap();
+        let validated = validate_export_path_with_policy(
+            &root.join("wf-diagnostics-inside.txt"),
+            ReportFormat::Text,
+            &policy,
+        )
+        .expect("dangling symlink to inside target must be accepted");
+        assert_eq!(
+            validated.as_path(),
+            root.canonicalize().unwrap().join("real-target.txt")
+        );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dangling_symlink_to_outside_is_rejected() {
+        use std::os::windows::fs::symlink_file;
+        let root = scratch("dangling-root");
+        let outside = scratch("dangling-outside");
+        let policy = policy(&root, None);
+        if symlink_file(
+            outside.join("target.txt"),
+            root.join("wf-diagnostics-2026-08-30.txt"),
+        )
+        .is_ok()
+        {
+            assert!(
+                validate_export_path_with_policy(
+                    &root.join("wf-diagnostics-2026-08-30.txt"),
+                    ReportFormat::Text,
+                    &policy
+                )
+                .is_err()
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
     }
 
