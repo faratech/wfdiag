@@ -81,5 +81,12 @@ opt-level = "z"
 panic = "abort"
 strip = true
 
+# Measured 2026-10-12 (/tmp/perfprobe, 185 KB history-shaped JSON, 55 KB
+# markdown): opt-level 3 vs "z" for this crate alone cut markdown_parse
+# ~2690 -> ~920 us/op and json_diff walks ~40%, so the pure-projection hot
+# paths build at opt-level 3 while the rest of the release keeps size opts.
+[profile.release.package.wfdiag-native-projection]
+opt-level = 3
+
 [profile.dev]
 opt-level = 1

@@ -129,6 +129,17 @@ fn compare_values(
         return;
     };
 
+    // Fast path: serde-equal values are recursively JavaScript-equal, so the
+    // walk below could only find no differences. `Value` equality is a subset
+    // of `javascript_strict_equal` (serde-equal numbers share a representation
+    // and are therefore f64-equal; map equality is key-order-insensitive in
+    // both `serde_json` map implementations), so this skip never hides a
+    // change the walk would report. Numbers that are only f64-equal
+    // (`1` vs `1.0`) fall through to the strict check below.
+    if previous == current {
+        return;
+    }
+
     if javascript_strict_equal(previous, current) {
         return;
     }
@@ -635,5 +646,55 @@ mod tests {
         let (visible, hidden) = visible_differences(&differences[..2]);
         assert_eq!(visible.len(), 2);
         assert_eq!(hidden, 0);
+    }
+
+    #[test]
+    fn identical_nested_subtrees_are_skipped_regardless_of_key_order() {
+        // Object equality is key-order-insensitive; the serde-equality fast
+        // path must agree with the recursive walk on reordered objects.
+        let differences = parsed_differences(
+            r#"{"outer":{"a":1,"b":{"x":[1,2,{"deep":true}],"y":null},"c":"same"},"list":[1,{"k":"v"}]}"#,
+            r#"{"list":[1,{"k":"v"}],"outer":{"c":"same","b":{"y":null,"x":[1,2,{"deep":true}]},"a":1}}"#,
+        );
+        assert!(differences.is_empty(), "got: {differences:?}");
+
+        // Representation-only numeric differences still take the
+        // JavaScript-equality path rather than the serde fast path.
+        assert!(parsed_differences(r#"{"n":1}"#, r#"{"n":1.0}"#).is_empty());
+    }
+
+    #[test]
+    fn large_identical_history_shaped_input_has_no_differences() {
+        // Perf-shaped correctness: a large identical structure must diff to
+        // empty via the fast path (no timing assertion; this only pins that
+        // the skip stays correct at history-scan scale).
+        let tasks: Vec<Value> = (0..120)
+            .map(|index| {
+                serde_json::json!({
+                    "task": format!("task-{index}"),
+                    "status": "ok",
+                    "duration_ms": index * 7,
+                    "details": {
+                        "items": (0..40).map(|item| serde_json::json!({
+                            "name": format!("item-{item}"),
+                            "value": item,
+                            "flags": [true, false, null],
+                        })).collect::<Vec<_>>(),
+                        "summary": "unchanged",
+                    },
+                })
+            })
+            .collect();
+        let document = serde_json::json!({ "tasks": tasks, "version": 3 });
+        let current = document.clone();
+        assert!(compare_json_values(&document, &current).is_empty());
+
+        // One deep leaf change is still found at its exact path.
+        let mut changed = document.clone();
+        changed["tasks"][57]["details"]["items"][13]["value"] = Value::from(999);
+        let differences = compare_json_values(&document, &changed);
+        assert_eq!(differences.len(), 1);
+        assert_eq!(differences[0].path, "tasks[57].details.items[13].value");
+        assert_eq!(differences[0].kind, JsonDifferenceKind::Modified);
     }
 }
