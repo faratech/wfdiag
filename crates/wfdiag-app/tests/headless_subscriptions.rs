@@ -582,11 +582,18 @@ fn auto_with_only_a_signed_out_cli_raises_sign_in_required_once_per_change() {
 #[test]
 fn a_completed_install_offers_sign_in_without_starting_it() {
     let mut harness = boot_ai("subscription_install_offer");
+    // The scripted install path must be absolute on the host platform:
+    // `/opt/...` is only root-relative on Windows, where the facade's
+    // verified_install_path correctly rejects it (#429).
     harness
         .mocks
         .ai
         .subscriptions
-        .set_install_path("/opt/codex/codex");
+        .set_install_path(if cfg!(windows) {
+            r"C:\opt\codex\codex.exe"
+        } else {
+            "/opt/codex/codex"
+        });
     let _ = harness
         .service
         .dispatch(AppCommand::InstallSubscriptionCli {
