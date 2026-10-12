@@ -1367,7 +1367,7 @@ mod tests {
             kb_ids("Check KB5094126, kb 5089549, and KB5094126 again", 8),
             vec!["KB5094126", "KB5089549"]
         );
-        assert!(kb_ids("serial 12345678", 8).is_empty());
+        assert_eq!(kb_ids("serial 12345678", 8).len(), 0);
     }
 
     #[test]

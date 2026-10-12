@@ -1850,7 +1850,7 @@ pub(crate) mod tests {
         );
 
         // Without a probe there is nothing to offer but also nothing to say.
-        assert!(onboarding_candidates(None).is_empty());
+        assert_eq!(onboarding_candidates(None).len(), 0);
     }
 
     #[test]

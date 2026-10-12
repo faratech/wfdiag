@@ -1022,7 +1022,7 @@ mod tests {
         let v = json!({"content": [], "stop_reason": "refusal"});
         let turn = parse_message_response(&v).unwrap();
         assert_eq!(turn.finished, FinishReason::Refusal);
-        assert!(turn.text.is_empty());
+        assert_eq!(turn.text.len(), 0);
     }
 
     #[test]

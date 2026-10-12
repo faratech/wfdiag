@@ -1001,7 +1001,7 @@ mod tests {
         let cmp = ScanStorage::compute_comparison(current, previous);
         assert_eq!(cmp.new_failures.len(), 1);
         assert_eq!(cmp.new_failures[0].task_id, "os_info");
-        assert!(cmp.new_successes.is_empty());
+        assert_eq!(cmp.new_successes.len(), 0);
         assert_eq!(cmp.total_changes, 1);
     }
 
@@ -1011,7 +1011,7 @@ mod tests {
         let previous = scan("prev", vec![("os_info", result(false, "boom"))]);
         let cmp = ScanStorage::compute_comparison(current, previous);
         assert_eq!(cmp.new_successes.len(), 1);
-        assert!(cmp.new_failures.is_empty());
+        assert_eq!(cmp.new_failures.len(), 0);
         assert_eq!(cmp.total_changes, 1);
     }
 
@@ -1104,9 +1104,9 @@ mod tests {
         let current = scan("cur", vec![("only_in_current", result(true, "x"))]);
         let previous = scan("prev", vec![("only_in_previous", result(true, "y"))]);
         let cmp = ScanStorage::compute_comparison(current, previous);
-        assert!(cmp.new_failures.is_empty());
-        assert!(cmp.new_successes.is_empty());
-        assert!(cmp.status_unchanged.is_empty());
+        assert_eq!(cmp.new_failures.len(), 0);
+        assert_eq!(cmp.new_successes.len(), 0);
+        assert_eq!(cmp.status_unchanged.len(), 0);
         assert_eq!(cmp.total_changes, 0);
     }
 

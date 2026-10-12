@@ -273,6 +273,6 @@ mod tests {
         let query = ProcessQuery::default();
         assert_eq!(query.limit, 100);
         assert_eq!(query.offset, 0);
-        assert!(query.search.is_empty());
+        assert_eq!(query.search.len(), 0);
     }
 }

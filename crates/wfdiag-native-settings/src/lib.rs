@@ -1520,7 +1520,7 @@ mod tests {
         };
         assert!(service.save(&candidate).is_err());
         assert!(settings.0.lock().unwrap().is_none());
-        assert!(credentials.0.lock().unwrap().is_empty());
+        assert_eq!(credentials.0.lock().unwrap().len(), 0);
     }
 
     #[test]
@@ -1544,14 +1544,14 @@ mod tests {
             Some(ProviderCredentialAction::Clear)
         );
         assert!(!format!("{transaction:?}").contains("new-secret-never-log"));
-        assert!(credentials.calls().is_empty());
+        assert_eq!(credentials.calls(), [] as [tests::CredentialCall; 0]);
         assert!(settings.0.lock().unwrap().is_none());
 
         transaction.unstage(ProviderKeyId::Anthropic);
         transaction.discard();
-        assert!(transaction.is_empty());
+        assert_eq!(transaction.len(), 0);
         service.commit_provider_credentials(&transaction).unwrap();
-        assert!(credentials.calls().is_empty());
+        assert_eq!(credentials.calls(), [] as [tests::CredentialCall; 0]);
         assert_eq!(
             credentials
                 .values()

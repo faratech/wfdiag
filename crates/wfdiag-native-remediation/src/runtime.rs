@@ -1277,8 +1277,8 @@ mod tests {
                 .iter()
                 .all(|action| action.status == ActionItemStatus::Cancelled)
         );
-        assert!(execution.items.is_empty());
-        assert!(executor.calls.lock().unwrap().is_empty());
+        assert_eq!(execution.items.len(), 0);
+        assert_eq!(executor.calls.lock().unwrap().len(), 0);
     }
 
     #[test]
@@ -1437,7 +1437,7 @@ mod tests {
             Err(AuthorizationError::RepairConfirmationRequired(review)) if review == proposal
         ));
         assert!(state.active_run_id.is_none());
-        assert!(state.runs.is_empty());
+        assert_eq!(state.runs.len(), 0);
 
         state
             .authorize_run(
@@ -1571,8 +1571,11 @@ mod tests {
     fn public_runtime_rehydrates_pending_proposals_without_executing_them() {
         let (runtime, legacy_events) = NativeActionRuntime::start(None).unwrap();
         let (run_events, initial) = runtime.subscribe_run_events();
-        assert!(initial.pending_proposals.is_empty());
-        assert!(initial.history.is_empty());
+        assert_eq!(
+            initial.pending_proposals,
+            [] as [wfdiag_ui_core::ActionProposal; 0]
+        );
+        assert_eq!(initial.history.len(), 0);
         assert!(initial.active_run.is_none());
         assert!(runtime.prepare(123, request("flush_dns", None), snapshot("scan-a", true)));
         let prepared = match legacy_events.recv_timeout(Duration::from_secs(2)) {
@@ -1587,7 +1590,7 @@ mod tests {
                 .iter()
                 .any(|proposal| proposal.proposal_id == prepared.proposal_id)
         );
-        assert!(runtime.list_history().is_empty());
+        assert_eq!(runtime.list_history().len(), 0);
         assert!(run_events.try_recv().is_err());
         assert!(runtime.discard(prepared.proposal_id));
     }

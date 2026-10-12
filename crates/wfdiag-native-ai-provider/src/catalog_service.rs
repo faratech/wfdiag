@@ -845,7 +845,7 @@ mod tests {
         let requests = http.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].0, "http://foundry.test/v1/models");
-        assert!(requests[0].1.is_empty());
+        assert_eq!(requests[0].1.len(), 0);
     }
 
     #[tokio::test]
@@ -866,7 +866,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(catalog.models.is_empty());
+        assert_eq!(catalog.models.len(), 0);
         let requests = http.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].0, "http://foundry.test/v1/models");

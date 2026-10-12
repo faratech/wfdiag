@@ -145,7 +145,10 @@ fn the_startup_check_is_throttled_but_a_manual_check_is_not() {
             .any(|event| matches!(event, AppEvent::Update(UpdateEvent::Throttled))),
         "the host is told why nothing happened"
     );
-    assert!(harness.mocks.release_http.requests().is_empty());
+    assert_eq!(
+        harness.mocks.release_http.requests(),
+        [] as [wfdiag_native_update::ReleaseRequest; 0]
+    );
 
     // The user asking explicitly still checks.
     assert_eq!(check(&mut harness), UpdateOutcome::UpToDate);

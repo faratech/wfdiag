@@ -129,7 +129,7 @@ fn cancelling_mid_stream_keeps_what_arrived_and_ends_the_turn_once() {
     let streaming = harness.pump_for("the first delta", |event| {
         matches!(event, AppEvent::Chat(ChatEvent::Delta { .. }))
     });
-    assert!(!deltas(&streaming).is_empty());
+    assert_ne!(deltas(&streaming), [] as [&str; 0]);
 
     assert!(
         harness

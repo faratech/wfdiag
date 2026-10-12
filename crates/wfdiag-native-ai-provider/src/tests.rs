@@ -452,7 +452,7 @@ fn status_deserializes_the_pre_provider_array_legacy_shape() {
     .unwrap();
     assert!(!status.foundry_local_available);
     assert_eq!(status.foundry_local_endpoint, None);
-    assert!(status.providers.is_empty());
+    assert_eq!(status.providers.len(), 0);
 }
 
 #[test]

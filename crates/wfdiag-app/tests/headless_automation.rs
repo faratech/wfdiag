@@ -210,9 +210,12 @@ fn nothing_safe_to_run_is_reported_not_faked() {
         )
     });
     let (actions, deferred) = planned(&events).unwrap();
-    assert!(actions.is_empty());
+    assert_eq!(actions, [] as [std::string::String; 0]);
     assert_eq!(deferred[0].1, DeferReason::NeedsConfirmation);
-    assert!(harness.mocks.ai.actions.executed().is_empty());
+    assert_eq!(
+        harness.mocks.ai.actions.executed(),
+        [] as [std::string::String; 0]
+    );
     harness.shutdown(Duration::from_secs(2));
 }
 
@@ -220,7 +223,10 @@ fn nothing_safe_to_run_is_reported_not_faked() {
 fn after_scan_automation_runs_only_when_switched_on_and_only_for_new_scans() {
     let mut harness = boot_with_findings("automation_after_scan", STALE_DEFENDER, HEALTHY_DISK);
     // Off by default: the committed scan ran nothing.
-    assert!(harness.mocks.ai.actions.executed().is_empty());
+    assert_eq!(
+        harness.mocks.ai.actions.executed(),
+        [] as [std::string::String; 0]
+    );
 
     enable(&mut harness, SettingsUpdate::AutoFixSafeIssues(true));
     // A refresh of the same scan never starts automation.
@@ -291,7 +297,10 @@ fn the_assistant_only_acts_with_standing_permission_and_never_on_a_repair() {
         matches!(event, AppEvent::Action(ActionEvent::Proposal { .. }))
     });
     assert!(planned(&events).is_none());
-    assert!(harness.mocks.ai.actions.executed().is_empty());
+    assert_eq!(
+        harness.mocks.ai.actions.executed(),
+        [] as [std::string::String; 0]
+    );
     let proposal_id = harness
         .service
         .snapshot()

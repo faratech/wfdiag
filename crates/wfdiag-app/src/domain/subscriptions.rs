@@ -524,7 +524,7 @@ mod tests {
                 method: SubscriptionInstallMethod::Winget,
                 stage,
             };
-            assert!(!progress_label(&progress).is_empty());
+            assert_ne!(progress_label(&progress).len(), 0);
         }
         assert!(!verified_install_path(std::path::Path::new("codex.cmd")));
         #[cfg(windows)]

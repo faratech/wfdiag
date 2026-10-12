@@ -3299,7 +3299,7 @@ mod tests {
 
         assert_eq!(query.offset, 0);
         assert_eq!(query.limit, 100);
-        assert!(query.search.is_empty());
+        assert_eq!(query.search.len(), 0);
     }
 
     #[test]

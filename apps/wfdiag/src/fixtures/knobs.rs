@@ -314,7 +314,7 @@ mod production_defaults {
         assert_eq!(initial_page_override(), None);
         assert!(!fixture_mode());
         assert!(!settings_dialog_open_override());
-        assert!(startup_theme_setting().is_empty());
+        assert_eq!(startup_theme_setting().len(), 0);
         assert!((initial_window_width(1200.0) - 1200.0).abs() < f64::EPSILON);
         assert!((initial_window_height(800.0) - 800.0).abs() < f64::EPSILON);
         assert!(tray_enabled());

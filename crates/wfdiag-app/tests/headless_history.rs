@@ -207,8 +207,8 @@ fn trends_and_clearing_operate_on_the_stored_scans() {
     harness.pump_for("the clear acknowledgement", |event| {
         matches!(event, AppEvent::History(HistoryEvent::Cleared))
     });
-    assert!(harness.service.snapshot().history.summaries.is_empty());
-    assert!(harness.service.snapshot().history.trends.is_empty());
+    assert_eq!(harness.service.snapshot().history.summaries.len(), 0);
+    assert_eq!(harness.service.snapshot().history.trends.len(), 0);
     harness.shutdown(Duration::from_secs(2));
 }
 

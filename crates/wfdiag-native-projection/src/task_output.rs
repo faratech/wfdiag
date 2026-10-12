@@ -374,7 +374,7 @@ mod tests {
         })
         .to_string();
         let rows = format_output_key_values("large_value", &oversized_value).unwrap();
-        assert!(rows.rows.is_empty());
+        assert_eq!(rows.rows.len(), 0);
         assert!(rows.byte_len <= MAX_STRUCTURED_OUTPUT_BYTES);
         assert!(rows.truncated);
     }

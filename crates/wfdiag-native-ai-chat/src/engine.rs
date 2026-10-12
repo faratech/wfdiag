@@ -1356,7 +1356,7 @@ mod tests {
     fn completed_history_evicts_oversized_turns_and_respects_boundaries() {
         let mut messages = vec![ChatMessage::user("x".repeat(MAX_SESSION_CHARS + 1))];
         assert_eq!(trim_completed_messages(&mut messages), 1);
-        assert!(messages.is_empty());
+        assert_eq!(messages.len(), 0);
         let mut messages = (0..MAX_SESSION_MESSAGES + 2)
             .map(|_| ChatMessage::user("question".to_string()))
             .collect::<Vec<_>>();
@@ -1646,7 +1646,7 @@ mod tests {
         .await
         .expect_err("clean failure should be handed to routing");
         assert_eq!(error, "rate limited");
-        assert!(emitter.events().is_empty());
+        assert_eq!(emitter.events().len(), 0);
         assert_eq!(messages.len(), 1);
     }
 

@@ -260,6 +260,9 @@ fn discarding_a_preview_removes_it_from_both_review_surfaces() {
         confirm_repair: false,
     });
     assert!(outcome.rejection().is_some());
-    assert!(harness.mocks.ai.actions.executed().is_empty());
+    assert_eq!(
+        harness.mocks.ai.actions.executed(),
+        [] as [std::string::String; 0]
+    );
     harness.shutdown(Duration::from_secs(2));
 }

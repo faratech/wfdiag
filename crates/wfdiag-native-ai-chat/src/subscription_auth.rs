@@ -972,8 +972,8 @@ mod tests {
             .unwrap();
         assert_eq!(status.state, SubscriptionAuthState::SignedOut);
         assert!(status.needs_sign_in());
-        assert!(process.requests().is_empty());
-        assert!(process.resolve_calls.lock().unwrap().is_empty());
+        assert_eq!(process.requests().len(), 0);
+        assert_eq!(process.resolve_calls.lock().unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -1053,7 +1053,7 @@ mod tests {
             }
         );
         assert!(error.to_string().contains("npm script shim"));
-        assert!(process.requests().is_empty());
+        assert_eq!(process.requests().len(), 0);
     }
 
     #[tokio::test]
@@ -1159,8 +1159,8 @@ mod tests {
                 operation: SubscriptionAuthOperation::SignIn,
             }
         );
-        assert!(process.requests().is_empty());
-        assert!(process.resolve_calls.lock().unwrap().is_empty());
+        assert_eq!(process.requests().len(), 0);
+        assert_eq!(process.resolve_calls.lock().unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -1184,7 +1184,7 @@ mod tests {
                 provider: SubscriptionAuthProvider::ClaudeCode
             }
         ));
-        assert!(process.resolve_calls.lock().unwrap().is_empty());
+        assert_eq!(process.resolve_calls.lock().unwrap().len(), 0);
         assert!(probe.calls().is_empty(), "rejected before the probe ran");
     }
 
@@ -1249,7 +1249,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(process.interactive_requests().is_empty());
+        assert_eq!(process.interactive_requests().len(), 0);
         assert_eq!(process.requests()[0].action, ProcessAction::SignOut);
     }
 

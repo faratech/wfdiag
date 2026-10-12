@@ -258,7 +258,7 @@ mod tests {
             parse_ollama_tags(&tags),
             vec!["llama3.2:latest", "phi4-mini:latest"]
         );
-        assert!(parse_ollama_tags(&serde_json::json!({})).is_empty());
+        assert_eq!(parse_ollama_tags(&serde_json::json!({})).len(), 0);
 
         let capabilities = serde_json::json!({"capabilities": ["completion", "tools"]});
         assert!(

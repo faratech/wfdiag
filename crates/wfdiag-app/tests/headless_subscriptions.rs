@@ -283,7 +283,13 @@ fn installation_needs_a_confirmation_and_declining_installs_nothing() {
             .is_accepted()
     );
     harness.pump_briefly();
-    assert!(harness.mocks.ai.subscriptions.installs().is_empty());
+    assert_eq!(
+        harness.mocks.ai.subscriptions.installs(),
+        [] as [(
+            wfdiag_native_ai_chat::SubscriptionAuthProvider,
+            wfdiag_native_ai_chat::SubscriptionInstallMethod
+        ); 0]
+    );
     assert!(
         harness
             .service

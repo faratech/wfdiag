@@ -3290,7 +3290,7 @@ mod pending_death_tests {
             .insert(load_id.get(), SettingsRequestKind::Load);
         service.drain_settings_events();
         assert!(!service.snapshot.settings_loading);
-        assert!(service.settings_requests.is_empty());
+        assert_eq!(service.settings_requests.len(), 0);
         assert!(service.queue.take().iter().any(|event| matches!(
             event,
             AppEvent::Settings(SettingsFact::Failed {
@@ -3304,7 +3304,7 @@ mod pending_death_tests {
         drop(sender);
         service.export_requests = vec![11, 12];
         service.drain_export_replies();
-        assert!(service.export_requests.is_empty());
+        assert_eq!(service.export_requests.len(), 0);
         let failed = service
             .queue
             .take()

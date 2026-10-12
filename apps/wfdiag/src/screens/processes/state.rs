@@ -273,6 +273,6 @@ mod tests {
         screen.set_page(Some(&page(vec![row(10, 5, 1.0)])));
         screen.set_page(None);
         assert!(screen.page.is_none());
-        assert!(screen.rows.is_empty());
+        assert_eq!(screen.rows.len(), 0);
     }
 }

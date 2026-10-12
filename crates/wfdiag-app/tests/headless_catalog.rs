@@ -216,7 +216,10 @@ fn a_provider_whose_probe_has_side_effects_is_never_discovered_by_typing() {
         ),
         "the Claude Code probe downloads an adapter package: it needs an explicit Refresh"
     );
-    assert!(harness.mocks.ai.model_catalog.requests().is_empty());
+    assert_eq!(
+        harness.mocks.ai.model_catalog.requests(),
+        [] as [wfdiag_native_ai_provider::AIProvider; 0]
+    );
 
     assert!(
         harness

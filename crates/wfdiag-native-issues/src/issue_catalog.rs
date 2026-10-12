@@ -867,7 +867,7 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
             disk.get("Name")
                 .and_then(serde_json::Value::as_str)
                 .is_some()
-                && disk.get("FreeSpace").is_some_and(&numeric)
+                && disk.get("FreeSpace").is_some_and(numeric)
                 && disk.get("Size").is_some_and(|size| {
                     numeric(size)
                         && size
@@ -881,7 +881,7 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
         }),
         "space_consumers" => {
             let usage = object("disk_usage")?;
-            usage.get("total_bytes").is_some_and(&numeric)
+            usage.get("total_bytes").is_some_and(numeric)
                 && usage
                     .get("consumers")
                     .and_then(serde_json::Value::as_array)
@@ -891,13 +891,13 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
                                 .get("id")
                                 .and_then(serde_json::Value::as_str)
                                 .is_some()
-                                && consumer.get("bytes").is_some_and(&numeric)
+                                && consumer.get("bytes").is_some_and(numeric)
                         })
                     })
         }
         "disk_fragmentation" => nonempty_array("disk_fragmentation")?
             .iter()
-            .all(|disk| disk.get("fragmentation_percent").is_some_and(&numeric)),
+            .all(|disk| disk.get("fragmentation_percent").is_some_and(numeric)),
         "unsigned_drivers" => nonempty_array("drivers_list")?.iter().all(|driver| {
             driver
                 .get("IsSigned")
@@ -932,18 +932,18 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
             .get("cpu_performance")
             .and_then(serde_json::Value::as_object)
             .and_then(|cpu| cpu.get("LoadPercentage"))
-            .is_some_and(&numeric),
+            .is_some_and(numeric),
         "high_memory_usage" => object("performance")?
             .get("memory_performance")
             .and_then(serde_json::Value::as_object)
             .and_then(|memory| memory.get("UsedPercent"))
-            .is_some_and(&numeric),
+            .is_some_and(numeric),
         "page_file_pressure" => object("performance")?
             .get("memory_performance")
             .and_then(serde_json::Value::as_object)
             .is_some_and(|memory| {
-                memory.get("TotalPageFileMBytes").is_some_and(&numeric)
-                    && memory.get("AvailablePageFileMBytes").is_some_and(&numeric)
+                memory.get("TotalPageFileMBytes").is_some_and(numeric)
+                    && memory.get("AvailablePageFileMBytes").is_some_and(numeric)
             }),
         "pending_windows_updates" => object("windows_update")?
             .get("installed_updates")
@@ -960,12 +960,12 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
                             .get("error_code")
                             .and_then(serde_json::Value::as_str)
                             .is_some()
-                            && failure.get("time_secs").is_some_and(&numeric)
+                            && failure.get("time_secs").is_some_and(numeric)
                     })
                 })
                 && events
                     .get("successes_after_last_failure")
-                    .is_some_and(&numeric)
+                    .is_some_and(numeric)
         }
         "windows_update_service_disabled" => nonempty_array("services")?.iter().any(|service| {
             service
@@ -994,7 +994,7 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
         }
         "firewall_disabled" | "defender_disabled" => nonempty_array(spec.source_tasks[0])?
             .iter()
-            .all(|product| product.get("productState").is_some_and(&numeric)),
+            .all(|product| product.get("productState").is_some_and(numeric)),
         "dns_misconfigured" => nonempty_array("network_adapter")?
             .iter()
             .all(serde_json::Value::is_object),
@@ -1023,7 +1023,7 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
             .is_some_and(|dumps| {
                 dumps
                     .iter()
-                    .all(|dump| dump.get("created").is_some_and(&numeric))
+                    .all(|dump| dump.get("created").is_some_and(numeric))
             }),
         "kernel_power_crashes"
         | "unexpected_shutdowns"
@@ -1038,13 +1038,13 @@ fn validate_evidence(spec: &IssueSpec, ctx: &DetectCtx) -> Result<(), String> {
                         .get("source")
                         .and_then(serde_json::Value::as_str)
                         .is_some()
-                        && event.get("code").is_some_and(&numeric)
-                        && event.get("count").is_some_and(&numeric)
+                        && event.get("code").is_some_and(numeric)
+                        && event.get("count").is_some_and(numeric)
                 })
             }),
         "device_manager_errors" => array("device_errors")?
             .iter()
-            .all(|device| device.get("ConfigManagerErrorCode").is_some_and(&numeric)),
+            .all(|device| device.get("ConfigManagerErrorCode").is_some_and(numeric)),
         "pending_reboot" => {
             let reboot = object("pending_reboot")?;
             let pending = reboot

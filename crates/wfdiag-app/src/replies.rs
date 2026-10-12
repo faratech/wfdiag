@@ -406,7 +406,7 @@ mod tests {
         wake_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("registration primes polling");
-        assert!(replies.poll(Instant::now()).messages.is_empty());
+        assert_eq!(replies.poll(Instant::now()).messages.len(), 0);
         sender.send(7).unwrap();
         wake_rx
             .recv_timeout(Duration::from_secs(1))
@@ -451,12 +451,12 @@ mod tests {
             receiver,
             map_message,
         );
-        assert!(replies.poll(Instant::now()).messages.is_empty());
+        assert_eq!(replies.poll(Instant::now()).messages.len(), 0);
         sender.send(7).expect("receiver is alive");
         let batch = replies.poll(Instant::now());
         assert_eq!(batch.messages, ["ok:7"]);
         assert_eq!(replies.len(), 0);
-        assert!(replies.poll(Instant::now()).messages.is_empty());
+        assert_eq!(replies.poll(Instant::now()).messages.len(), 0);
     }
 
     #[test]
@@ -472,7 +472,7 @@ mod tests {
         drop(sender);
         let batch = replies.poll(Instant::now());
         assert_eq!(batch.messages, ["err:WorkerStopped"]);
-        assert!(batch.timeouts.is_empty());
+        assert_eq!(batch.timeouts.len(), 0);
     }
 
     #[test]

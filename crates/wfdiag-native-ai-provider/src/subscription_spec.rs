@@ -124,7 +124,7 @@ mod tests {
         );
         for spec in [codex, claude] {
             assert!(spec.vendor_script.starts_with("irm ") || spec.vendor_script.contains("irm "));
-            assert!(!spec.signed_out_markers.is_empty());
+            assert_ne!(spec.signed_out_markers.len(), 0);
             assert!(
                 spec.signed_out_markers
                     .iter()

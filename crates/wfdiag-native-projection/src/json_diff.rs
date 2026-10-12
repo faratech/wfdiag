@@ -594,9 +594,12 @@ mod tests {
     #[test]
     fn numbers_follow_javascript_precision_and_stringification() {
         // JSON.parse rounds both integers to the same JavaScript Number.
-        assert!(parsed_differences("9007199254740992", "9007199254740993").is_empty());
-        assert!(parsed_differences("-0", "0").is_empty());
-        assert!(parsed_differences("1", "1.0").is_empty());
+        assert_eq!(
+            parsed_differences("9007199254740992", "9007199254740993").len(),
+            0
+        );
+        assert_eq!(parsed_differences("-0", "0").len(), 0);
+        assert_eq!(parsed_differences("1", "1.0").len(), 0);
 
         assert_eq!(javascript_number_to_string(1e20), "100000000000000000000");
         assert_eq!(javascript_number_to_string(1e21), "1e+21");
@@ -660,7 +663,7 @@ mod tests {
 
         // Representation-only numeric differences still take the
         // JavaScript-equality path rather than the serde fast path.
-        assert!(parsed_differences(r#"{"n":1}"#, r#"{"n":1.0}"#).is_empty());
+        assert_eq!(parsed_differences(r#"{"n":1}"#, r#"{"n":1.0}"#).len(), 0);
     }
 
     #[test]
@@ -687,7 +690,7 @@ mod tests {
             .collect();
         let document = serde_json::json!({ "tasks": tasks, "version": 3 });
         let current = document.clone();
-        assert!(compare_json_values(&document, &current).is_empty());
+        assert_eq!(compare_json_values(&document, &current).len(), 0);
 
         // One deep leaf change is still found at its exact path.
         let mut changed = document.clone();

@@ -359,7 +359,6 @@ impl ActionGrant {
     ///
     /// This getter is a pure projection: it does not consume anything.
     /// Consumption happens only in [`RealCatalogExecutor::execute`].
-    #[must_use]
     pub fn actions(&self) -> impl ExactSizeIterator<Item = AuthorizedAction<'_>> {
         self.proposal
             .actions
@@ -902,7 +901,7 @@ mod tests {
             }
             // The strongest guarantee: no grant exists, so no command can be
             // constructed for the machine at all.
-            assert!(runner.calls().is_empty());
+            assert_eq!(runner.calls(), [] as [std::string::String; 0]);
             // The refused preview is NOT consumed and stays reviewable.
             assert!(broker.get(&proposal.proposal_id, 1_002).is_some());
         }
@@ -1227,7 +1226,7 @@ mod tests {
         ))
         .unwrap_err();
         assert!(error.contains("expired"), "{error}");
-        assert!(runner.calls().is_empty());
+        assert_eq!(runner.calls(), [] as [std::string::String; 0]);
     }
 
     #[test]

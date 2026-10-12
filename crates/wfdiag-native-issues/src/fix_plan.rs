@@ -341,7 +341,7 @@ mod tests {
                 &[issue("temp_files", Some("clear_temp_files"))],
                 remediation_catalog(),
             );
-            assert!(parsed.entries.is_empty());
+            assert_eq!(parsed.entries.len(), 0);
         }
     }
 }

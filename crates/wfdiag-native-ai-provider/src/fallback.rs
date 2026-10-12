@@ -326,8 +326,9 @@ mod tests {
                 .into_iter()
                 .find(|candidate| *candidate != provider)
                 .expect("there is another provider");
-            assert!(
-                provider_fallback_plan(preference, availability_for(another_available)).is_empty()
+            assert_eq!(
+                provider_fallback_plan(preference, availability_for(another_available)).len(),
+                0
             );
         }
     }
@@ -508,9 +509,10 @@ mod tests {
 
     #[test]
     fn empty_snapshot_and_exhausted_plan_have_no_candidate() {
-        assert!(
+        assert_eq!(
             provider_fallback_plan(AIProviderPreference::Auto, ProviderAvailability::default())
-                .is_empty()
+                .len(),
+            0
         );
         assert!(
             next_fallback_candidate(

@@ -155,13 +155,9 @@ fn sign_in_is_nonblocking_cancellable_and_shutdown_closes_the_listener() {
         !s.snapshot().provider_setup.chatgpt.busy
             && s.snapshot().provider_setup.chatgpt.error.is_some()
     });
-    assert!(
-        service
-            .snapshot()
-            .provider_setup
-            .chatgpt
-            .accounts
-            .is_empty()
+    assert_eq!(
+        service.snapshot().provider_setup.chatgpt.accounts,
+        [] as [wfdiag_native_chatgpt::AccountView; 0]
     );
     let _ = service.shutdown(Duration::from_secs(2));
 }

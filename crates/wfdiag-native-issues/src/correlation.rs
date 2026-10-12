@@ -169,7 +169,7 @@ mod tests {
             assert!(ids.contains(&relation.cause), "{}", relation.cause);
             assert!(ids.contains(&relation.symptom), "{}", relation.symptom);
             assert_ne!(relation.cause, relation.symptom);
-            assert!(!relation.note.is_empty());
+            assert_ne!(relation.note.len(), 0);
         }
         // No cycle: following cause links from any symptom terminates.
         for start in CORRELATIONS.iter().map(|relation| relation.symptom) {

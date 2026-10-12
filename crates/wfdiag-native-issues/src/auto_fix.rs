@@ -217,7 +217,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["flush_dns"]
         );
-        assert!(plan.singles.is_empty());
+        assert_eq!(plan.singles.len(), 0);
         assert_eq!(
             plan.deferred
                 .iter()
@@ -265,7 +265,7 @@ mod tests {
         );
 
         let elevated = safe_fix_plan(&issues, true, 5);
-        assert!(elevated.deferred.is_empty());
+        assert_eq!(elevated.deferred.len(), 0);
         assert_eq!(
             elevated
                 .singles

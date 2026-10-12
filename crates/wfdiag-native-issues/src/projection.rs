@@ -753,7 +753,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["was_ok", "was_warning"]
         );
-        assert!(newly_critical(&[], &current).is_empty());
+        assert_eq!(newly_critical(&[], &current).len(), 0);
     }
 
     #[test]

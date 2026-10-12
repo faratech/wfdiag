@@ -956,7 +956,7 @@ mod tests {
             .await;
 
         assert_eq!(endpoint.as_deref(), Some("https://configured.test"));
-        assert!(runner.requests().is_empty());
+        assert_eq!(runner.requests().len(), 0);
         assert_eq!(
             health.endpoints.lock().unwrap().as_slice(),
             &["https://configured.test"]
@@ -994,7 +994,7 @@ mod tests {
         assert_eq!(requests[1].timeout, FOUNDRY_STATUS_TIMEOUT);
         // Discovery extracts a URL even when the CLI exits non-zero; some
         // historical Foundry builds did that while the service was starting.
-        assert!(!runner.requests()[1].what.is_empty());
+        assert_ne!(runner.requests()[1].what.len(), 0);
     }
 
     #[tokio::test]

@@ -249,7 +249,7 @@ mod tests {
                     "{}: an in-app action and a catalog remediation would compete for one button",
                     spec.id
                 );
-                assert!(!action.label().is_empty());
+                assert_ne!(action.label().len(), 0);
             }
         }
         assert_eq!(

@@ -1099,7 +1099,7 @@ mod tests {
                     error,
                     SubscriptionInstallError::ConfirmationRequired { .. }
                 ));
-                assert!(fake.calls().is_empty());
+                assert_eq!(fake.calls().len(), 0);
                 assert_eq!(fake.file_checks.load(Ordering::Relaxed), 0);
             }
 
@@ -1133,7 +1133,7 @@ mod tests {
                         }
                     );
                 }
-                assert!(fake.calls().is_empty());
+                assert_eq!(fake.calls().len(), 0);
                 assert_eq!(fake.file_checks.load(Ordering::Relaxed), 0);
             }
         }
@@ -1270,7 +1270,7 @@ mod tests {
                 reason: SubscriptionInstallFallbackReason::WingetUnavailable,
             }
         );
-        assert!(fake.install_calls().is_empty());
+        assert_eq!(fake.install_calls().len(), 0);
     }
 
     #[tokio::test]
@@ -1288,7 +1288,7 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, SubscriptionInstallError::Cancelled { .. }));
-        assert!(fake.calls().is_empty());
+        assert_eq!(fake.calls().len(), 0);
         assert_eq!(fake.file_checks.load(Ordering::Relaxed), 0);
     }
 
@@ -1307,7 +1307,7 @@ mod tests {
             status.path,
             FakeProcess::cli_path(SubscriptionAuthProvider::Codex)
         );
-        assert!(fake.install_calls().is_empty());
+        assert_eq!(fake.install_calls().len(), 0);
         assert_eq!(
             fake.calls()
                 .iter()

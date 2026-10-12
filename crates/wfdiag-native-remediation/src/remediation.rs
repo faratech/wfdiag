@@ -1735,7 +1735,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(runner.calls().is_empty());
+        assert_eq!(runner.calls(), [] as [std::string::String; 0]);
     }
 
     #[tokio::test]
@@ -1747,7 +1747,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.completion_status, FixCompletionStatus::Cancelled);
-        assert!(runner.calls().is_empty());
+        assert_eq!(runner.calls(), [] as [std::string::String; 0]);
     }
 
     #[test]

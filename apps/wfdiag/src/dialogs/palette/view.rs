@@ -499,16 +499,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["process list", "settings", "providers"]
         );
-        assert!(!matches[0].indices.is_empty());
-        assert!(!matches[1].indices.is_empty());
-        assert!(matches[2].indices.is_empty());
+        assert_ne!(matches[0].indices.len(), 0);
+        assert_ne!(matches[1].indices.len(), 0);
+        assert_eq!(matches[2].indices.len(), 0);
         assert!(matches[1].score > matches[2].score);
 
         let section_only = palette_visible_matches(
             vec![palette_spec("App", "Toggle theme", "theme color")],
             "app",
         );
-        assert!(section_only.is_empty());
+        assert_eq!(section_only.len(), 0);
     }
 
     #[test]

@@ -326,8 +326,8 @@ mod tests {
     #[test]
     fn portable_collection_returns_a_self_consistent_projection() {
         let snapshot = get_architecture_snapshot().unwrap();
-        assert!(!snapshot.process_architecture_name.is_empty());
-        assert!(!snapshot.native_architecture_name.is_empty());
+        assert_ne!(snapshot.process_architecture_name, "");
+        assert_ne!(snapshot.native_architecture_name, "");
         assert!(snapshot.page_size > 0);
         assert!(snapshot.processor_count > 0);
     }
