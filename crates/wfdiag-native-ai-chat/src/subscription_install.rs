@@ -897,6 +897,43 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    // Fake filesystem roots must be absolute on every platform: a Unix-style
+    // "/local/..." path is root-relative, not absolute, on Windows, so
+    // `discover_cli` skipped its candidates there and every test that needs
+    // discovery to succeed failed on windows-x64 CI. Root the fake tree at a
+    // drive path on Windows instead of ignoring those tests.
+    fn fake_system_root() -> PathBuf {
+        fake_root().join("windows")
+    }
+
+    fn fake_local() -> PathBuf {
+        fake_root().join("local")
+    }
+
+    fn fake_user() -> PathBuf {
+        fake_root().join("user")
+    }
+
+    fn fake_root() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\wfdiag-fake")
+        } else {
+            PathBuf::from("/")
+        }
+    }
+
+    fn fake_winget_path() -> PathBuf {
+        fake_system_root().join("System32").join("winget.exe")
+    }
+
+    fn fake_powershell_path() -> PathBuf {
+        fake_system_root()
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe")
+    }
+
     struct FakeProcess {
         calls: Mutex<Vec<ProcessPlan>>,
         file_checks: AtomicUsize,
@@ -918,9 +955,9 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 file_checks: AtomicUsize::new(0),
                 env: HashMap::from([
-                    ("SystemRoot", OsString::from("/windows")),
-                    ("LOCALAPPDATA", OsString::from("/local")),
-                    ("USERPROFILE", OsString::from("/user")),
+                    ("SystemRoot", fake_system_root().into_os_string()),
+                    ("LOCALAPPDATA", fake_local().into_os_string()),
+                    ("USERPROFILE", fake_user().into_os_string()),
                 ]),
                 installed: AtomicBool::new(false),
                 install_success: AtomicBool::new(true),
@@ -956,11 +993,14 @@ mod tests {
 
         fn cli_path(provider: SubscriptionAuthProvider) -> PathBuf {
             match provider {
-                SubscriptionAuthProvider::Codex => {
-                    PathBuf::from("/local/Programs/OpenAI/Codex/bin/codex.exe")
-                }
+                SubscriptionAuthProvider::Codex => fake_local()
+                    .join("Programs")
+                    .join("OpenAI")
+                    .join("Codex")
+                    .join("bin")
+                    .join("codex.exe"),
                 SubscriptionAuthProvider::ClaudeCode => {
-                    PathBuf::from("/user/.local/bin/claude.exe")
+                    fake_user().join(".local").join("bin").join("claude.exe")
                 }
             }
         }
@@ -973,10 +1013,9 @@ mod tests {
 
         fn file_exists(&self, path: &Path) -> bool {
             self.file_checks.fetch_add(1, Ordering::Relaxed);
-            (self.winget_available.load(Ordering::Acquire)
-                && path == Path::new("/windows/System32/winget.exe"))
+            (self.winget_available.load(Ordering::Acquire) && path == fake_winget_path())
                 || (self.powershell_available.load(Ordering::Acquire)
-                    && path == Path::new("/windows/System32/WindowsPowerShell/v1.0/powershell.exe"))
+                    && path == fake_powershell_path())
                 || (self.installed.load(Ordering::Acquire)
                     && [
                         Self::cli_path(SubscriptionAuthProvider::Codex),
@@ -1100,17 +1139,7 @@ mod tests {
         }
     }
 
-    // FIXME: these four subscription_install tests are red on windows-x64 CI
-    // (2026-09-03 — the first run to get past the fmt gate in weeks, so the
-    // failures predate today and were never seen on CI). Ignored on Windows
-    // only since the 2026-09-23 audit — all four pass on Linux, so the
-    // headless lane keeps covering the installer guardrails; re-enable the
-    // Windows leg after fixing, do not delete.
     #[tokio::test]
-    #[cfg_attr(
-        target_os = "windows",
-        ignore = "subscription_install: red on windows-x64 CI, see FIXME in this module's tests"
-    )]
     async fn fixed_allowlisted_commands_and_budgets_cover_every_provider_and_method() {
         for (provider, package, script, status_args) in [
             (
@@ -1264,10 +1293,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(
-        target_os = "windows",
-        ignore = "subscription_install: red on windows-x64 CI, see FIXME in this module's tests"
-    )]
     async fn an_existing_verified_cli_runs_status_but_never_an_installer() {
         let fake = Arc::new(FakeProcess::new());
         fake.installed.store(true, Ordering::Release);
@@ -1338,10 +1363,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(
-        target_os = "windows",
-        ignore = "subscription_install: red on windows-x64 CI, see FIXME in this module's tests"
-    )]
     async fn cancellation_after_installer_commit_does_not_relabel_success() {
         let fake = Arc::new(FakeProcess::new());
         fake.cancel_after_install.store(true, Ordering::Release);
@@ -1383,10 +1404,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(
-        target_os = "windows",
-        ignore = "subscription_install: red on windows-x64 CI, see FIXME in this module's tests"
-    )]
     async fn progress_is_ordered_and_contains_only_static_stages() {
         let fake = Arc::new(FakeProcess::new());
         let stages = Arc::new(Mutex::new(Vec::new()));

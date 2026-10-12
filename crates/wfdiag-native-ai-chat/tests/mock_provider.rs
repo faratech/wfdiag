@@ -46,6 +46,15 @@ pub fn spawn() -> MockController {
                 }
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // Winsock accepted sockets inherit the listener's
+                        // nonblocking mode (Linux accept does not); a
+                        // nonblocking handler socket makes the first read
+                        // race the client's send and can slam the connection
+                        // shut with WouldBlock — the windows-x64
+                        // "error sending request" flake in the slow-stream
+                        // cancellation test. The handler relies on blocking
+                        // reads with a timeout, so restore blocking mode.
+                        let _ = stream.set_nonblocking(false);
                         let _ = std::thread::Builder::new()
                             .name("mock-conn".to_string())
                             .spawn(move || handle_connection(stream));
