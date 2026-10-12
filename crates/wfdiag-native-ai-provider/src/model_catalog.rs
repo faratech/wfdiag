@@ -604,6 +604,10 @@ mod tests {
                         Err(error) => panic!("mock catalog accept failed: {error}"),
                     }
                 };
+                // Winsock accepted sockets inherit the listener's
+                // nonblocking mode (Linux accept does not); the reads
+                // below rely on blocking mode with a timeout (#431).
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
