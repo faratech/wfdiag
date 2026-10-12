@@ -258,12 +258,18 @@ fn after_scan_automation_runs_only_when_switched_on_and_only_for_new_scans() {
         ["update_defender_signatures"]
     );
     assert!(no_review_was_opened(&events));
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, AppEvent::Scan(ScanEvent::Finalized { .. }))),
-        "the scan itself still finalized normally"
-    );
+    // Finalized waits for the history auto-save, which the automation does
+    // not: SafeFixesFinished can legitimately land first (Windows), or
+    // Finalized can already be in this window (Linux) — accept either order,
+    // but the scan must finalize exactly once.
+    if !events
+        .iter()
+        .any(|event| matches!(event, AppEvent::Scan(ScanEvent::Finalized { .. })))
+    {
+        harness.pump_for("the scan to finalize", |event| {
+            matches!(event, AppEvent::Scan(ScanEvent::Finalized { .. }))
+        });
+    }
     harness.shutdown(Duration::from_secs(2));
 }
 
