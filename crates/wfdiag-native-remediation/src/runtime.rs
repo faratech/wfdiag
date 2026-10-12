@@ -1602,6 +1602,15 @@ mod tests {
         .unwrap();
         assert!(runtime.prepare(1, request("flush_dns", None), snapshot("scan-a", true)));
         events.recv_timeout(Duration::from_secs(2)).unwrap();
+        // The event send precedes the wake call on the worker thread, so
+        // receiving the event can beat the counter increment; wait for the
+        // wake with a deadline instead of asserting it has already landed.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while wakes.load(std::sync::atomic::Ordering::Relaxed) == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(wakes.load(std::sync::atomic::Ordering::Relaxed) >= 1);
     }
 }

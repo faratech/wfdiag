@@ -186,17 +186,19 @@ mod tests {
 
         let canonical = remediation_summaries();
         for issue in &projection.detected {
-            let remediation_id = catalog()
+            // A detected issue carries the canonical remediation summary
+            // when the catalog offers one, and none when it does not
+            // (page_file_pressure is advice-only by design).
+            let expected = catalog()
                 .iter()
                 .find(|spec| spec.id == issue.id)
                 .and_then(|spec| spec.remediation_id)
-                .unwrap();
-            assert_eq!(
-                issue.remediation.as_ref(),
-                canonical
-                    .iter()
-                    .find(|summary| summary.id == remediation_id)
-            );
+                .and_then(|remediation_id| {
+                    canonical
+                        .iter()
+                        .find(|summary| summary.id == remediation_id)
+                });
+            assert_eq!(issue.remediation.as_ref(), expected);
         }
         assert_eq!(
             projection.detected[1].severity,
