@@ -1,0 +1,9 @@
+# RUSTSEC-2023-0071 (Marvin Attack, rsa 0.9.10 via jsonwebtoken's rust_crypto
+# backend): a timing sidechannel in RSA *decryption* with a private key.
+# WFDiag only *verifies* RS256 identity tokens with a public JWK
+# (DecodingKey::from_jwk + jsonwebtoken::decode in
+# crates/wfdiag-native-chatgpt/src/oauth.rs); it never decrypts with RSA and
+# holds no RSA private key, so the vulnerable operation is unreachable. No
+# fixed rsa release exists; re-check when jsonwebtoken moves off rsa 0.9.
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]

@@ -151,7 +151,9 @@ coverage/
 Cargo.lock.orig
 src-tauri/.cargo/
 # Machine-specific cargo config (cross-compile paths) is never committed.
-/.cargo/
+/.cargo/*
+# The cargo-audit disposition is a reviewed team decision, not machine state.
+!/.cargo/audit.toml
 # WSL `> NUL` accidents
 NUL
 
