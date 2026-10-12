@@ -299,6 +299,17 @@ pub async fn chat_stream(
         }
     }
 }
+fn one_shot_text(turn: ChatTurn) -> Result<String, String> {
+    match turn.finished {
+        FinishReason::Stop if !turn.text.trim().is_empty() => Ok(turn.text),
+        FinishReason::MaxTokens => {
+            Err("ChatGPT response was truncated before completion".to_string())
+        }
+        FinishReason::Refusal => Err("ChatGPT declined to answer this request.".to_string()),
+        _ => Err("ChatGPT returned an unexpected one-shot response".to_string()),
+    }
+}
+
 pub async fn one_shot(
     cfg: &ResolvedProviderConfig,
     system: &str,
@@ -313,7 +324,7 @@ pub async fn one_shot(
     let stream = chat_stream(cfg, &request, tx);
     tokio::pin!(stream);
     loop {
-        tokio::select! { result = &mut stream => return result.map(|t| t.text), delta = rx.recv() => { if delta.is_none() { return stream.await.map(|t| t.text); } } }
+        tokio::select! { result = &mut stream => return result.and_then(one_shot_text), delta = rx.recv() => { if delta.is_none() { return stream.await.and_then(one_shot_text); } } }
     }
 }
 
@@ -372,6 +383,38 @@ mod tests {
             .is_err()
         );
         assert!(completed_turn(&json!({"status":"completed", "output":[{"type":"function_call","namespace":"other","name":"get_scan_summary","call_id":"a","arguments":"{}"}]}), "m", &ChatRequest::default()).is_err());
+    }
+    #[test]
+    fn one_shot_rejects_refusal_and_empty_stop() {
+        let refusal = completed_turn(
+            &json!({"status":"completed", "output":[{"type":"message","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}),
+            "m",
+            &ChatRequest::default(),
+        )
+        .unwrap();
+        assert_eq!(refusal.finished, FinishReason::Refusal);
+        assert_eq!(
+            one_shot_text(refusal),
+            Err("ChatGPT declined to answer this request.".to_string())
+        );
+        let empty = completed_turn(
+            &json!({"status":"completed", "output":[]}),
+            "m",
+            &ChatRequest::default(),
+        )
+        .unwrap();
+        assert_eq!(empty.finished, FinishReason::Stop);
+        assert_eq!(
+            one_shot_text(empty),
+            Err("ChatGPT returned an unexpected one-shot response".to_string())
+        );
+        let ok = completed_turn(
+            &json!({"status":"completed", "output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}),
+            "m",
+            &ChatRequest::default(),
+        )
+        .unwrap();
+        assert_eq!(one_shot_text(ok), Ok("done".to_string()));
     }
 }
 

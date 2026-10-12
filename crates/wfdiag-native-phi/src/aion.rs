@@ -7,6 +7,12 @@ use windows_core::Interface;
 use windows_future::{AsyncOperationProgressHandler, AsyncStatus, IAsyncInfo};
 
 const LOAD_TIMEOUT: Duration = Duration::from_mins(10);
+const POLL_INITIAL: Duration = Duration::from_millis(20);
+const POLL_MAX: Duration = Duration::from_millis(100);
+
+fn next_poll_delay(current: Duration) -> Duration {
+    (current * 2).min(POLL_MAX)
+}
 static MODEL: Mutex<Option<LanguageModel>> = Mutex::new(None);
 const SETUP: &str = "Aion Preview requires a supported ARM64 Snapdragon Copilot+ PC, the Aion Preview framework, Windows App Runtime 1.8 and the QNN 1.8 execution provider. Install the prerequisites from Microsoft's Aion Instruct Preview sample and restart WFDiag.";
 
@@ -46,6 +52,7 @@ fn model_lock(
     cancel: &dyn Fn() -> bool,
 ) -> Result<MutexGuard<'static, Option<LanguageModel>>, String> {
     let deadline = Instant::now() + LOAD_TIMEOUT;
+    let mut delay = POLL_INITIAL;
     loop {
         if cancel() {
             return Err("Aion operation cancelled".into());
@@ -59,7 +66,8 @@ fn model_lock(
                 if Instant::now() >= deadline {
                     return Err("Aion is busy; try again shortly".into());
                 }
-                std::thread::sleep(Duration::from_millis(20));
+                std::thread::sleep(delay);
+                delay = next_poll_delay(delay);
             }
         }
     }
@@ -75,6 +83,7 @@ pub(crate) fn prepare(cancel: &dyn Fn() -> bool) -> Result<(), String> {
     let op = LanguageModel::CreateAsync().map_err(|e| format!("Cannot load Aion: {e}. {SETUP}"))?;
     let info: IAsyncInfo = op.cast().map_err(|e| e.to_string())?;
     let deadline = Instant::now() + LOAD_TIMEOUT;
+    let mut delay = POLL_INITIAL;
     loop {
         if cancel() || Instant::now() >= deadline {
             let _ = info.Cancel();
@@ -93,7 +102,10 @@ pub(crate) fn prepare(cancel: &dyn Fn() -> bool) -> Result<(), String> {
                 );
                 return Ok(());
             }
-            AsyncStatus::Started => std::thread::sleep(Duration::from_millis(20)),
+            AsyncStatus::Started => {
+                std::thread::sleep(delay);
+                delay = next_poll_delay(delay);
+            }
             _ => {
                 return Err(format!(
                     "Aion model preparation failed: {:?}. {SETUP}",
@@ -201,6 +213,13 @@ fn send_delta(tx: &tokio::sync::mpsc::Sender<String>, text: String) -> Result<bo
 mod tests {
     use super::*;
     use crate::aion_bindings::{ILanguageModel, ILanguageModelStatics, ILanguageModelStatics_Vtbl};
+
+    #[test]
+    fn poll_delay_backs_off_to_cap() {
+        assert_eq!(next_poll_delay(POLL_INITIAL), Duration::from_millis(40));
+        assert_eq!(next_poll_delay(Duration::from_millis(80)), POLL_MAX);
+        assert_eq!(next_poll_delay(POLL_MAX), POLL_MAX);
+    }
 
     #[test]
     fn preview_contract_cannot_be_reinterpreted_as_retail() {

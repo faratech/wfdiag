@@ -5,6 +5,7 @@ const MAX_BYTES: usize = 1024 * 1024;
 pub(crate) struct StreamReconciler {
     text: String,
     sent: usize,
+    blocked: bool,
     error: Option<String>,
 }
 
@@ -26,9 +27,15 @@ impl StreamReconciler {
             return;
         }
         self.text.push_str(delta);
+        // While the consumer queue is full, only accumulate: re-sending
+        // `text[sent..]` on every delta would recopy a growing tail
+        // (quadratic total bytes). `finish` delivers the remainder.
+        if self.blocked {
+            return;
+        }
         match send(self.text[self.sent..].to_string()) {
             Ok(true) => self.sent = self.text.len(),
-            Ok(false) => {} // queue full: coalesce until the next callback/final result
+            Ok(false) => self.blocked = true, // queue full: coalesce until finish
             Err(error) => self.error = Some(error),
         }
     }
@@ -52,6 +59,7 @@ impl StreamReconciler {
         }
         self.text = text.to_string();
         self.sent = text.len();
+        self.blocked = false;
         Ok(())
     }
 }
@@ -79,6 +87,28 @@ mod tests {
         state
             .finish("αβγ", |_| panic!("must not duplicate final text"))
             .unwrap();
+    }
+
+    #[test]
+    fn full_queue_forwards_do_not_recopy_tail() {
+        let mut state = StreamReconciler::default();
+        let mut bytes_to_send = 0usize;
+        for _ in 0..100 {
+            state.forward("x", |s| {
+                bytes_to_send += s.len();
+                Ok(false)
+            });
+        }
+        // Only the first (1-byte) attempt reaches `send`; the rest accumulate.
+        assert_eq!(bytes_to_send, 1);
+        let mut received = String::new();
+        state
+            .finish(&"x".repeat(100), |s| {
+                received.push_str(&s);
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(received, "x".repeat(100));
     }
 
     #[test]
