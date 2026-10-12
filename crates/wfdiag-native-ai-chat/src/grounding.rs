@@ -27,6 +27,7 @@ use reqwest::{StatusCode, header};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -681,12 +682,7 @@ fn collect_safe_plain_terms(data: &str, out: &mut Vec<String>, limit: usize) {
             continue;
         }
         let value = value.trim();
-        if value.is_empty()
-            || value.contains('@')
-            || value.contains("\\Users\\")
-            || value.contains("/Users/")
-            || value.len() > 160
-        {
+        if !is_safe_query_value(value) {
             continue;
         }
         out.push(format!("{key} {value}"));
@@ -712,7 +708,7 @@ fn build_windows_update_query(label: &str, value: &Value) -> Option<GroundingQue
         "Windows installed updates hotfix history Microsoft Support".to_string(),
         ids.iter().take(8).cloned().collect::<Vec<_>>().join(" "),
     ];
-    if let Some(description) = find_string_field(value, "Description") {
+    if let Some(description) = sanitized_string_field(value, "Description") {
         parts.push(format!("Description {description}"));
     }
     Some(GroundingQuery {
@@ -723,15 +719,15 @@ fn build_windows_update_query(label: &str, value: &Value) -> Option<GroundingQue
 
 fn build_windows_release_query(label: &str, value: &Value) -> Option<GroundingQuery> {
     let label_is_os = label.to_ascii_lowercase().contains("operating system");
-    let caption = find_string_field(value, "Caption")
-        .or_else(|| find_string_field(value, "ProductName"))
+    let caption = sanitized_string_field(value, "Caption")
+        .or_else(|| sanitized_string_field(value, "ProductName"))
         .unwrap_or_default();
-    let build = find_string_field(value, "CurrentBuild")
-        .or_else(|| find_string_field(value, "CurrentBuildNumber"))
-        .or_else(|| find_string_field(value, "BuildNumber"));
-    let display_version = find_string_field(value, "DisplayVersion");
-    let full_build =
-        find_string_field(value, "FullBuild").or_else(|| find_string_field(value, "Version"));
+    let build = sanitized_string_field(value, "CurrentBuild")
+        .or_else(|| sanitized_string_field(value, "CurrentBuildNumber"))
+        .or_else(|| sanitized_string_field(value, "BuildNumber"));
+    let display_version = sanitized_string_field(value, "DisplayVersion");
+    let full_build = sanitized_string_field(value, "FullBuild")
+        .or_else(|| sanitized_string_field(value, "Version"));
     let is_windows_os = caption.to_ascii_lowercase().contains("windows") && build.is_some();
     if !label_is_os && !is_windows_os {
         return None;
@@ -781,6 +777,10 @@ fn find_string_field(value: &Value, wanted: &str) -> Option<String> {
     }
 }
 
+fn sanitized_string_field(value: &Value, wanted: &str) -> Option<String> {
+    find_string_field(value, wanted).filter(|text| is_safe_query_value(text))
+}
+
 fn collect_safe_terms(value: &Value, out: &mut Vec<String>, limit: usize) {
     if out.len() >= limit {
         return;
@@ -804,6 +804,9 @@ fn collect_safe_terms(value: &Value, out: &mut Vec<String>, limit: usize) {
                 {
                     out.push(term);
                 }
+                // Recursing under non-allowlisted parents is kept: nested
+                // objects carry legit allowlisted OS data, and every value
+                // emitted still passes `is_safe_query_value` above.
                 if matches!(value, Value::Array(_) | Value::Object(_)) {
                     collect_safe_terms(value, out, limit);
                 }
@@ -819,19 +822,72 @@ fn is_safe_query_field(key: &str) -> bool {
         .any(|allowed| key.eq_ignore_ascii_case(allowed))
 }
 
+/// Single rejection gate for every free-text query value, shared by the
+/// JSON (`safe_value_term`), plain-text, and specialized query builders so
+/// they cannot drift.
+fn is_safe_query_value(raw: &str) -> bool {
+    if raw.is_empty() || raw.len() > 160 || raw.contains('@') {
+        return false;
+    }
+    if (raw.contains('\\') || raw.contains('/'))
+        && raw.split(['\\', '/']).any(|segment| {
+            segment
+                .trim()
+                .trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';' | ':' | '(' | ')'))
+                .eq_ignore_ascii_case("users")
+                || segment
+                    .trim()
+                    .trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';' | ':' | '(' | ')'))
+                    .eq_ignore_ascii_case("home")
+        })
+    {
+        return false;
+    }
+    // Filesystem paths and UNC shares have no place in a query value.
+    if raw.contains("\\\\") || raw.contains(":\\") || raw.contains(":/") {
+        return false;
+    }
+    // IP literals, whether standalone or embedded in free text.
+    if raw
+        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .any(|candidate| candidate.contains('.') && candidate.parse::<IpAddr>().is_ok())
+    {
+        return false;
+    }
+    for token in raw.split_whitespace() {
+        let token = token.trim_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '<' | '>'
+            )
+        });
+        if token.parse::<IpAddr>().is_ok() {
+            return false;
+        }
+        // `HOST\user` (optionally followed by further path segments).
+        if let Some((host, user)) = token.split_once('\\') {
+            let user_head = user.split(['\\', '/']).next().unwrap_or_default();
+            let host_like = host.len() >= 2
+                && host
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+            let user_like = !user_head.is_empty()
+                && user_head
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '$'));
+            if host_like && user_like {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Reject a value even from an allowlisted field when it looks like personal
 /// data: an address, a user profile path, or an unbounded blob.
 fn safe_value_term(key: &str, value: &Value) -> Option<String> {
     let raw = primitive_to_query_text(value)?;
-    if raw.is_empty()
-        || raw.contains('@')
-        || raw.contains("\\Users\\")
-        || raw.contains("/Users/")
-        || raw.len() > 160
-    {
-        return None;
-    }
-    Some(format!("{key} {raw}"))
+    is_safe_query_value(&raw).then(|| format!("{key} {raw}"))
 }
 
 fn primitive_to_query_text(value: &Value) -> Option<String> {
@@ -1463,6 +1519,171 @@ mod tests {
         assert_eq!(
             trace.sources[0].url.as_deref(),
             Some("https://support.microsoft.com/help/5094126")
+        );
+    }
+
+    #[test]
+    fn hostile_windows_update_description_is_rejected_but_kb_kept() {
+        let data = r#"{"HotFixID":"KB5094126","Description":"Contact person@example.com C:\\Users\\alice secret"}"#;
+        let query = build_safe_query("Windows Update History", data);
+        assert_eq!(query.mode, GroundingMode::KnowledgeBase);
+        assert!(query.text.contains("KB5094126"), "{}", query.text);
+        assert!(!query.text.contains("person@example.com"), "{}", query.text);
+        assert!(!query.text.contains("alice"), "{}", query.text);
+        assert!(!query.text.contains("secret"), "{}", query.text);
+    }
+
+    #[test]
+    fn hostile_full_build_is_rejected_and_version_fallback_is_sanitized() {
+        let hostile = r#"[{"Caption":"Microsoft Windows 11 Pro","BuildNumber":"26200","FullBuild":"C:\\Users\\alice\\10.0.26200.1234","Version":"10.0.26200.1234"}]"#;
+        let query = build_safe_query("Operating System", hostile);
+        assert!(!query.text.contains("alice"), "{}", query.text);
+        assert!(
+            query.text.contains("full build 10.0.26200.1234"),
+            "{}",
+            query.text
+        );
+        let hostile_version = r#"[{"Caption":"Microsoft Windows 11 Pro","BuildNumber":"26200","Version":"person@example.com"}]"#;
+        let query = build_safe_query("Operating System", hostile_version);
+        assert!(!query.text.contains("person@example.com"), "{}", query.text);
+        assert!(!query.text.contains("full build"), "{}", query.text);
+    }
+
+    #[test]
+    fn lowercase_users_and_home_paths_are_rejected_in_json_values() {
+        let query = build_safe_query(
+            "Computer System",
+            r#"{"Model":"c:/users/alice/laptop","Manufacturer":"Contoso"}"#,
+        );
+        assert!(
+            !query.text.to_ascii_lowercase().contains("alice"),
+            "{}",
+            query.text
+        );
+        assert!(
+            !query.text.to_ascii_lowercase().contains("users"),
+            "{}",
+            query.text
+        );
+        assert!(
+            query.text.contains("Manufacturer Contoso"),
+            "{}",
+            query.text
+        );
+
+        let query = build_safe_query(
+            "Computer System",
+            r#"{"Model":"/home/bob/device","Manufacturer":"Contoso"}"#,
+        );
+        assert!(!query.text.contains("bob"), "{}", query.text);
+        assert!(
+            !query.text.to_ascii_lowercase().contains("/home/"),
+            "{}",
+            query.text
+        );
+        assert!(
+            query.text.contains("Manufacturer Contoso"),
+            "{}",
+            query.text
+        );
+    }
+
+    #[test]
+    fn plain_text_lowercase_users_and_home_paths_are_rejected() {
+        let query = build_safe_query(
+            "Computer System",
+            "Model: c:/users/alice/laptop\nManufacturer: Contoso",
+        );
+        assert!(
+            !query.text.to_ascii_lowercase().contains("alice"),
+            "{}",
+            query.text
+        );
+        assert!(
+            query.text.contains("Manufacturer Contoso"),
+            "{}",
+            query.text
+        );
+
+        let query = build_safe_query(
+            "Computer System",
+            "Model: /home/bob/device\nManufacturer: Contoso",
+        );
+        assert!(!query.text.contains("bob"), "{}", query.text);
+        assert!(
+            query.text.contains("Manufacturer Contoso"),
+            "{}",
+            query.text
+        );
+    }
+
+    #[test]
+    fn ip_literal_and_host_user_patterns_are_rejected_in_json_values() {
+        let query = build_safe_query(
+            "Computer System",
+            r#"{"Model":"DESKTOP-ABC123\\alice","Manufacturer":"Contoso"}"#,
+        );
+        assert!(!query.text.contains("alice"), "{}", query.text);
+        assert!(
+            query.text.contains("Manufacturer Contoso"),
+            "{}",
+            query.text
+        );
+
+        let query = build_safe_query(
+            "Computer System",
+            r#"{"Model":"seen from 203.0.113.42 today","Manufacturer":"Contoso"}"#,
+        );
+        assert!(!query.text.contains("203.0.113.42"), "{}", query.text);
+        assert!(
+            query.text.contains("Manufacturer Contoso"),
+            "{}",
+            query.text
+        );
+    }
+
+    #[test]
+    fn legit_grounding_values_are_preserved() {
+        let update = build_safe_query(
+            "Windows Update History",
+            r#"{"HotFixID":"KB5094126","Description":"Security Update"}"#,
+        );
+        assert!(
+            update.text.contains("Description Security Update"),
+            "{}",
+            update.text
+        );
+        assert!(update.text.contains("KB5094126"), "{}", update.text);
+
+        let release = build_safe_query(
+            "Operating System",
+            r#"[{"Caption":"Microsoft Windows 11 Pro","BuildNumber":"26200","DisplayVersion":"25H2","FullBuild":"10.0.26200.1234"}]"#,
+        );
+        assert!(
+            release.text.contains("full build 10.0.26200.1234"),
+            "{}",
+            release.text
+        );
+        assert!(release.text.contains("OS Builds 26200"), "{}", release.text);
+
+        let general = build_safe_query(
+            "Computer System",
+            r#"{"Model":"Windows 11 Pro","Manufacturer":"Microsoft Corporation","Version":"10.0.26200.1234"}"#,
+        );
+        assert!(
+            general.text.contains("Model Windows 11 Pro"),
+            "{}",
+            general.text
+        );
+        assert!(
+            general.text.contains("Manufacturer Microsoft Corporation"),
+            "{}",
+            general.text
+        );
+        assert!(
+            general.text.contains("Version 10.0.26200.1234"),
+            "{}",
+            general.text
         );
     }
 
