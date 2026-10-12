@@ -8,13 +8,13 @@ default-members = ["crates/*", "apps/wfdiag"]
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.99"
 license-file = "LICENSE"
 publish = false
 
 [workspace.dependencies]
 # Third-party (one version per dependency; members add their own `features`).
-agent-client-protocol = "2"
+agent-client-protocol = "3"
 anyhow = "1.0"
 async-openai = { version = "0.42", default-features = false }
 dirs = "7.0"
@@ -23,16 +23,16 @@ encoding_rs = "0.8"
 event-listener = "5.4.2"
 eventsource-stream = "0.2"
 futures = "0.3"
-process-wrap = { version = "10.0.0", default-features = false }
+process-wrap = { version = "10.0.1", default-features = false }
 reqwest = { version = "0.13", default-features = false }
 semver = "1"
 serde = "1.0.229"
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 thiserror = "2.0"
-tokio = "1.52.0"
+tokio = "1.53.2"
 tokio-util = "0.7"
 url = "2.5"
-uuid = "1.20.0"
+uuid = "1.28.0"
 winreg = "0.56"
 windows-collections = "0.100.0"
 windows-core = "0.100.0"
