@@ -95,6 +95,8 @@ fn replace(temp_path: &Path, path: &Path) -> Result<(), String> {
     };
     use windows::core::PCWSTR;
 
+    const MAX_ATTEMPTS: u32 = 12;
+
     // Wide paths: MoveFileExW handles long/unicode destinations that
     // fs::rename cannot on Windows.
     let encode = |p: &Path| -> Vec<u16> {
@@ -108,14 +110,42 @@ fn replace(temp_path: &Path, path: &Path) -> Result<(), String> {
 
     // MOVEFILE_WRITE_THROUGH already flushes the directory metadata, which is
     // what `sync_parent` does on the POSIX branch.
-    unsafe {
-        MoveFileExW(
-            PCWSTR(temp_wide.as_ptr()),
-            PCWSTR(file_wide.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
+    //
+    // A concurrent replace of the same destination (or a scanner briefly
+    // holding it) fails with a sharing error instead of waiting as POSIX
+    // rename does (#430); retry those briefly so the last writer still wins.
+    // Any other error fails at once with the previous destination untouched.
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let result = unsafe {
+            MoveFileExW(
+                PCWSTR(temp_wide.as_ptr()),
+                PCWSTR(file_wide.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < MAX_ATTEMPTS && is_transient_replace_error(&error) => {
+                std::thread::sleep(std::time::Duration::from_millis(5 * u64::from(attempt)));
+            }
+            Err(error) => {
+                return Err(format!("Failed to finalize {}: {error}", path.display()));
+            }
+        }
     }
-    .map_err(|e| format!("Failed to finalize {}: {e}", path.display()))
+}
+
+/// Whether a failed Windows replace is a transient sharing conflict
+/// (`ERROR_ACCESS_DENIED`, `ERROR_SHARING_VIOLATION`, or
+/// `ERROR_LOCK_VIOLATION` as `HRESULT_FROM_WIN32` values) worth retrying.
+#[cfg(windows)]
+fn is_transient_replace_error(error: &windows::core::Error) -> bool {
+    matches!(
+        error.code().0.cast_unsigned(),
+        0x8007_0005 | 0x8007_0020 | 0x8007_0021
+    )
 }
 
 #[cfg(not(windows))]
@@ -152,7 +182,7 @@ mod tests {
         // Overwrite proves replace works against an existing destination.
         write_file(&path, br#"{"v":2}"#).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"{\"v\":2}");
-        assert!(staging_files(&dir).is_empty());
+        assert_eq!(staging_files(&dir), [] as [std::string::String; 0]);
 
         fs::remove_dir_all(dir.parent().unwrap()).unwrap();
     }
@@ -266,7 +296,7 @@ mod tests {
             "torn file: {} bytes",
             published.len()
         );
-        assert!(staging_files(&dir).is_empty());
+        assert_eq!(staging_files(&dir), [] as [std::string::String; 0]);
 
         fs::remove_dir_all(&dir).ok();
     }

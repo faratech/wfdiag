@@ -139,6 +139,8 @@ fn replace_file(temporary_path: &Path, path: &Path) -> Result<(), String> {
     };
     use windows::core::PCWSTR;
 
+    const MAX_ATTEMPTS: u32 = 12;
+
     let encode = |candidate: &Path| -> Vec<u16> {
         candidate
             .as_os_str()
@@ -148,14 +150,40 @@ fn replace_file(temporary_path: &Path, path: &Path) -> Result<(), String> {
     };
     let temporary_wide = encode(temporary_path);
     let destination_wide = encode(path);
-    unsafe {
-        MoveFileExW(
-            PCWSTR(temporary_wide.as_ptr()),
-            PCWSTR(destination_wide.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
+    // Same transient-sharing retry as the core atomic writer (#430): a
+    // concurrent replace of the same destination fails with a sharing error
+    // on Windows instead of waiting as POSIX rename does.
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let result = unsafe {
+            MoveFileExW(
+                PCWSTR(temporary_wide.as_ptr()),
+                PCWSTR(destination_wide.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < MAX_ATTEMPTS && is_transient_replace_error(&error) => {
+                std::thread::sleep(std::time::Duration::from_millis(5 * u64::from(attempt)));
+            }
+            Err(error) => {
+                return Err(format!("Failed to finalize {}: {error}", path.display()));
+            }
+        }
     }
-    .map_err(|error| format!("Failed to finalize {}: {error}", path.display()))
+}
+
+/// Whether a failed Windows replace is a transient sharing conflict
+/// (`ERROR_ACCESS_DENIED`, `ERROR_SHARING_VIOLATION`, or
+/// `ERROR_LOCK_VIOLATION` as `HRESULT_FROM_WIN32` values) worth retrying.
+#[cfg(windows)]
+fn is_transient_replace_error(error: &windows::core::Error) -> bool {
+    matches!(
+        error.code().0.cast_unsigned(),
+        0x8007_0005 | 0x8007_0020 | 0x8007_0021
+    )
 }
 
 #[cfg(not(windows))]
@@ -622,7 +650,10 @@ mod tests {
         storage.save(br#"{"version":1}"#).unwrap();
         storage.save(br#"{"version":2}"#).unwrap();
         assert_eq!(storage.load().unwrap().unwrap(), br#"{"version":2}"#);
-        assert!(leftover_temp_files(path.parent().unwrap()).is_empty());
+        assert_eq!(
+            leftover_temp_files(path.parent().unwrap()),
+            [] as [std::path::PathBuf; 0]
+        );
         remove_test_directory(&directory);
     }
 
@@ -672,7 +703,10 @@ mod tests {
             "concurrent writes left a partial file of {} bytes",
             written.len()
         );
-        assert!(leftover_temp_files(&directory).is_empty());
+        assert_eq!(
+            leftover_temp_files(&directory),
+            [] as [std::path::PathBuf; 0]
+        );
         remove_test_directory(&directory);
     }
 
@@ -689,7 +723,10 @@ mod tests {
         let path = directory.join("credentials.bin");
         let bytes = fs::read(&path).unwrap();
         assert!(!String::from_utf8_lossy(&bytes).contains("sk-never-plaintext"));
-        assert!(leftover_temp_files(&directory).is_empty());
+        assert_eq!(
+            leftover_temp_files(&directory),
+            [] as [std::path::PathBuf; 0]
+        );
         assert_eq!(
             storage.load(ProviderKeyId::OpenAI).unwrap().as_deref(),
             Some("sk-never-plaintext")
@@ -778,7 +815,7 @@ mod tests {
     fn dpapi_roundtrip_uses_current_user_and_no_entropy() {
         let protector = DpapiProtector;
         let protected = protector.protect("sk-test-key-12345").unwrap();
-        assert!(!protected.is_empty());
+        assert_ne!(protected.len(), 0);
         assert_ne!(protected, b"sk-test-key-12345");
         assert_eq!(
             protector.unprotect(&protected).unwrap().as_str(),
