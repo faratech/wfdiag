@@ -664,6 +664,12 @@ impl Drop for SingleThreadedApartment {
 mod tests {
     use super::*;
 
+    /// Both tests below drive the process-global `COMPLETED` mailbox, and
+    /// the test harness runs them on parallel threads: without this lock
+    /// one test can drain the other's queued completions mid-assertion
+    /// (#428). Held for each test's whole body.
+    static MAILBOX_SERIAL: Mutex<()> = Mutex::new(());
+
     fn completion(epoch: u64) -> SavePickerCompletion {
         SavePickerCompletion {
             epoch,
@@ -674,6 +680,9 @@ mod tests {
 
     #[test]
     fn completed_answers_queue_and_drain_exactly_once() {
+        let _serial = MAILBOX_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         COMPLETED
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -693,6 +702,9 @@ mod tests {
 
     #[test]
     fn request_without_a_registered_window_is_rejected_not_blocked() {
+        let _serial = MAILBOX_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Unit tests register no shell window, so the host must refuse the
         // request instead of spawning a dialog that could never be shown.
         let outcome =
