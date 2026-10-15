@@ -357,6 +357,8 @@ jobs:
     permissions:
       contents: write
     if: needs.build-x64.result == 'success' && needs.create-msix-bundle.result == 'success' && needs.build-x64.outputs.create_release == 'true'
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
