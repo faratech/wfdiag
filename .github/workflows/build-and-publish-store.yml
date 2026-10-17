@@ -32,6 +32,11 @@ env:
   CARGO_TERM_COLOR: always
   PROJECT_NAME: WindowsForum_Diagnostics
   PUBLISHER: CN=ABDB6B3F-DF9E-447D-BC0E-4DA7BAFD14C4
+  # Link the C runtime statically so wfdiag.exe does not depend on
+  # VCRUNTIME140.dll (VC++ Redistributable), which clean Windows installs lack.
+  # Set here because /.cargo/ is machine-specific and never committed.
+  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+  CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
 
 # Default to minimal permissions
 permissions:
