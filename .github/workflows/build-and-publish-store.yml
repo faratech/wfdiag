@@ -404,6 +404,7 @@ jobs:
           The Microsoft Store package installs it for you.
           NOTE
               (cd "exe-$ARCH" && zip -q "../WindowsForum_Diagnostics_${VERSION}_${ARCH}.zip" wfdiag.exe README.txt)
+            fi
           done
 
           # Clean up staging directories
